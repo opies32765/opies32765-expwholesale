@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bid #{{ bid.id }} — Experience Wholesale</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh}
+
+.header{background:#111827;border-bottom:1px solid #1e293b;padding:0 32px;height:60px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-mark{width:34px;height:34px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;color:#fff}
+.logo-text{font-size:15px;font-weight:700;color:#f1f5f9}
+.back-btn{display:flex;align-items:center;gap:6px;color:#64748b;font-size:13px;font-weight:500;text-decoration:none;padding:6px 12px;border-radius:6px;border:1px solid #1e293b;transition:all .15s}
+.back-btn:hover{border-color:#334155;color:#e2e8f0}
+
+.page{max-width:1100px;margin:0 auto;padding:28px 32px;display:grid;grid-template-columns:1fr 380px;gap:24px;align-items:start}
+
+/* Card */
+.card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:24px}
+.card-title{font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.8px;margin-bottom:16px}
+
+/* Status badge */
+.badge{display:inline-block;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+.badge-new{background:rgba(59,130,246,.15);color:#60a5fa;border:1px solid rgba(59,130,246,.25)}
+.badge-reviewing{background:rgba(245,158,11,.12);color:#fbbf24;border:1px solid rgba(245,158,11,.2)}
+.badge-bid_sent{background:rgba(34,197,94,.12);color:#4ade80;border:1px solid rgba(34,197,94,.2)}
+.badge-passed{background:rgba(100,116,139,.1);color:#64748b;border:1px solid rgba(100,116,139,.15)}
+
+/* Vehicle header */
+.vehicle-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:20px;gap:12px}
+.bid-id{font-size:13px;color:#475569;font-weight:500}
+.vin-big{font-size:22px;font-weight:800;color:#fff;font-family:monospace;letter-spacing:1px;margin:4px 0}
+.vehicle-desc-big{font-size:15px;color:#94a3b8;font-weight:500}
+
+/* Fields grid */
+.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:20px}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:11px;color:#475569;font-weight:600;text-transform:uppercase;letter-spacing:.6px}
+.field input{background:#0f172a;border:1px solid #1e293b;border-radius:7px;padding:8px 12px;color:#e2e8f0;font-size:14px;font-family:'Inter',sans-serif;transition:border .15s;outline:none}
+.field input:focus{border-color:#3b82f6}
+.save-btn{margin-top:16px;width:100%;padding:10px;background:#1e3a5f;border:1px solid #2563eb;border-radius:8px;color:#60a5fa;font-size:13px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s}
+.save-btn:hover{background:#1d4ed8;color:#fff}
+
+/* Photos */
+.photos-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-top:4px}
+.photo-thumb{border-radius:8px;overflow:hidden;aspect-ratio:4/3;background:#0f172a;cursor:pointer;border:1px solid #1e293b;transition:border .15s}
+.photo-thumb:hover{border-color:#334155}
+.photo-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+
+/* Message thread */
+.messages{display:flex;flex-direction:column;gap:10px;margin-top:4px}
+.msg{padding:10px 14px;border-radius:10px;font-size:13px;line-height:1.5}
+.msg.inbound{background:#1e293b;color:#e2e8f0;border-bottom-left-radius:3px;align-self:flex-start;max-width:85%}
+.msg.outbound{background:#1e3a5f;color:#93c5fd;border-bottom-right-radius:3px;align-self:flex-end;max-width:85%}
+.msg-meta{font-size:11px;color:#475569;margin-top:4px}
+
+/* Contact card */
+.contact-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+.contact-phone-big{font-size:18px;font-weight:700;color:#f1f5f9}
+.contact-fields{display:flex;flex-direction:column;gap:10px;margin-top:4px}
+
+/* Reply section */
+.reply-section{margin-top:4px}
+.reply-tabs{display:flex;gap:8px;margin-bottom:14px}
+.reply-tab{flex:1;padding:8px;border-radius:7px;border:1px solid #1e293b;background:transparent;color:#64748b;font-size:13px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-align:center}
+.reply-tab:hover{border-color:#334155;color:#94a3b8}
+.reply-tab.active-bid{background:rgba(34,197,94,.1);border-color:#22c55e;color:#4ade80}
+.reply-tab.active-pass{background:rgba(239,68,68,.1);border-color:#ef4444;color:#f87171}
+
+.bid-amount-wrap{margin-bottom:12px}
+.bid-amount-wrap label{font-size:11px;color:#475569;font-weight:600;text-transform:uppercase;letter-spacing:.6px;display:block;margin-bottom:6px}
+.bid-amount-input{display:flex;align-items:center;background:#0f172a;border:1px solid #1e293b;border-radius:7px;overflow:hidden}
+.bid-amount-input span{padding:0 12px;color:#64748b;font-size:15px;font-weight:600}
+.bid-amount-input input{flex:1;background:transparent;border:none;padding:10px 0;color:#e2e8f0;font-size:16px;font-weight:700;font-family:'Inter',sans-serif;outline:none}
+
+.reply-textarea{width:100%;background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px 14px;color:#e2e8f0;font-size:13px;font-family:'Inter',sans-serif;resize:vertical;min-height:80px;outline:none;transition:border .15s;margin-bottom:12px}
+.reply-textarea:focus{border-color:#3b82f6}
+
+.btn-send-bid{width:100%;padding:12px;border:none;border-radius:8px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;font-size:14px;font-weight:700;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;margin-bottom:8px}
+.btn-send-bid:hover{background:linear-gradient(135deg,#16a34a,#15803d);transform:translateY(-1px)}
+.btn-pass{width:100%;padding:10px;border:1px solid #334155;border-radius:8px;background:transparent;color:#64748b;font-size:13px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s}
+.btn-pass:hover{border-color:#ef4444;color:#f87171}
+
+/* Valuations */
+.val-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #0f172a;font-size:13px}
+.val-row:last-child{border-bottom:none}
+.val-label{color:#64748b;font-weight:500}
+.val-value{color:#e2e8f0;font-weight:600}
+.val-value.green{color:#4ade80}
+.val-source{font-size:11px;color:#475569;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px;margin-top:14px}
+
+/* Lightbox */
+.lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:1000;align-items:center;justify-content:center}
+.lightbox.open{display:flex}
+.lightbox img{max-width:90vw;max-height:90vh;object-fit:contain;border-radius:8px}
+.lightbox-close{position:fixed;top:20px;right:24px;color:#fff;font-size:28px;cursor:pointer;opacity:.7;line-height:1}
+.lightbox-close:hover{opacity:1}
+
+.toast{position:fixed;bottom:24px;right:24px;background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:12px 20px;border-radius:8px;font-size:13px;font-weight:500;display:none;z-index:999}
+
+@media(max-width:900px){.page{grid-template-columns:1fr}.fields{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <div class="logo-mark">EW</div>
+    <div class="logo-text">Experience Wholesale</div>
+  </div>
+  <a href="/" class="back-btn">← All Bids</a>
+</div>
+
+<div class="page">
+
+  <!-- LEFT COLUMN -->
+  <div style="display:flex;flex-direction:column;gap:20px">
+
+    <!-- Vehicle Info -->
+    <div class="card">
+      <div class="vehicle-header">
+        <div>
+          <div class="bid-id">Bid #{{ bid.id }} · {{ time_ago(bid.created_at) }}</div>
+          <div class="vin-big">{{ bid.vin or 'No VIN' }}</div>
+          {% if bid.year or bid.make %}
+          <div class="vehicle-desc-big">{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }} {{ bid.trim or '' }}</div>
+          {% endif %}
+        </div>
+        <span class="badge badge-{{ bid.status }}">{{ bid.status.replace('_',' ') }}</span>
+      </div>
+
+      <div class="card-title">Vehicle Details</div>
+      <div class="fields">
+        <div class="field"><label>VIN</label><input id="f-vin" value="{{ bid.vin or '' }}" placeholder="17-char VIN"></div>
+        <div class="field"><label>Mileage</label><input id="f-mileage" type="number" value="{{ bid.mileage or '' }}" placeholder="Miles"></div>
+        <div class="field"><label>Year</label><input id="f-year" type="number" value="{{ bid.year or '' }}" placeholder="2022"></div>
+        <div class="field"><label>Make</label><input id="f-make" value="{{ bid.make or '' }}" placeholder="Ford"></div>
+        <div class="field"><label>Model</label><input id="f-model" value="{{ bid.model or '' }}" placeholder="F-150"></div>
+        <div class="field"><label>Trim</label><input id="f-trim" value="{{ bid.trim or '' }}" placeholder="XLT"></div>
+        <div class="field"><label>Color</label><input id="f-color" value="{{ bid.color or '' }}" placeholder="White"></div>
+        <div class="field"><label>Notes</label><input id="f-notes" value="{{ bid.notes or '' }}" placeholder="Any notes..."></div>
+      </div>
+      <button class="save-btn" onclick="saveVehicle()">Save Changes</button>
+    </div>
+
+    <!-- Photos -->
+    {% if photos %}
+    <div class="card">
+      <div class="card-title">Photos ({{ photos|length }})</div>
+      <div class="photos-grid">
+        {% for photo in photos %}
+        <div class="photo-thumb" onclick="openLightbox('{{ photo.url }}')">
+          <img src="{{ photo.url }}" alt="Vehicle photo" loading="lazy">
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Message Thread -->
+    <div class="card">
+      <div class="card-title">Message Thread</div>
+      <div class="messages">
+        {% for msg in messages %}
+        <div>
+          <div class="msg {{ msg.direction }}">{{ msg.message }}</div>
+          <div class="msg-meta" style="text-align:{{ 'right' if msg.direction=='outbound' else 'left' }}">
+            {{ time_ago(msg.created_at) }} · {{ 'Sent' if msg.direction=='outbound' else msg.from_phone }}
+          </div>
+        </div>
+        {% else %}
+        <div style="color:#475569;font-size:13px;font-style:italic">No messages yet</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- Valuations -->
+    {% if valuations %}
+    <div class="card">
+      <div class="card-title">Valuations</div>
+      {% for v in valuations %}
+      <div class="val-source">{{ v.source }}</div>
+      {% if v.data %}
+        {% for key, val in v.data.items() %}
+        <div class="val-row">
+          <span class="val-label">{{ key }}</span>
+          <span class="val-value">{{ val }}</span>
+        </div>
+        {% endfor %}
+      {% endif %}
+      {% endfor %}
+    </div>
+    {% endif %}
+
+  </div>
+
+  <!-- RIGHT COLUMN -->
+  <div style="display:flex;flex-direction:column;gap:20px">
+
+    <!-- Contact -->
+    <div class="card">
+      <div class="card-title">Contact</div>
+      <div class="contact-phone-big">{{ bid.phone }}</div>
+      <div class="contact-fields" style="margin-top:14px">
+        <div class="field"><label>Name</label><input id="c-name" value="{{ bid.contact_name or '' }}" placeholder="Full name"></div>
+        <div class="field"><label>Company</label><input id="c-company" value="{{ bid.contact_company or '' }}" placeholder="Dealership / Company"></div>
+      </div>
+      <button class="save-btn" onclick="saveContact()" style="margin-top:12px">Save Contact</button>
+    </div>
+
+    <!-- Reply -->
+    <div class="card">
+      <div class="card-title">Send Reply</div>
+      <div class="reply-section">
+        <div class="reply-tabs">
+          <button class="reply-tab active-bid" id="tab-bid" onclick="setTab('bid')">Send Bid</button>
+          <button class="reply-tab" id="tab-pass" onclick="setTab('pass')">Pass</button>
+        </div>
+
+        <div id="bid-section">
+          <div class="bid-amount-wrap">
+            <label>Bid Amount</label>
+            <div class="bid-amount-input">
+              <span>$</span>
+              <input type="number" id="bid-amount" placeholder="0" step="100">
+            </div>
+          </div>
+          <textarea class="reply-textarea" id="reply-text" placeholder="We're in at $XX,XXX. Let me know if you want to move forward."></textarea>
+          <button class="btn-send-bid" onclick="sendReply('bid')">Send Bid</button>
+        </div>
+
+        <div id="pass-section" style="display:none">
+          <textarea class="reply-textarea" id="pass-text" placeholder="Thanks, but we're going to pass on this one."></textarea>
+          <button class="btn-pass" onclick="sendReply('pass')">Send & Mark Passed</button>
+        </div>
+
+        {% if bid.bid_sent_at %}
+        <div style="margin-top:12px;padding:10px 14px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.15);border-radius:7px;font-size:12px;color:#4ade80">
+          {% if bid.bid_amount %}Bid of ${{ '{:,.0f}'.format(bid.bid_amount) }} sent{% else %}Response sent{% endif %} · {{ time_ago(bid.bid_sent_at) }}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Quick Status -->
+    <div class="card">
+      <div class="card-title">Update Status</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        {% for s in ['new','reviewing','bid_sent','passed'] %}
+        <button onclick="updateStatus('{{ s }}')" style="padding:8px 14px;border-radius:7px;border:1px solid #1e293b;background:{% if bid.status==s %}#1e3a5f{% else %}transparent{% endif %};color:{% if bid.status==s %}#60a5fa{% else %}#64748b{% endif %};font-size:13px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;text-align:left;text-transform:capitalize">
+          {{ s.replace('_',' ').title() }}
+        </button>
+        {% endfor %}
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Lightbox -->
+<div class="lightbox" id="lightbox" onclick="closeLightbox()">
+  <span class="lightbox-close" onclick="closeLightbox()">✕</span>
+  <img id="lightbox-img" src="" alt="">
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const BID_ID = {{ bid.id }};
+
+function toast(msg, ok=true) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  t.style.borderColor = ok ? '#22c55e' : '#ef4444';
+  setTimeout(() => t.style.display='none', 2500);
+}
+
+function setTab(tab) {
+  document.getElementById('bid-section').style.display = tab==='bid' ? 'block' : 'none';
+  document.getElementById('pass-section').style.display = tab==='pass' ? 'block' : 'none';
+  document.getElementById('tab-bid').className = 'reply-tab' + (tab==='bid' ? ' active-bid' : '');
+  document.getElementById('tab-pass').className = 'reply-tab' + (tab==='pass' ? ' active-pass' : '');
+}
+
+async function sendReply(action) {
+  const isPass = action === 'pass';
+  const message = document.getElementById(isPass ? 'pass-text' : 'reply-text').value.trim();
+  const bidAmount = isPass ? null : parseFloat(document.getElementById('bid-amount').value) || null;
+
+  if (!message) { toast('Enter a message first', false); return; }
+
+  const r = await fetch(`/api/bid/${BID_ID}/reply`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({message, action, bid_amount: bidAmount})
+  });
+  const d = await r.json();
+  if (d.success) {
+    toast(isPass ? 'Marked as passed' : 'Bid sent!');
+    setTimeout(() => location.reload(), 1200);
+  } else {
+    toast('Error sending', false);
+  }
+}
+
+async function saveVehicle() {
+  const data = {
+    vin: document.getElementById('f-vin').value.trim().toUpperCase() || null,
+    year: parseInt(document.getElementById('f-year').value) || null,
+    make: document.getElementById('f-make').value.trim() || null,
+    model: document.getElementById('f-model').value.trim() || null,
+    trim: document.getElementById('f-trim').value.trim() || null,
+    mileage: parseInt(document.getElementById('f-mileage').value) || null,
+    color: document.getElementById('f-color').value.trim() || null,
+    notes: document.getElementById('f-notes').value.trim() || null,
+  };
+  const r = await fetch(`/api/bid/${BID_ID}/update`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)
+  });
+  const d = await r.json();
+  toast(d.success ? 'Saved' : 'Error', d.success);
+}
+
+async function saveContact() {
+  const data = {
+    name: document.getElementById('c-name').value.trim() || null,
+    company: document.getElementById('c-company').value.trim() || null,
+  };
+  const r = await fetch(`/api/bid/${BID_ID}/contact`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)
+  });
+  const d = await r.json();
+  toast(d.success ? 'Contact saved' : 'Error', d.success);
+}
+
+async function updateStatus(status) {
+  const r = await fetch(`/api/bid/${BID_ID}/update`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({status})
+  });
+  const d = await r.json();
+  if (d.success) { toast('Status updated'); setTimeout(() => location.reload(), 800); }
+}
+
+function openLightbox(url) {
+  document.getElementById('lightbox-img').src = url;
+  document.getElementById('lightbox').classList.add('open');
+}
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('open');
+  document.getElementById('lightbox-img').src = '';
+}
+document.addEventListener('keydown', e => { if (e.key==='Escape') closeLightbox(); });
+</script>
+</body>
+</html>

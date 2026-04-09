@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Experience Wholesale — Bid Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh}
+
+/* Header */
+.header{background:#111827;border-bottom:1px solid #1e293b;padding:0 32px;height:60px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-mark{width:34px;height:34px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;color:#fff}
+.logo-text{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-0.3px}
+.logo-sub{font-size:10px;color:#64748b;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+.header-right{display:flex;align-items:center;gap:8px}
+.live-dot{width:7px;height:7px;background:#22c55e;border-radius:50%;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(.85)}}
+.live-label{font-size:12px;color:#22c55e;font-weight:600}
+
+/* Stats bar */
+.stats-bar{background:#111827;border-bottom:1px solid #1e293b;padding:12px 32px;display:flex;gap:32px;align-items:center}
+.stat-item{display:flex;flex-direction:column;align-items:center}
+.stat-num{font-size:22px;font-weight:800;line-height:1}
+.stat-label{font-size:10px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-top:2px}
+.stat-num.blue{color:#3b82f6}
+.stat-num.yellow{color:#f59e0b}
+.stat-num.green{color:#22c55e}
+.stat-num.gray{color:#64748b}
+.stat-num.white{color:#f1f5f9}
+.stat-divider{width:1px;height:32px;background:#1e293b}
+
+/* Filters */
+.filters{padding:16px 32px;display:flex;gap:8px;align-items:center;border-bottom:1px solid #1e293b}
+.filter-btn{padding:6px 16px;border-radius:6px;border:1px solid #1e293b;background:transparent;color:#94a3b8;font-size:13px;font-weight:500;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-decoration:none;display:inline-block}
+.filter-btn:hover{border-color:#334155;color:#e2e8f0}
+.filter-btn.active{background:#1e3a5f;border-color:#3b82f6;color:#60a5fa}
+.filter-count{background:#1e293b;border-radius:4px;padding:1px 6px;font-size:11px;margin-left:4px;color:#64748b}
+.filter-btn.active .filter-count{background:#1e3a5f;color:#93c5fd}
+
+/* Table */
+.table-wrap{padding:24px 32px}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:10px 14px;font-size:11px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #1e293b}
+td{padding:12px 14px;border-bottom:1px solid #0f172a;vertical-align:middle}
+tr:hover td{background:rgba(255,255,255,.02)}
+tr:last-child td{border-bottom:none}
+
+.contact-name{font-size:14px;font-weight:600;color:#f1f5f9}
+.contact-phone{font-size:12px;color:#64748b;margin-top:1px}
+.contact-company{font-size:11px;color:#3b82f6;margin-top:1px;font-weight:500}
+
+.vehicle-vin{font-size:13px;font-weight:700;color:#e2e8f0;font-family:monospace;letter-spacing:.5px}
+.vehicle-desc{font-size:12px;color:#94a3b8;margin-top:2px}
+.no-vin{font-size:12px;color:#475569;font-style:italic}
+
+.msg-preview{font-size:12px;color:#64748b;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.photo-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#64748b;background:#1e293b;padding:3px 8px;border-radius:4px}
+.photo-badge svg{width:12px;height:12px}
+
+/* Status badges */
+.badge{display:inline-block;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+.badge-new{background:rgba(59,130,246,.15);color:#60a5fa;border:1px solid rgba(59,130,246,.25)}
+.badge-reviewing{background:rgba(245,158,11,.12);color:#fbbf24;border:1px solid rgba(245,158,11,.2)}
+.badge-bid_sent{background:rgba(34,197,94,.12);color:#4ade80;border:1px solid rgba(34,197,94,.2)}
+.badge-passed{background:rgba(100,116,139,.1);color:#64748b;border:1px solid rgba(100,116,139,.15)}
+
+.time-col{font-size:12px;color:#475569;white-space:nowrap}
+
+.btn-view{padding:5px 14px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#94a3b8;font-size:12px;font-weight:500;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-decoration:none}
+.btn-view:hover{background:#334155;color:#e2e8f0}
+
+/* Empty state */
+.empty{text-align:center;padding:80px 24px;color:#475569}
+.empty-icon{font-size:48px;margin-bottom:16px}
+.empty h3{font-size:18px;font-weight:600;color:#64748b;margin-bottom:8px}
+.empty p{font-size:14px;line-height:1.6}
+
+@media(max-width:768px){
+  .stats-bar{gap:16px;padding:12px 16px;flex-wrap:wrap}
+  .table-wrap{padding:12px}
+  .filters{padding:12px 16px}
+  th,td{padding:10px 8px}
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <div class="logo-mark">EW</div>
+    <div>
+      <div class="logo-text">Experience Wholesale</div>
+      <div class="logo-sub">Bid Management</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="live-dot"></div>
+    <span class="live-label">LIVE</span>
+  </div>
+</div>
+
+<div class="stats-bar">
+  <div class="stat-item">
+    <div class="stat-num white" id="stat-today">{{ stats.today }}</div>
+    <div class="stat-label">Today</div>
+  </div>
+  <div class="stat-divider"></div>
+  <div class="stat-item">
+    <div class="stat-num blue" id="stat-new">{{ stats.new }}</div>
+    <div class="stat-label">New</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-num yellow" id="stat-reviewing">{{ stats.reviewing }}</div>
+    <div class="stat-label">Reviewing</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-num green" id="stat-bid_sent">{{ stats.bid_sent }}</div>
+    <div class="stat-label">Bid Sent</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-num gray" id="stat-passed">{{ stats.passed }}</div>
+    <div class="stat-label">Passed</div>
+  </div>
+  <div class="stat-divider"></div>
+  <div class="stat-item">
+    <div class="stat-num white" id="stat-total">{{ stats.total }}</div>
+    <div class="stat-label">Total</div>
+  </div>
+</div>
+
+<div class="filters">
+  <a href="/?status=all" class="filter-btn {% if status_filter=='all' %}active{% endif %}">All <span class="filter-count" data-status="total">{{ stats.total }}</span></a>
+  <a href="/?status=new" class="filter-btn {% if status_filter=='new' %}active{% endif %}">New <span class="filter-count" data-status="new">{{ stats.new }}</span></a>
+  <a href="/?status=reviewing" class="filter-btn {% if status_filter=='reviewing' %}active{% endif %}">Reviewing <span class="filter-count" data-status="reviewing">{{ stats.reviewing }}</span></a>
+  <a href="/?status=bid_sent" class="filter-btn {% if status_filter=='bid_sent' %}active{% endif %}">Bid Sent <span class="filter-count" data-status="bid_sent">{{ stats.bid_sent }}</span></a>
+  <a href="/?status=passed" class="filter-btn {% if status_filter=='passed' %}active{% endif %}">Passed <span class="filter-count" data-status="passed">{{ stats.passed }}</span></a>
+</div>
+
+<div class="table-wrap">
+  {% if bids %}
+  <table>
+    <thead>
+      <tr>
+        <th>Contact</th>
+        <th>Vehicle / VIN</th>
+        <th>Message</th>
+        <th>Photos</th>
+        <th>Status</th>
+        <th>Received</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for bid in bids %}
+      <tr data-id="{{ bid.id }}" data-created="{{ bid.created_at.isoformat() if bid.created_at else '' }}">
+        <td>
+          <div class="contact-name">{{ bid.contact_name or bid.phone }}</div>
+          {% if bid.contact_name %}<div class="contact-phone">{{ bid.phone }}</div>{% endif %}
+          {% if bid.contact_company %}<div class="contact-company">{{ bid.contact_company }}</div>{% endif %}
+        </td>
+        <td>
+          {% if bid.vin %}
+            <div class="vehicle-vin">{{ bid.vin }}</div>
+            {% if bid.year or bid.make %}
+              <div class="vehicle-desc">{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }}{% if bid.mileage %} · {{ '{:,}'.format(bid.mileage) }} mi{% endif %}</div>
+            {% endif %}
+          {% else %}
+            <div class="no-vin">No VIN extracted</div>
+          {% endif %}
+        </td>
+        <td>
+          <div class="msg-preview">{{ bid.raw_message or '—' }}</div>
+        </td>
+        <td>
+          {% set pc = photo_counts.get(bid.id, 0) %}
+          {% if pc > 0 %}
+          <span class="photo-badge">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+            {{ pc }}
+          </span>
+          {% else %}—{% endif %}
+        </td>
+        <td><span class="badge badge-{{ bid.status }}">{{ bid.status.replace('_',' ') }}</span></td>
+        <td class="time-col">{{ time_ago(bid.created_at) }}</td>
+        <td><a href="/bid/{{ bid.id }}" class="btn-view">View →</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">
+    <div class="empty-icon">📋</div>
+    <h3>No bids yet</h3>
+    <p>Bids will appear here as texts come in via Twilio.</p>
+  </div>
+  {% endif %}
+</div>
+
+<script>
+let highestId = Math.max(0, ...Array.from(document.querySelectorAll('tr[data-id]')).map(r => parseInt(r.dataset.id)));
+let currentFilter = new URLSearchParams(window.location.search).get('status') || 'all';
+let newCount = 0;
+
+function timeAgo(iso) {
+  if (!iso) return '';
+  const diff = (Date.now() - new Date(iso.endsWith('Z') ? iso : iso + 'Z')) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  return Math.floor(diff/86400) + 'd ago';
+}
+
+function statusBadge(s) {
+  const map = {new:'badge-new',reviewing:'badge-reviewing',bid_sent:'badge-bid_sent',passed:'badge-passed'};
+  return `<span class="badge ${map[s]||''}">${s.replace('_',' ')}</span>`;
+}
+
+function renderRow(b, pc) {
+  const name = b.contact_name || b.phone;
+  const vehicle = b.vin ? `<div class="vehicle-vin">${b.vin}</div>${b.year||b.make ? `<div class="vehicle-desc">${b.year||''} ${b.make||''} ${b.model||''}${b.mileage ? ' · '+b.mileage.toLocaleString()+' mi':''}</div>` : ''}` : '<div class="no-vin">No VIN extracted</div>';
+  const photos = (pc||0) > 0 ? `<span class="photo-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>${pc}</span>` : '—';
+  return `<tr data-id="${b.id}" ${b.is_new ? 'class="row-new"' : ''}>
+    <td><div class="contact-name">${name}</div>${b.contact_name?`<div class="contact-phone">${b.phone}</div>`:''} ${b.contact_company?`<div class="contact-company">${b.contact_company}</div>`:''}</td>
+    <td>${vehicle}</td>
+    <td><div class="msg-preview">${b.raw_message||'—'}</div></td>
+    <td>${photos}</td>
+    <td>${statusBadge(b.status)}</td>
+    <td class="time-col">${timeAgo(b.created_at)}</td>
+    <td><a href="/bid/${b.id}" class="btn-view">View →</a></td>
+  </tr>`;
+}
+
+function updateStats(s) {
+  document.getElementById('stat-today').textContent = s.today||0;
+  document.getElementById('stat-new').textContent = s.new||0;
+  document.getElementById('stat-reviewing').textContent = s.reviewing||0;
+  document.getElementById('stat-bid_sent').textContent = s.bid_sent||0;
+  document.getElementById('stat-passed').textContent = s.passed||0;
+  document.getElementById('stat-total').textContent = s.total||0;
+  ['new','reviewing','bid_sent','passed','total'].forEach(k => {
+    const el = document.querySelector(`.filter-count[data-status="${k}"]`);
+    if (el) el.textContent = s[k]||0;
+  });
+}
+
+async function poll() {
+  try {
+    const r = await fetch(`/api/bids?since_id=${highestId}&status=${currentFilter}`);
+    const d = await r.json();
+
+    updateStats(d.stats);
+
+    const tbody = document.querySelector('tbody');
+    const empty = document.querySelector('.empty');
+
+    if (d.bids.length === 0 && !tbody) return;
+
+    // Check for new bids
+    const fresh = d.bids.filter(b => b.is_new);
+    if (fresh.length > 0) {
+      newCount += fresh.length;
+      highestId = Math.max(highestId, ...fresh.map(b => b.id));
+      showNewBidAlert(fresh.length);
+    }
+
+    // Re-render table
+    if (d.bids.length > 0) {
+      if (empty) empty.style.display = 'none';
+      if (tbody) {
+        tbody.innerHTML = d.bids.map(b => renderRow(b, d.photo_counts[b.id])).join('');
+        // Flash new rows
+        document.querySelectorAll('.row-new').forEach(row => {
+          row.style.background = 'rgba(59,130,246,0.08)';
+          setTimeout(() => row.style.background = '', 3000);
+        });
+      }
+    }
+  } catch(e) { console.warn('poll error', e); }
+}
+
+function showNewBidAlert(count) {
+  let alert = document.getElementById('new-bid-alert');
+  if (!alert) {
+    alert = document.createElement('div');
+    alert.id = 'new-bid-alert';
+    alert.style.cssText = 'position:fixed;top:68px;left:50%;transform:translateX(-50%);background:#1e3a5f;border:1px solid #3b82f6;color:#60a5fa;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;z-index:200;cursor:pointer;box-shadow:0 4px 20px rgba(0,0,0,.4)';
+    alert.onclick = () => { alert.remove(); };
+    document.body.appendChild(alert);
+  }
+  alert.textContent = `${newCount} new bid${newCount>1?'s':''} received`;
+  clearTimeout(alert._timer);
+  alert._timer = setTimeout(() => { alert.remove(); newCount = 0; }, 8000);
+}
+
+// Poll every 5 seconds
+setInterval(poll, 5000);
+// Update timestamps every minute
+setInterval(() => {
+  document.querySelectorAll('.time-col').forEach(el => {
+    const row = el.closest('tr');
+    if (!row) return;
+    const bid = row.dataset.created;
+    if (bid) el.textContent = timeAgo(bid);
+  });
+}, 60000);
+</script>
+</body>
+</html>

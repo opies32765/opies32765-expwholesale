@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0b0f19">
+<title>EW — Submit Bid</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{font-family:-apple-system,'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh;padding-bottom:40px}
+
+/* ── Header ── */
+.header{background:#111827;border-bottom:1px solid #1e293b;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-mark{width:32px;height:32px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;color:#fff;flex-shrink:0}
+.logo-text{font-size:14px;font-weight:700;color:#f1f5f9}
+.logo-sub{font-size:10px;color:#64748b;font-weight:500}
+.rep-chip{display:flex;align-items:center;gap:8px;background:#1e293b;border:1px solid #334155;border-radius:20px;padding:6px 12px 6px 6px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.rep-chip:active{background:#334155}
+.rep-avatar{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#3b82f6,#1d4ed8);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:800;color:#fff;flex-shrink:0}
+.rep-name-label{font-size:13px;font-weight:600;color:#e2e8f0;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rep-edit{font-size:11px;color:#475569}
+
+/* ── Setup screen ── */
+.setup{display:none;position:fixed;inset:0;background:#0b0f19;z-index:500;flex-direction:column;align-items:center;justify-content:center;padding:32px}
+.setup.show{display:flex}
+.setup-logo{width:64px;height:64px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:800;color:#fff;margin-bottom:28px}
+.setup h2{font-size:24px;font-weight:800;color:#f1f5f9;text-align:center;margin-bottom:8px}
+.setup p{font-size:15px;color:#64748b;text-align:center;line-height:1.5;margin-bottom:32px}
+.setup-input{width:100%;max-width:360px;background:#111827;border:2px solid #1e293b;border-radius:12px;padding:16px 18px;color:#e2e8f0;font-size:20px;font-family:-apple-system,'Inter',sans-serif;outline:none;text-align:center;transition:border .15s}
+.setup-input:focus{border-color:#3b82f6}
+.setup-btn{width:100%;max-width:360px;margin-top:16px;padding:16px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border:none;border-radius:12px;color:#fff;font-size:17px;font-weight:700;font-family:-apple-system,'Inter',sans-serif;cursor:pointer}
+.setup-btn:disabled{opacity:.35;cursor:not-allowed}
+.setup-hint{font-size:12px;color:#334155;margin-top:20px;text-align:center}
+
+/* ── Page ── */
+.page{padding:20px 16px;max-width:520px;margin:0 auto}
+.section{margin-bottom:20px}
+.section-title{font-size:12px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.section-title span{width:20px;height:20px;background:#1e293b;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;font-size:11px}
+
+/* ── Photo capture buttons ── */
+.photo-btn{width:100%;padding:18px;background:#111827;border:2px dashed #1e293b;border-radius:12px;display:flex;align-items:center;gap:14px;cursor:pointer;transition:all .15s;position:relative;overflow:hidden}
+.photo-btn:active{background:#1e293b;border-color:#334155}
+.photo-btn.has-photo{border-style:solid;border-color:#3b82f6;background:rgba(59,130,246,.06)}
+.photo-icon{width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0}
+.photo-icon.vin{background:rgba(245,158,11,.15)}
+.photo-icon.odo{background:rgba(168,85,247,.15)}
+.photo-info{flex:1;text-align:left}
+.photo-label{font-size:15px;font-weight:600;color:#f1f5f9}
+.photo-sub{font-size:12px;color:#64748b;margin-top:2px}
+.photo-check{font-size:18px;flex-shrink:0}
+input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;font-size:0}
+
+/* ── Multi photo area ── */
+.multi-photo-wrap{background:#111827;border:2px dashed #1e293b;border-radius:12px;padding:14px;transition:all .15s}
+.multi-photo-wrap.has-photos{border-style:solid;border-color:#334155}
+.add-photo-btn{width:100%;padding:14px;display:flex;align-items:center;justify-content:center;gap:8px;color:#64748b;font-size:14px;font-weight:500;cursor:pointer;position:relative}
+.add-photo-btn:active{color:#94a3b8}
+.add-photo-btn input{position:absolute;inset:0;opacity:0;cursor:pointer;font-size:0}
+.photo-previews{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+.preview-thumb{aspect-ratio:4/3;border-radius:8px;overflow:hidden;position:relative;background:#0f172a}
+.preview-thumb img{width:100%;height:100%;object-fit:cover}
+.preview-thumb .remove{position:absolute;top:4px;right:4px;width:20px;height:20px;background:rgba(0,0,0,.7);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;cursor:pointer}
+
+/* ── Extracted badge ── */
+.extracted{display:inline-flex;align-items:center;gap:6px;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.25);border-radius:6px;padding:6px 12px;font-size:13px;color:#4ade80;font-weight:600;margin-top:8px}
+.extracted.loading{background:rgba(245,158,11,.1);border-color:rgba(245,158,11,.2);color:#fbbf24}
+.extracted.fail{background:rgba(239,68,68,.08);border-color:rgba(239,68,68,.2);color:#f87171}
+.retake-hint{font-size:12px;color:#94a3b8;margin-top:6px;padding:0 2px}
+
+/* ── Dual capture buttons (Camera + Library) ── */
+.dual-capture-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.capture-btn{position:relative;padding:13px 8px;background:#111827;border:1.5px solid #1e293b;border-radius:10px;display:flex;align-items:center;justify-content:center;gap:6px;font-size:14px;font-weight:600;color:#94a3b8;cursor:pointer;text-align:center;overflow:hidden;-webkit-tap-highlight-color:transparent}
+.capture-btn:active{background:#1e293b}
+.capture-btn.cam{border-color:#1e3a5f;color:#60a5fa}
+.capture-btn input{position:absolute;inset:0;opacity:0;cursor:pointer;font-size:0}
+
+/* ── Fields ── */
+.field{margin-bottom:14px}
+.field label{font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.6px;display:block;margin-bottom:6px}
+.field input,.field textarea{width:100%;background:#111827;border:1.5px solid #1e293b;border-radius:10px;padding:13px 14px;color:#e2e8f0;font-size:16px;font-family:-apple-system,'Inter',sans-serif;outline:none;transition:border .15s}
+.field input:focus,.field textarea:focus{border-color:#3b82f6}
+.field textarea{resize:none;height:80px;font-size:14px}
+.dollar-wrap{position:relative}
+.dollar-wrap span{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:#64748b;font-size:16px;font-weight:600}
+.dollar-wrap input{padding-left:28px}
+
+/* ── Checklist bar ── */
+.checklist{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:14px 16px;margin-bottom:20px}
+.check-row{display:flex;align-items:center;gap:10px;padding:5px 0;font-size:14px;color:#64748b;transition:color .2s}
+.check-row.done{color:#4ade80}
+.check-row.done .check-dot{background:#22c55e;color:#fff}
+.check-dot{width:22px;height:22px;border-radius:50%;background:#1e293b;display:inline-flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0;transition:all .2s}
+.req-badge{font-size:10px;font-weight:700;color:#ef4444;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2);border-radius:4px;padding:2px 6px;margin-left:auto}
+
+/* ── Submit ── */
+.submit-btn{width:100%;padding:17px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border:none;border-radius:12px;color:#fff;font-size:17px;font-weight:700;font-family:-apple-system,'Inter',sans-serif;cursor:pointer;transition:all .15s;margin-top:8px}
+.submit-btn:active{transform:scale(.98)}
+.submit-btn:disabled{opacity:.35;cursor:not-allowed;transform:none}
+
+/* ── Processing overlay ── */
+.overlay{display:none;position:fixed;inset:0;background:rgba(11,15,25,.95);z-index:200;flex-direction:column;align-items:center;justify-content:center;gap:20px}
+.overlay.show{display:flex}
+.spinner{width:48px;height:48px;border:3px solid #1e293b;border-top-color:#3b82f6;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.overlay-text{font-size:16px;color:#94a3b8;font-weight:500;text-align:center}
+.overlay-step{font-size:13px;color:#475569;margin-top:-10px}
+
+/* ── Success screen ── */
+.success{display:none;position:fixed;inset:0;background:#0b0f19;z-index:300;flex-direction:column;align-items:center;justify-content:center;padding:32px;text-align:center}
+.success.show{display:flex}
+.success-icon{font-size:64px;margin-bottom:24px}
+.success h2{font-size:24px;font-weight:800;color:#f1f5f9;margin-bottom:8px}
+.success p{font-size:15px;color:#64748b;line-height:1.6;margin-bottom:8px}
+.success .bid-id{font-size:28px;font-weight:800;color:#3b82f6;margin:16px 0}
+.success .extracted-summary{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:16px;text-align:left;width:100%;margin:16px 0}
+.summary-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #0f172a;font-size:14px}
+.summary-row:last-child{border-bottom:none}
+.summary-label{color:#64748b}
+.summary-value{color:#f1f5f9;font-weight:600}
+.btn-another{width:100%;padding:15px;background:#1e293b;border:1px solid #334155;border-radius:12px;color:#e2e8f0;font-size:16px;font-weight:600;font-family:-apple-system,'Inter',sans-serif;cursor:pointer;margin-top:8px}
+</style>
+</head>
+<body>
+
+<!-- ── Setup Screen (first visit / name change) ── -->
+<div class="setup" id="setup">
+  <div class="setup-logo">EW</div>
+  <h2>Welcome to EW Field App</h2>
+  <p>Enter your name once — the app will remember you for every future submission.</p>
+  <input class="setup-input" type="text" id="setup-name" placeholder="Your full name"
+         autocomplete="name" autocorrect="off" oninput="setupInputChanged()">
+  <button class="setup-btn" id="setup-btn" onclick="saveRep()" disabled>Get Started</button>
+</div>
+
+<!-- ── Header ── -->
+<div class="header">
+  <div class="logo">
+    <div class="logo-mark">EW</div>
+    <div>
+      <div class="logo-text">Experience Wholesale</div>
+      <div class="logo-sub">Field Submission</div>
+    </div>
+  </div>
+  <div class="rep-chip" onclick="showSetup()" id="rep-chip">
+    <div class="rep-avatar" id="rep-avatar">?</div>
+    <span class="rep-name-label" id="rep-name-label">Set name</span>
+    <span class="rep-edit">✎</span>
+  </div>
+</div>
+
+<!-- ── Main Form ── -->
+<div class="page">
+
+  <!-- Vehicle Photos -->
+  <div class="section">
+    <div class="section-title"><span>📸</span> Vehicle Photos</div>
+    <div class="multi-photo-wrap" id="car-wrap">
+      <div class="photo-previews" id="car-previews"></div>
+      <div class="dual-capture-row">
+        <label class="capture-btn cam">
+          📷 Camera
+          <input type="file" accept="image/*" capture="environment" multiple onchange="addCarPhotos(this)">
+        </label>
+        <label class="capture-btn">
+          🖼️ Saved Photos
+          <input type="file" accept="image/*" multiple onchange="addCarPhotos(this)">
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIN Photo -->
+  <div class="section">
+    <div class="section-title"><span>🔢</span> VIN Sticker</div>
+    <div class="photo-btn" id="vin-btn">
+      <div class="photo-icon vin">🔢</div>
+      <div class="photo-info">
+        <div class="photo-label">VIN Sticker Photo</div>
+        <div class="photo-sub" id="vin-sub">AI reads the VIN automatically</div>
+      </div>
+      <div class="photo-check" id="vin-check"></div>
+    </div>
+    <div class="dual-capture-row">
+      <label class="capture-btn cam">
+        📷 Camera
+        <input type="file" accept="image/*" capture="environment" onchange="handleVinPhoto(this)">
+      </label>
+      <label class="capture-btn">
+        🖼️ Saved Photo
+        <input type="file" accept="image/*" onchange="handleVinPhoto(this)">
+      </label>
+    </div>
+    <div id="vin-result"></div>
+    <div class="field" style="margin-top:10px;margin-bottom:0">
+      <label>Or type / paste VIN</label>
+      <input type="text" id="vin-manual" placeholder="17-character VIN"
+             maxlength="17" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false"
+             oninput="onVinManualInput(this)">
+    </div>
+  </div>
+
+  <!-- Odometer Photo -->
+  <div class="section">
+    <div class="section-title"><span>🔵</span> Odometer</div>
+    <div class="photo-btn" id="odo-btn">
+      <div class="photo-icon odo">🔵</div>
+      <div class="photo-info">
+        <div class="photo-label">Odometer Photo</div>
+        <div class="photo-sub" id="odo-sub">AI reads the mileage automatically</div>
+      </div>
+      <div class="photo-check" id="odo-check"></div>
+    </div>
+    <div class="dual-capture-row">
+      <label class="capture-btn cam">
+        📷 Camera
+        <input type="file" accept="image/*" capture="environment" onchange="handleOdoPhoto(this)">
+      </label>
+      <label class="capture-btn">
+        🖼️ Saved Photo
+        <input type="file" accept="image/*" onchange="handleOdoPhoto(this)">
+      </label>
+    </div>
+    <div id="odo-result"></div>
+    <div class="field" style="margin-top:10px;margin-bottom:0">
+      <label>Or type / paste mileage</label>
+      <input type="number" id="odo-manual" placeholder="e.g. 42000"
+             min="0" max="999999" autocomplete="off"
+             oninput="onOdoManualInput(this)">
+    </div>
+  </div>
+
+  <!-- Manual Fields -->
+  <div class="section">
+    <div class="section-title"><span>✏️</span> Details</div>
+    <div class="field">
+      <label>Asking Price</label>
+      <div class="dollar-wrap">
+        <span>$</span>
+        <input type="number" id="asking-price" placeholder="0">
+      </div>
+    </div>
+    <div class="field">
+      <label>Notes</label>
+      <textarea id="notes" placeholder="Condition, color, any issues, seller info..."></textarea>
+    </div>
+  </div>
+
+  <!-- Checklist -->
+  <div class="checklist">
+    <div class="check-row" id="chk-car">
+      <div class="check-dot" id="dot-car">1</div>
+      <span id="chk-label-car">Vehicle photos (at least 1)</span>
+      <span class="req-badge" id="badge-car">Required</span>
+    </div>
+    <div class="check-row" id="chk-vin">
+      <div class="check-dot" id="dot-vin">2</div>
+      <span id="chk-label-vin">VIN sticker photo</span>
+      <span class="req-badge" id="badge-vin">Required</span>
+    </div>
+    <div class="check-row" id="chk-odo">
+      <div class="check-dot" id="dot-odo">3</div>
+      <span id="chk-label-odo">Odometer photo</span>
+      <span class="req-badge" id="badge-odo">Required</span>
+    </div>
+  </div>
+
+  <button class="submit-btn" id="submit-btn" onclick="submitBid()">Submit Bid Request</button>
+
+</div>
+
+<!-- Processing Overlay -->
+<div class="overlay" id="overlay">
+  <div class="spinner"></div>
+  <div class="overlay-text">Processing submission...</div>
+  <div class="overlay-step" id="overlay-step">Uploading photos</div>
+</div>
+
+<!-- Success Screen -->
+<div class="success" id="success">
+  <div class="success-icon">✅</div>
+  <h2>Bid Submitted!</h2>
+  <p>Your submission is now live in the dashboard.</p>
+  <div class="bid-id" id="success-bid-id"></div>
+  <div class="extracted-summary" id="success-summary"></div>
+  <button class="btn-another" onclick="resetForm()">Submit Another</button>
+</div>
+
+<script>
+let carFiles = [];
+let vinFile = null;
+let odoFile = null;
+let extractedVin = null;
+let extractedMileage = null;
+
+// Resize image client-side before upload (max 1600px, ~1.5MB)
+function resizeImage(file, maxDim=1600, quality=0.82) {
+  return new Promise(resolve => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let w = img.naturalWidth, h = img.naturalHeight;
+      if (Math.max(w, h) > maxDim) {
+        const r = maxDim / Math.max(w, h);
+        w = Math.round(w * r); h = Math.round(h * r);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      canvas.toBlob(blob => resolve(new File([blob], file.name, {type:'image/jpeg'})),
+                    'image/jpeg', quality);
+    };
+    img.onerror = () => resolve(file); // fall back to original
+    img.src = url;
+  });
+}
+
+// ── Rep identity ──────────────────────────────────────────────────────────────
+
+function getInitials(name) {
+  return name.trim().split(/\s+/).map(w => w[0]).join('').toUpperCase().slice(0, 2) || '?';
+}
+
+function renderRepChip(name) {
+  document.getElementById('rep-avatar').textContent = getInitials(name);
+  document.getElementById('rep-name-label').textContent = name;
+}
+
+function showSetup() {
+  const el = document.getElementById('setup');
+  el.classList.add('show');
+  const saved = localStorage.getItem('ew_rep_name') || '';
+  document.getElementById('setup-name').value = saved;
+  setupInputChanged();
+  setTimeout(() => document.getElementById('setup-name').focus(), 100);
+}
+
+function hideSetup() {
+  document.getElementById('setup').classList.remove('show');
+}
+
+function setupInputChanged() {
+  const val = document.getElementById('setup-name').value.trim();
+  document.getElementById('setup-btn').disabled = val.length < 2;
+}
+
+function saveRep() {
+  const name = document.getElementById('setup-name').value.trim();
+  if (name.length < 2) return;
+  localStorage.setItem('ew_rep_name', name);
+  renderRepChip(name);
+  hideSetup();
+}
+
+// Allow Enter key on setup input
+document.getElementById('setup-name').addEventListener('keydown', e => {
+  if (e.key === 'Enter') saveRep();
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+// Server-side reset flag clears localStorage and shows setup
+if ({{ 'true' if force_setup else 'false' }}) {
+  localStorage.removeItem('ew_rep_name');
+  window.history.replaceState({}, '', '/mobile');
+}
+
+const savedName = localStorage.getItem('ew_rep_name');
+if (savedName) {
+  renderRepChip(savedName);
+} else {
+  showSetup();
+}
+
+function onOdoManualInput(el) {
+  const val = parseInt(el.value);
+  extractedMileage = (!isNaN(val) && val > 0) ? val : null;
+  updateChecklist();
+}
+
+function onVinManualInput(el) {
+  const val = el.value.trim().toUpperCase();
+  el.value = val;
+  extractedVin = val.length >= 5 ? val : null;
+  updateChecklist();
+}
+
+// ── Checklist ─────────────────────────────────────────────────────────────────
+
+function updateChecklist() {
+  const rejectedCount = photoVerified.filter(v => v !== null && v !== true).length;
+  const pendingCount = photoVerified.filter(v => v === null).length;
+  const carDone = carFiles.length > 0 && rejectedCount === 0 && pendingCount === 0;
+  const manualVin = document.getElementById('vin-manual').value.trim();
+  const vinDone = vinFile !== null || manualVin.length >= 5;
+  const manualOdo = parseInt(document.getElementById('odo-manual').value);
+  const odoDone = odoFile !== null || (!isNaN(manualOdo) && manualOdo > 0);
+
+  function set(id, done, num, label) {
+    document.getElementById('chk-' + id).classList.toggle('done', done);
+    document.getElementById('dot-' + id).textContent = done ? '✓' : num;
+    const badge = document.getElementById('badge-' + id);
+    badge.style.display = done ? 'none' : '';
+    const textEl = document.getElementById('chk-label-' + id);
+    if (textEl && label) textEl.textContent = label;
+  }
+
+  const carLabel = rejectedCount > 0
+    ? `${rejectedCount} photo${rejectedCount>1?'s':''} don't look like a vehicle — remove them`
+    : pendingCount > 0
+      ? `Checking ${pendingCount} photo${pendingCount>1?'s':''}...`
+      : carFiles.length > 0
+        ? `Vehicle photos (${carFiles.length})`
+        : 'Vehicle photos (at least 1)';
+  set('car', carDone && rejectedCount === 0 && pendingCount === 0, '1', carLabel);
+
+  const vinLabel = extractedVin
+    ? `VIN: ${extractedVin}`
+    : (manualVin.length >= 5 ? `VIN: ${manualVin}` : (vinFile ? 'VIN photo — could not read, submit anyway?' : 'VIN sticker photo'));
+  set('vin', vinDone, '2', vinLabel);
+
+  const odoLabel = extractedMileage
+    ? `Mileage: ${parseInt(extractedMileage).toLocaleString()} mi`
+    : (!isNaN(manualOdo) && manualOdo > 0 ? `Mileage: ${manualOdo.toLocaleString()} mi` : (odoFile ? 'Odometer photo — could not read, submit anyway?' : 'Odometer photo'));
+  set('odo', odoDone, '3', odoLabel);
+
+  // Warn rows where photo taken but extraction failed
+  document.getElementById('chk-vin').style.color = (vinFile && !extractedVin) ? '#f59e0b' : '';
+  document.getElementById('dot-vin').style.background = (vinFile && !extractedVin) ? '#92400e' : '';
+  document.getElementById('chk-odo').style.color = (odoFile && !extractedMileage) ? '#f59e0b' : '';
+  document.getElementById('dot-odo').style.background = (odoFile && !extractedMileage) ? '#92400e' : '';
+
+  document.getElementById('submit-btn').disabled = !(carDone && vinDone && odoDone);
+}
+
+// ── Photos ────────────────────────────────────────────────────────────────────
+
+// Track per-photo verification state: null=pending, true=ok, false=rejected
+let photoVerified = [];
+
+async function addCarPhotos(input) {
+  const rawFiles = Array.from(input.files);
+  // Resize all photos client-side first
+  const newFiles = await Promise.all(rawFiles.map(f => resizeImage(f)));
+  const startIdx = carFiles.length;
+  carFiles = carFiles.concat(newFiles);
+  // Add pending slots
+  newFiles.forEach(() => photoVerified.push(null));
+  renderCarPreviews();
+  document.getElementById('car-wrap').classList.add('has-photos');
+  input.value = '';
+  updateChecklist();
+
+  // Verify each new photo in parallel
+  await Promise.all(newFiles.map(async (f, offset) => {
+    const idx = startIdx + offset;
+    const fd = new FormData();
+    fd.append('photo', f);
+    try {
+      const resp = await fetch('/api/verify-photo', {method:'POST', body:fd});
+      const data = await resp.json();
+      photoVerified[idx] = data.ok ? true : (data.description || 'Not a vehicle photo');
+    } catch(e) {
+      photoVerified[idx] = true; // fail open
+    }
+    renderCarPreviews();
+    updateChecklist();
+  }));
+}
+
+function renderCarPreviews() {
+  const container = document.getElementById('car-previews');
+  container.innerHTML = '';
+  carFiles.forEach((f, i) => {
+    const div = document.createElement('div');
+    div.className = 'preview-thumb';
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(f);
+    div.appendChild(img);
+
+    // Verification overlay
+    const status = photoVerified[i];
+    if (status === null) {
+      // Still checking
+      const spin = document.createElement('div');
+      spin.style.cssText = 'position:absolute;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;font-size:16px;border-radius:8px';
+      spin.textContent = '⏳';
+      div.appendChild(spin);
+    } else if (status !== null && status !== true) {
+      // Not a vehicle — status is the category string
+      // status is Claude's description of what it saw
+      const shortDesc = status.length > 40 ? status.slice(0, 38) + '…' : status;
+      const warn = document.createElement('div');
+      warn.style.cssText = 'position:absolute;inset:0;background:rgba(239,68,68,.75);display:flex;flex-direction:column;align-items:center;justify-content:center;border-radius:8px;padding:6px;text-align:center';
+      warn.innerHTML = `<div style="font-size:14px">⚠️</div><div style="font-size:8px;color:#fff;font-weight:700;line-height:1.3">${shortDesc}</div>`;
+      div.appendChild(warn);
+    }
+
+    const rm = document.createElement('div');
+    rm.className = 'remove';
+    rm.textContent = '✕';
+    rm.style.background = (status !== null && status !== true) ? 'rgba(239,68,68,.9)' : 'rgba(0,0,0,.7)';
+    rm.onclick = e => {
+      e.preventDefault(); e.stopPropagation();
+      carFiles.splice(i, 1);
+      photoVerified.splice(i, 1);
+      renderCarPreviews();
+      updateChecklist();
+    };
+    div.appendChild(rm);
+    container.appendChild(div);
+  });
+}
+
+async function handleVinPhoto(input) {
+  if (!input.files[0]) return;
+  vinFile = await resizeImage(input.files[0], 1600, 0.90);
+  extractedVin = null;
+  document.getElementById('vin-btn').classList.add('has-photo');
+  document.getElementById('vin-check').textContent = '⏳';
+  document.getElementById('vin-sub').textContent = 'Reading VIN...';
+  document.getElementById('vin-result').innerHTML = `<div class="extracted loading" style="margin-top:8px"><span style="animation:spin .7s linear infinite;display:inline-block">⏳</span> We are reading the VIN...</div>`;
+  updateChecklist();
+
+  const fd = new FormData();
+  fd.append('photo', vinFile);
+  fd.append('type', 'vin');
+  try {
+    const resp = await fetch('/api/quick-extract', {method:'POST', body:fd});
+    const data = await resp.json();
+    if (data.success) {
+      extractedVin = data.value;
+      document.getElementById('vin-manual').value = data.value;
+      document.getElementById('vin-check').textContent = '✅';
+      document.getElementById('vin-btn').classList.add('vin-ok');
+      document.getElementById('vin-sub').textContent = `VIN read successfully`;
+      document.getElementById('vin-result').innerHTML = `<div class="extracted" style="margin-top:8px">✓ ${data.value}</div>`;
+    } else {
+      document.getElementById('vin-check').textContent = '⚠️';
+      document.getElementById('vin-sub').textContent = 'Could not read VIN';
+      document.getElementById('vin-result').innerHTML = `
+        <div class="extracted fail" style="margin-top:8px">⚠️ VIN not readable</div>
+        <div class="retake-hint">Try a closer, clearer shot of the VIN sticker. Tap to retake.</div>`;
+    }
+  } catch(e) {
+    document.getElementById('vin-check').textContent = '⚠️';
+    document.getElementById('vin-sub').textContent = 'Could not connect — will retry on submit';
+  }
+  updateChecklist();
+}
+
+async function handleOdoPhoto(input) {
+  if (!input.files[0]) return;
+  odoFile = await resizeImage(input.files[0], 1600, 0.90);
+  extractedMileage = null;
+  document.getElementById('odo-btn').classList.add('has-photo');
+  document.getElementById('odo-check').textContent = '⏳';
+  document.getElementById('odo-sub').textContent = 'Reading mileage...';
+  document.getElementById('odo-result').innerHTML = `<div class="extracted loading" style="margin-top:8px"><span style="animation:spin .7s linear infinite;display:inline-block">⏳</span> We are reading the mileage...</div>`;
+  updateChecklist();
+
+  const fd = new FormData();
+  fd.append('photo', odoFile);
+  fd.append('type', 'odo');
+  try {
+    const resp = await fetch('/api/quick-extract', {method:'POST', body:fd});
+    const data = await resp.json();
+    if (data.success) {
+      extractedMileage = data.value;
+      document.getElementById('odo-manual').value = data.value;
+      document.getElementById('odo-check').textContent = '✅';
+      document.getElementById('odo-sub').textContent = 'Mileage read successfully';
+      document.getElementById('odo-result').innerHTML = `<div class="extracted" style="margin-top:8px">✓ ${parseInt(data.value).toLocaleString()} mi</div>`;
+    } else {
+      document.getElementById('odo-check').textContent = '⚠️';
+      document.getElementById('odo-sub').textContent = 'Could not read mileage';
+      document.getElementById('odo-result').innerHTML = `
+        <div class="extracted fail" style="margin-top:8px">⚠️ Mileage not readable</div>
+        <div class="retake-hint">Try a closer shot of the odometer or digital display. Tap to retake.</div>`;
+    }
+  } catch(e) {
+    document.getElementById('odo-check').textContent = '⚠️';
+    document.getElementById('odo-sub').textContent = 'Could not connect — will retry on submit';
+  }
+  updateChecklist();
+}
+
+// ── Submit ────────────────────────────────────────────────────────────────────
+
+function setOverlayStep(text) {
+  document.getElementById('overlay-step').textContent = text;
+}
+
+async function submitBid() {
+  if (!carFiles.length || !vinFile || !odoFile) return;
+
+  const repName = localStorage.getItem('ew_rep_name') || '';
+  const notes = document.getElementById('notes').value.trim();
+  const askingPrice = document.getElementById('asking-price').value;
+
+  document.getElementById('submit-btn').disabled = true;
+  document.getElementById('overlay').classList.add('show');
+
+  const fd = new FormData();
+  fd.append('rep_name', repName);
+  fd.append('notes', notes);
+  fd.append('asking_price', askingPrice || '');
+  // Pass already-extracted values so server skips re-running Claude
+  const finalVin = extractedVin || document.getElementById('vin-manual').value.trim();
+  if (finalVin) fd.append('manual_vin', finalVin);
+  const finalMileage = extractedMileage || document.getElementById('odo-manual').value.trim();
+  if (finalMileage) fd.append('manual_mileage', String(finalMileage));
+
+  setOverlayStep('Uploading vehicle photos...');
+  carFiles.forEach((f, i) => fd.append(`car_photo_${i}`, f));
+  setOverlayStep('Uploading photos...');
+  fd.append('vin_photo', vinFile);
+  fd.append('odo_photo', odoFile);
+  setOverlayStep('Saving bid...');
+
+  try {
+    const resp = await fetch('/api/mobile-submit', { method: 'POST', body: fd });
+    const data = await resp.json();
+    if (data.success) {
+      showSuccess(data);
+    } else {
+      alert('Error: ' + (data.error || 'Unknown error'));
+      document.getElementById('overlay').classList.remove('show');
+      document.getElementById('submit-btn').disabled = false;
+      updateChecklist();
+    }
+  } catch(e) {
+    alert('Submission failed. Check your connection.');
+    document.getElementById('overlay').classList.remove('show');
+    document.getElementById('submit-btn').disabled = false;
+    updateChecklist();
+  }
+}
+
+// ── Success ───────────────────────────────────────────────────────────────────
+
+function showSuccess(data) {
+  document.getElementById('overlay').classList.remove('show');
+  document.getElementById('success-bid-id').textContent = `Bid #${data.bid_id}`;
+
+  let html = '';
+  html += data.vin
+    ? `<div class="summary-row"><span class="summary-label">VIN</span><span class="summary-value" style="font-family:monospace">${data.vin}</span></div>`
+    : `<div class="summary-row"><span class="summary-label">VIN</span><span class="summary-value" style="color:#f87171">Not read — team will follow up</span></div>`;
+  html += data.mileage
+    ? `<div class="summary-row"><span class="summary-label">Mileage</span><span class="summary-value">${parseInt(data.mileage).toLocaleString()} mi</span></div>`
+    : `<div class="summary-row"><span class="summary-label">Mileage</span><span class="summary-value" style="color:#f87171">Not read — team will follow up</span></div>`;
+  if (data.asking_price) html += `<div class="summary-row"><span class="summary-label">Asking</span><span class="summary-value">$${parseInt(data.asking_price).toLocaleString()}</span></div>`;
+  if (data.photos) html += `<div class="summary-row"><span class="summary-label">Photos</span><span class="summary-value">${data.photos}</span></div>`;
+  const repName = localStorage.getItem('ew_rep_name') || '';
+  if (repName) html += `<div class="summary-row"><span class="summary-label">Submitted by</span><span class="summary-value">${repName}</span></div>`;
+
+  document.getElementById('success-summary').innerHTML = html;
+  document.getElementById('success').classList.add('show');
+}
+
+function resetForm() {
+  document.getElementById('success').classList.remove('show');
+  carFiles = []; vinFile = null; odoFile = null;
+  extractedVin = null; extractedMileage = null;
+  photoVerified = [];
+  document.getElementById('car-previews').innerHTML = '';
+  document.getElementById('car-wrap').classList.remove('has-photos');
+  document.getElementById('vin-btn').classList.remove('has-photo');
+  document.getElementById('vin-check').textContent = '';
+  document.getElementById('vin-sub').textContent = 'Point camera at VIN sticker — AI reads it automatically';
+  document.getElementById('vin-result').innerHTML = '';
+  document.getElementById('odo-btn').classList.remove('has-photo');
+  document.getElementById('odo-check').textContent = '';
+  document.getElementById('odo-sub').textContent = 'AI reads the mileage automatically';
+  document.getElementById('odo-result').innerHTML = '';
+  document.getElementById('asking-price').value = '';
+  document.getElementById('notes').value = '';
+  updateChecklist();
+}
+
+// Init checklist state
+updateChecklist();
+</script>
+</body>
+</html>

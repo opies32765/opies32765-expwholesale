@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EW — Contacts & Reps</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh}
+
+.header{background:#111827;border-bottom:1px solid #1e293b;padding:0 32px;height:60px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-mark{width:34px;height:34px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;color:#fff}
+.logo-text{font-size:15px;font-weight:700;color:#f1f5f9}
+.logo-sub{font-size:10px;color:#64748b;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+.nav-link{font-size:13px;color:#64748b;text-decoration:none;padding:6px 14px;border:1px solid #1e293b;border-radius:6px;font-weight:500;transition:all .15s}
+.nav-link:hover{color:#e2e8f0;border-color:#334155}
+
+.page{padding:32px}
+.page-title{font-size:22px;font-weight:800;color:#f1f5f9;margin-bottom:4px}
+.page-sub{font-size:14px;color:#64748b;margin-bottom:28px}
+
+.section-label{font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.8px;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.badge-field{display:inline-block;background:rgba(168,85,247,.12);color:#c084fc;border:1px solid rgba(168,85,247,.2);border-radius:4px;padding:2px 7px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+.badge-sms{display:inline-block;background:rgba(59,130,246,.1);color:#60a5fa;border:1px solid rgba(59,130,246,.2);border-radius:4px;padding:2px 7px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+
+.contact-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px;margin-bottom:40px}
+.contact-card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:18px;transition:border .15s}
+.contact-card:hover{border-color:#334155}
+.card-top{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.avatar{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:800;flex-shrink:0}
+.avatar.field{background:linear-gradient(135deg,rgba(168,85,247,.3),rgba(168,85,247,.1));color:#c084fc;border:1px solid rgba(168,85,247,.2)}
+.avatar.sms{background:linear-gradient(135deg,rgba(59,130,246,.3),rgba(59,130,246,.1));color:#60a5fa;border:1px solid rgba(59,130,246,.2)}
+.card-meta{flex:1;min-width:0}
+.card-name{font-size:15px;font-weight:700;color:#f1f5f9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-phone{font-size:12px;color:#64748b;margin-top:2px}
+.card-company{font-size:11px;color:#3b82f6;margin-top:2px;font-weight:500}
+.bid-count{font-size:12px;color:#475569;font-weight:600;white-space:nowrap}
+
+.edit-form{display:none;flex-direction:column;gap:8px;border-top:1px solid #1e293b;padding-top:14px;margin-top:2px}
+.edit-form.open{display:flex}
+.edit-row{display:flex;gap:8px}
+.edit-input{flex:1;background:#0b0f19;border:1.5px solid #1e293b;border-radius:8px;padding:9px 12px;color:#e2e8f0;font-size:13px;font-family:'Inter',sans-serif;outline:none;transition:border .15s}
+.edit-input:focus{border-color:#3b82f6}
+.btn-save{padding:9px 18px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border:none;border-radius:8px;color:#fff;font-size:13px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer}
+.btn-cancel{padding:9px 14px;background:#1e293b;border:1px solid #334155;border-radius:8px;color:#94a3b8;font-size:13px;font-weight:500;font-family:'Inter',sans-serif;cursor:pointer}
+.btn-edit{padding:5px 12px;background:transparent;border:1px solid #1e293b;border-radius:6px;color:#64748b;font-size:12px;font-weight:500;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s}
+.btn-edit:hover{border-color:#334155;color:#94a3b8}
+.saved-msg{font-size:12px;color:#4ade80;display:none}
+
+.view-bids{font-size:12px;color:#3b82f6;text-decoration:none;font-weight:500}
+.view-bids:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <div class="logo-mark">EW</div>
+    <div>
+      <div class="logo-text">Experience Wholesale</div>
+      <div class="logo-sub">Contacts & Reps</div>
+    </div>
+  </div>
+  <a href="/" class="nav-link">← Dashboard</a>
+</div>
+
+<div class="page">
+  <div class="page-title">Contacts & Field Reps</div>
+  <div class="page-sub">Edit names, companies, and notes. Changes apply to all bids from that contact.</div>
+
+  {% if field_contacts %}
+  <div class="section-label"><span class="badge-field">Field Reps</span> — submitted via mobile app</div>
+  <div class="contact-grid">
+    {% for c in field_contacts %}
+    <div class="contact-card" id="card-{{ c.id }}">
+      <div class="card-top">
+        <div class="avatar field">{{ (c.name or 'R')[0].upper() }}{{ (c.name or '')[1:].split()[-1][0].upper() if ' ' in (c.name or '') else '' }}</div>
+        <div class="card-meta">
+          <div class="card-name">{{ c.name or 'Unnamed Rep' }}</div>
+          <div class="card-phone">{{ c.phone }}</div>
+          {% if c.company %}<div class="card-company">{{ c.company }}</div>{% endif %}
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+          <span class="bid-count">{{ c.bid_count }} bid{{ 's' if c.bid_count != 1 else '' }}</span>
+          <button class="btn-edit" onclick="toggleEdit({{ c.id }})">Edit</button>
+        </div>
+      </div>
+      <div class="edit-form" id="edit-{{ c.id }}">
+        <div class="edit-row">
+          <input class="edit-input" id="name-{{ c.id }}" placeholder="Full name" value="{{ c.name or '' }}">
+          <input class="edit-input" id="company-{{ c.id }}" placeholder="Company" value="{{ c.company or '' }}">
+        </div>
+        <div class="edit-row">
+          <button class="btn-save" onclick="saveContact({{ c.id }})">Save</button>
+          <button class="btn-cancel" onclick="toggleEdit({{ c.id }})">Cancel</button>
+          <span class="saved-msg" id="saved-{{ c.id }}">✓ Saved</span>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if sms_contacts %}
+  <div class="section-label"><span class="badge-sms">SMS</span> — bid via text message</div>
+  <div class="contact-grid">
+    {% for c in sms_contacts %}
+    <div class="contact-card" id="card-{{ c.id }}">
+      <div class="card-top">
+        <div class="avatar sms">{{ (c.name or c.phone)[0].upper() }}</div>
+        <div class="card-meta">
+          <div class="card-name">{{ c.name or c.phone }}</div>
+          {% if c.name %}<div class="card-phone">{{ c.phone }}</div>{% endif %}
+          {% if c.company %}<div class="card-company">{{ c.company }}</div>{% endif %}
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+          <span class="bid-count">{{ c.bid_count }} bid{{ 's' if c.bid_count != 1 else '' }}</span>
+          <button class="btn-edit" onclick="toggleEdit({{ c.id }})">Edit</button>
+        </div>
+      </div>
+      <div class="edit-form" id="edit-{{ c.id }}">
+        <div class="edit-row">
+          <input class="edit-input" id="name-{{ c.id }}" placeholder="Full name" value="{{ c.name or '' }}">
+          <input class="edit-input" id="company-{{ c.id }}" placeholder="Company / Dealership" value="{{ c.company or '' }}">
+        </div>
+        <div class="edit-row">
+          <button class="btn-save" onclick="saveContact({{ c.id }})">Save</button>
+          <button class="btn-cancel" onclick="toggleEdit({{ c.id }})">Cancel</button>
+          <span class="saved-msg" id="saved-{{ c.id }}">✓ Saved</span>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if not field_contacts and not sms_contacts %}
+  <div style="text-align:center;padding:80px 24px;color:#475569">
+    <div style="font-size:48px;margin-bottom:16px">👥</div>
+    <div style="font-size:18px;font-weight:600;color:#64748b;margin-bottom:8px">No contacts yet</div>
+    <div style="font-size:14px">Contacts appear as bids come in via SMS or field reps.</div>
+  </div>
+  {% endif %}
+</div>
+
+<script>
+function toggleEdit(id) {
+  const form = document.getElementById('edit-' + id);
+  form.classList.toggle('open');
+}
+
+async function saveContact(id) {
+  const name = document.getElementById('name-' + id).value.trim();
+  const company = document.getElementById('company-' + id).value.trim();
+
+  const r = await fetch('/api/contact/' + id, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, company})
+  });
+  const d = await r.json();
+  if (d.success) {
+    // Update card display
+    const card = document.getElementById('card-' + id);
+    card.querySelector('.card-name').textContent = name || 'Unnamed';
+    const compEl = card.querySelector('.card-company');
+    if (company) {
+      if (compEl) compEl.textContent = company;
+      else {
+        const ph = card.querySelector('.card-phone');
+        const newEl = document.createElement('div');
+        newEl.className = 'card-company';
+        newEl.textContent = company;
+        ph.after(newEl);
+      }
+    } else if (compEl) compEl.remove();
+
+    const saved = document.getElementById('saved-' + id);
+    saved.style.display = 'inline';
+    setTimeout(() => {
+      saved.style.display = 'none';
+      document.getElementById('edit-' + id).classList.remove('open');
+    }, 1200);
+  }
+}
+</script>
+</body>
+</html>
