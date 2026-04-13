@@ -54,7 +54,30 @@ CREATE TABLE IF NOT EXISTS valuations (
     fetched_at TIMESTAMP DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS vauto_lookups (
+    id SERIAL PRIMARY KEY,
+    bid_id INTEGER REFERENCES bids(id) ON DELETE CASCADE,
+    vin VARCHAR(17) NOT NULL,
+    rbook INTEGER,
+    black_book INTEGER,
+    mmr INTEGER,
+    kbb INTEGER,
+    kbb_com INTEGER,
+    jd_power INTEGER,
+    title_status VARCHAR(20),
+    price_rank VARCHAR(50),
+    adj_pct_market VARCHAR(50),
+    carfax_screenshot TEXT,
+    autocheck_screenshot TEXT,
+    carfax_json JSONB,
+    autocheck_json JSONB,
+    raw_json JSONB,
+    looked_up_at TIMESTAMP DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_bids_status ON bids(status);
 CREATE INDEX IF NOT EXISTS idx_bids_created ON bids(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bids_phone ON bids(phone);
 CREATE INDEX IF NOT EXISTS idx_bids_vin ON bids(vin);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vauto_bid_id ON vauto_lookups(bid_id);
+CREATE INDEX IF NOT EXISTS idx_vauto_vin ON vauto_lookups(vin);

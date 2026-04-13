@@ -3,85 +3,116 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Experience Wholesale — Bid Dashboard</title>
+<title>EW Buy Center</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh}
+body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:100vh}
 
 /* Header */
-.header{background:#111827;border-bottom:1px solid #1e293b;padding:0 32px;height:60px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.header{background:#243447;border-bottom:1px solid #344f68;padding:0 32px;height:66px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
 .logo{display:flex;align-items:center;gap:12px}
-.logo-mark{width:34px;height:34px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;color:#fff}
-.logo-text{font-size:15px;font-weight:700;color:#f1f5f9;letter-spacing:-0.3px}
-.logo-sub{font-size:10px;color:#64748b;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+.logo-mark{width:38px;height:38px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;color:#fff}
+.logo-text{font-size:17px;font-weight:700;color:#f1f5f9;letter-spacing:-0.3px}
+.logo-sub{font-size:11px;color:#7a9bb5;font-weight:500;text-transform:uppercase;letter-spacing:1px}
 .header-right{display:flex;align-items:center;gap:8px}
-.live-dot{width:7px;height:7px;background:#22c55e;border-radius:50%;animation:pulse 2s infinite}
+.live-dot{width:8px;height:8px;background:#22c55e;border-radius:50%;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(.85)}}
-.live-label{font-size:12px;color:#22c55e;font-weight:600}
+.live-label{font-size:14px;color:#22c55e;font-weight:600}
 
 /* Stats bar */
-.stats-bar{background:#111827;border-bottom:1px solid #1e293b;padding:12px 32px;display:flex;gap:32px;align-items:center}
-.stat-item{display:flex;flex-direction:column;align-items:center}
-.stat-num{font-size:22px;font-weight:800;line-height:1}
-.stat-label{font-size:10px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-top:2px}
-.stat-num.blue{color:#3b82f6}
-.stat-num.yellow{color:#f59e0b}
-.stat-num.green{color:#22c55e}
-.stat-num.gray{color:#64748b}
+.stats-bar{background:#243447;border-bottom:1px solid #344f68;padding:18px 40px;display:flex;gap:48px;align-items:center}
+.stat-item{display:flex;flex-direction:column;align-items:center;gap:4px}
+.stat-num{font-size:38px;font-weight:800;line-height:1}
+.stat-label{font-size:12px;color:#7a9bb5;font-weight:600;text-transform:uppercase;letter-spacing:.8px}
+.stat-num.blue{color:#60a5fa}
+.stat-num.yellow{color:#fbbf24}
+.stat-num.green{color:#34d399}
+.stat-num.gray{color:#7a9bb5}
 .stat-num.white{color:#f1f5f9}
-.stat-divider{width:1px;height:32px;background:#1e293b}
+.stat-divider{width:1px;height:44px;background:#344f68}
 
 /* Filters */
-.filters{padding:16px 32px;display:flex;gap:8px;align-items:center;border-bottom:1px solid #1e293b}
-.filter-btn{padding:6px 16px;border-radius:6px;border:1px solid #1e293b;background:transparent;color:#94a3b8;font-size:13px;font-weight:500;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-decoration:none;display:inline-block}
-.filter-btn:hover{border-color:#334155;color:#e2e8f0}
+.filters{padding:16px 32px;display:flex;gap:10px;align-items:center;border-bottom:1px solid #344f68;flex-wrap:wrap}
+.filter-btn{padding:9px 20px;border-radius:8px;border:1px solid #344f68;background:transparent;color:#a8c0d6;font-size:15px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-decoration:none;display:inline-block}
+.filter-btn:hover{border-color:#4d7a9e;color:#e2e8f0}
 .filter-btn.active{background:#1e3a5f;border-color:#3b82f6;color:#60a5fa}
-.filter-count{background:#1e293b;border-radius:4px;padding:1px 6px;font-size:11px;margin-left:4px;color:#64748b}
-.filter-btn.active .filter-count{background:#1e3a5f;color:#93c5fd}
+.filter-btn-passed{border-color:rgba(153,27,27,.5);color:#fca5a5;background:rgba(127,29,29,.25)}
+.filter-btn-passed:hover{background:rgba(153,27,27,.4);border-color:#b91c1c;color:#fca5a5}
+.filter-btn-passed.active{background:#7f1d1d;border-color:#ef4444;color:#fca5a5}
+.filter-count{background:#344f68;border-radius:4px;padding:2px 8px;font-size:13px;margin-left:5px;color:#7a9bb5}
+.filter-btn.active .filter-count{background:rgba(59,130,246,.2);color:#93c5fd}
+.filter-btn-passed.active .filter-count{background:rgba(239,68,68,.2);color:#fca5a5}
+.filter-divider{width:1px;height:30px;background:#344f68;margin:0 6px}
+.filter-select{background:#243447;border:1px solid #344f68;border-radius:8px;color:#a8c0d6;font-size:15px;font-weight:500;font-family:'Inter',sans-serif;padding:9px 36px 9px 16px;appearance:none;cursor:pointer;outline:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237a9bb5' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center}
+.filter-select:focus{border-color:#3b82f6;color:#e2e8f0}
+.filter-label{font-size:12px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.7px;white-space:nowrap}
+
+/* Bid # */
+.bid-num{font-size:15px;font-weight:700;color:#7a9bb5;font-family:monospace}
+
+/* Passed row */
+tr.status-passed td{background:rgba(239,68,68,.06)}
+tr.status-passed:hover td{background:rgba(239,68,68,.11)}
+/* Bought row */
+tr.status-bought td{background:rgba(34,197,94,.05)}
+tr.status-bought:hover td{background:rgba(34,197,94,.09)}
 
 /* Table */
 .table-wrap{padding:24px 32px}
 table{width:100%;border-collapse:collapse}
-th{text-align:left;padding:10px 14px;font-size:11px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #1e293b}
-td{padding:12px 14px;border-bottom:1px solid #0f172a;vertical-align:middle}
-tr:hover td{background:rgba(255,255,255,.02)}
+th{text-align:left;padding:12px 16px;font-size:12px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #344f68}
+td{padding:15px 16px;border-bottom:1px solid #2a3f54;vertical-align:middle}
+tr:hover td{background:rgba(255,255,255,.03)}
 tr:last-child td{border-bottom:none}
 
-.contact-name{font-size:14px;font-weight:600;color:#f1f5f9}
-.contact-phone{font-size:12px;color:#64748b;margin-top:1px}
-.contact-company{font-size:11px;color:#3b82f6;margin-top:1px;font-weight:500}
+.contact-name{font-size:16px;font-weight:600;color:#f1f5f9}
+.contact-phone{font-size:14px;color:#7a9bb5;margin-top:2px}
+.contact-company{font-size:13px;color:#60a5fa;margin-top:2px;font-weight:500}
 
-.vehicle-vin{font-size:13px;font-weight:700;color:#e2e8f0;font-family:monospace;letter-spacing:.5px}
-.vehicle-desc{font-size:12px;color:#94a3b8;margin-top:2px}
-.no-vin{font-size:12px;color:#475569;font-style:italic}
+.vehicle-vin{font-size:15px;font-weight:700;color:#e2e8f0;font-family:monospace;letter-spacing:.5px}
+.vehicle-desc{font-size:14px;color:#a8c0d6;margin-top:3px}
+.no-vin{font-size:14px;color:#5a7a96;font-style:italic}
 
-.msg-preview{font-size:12px;color:#64748b;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msg-preview{font-size:15px;color:#c4d6e8;max-width:360px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;line-height:1.55}
 
-.photo-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#64748b;background:#1e293b;padding:3px 8px;border-radius:4px}
-.photo-badge svg{width:12px;height:12px}
+.photo-badge{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:#7a9bb5;background:#2a3f54;padding:5px 11px;border-radius:6px}
+.photo-badge svg{width:13px;height:13px}
 
 /* Status badges */
-.badge{display:inline-block;padding:4px 10px;border-radius:5px;font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
-.badge-new{background:rgba(59,130,246,.15);color:#60a5fa;border:1px solid rgba(59,130,246,.25)}
-.badge-reviewing{background:rgba(245,158,11,.12);color:#fbbf24;border:1px solid rgba(245,158,11,.2)}
-.badge-bid_sent{background:rgba(34,197,94,.12);color:#4ade80;border:1px solid rgba(34,197,94,.2)}
-.badge-passed{background:rgba(100,116,139,.1);color:#64748b;border:1px solid rgba(100,116,139,.15)}
-.badge-field{display:inline-block;background:rgba(168,85,247,.12);color:#c084fc;border:1px solid rgba(168,85,247,.2);border-radius:4px;padding:2px 7px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;margin-top:2px}
+.badge{display:inline-block;padding:5px 13px;border-radius:6px;font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+.badge-new{background:rgba(59,130,246,.18);color:#60a5fa;border:1px solid rgba(59,130,246,.3)}
+.badge-reviewing{background:rgba(245,158,11,.15);color:#fbbf24;border:1px solid rgba(245,158,11,.25)}
+.badge-bid_sent{background:rgba(34,197,94,.15);color:#34d399;border:1px solid rgba(34,197,94,.25)}
+.badge-passed{background:rgba(127,29,29,.3);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
+.badge-bought{background:rgba(34,197,94,.2);color:#34d399;border:1px solid rgba(34,197,94,.4)}
+.badge-field{display:inline-block;background:rgba(168,85,247,.15);color:#c084fc;border:1px solid rgba(168,85,247,.25);border-radius:5px;padding:3px 9px;font-size:12px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;margin-top:2px}
 
-.time-col{font-size:12px;color:#475569;white-space:nowrap}
+.time-col{font-size:14px;color:#7a9bb5;white-space:nowrap}
 
-.btn-view{padding:5px 14px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#94a3b8;font-size:12px;font-weight:500;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-decoration:none}
-.btn-view:hover{background:#334155;color:#e2e8f0}
+.btn-view{padding:8px 18px;background:#2a3f54;border:1px solid #3d5a74;border-radius:8px;color:#a8c0d6;font-size:14px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-decoration:none}
+.btn-view:hover{background:#344f68;color:#e2e8f0}
 
 /* Empty state */
-.empty{text-align:center;padding:80px 24px;color:#475569}
+.empty{text-align:center;padding:80px 24px;color:#5a7a96}
 .empty-icon{font-size:48px;margin-bottom:16px}
-.empty h3{font-size:18px;font-weight:600;color:#64748b;margin-bottom:8px}
+.empty h3{font-size:18px;font-weight:600;color:#7a9bb5;margin-bottom:8px}
 .empty p{font-size:14px;line-height:1.6}
 
+/* Unread star */
+.unread-star{color:#fbbf24;font-size:18px;margin-right:6px;animation:starPulse 1.5s ease infinite;display:inline-block}
+@keyframes starPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.25)}}
+
+/* Message popup */
+.msg-popup{display:none;position:fixed;top:70px;right:24px;background:#1e3a5f;border:1px solid #3b82f6;border-radius:12px;padding:16px 20px;z-index:300;max-width:400px;box-shadow:0 8px 32px rgba(0,0,0,.5);animation:slideIn .3s ease;cursor:pointer}
+.msg-popup.show{display:block}
+@keyframes slideIn{from{transform:translateX(100px);opacity:0}to{transform:translateX(0);opacity:1}}
+.msg-popup-title{font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:4px}
+.msg-popup-body{font-size:13px;color:#94a3b8;line-height:1.5}
+.msg-popup-close{position:absolute;top:8px;right:12px;background:none;border:none;color:#475569;font-size:16px;cursor:pointer}
+
 @media(max-width:768px){
-  .stats-bar{gap:16px;padding:12px 16px;flex-wrap:wrap}
+  .stats-bar{gap:20px;padding:14px 16px;flex-wrap:wrap}
   .table-wrap{padding:12px}
   .filters{padding:12px 16px}
   th,td{padding:10px 8px}
@@ -94,11 +125,15 @@ tr:last-child td{border-bottom:none}
   <div class="logo">
     <div class="logo-mark">EW</div>
     <div>
-      <div class="logo-text">Experience Wholesale</div>
-      <div class="logo-sub">Bid Management</div>
+      <div class="logo-text">EW Buy Center</div>
+      <div class="logo-sub">Vehicle Acquisition</div>
     </div>
   </div>
   <div class="header-right" style="gap:16px">
+    <div id="online-reps" style="display:none;align-items:center;gap:10px;background:#0d2d1a;border:1px solid rgba(34,197,94,.3);border-radius:8px;padding:6px 14px;font-size:13px;color:#4ade80;font-weight:600">
+      <span style="width:8px;height:8px;background:#22c55e;border-radius:50%;display:inline-block;animation:pulse 2s infinite;flex-shrink:0"></span>
+      <span id="online-reps-text"></span>
+    </div>
     <a href="/contacts" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Contacts</a>
     <div class="live-dot"></div>
     <span class="live-label">LIVE</span>
@@ -124,6 +159,10 @@ tr:last-child td{border-bottom:none}
     <div class="stat-label">Bid Sent</div>
   </div>
   <div class="stat-item">
+    <div class="stat-num green" id="stat-bought">{{ stats.bought }}</div>
+    <div class="stat-label">Bought</div>
+  </div>
+  <div class="stat-item">
     <div class="stat-num gray" id="stat-passed">{{ stats.passed }}</div>
     <div class="stat-label">Passed</div>
   </div>
@@ -135,12 +174,24 @@ tr:last-child td{border-bottom:none}
 </div>
 
 <div class="filters">
-  <a href="/?status=all" class="filter-btn {% if status_filter=='all' %}active{% endif %}">All <span class="filter-count" data-status="total">{{ stats.total }}</span></a>
-  <a href="/?status=new" class="filter-btn {% if status_filter=='new' %}active{% endif %}">New <span class="filter-count" data-status="new">{{ stats.new }}</span></a>
-  <a href="/?status=reviewing" class="filter-btn {% if status_filter=='reviewing' %}active{% endif %}">Reviewing <span class="filter-count" data-status="reviewing">{{ stats.reviewing }}</span></a>
-  <a href="/?status=bid_sent" class="filter-btn {% if status_filter=='bid_sent' %}active{% endif %}">Bid Sent <span class="filter-count" data-status="bid_sent">{{ stats.bid_sent }}</span></a>
-  <a href="/?status=passed" class="filter-btn {% if status_filter=='passed' %}active{% endif %}">Passed <span class="filter-count" data-status="passed">{{ stats.passed }}</span></a>
-  <a href="/?status=field" class="filter-btn {% if status_filter=='field' %}active{% endif %}" style="border-color:rgba(168,85,247,.3);{% if status_filter=='field' %}background:rgba(168,85,247,.1);color:#c084fc;{% endif %}">Field Reps <span class="filter-count" data-status="field" style="{% if status_filter=='field' %}background:rgba(168,85,247,.15);color:#c084fc;{% endif %}">{{ stats.field }}</span></a>
+  <span class="filter-label">Status</span>
+  <a href="/?status=all&rep={{ rep_filter }}" class="filter-btn {% if status_filter=='all' %}active{% endif %}">All <span class="filter-count" data-status="total">{{ stats.total }}</span></a>
+  <a href="/?status=new&rep={{ rep_filter }}" class="filter-btn {% if status_filter=='new' %}active{% endif %}">New <span class="filter-count" data-status="new">{{ stats.new }}</span></a>
+  <a href="/?status=reviewing&rep={{ rep_filter }}" class="filter-btn {% if status_filter=='reviewing' %}active{% endif %}">Reviewing <span class="filter-count" data-status="reviewing">{{ stats.reviewing }}</span></a>
+  <a href="/?status=bid_sent&rep={{ rep_filter }}" class="filter-btn {% if status_filter=='bid_sent' %}active{% endif %}">Bid Sent <span class="filter-count" data-status="bid_sent">{{ stats.bid_sent }}</span></a>
+  <a href="/?status=bought&rep={{ rep_filter }}" class="filter-btn {% if status_filter=='bought' %}active{% endif %}" style="{% if status_filter=='bought' %}background:rgba(34,197,94,.15);border-color:#22c55e;color:#34d399{% else %}border-color:rgba(34,197,94,.3);color:#34d399{% endif %}">Bought <span class="filter-count" data-status="bought" style="{% if status_filter=='bought' %}background:rgba(34,197,94,.15);color:#34d399{% endif %}">{{ stats.bought }}</span></a>
+  <a href="/?status=passed&rep={{ rep_filter }}" class="filter-btn filter-btn-passed {% if status_filter=='passed' %}active{% endif %}">Passed <span class="filter-count" data-status="passed">{{ stats.passed }}</span></a>
+
+  {% if reps %}
+  <div class="filter-divider"></div>
+  <span class="filter-label">Rep</span>
+  <select class="filter-select" id="rep-select" onchange="applyRepFilter(this.value)">
+    <option value="all" {% if rep_filter=='all' %}selected{% endif %}>All Reps</option>
+    {% for rep in reps %}
+    <option value="{{ rep.phone_key }}" {% if rep_filter==rep.phone_key %}selected{% endif %}>{{ rep.name or rep.phone_key }}</option>
+    {% endfor %}
+  </select>
+  {% endif %}
 </div>
 
 <div class="table-wrap">
@@ -148,9 +199,13 @@ tr:last-child td{border-bottom:none}
   <table>
     <thead>
       <tr>
+        <th>#</th>
         <th>Contact / Rep</th>
         <th>Vehicle / VIN</th>
         <th>Message</th>
+        <th>Ask</th>
+        <th>AI Price</th>
+        <th>Bid</th>
         <th>Photos</th>
         <th>Status</th>
         <th>Received</th>
@@ -159,7 +214,8 @@ tr:last-child td{border-bottom:none}
     </thead>
     <tbody>
       {% for bid in bids %}
-      <tr data-id="{{ bid.id }}" data-created="{{ bid.created_at.isoformat() if bid.created_at else '' }}">
+      <tr data-id="{{ bid.id }}" data-created="{{ bid.created_at.isoformat() if bid.created_at else '' }}" data-unread="{{ '1' if bid.has_unread else '0' }}" class="status-{{ bid.status }}">
+        <td><div class="bid-num">{% if bid.has_unread %}<span class="unread-star" title="Unread message">&#9733;</span>{% endif %}#{{ bid.id }}</div></td>
         <td>
           {% if bid.phone.startswith('field:') %}
             <div class="contact-name">{{ bid.contact_name or 'Field Rep' }}</div>
@@ -172,16 +228,31 @@ tr:last-child td{border-bottom:none}
         </td>
         <td>
           {% if bid.vin %}
-            <div class="vehicle-vin">{{ bid.vin }}</div>
-            {% if bid.year or bid.make %}
-              <div class="vehicle-desc">{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }}{% if bid.mileage %} · {{ '{:,}'.format(bid.mileage) }} mi{% endif %}</div>
+            <div class="vehicle-vin">{{ bid.vin }}{% if bid.id in vauto_done %}<span title="vAuto complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% else %}<span title="vAuto pending" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% endif %}</div>
+            {% if bid.year or bid.make or bid.mileage %}
+              <div class="vehicle-desc">{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }}{% if bid.mileage %} {% if bid.year or bid.make %}· {% endif %}{{ '{:,}'.format(bid.mileage) }} mi{% endif %}</div>
             {% endif %}
           {% else %}
             <div class="no-vin">No VIN extracted</div>
           {% endif %}
         </td>
         <td>
-          <div class="msg-preview">{{ bid.raw_message or '—' }}</div>
+          <div class="msg-preview">{{ (bid.raw_message or '')|msg_display or '—' }}</div>
+        </td>
+        <td>
+          {% if bid.asking_price %}
+            <div style="font-size:15px;font-weight:700;color:#94a3b8">${{ '{:,.0f}'.format(bid.asking_price) }}</div>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if bid.ai_price %}
+            <div style="font-size:15px;font-weight:700;color:#a78bfa">${{ '{:,.0f}'.format(bid.ai_price) }}</div>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if bid.bid_amount %}
+            <div style="font-size:15px;font-weight:700;color:#34d399">${{ '{:,.0f}'.format(bid.bid_amount) }}</div>
+          {% else %}—{% endif %}
         </td>
         <td>
           {% set pc = photo_counts.get(bid.id, 0) %}
@@ -208,14 +279,53 @@ tr:last-child td{border-bottom:none}
   {% endif %}
 </div>
 
+<!-- Message popup -->
+<div class="msg-popup" id="msg-popup" onclick="this.classList.remove('show')">
+  <button class="msg-popup-close">&times;</button>
+  <div class="msg-popup-title" id="msg-popup-title"></div>
+  <div class="msg-popup-body" id="msg-popup-body"></div>
+</div>
+
 <script>
+// Chime — AudioContext must be unlocked by user gesture first
+let _chimeCtx = null;
+document.addEventListener('click', function _unlockAudio() {
+  if (!_chimeCtx) _chimeCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_chimeCtx.state === 'suspended') _chimeCtx.resume();
+}, {once: true});
+
+function playChime() {
+  if (!_chimeCtx) _chimeCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_chimeCtx.state === 'suspended') { _chimeCtx.resume(); return; }
+  const osc = _chimeCtx.createOscillator();
+  const gain = _chimeCtx.createGain();
+  osc.connect(gain);
+  gain.connect(_chimeCtx.destination);
+  osc.frequency.setValueAtTime(880, _chimeCtx.currentTime);
+  osc.frequency.setValueAtTime(1100, _chimeCtx.currentTime + 0.1);
+  gain.gain.setValueAtTime(0.3, _chimeCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, _chimeCtx.currentTime + 0.4);
+  osc.start(_chimeCtx.currentTime);
+  osc.stop(_chimeCtx.currentTime + 0.4);
+}
+
 let highestId = Math.max(0, ...Array.from(document.querySelectorAll('tr[data-id]')).map(r => parseInt(r.dataset.id)));
-let currentFilter = new URLSearchParams(window.location.search).get('status') || 'all';
+const _qs = new URLSearchParams(window.location.search);
+let currentFilter = _qs.get('status') || 'all';
+let currentRep = _qs.get('rep') || 'all';
 let newCount = 0;
+
+function applyRepFilter(rep) {
+  const url = new URL(window.location.href);
+  url.searchParams.set('rep', rep);
+  window.location.href = url.toString();
+}
 
 function timeAgo(iso) {
   if (!iso) return '';
-  const diff = (Date.now() - new Date(iso.endsWith('Z') ? iso : iso + 'Z')) / 1000;
+  // Server timestamps are America/New_York (no TZ info in DB)
+  const d = new Date(iso.endsWith('Z') ? iso : iso.replace('T', ' ') + ' EDT');
+  const diff = (Date.now() - d) / 1000;
   if (diff < 60) return 'just now';
   if (diff < 3600) return Math.floor(diff/60) + 'm ago';
   if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
@@ -223,20 +333,42 @@ function timeAgo(iso) {
 }
 
 function statusBadge(s) {
-  const map = {new:'badge-new',reviewing:'badge-reviewing',bid_sent:'badge-bid_sent',passed:'badge-passed'};
+  const map = {new:'badge-new',reviewing:'badge-reviewing',bid_sent:'badge-bid_sent',passed:'badge-passed',bought:'badge-bought'};
   return `<span class="badge ${map[s]||''}">${s.replace('_',' ')}</span>`;
 }
 
+function stripFieldMeta(msg) {
+  if (!msg) return '—';
+  const skip = ['Rep:', 'VIN:', 'Mileage:', 'Asking:'];
+  const kept = msg.split(' | ').filter(p => !skip.some(s => p.startsWith(s)));
+  return kept.join(' | ').trim() || '—';
+}
+
+let _vautoDone = new Set();
 function renderRow(b, pc) {
-  const vehicle = b.vin ? `<div class="vehicle-vin">${b.vin}</div>${b.year||b.make ? `<div class="vehicle-desc">${b.year||''} ${b.make||''} ${b.model||''}${b.mileage ? ' · '+b.mileage.toLocaleString()+' mi':''}</div>` : ''}` : '<div class="no-vin">No VIN extracted</div>';
+  const vehicleDesc = (b.year||b.make||b.mileage) ? `<div class="vehicle-desc">${b.year||''} ${b.make||''} ${b.model||''}${b.mileage ? (b.year||b.make?' · ':'')+b.mileage.toLocaleString()+' mi':''}</div>` : '';
+  const vaBadge = b.vin ? (_vautoDone.has(b.id)
+    ? '<span title="vAuto complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>'
+    : '<span title="vAuto pending" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px;animation:pulse 2s infinite">vA</span>'
+  ) : '';
+  const vehicle = b.vin ? `<div class="vehicle-vin">${b.vin}${vaBadge}</div>${vehicleDesc}` : '<div class="no-vin">No VIN extracted</div>';
   const photos = (pc||0) > 0 ? `<span class="photo-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>${pc}</span>` : '—';
   const contactCell = b.is_field
     ? `<div class="contact-name">${b.contact_name||'Field Rep'}</div><div><span class="badge-field">Field Rep</span></div>`
     : `<div class="contact-name">${b.contact_name||b.phone}</div>${b.contact_name?`<div class="contact-phone">${b.phone}</div>`:''}${b.contact_company?`<div class="contact-company">${b.contact_company}</div>`:''}`;
-  return `<tr data-id="${b.id}" ${b.is_new ? 'class="row-new"' : ''}>
+  const rowClass = ['status-'+b.status, b.is_new ? 'row-new' : ''].filter(Boolean).join(' ');
+  const askPrice = b.asking_price ? `<div style="font-size:15px;font-weight:700;color:#94a3b8">$${Math.round(b.asking_price).toLocaleString()}</div>` : '—';
+  const aiPrice  = b.ai_price    ? `<div style="font-size:15px;font-weight:700;color:#a78bfa">$${Math.round(b.ai_price).toLocaleString()}</div>` : '—';
+  const bidSent  = b.bid_amount  ? `<div style="font-size:15px;font-weight:700;color:#34d399">$${Math.round(b.bid_amount).toLocaleString()}</div>` : '—';
+  const star = b.has_unread ? '<span class="unread-star" title="Unread message">&#9733;</span>' : '';
+  return `<tr data-id="${b.id}" class="${rowClass}" data-unread="${b.has_unread?1:0}">
+    <td><div class="bid-num">${star}#${b.id}</div></td>
     <td>${contactCell}</td>
     <td>${vehicle}</td>
-    <td><div class="msg-preview">${b.raw_message||'—'}</div></td>
+    <td><div class="msg-preview">${stripFieldMeta(b.raw_message)}</div></td>
+    <td>${askPrice}</td>
+    <td>${aiPrice}</td>
+    <td>${bidSent}</td>
     <td>${photos}</td>
     <td>${statusBadge(b.status)}</td>
     <td class="time-col">${timeAgo(b.created_at)}</td>
@@ -249,17 +381,23 @@ function updateStats(s) {
   document.getElementById('stat-new').textContent = s.new||0;
   document.getElementById('stat-reviewing').textContent = s.reviewing||0;
   document.getElementById('stat-bid_sent').textContent = s.bid_sent||0;
+  document.getElementById('stat-bought').textContent = s.bought||0;
   document.getElementById('stat-passed').textContent = s.passed||0;
   document.getElementById('stat-total').textContent = s.total||0;
-  ['new','reviewing','bid_sent','passed','total','field'].forEach(k => {
+  ['new','reviewing','bid_sent','bought','passed','total','field'].forEach(k => {
     const el = document.querySelector(`.filter-count[data-status="${k}"]`);
     if (el) el.textContent = s[k]||0;
   });
 }
 
+// Track which bids had unread on last poll to detect new messages
+let _prevUnread = new Set(
+  Array.from(document.querySelectorAll('tr[data-unread="1"]')).map(r => r.dataset.id)
+);
+
 async function poll() {
   try {
-    const r = await fetch(`/api/bids?since_id=${highestId}&status=${currentFilter}`);
+    const r = await fetch(`/api/bids?since_id=${highestId}&status=${currentFilter}&rep=${currentRep}`);
     const d = await r.json();
 
     updateStats(d.stats);
@@ -275,7 +413,25 @@ async function poll() {
       newCount += fresh.length;
       highestId = Math.max(highestId, ...fresh.map(b => b.id));
       showNewBidAlert(fresh.length);
+      playChime();
     }
+
+    // Detect newly unread bids (rep sent a message since last poll)
+    const nowUnread = new Set(d.bids.filter(b => b.has_unread).map(b => String(b.id)));
+    for (const bidId of nowUnread) {
+      if (!_prevUnread.has(bidId)) {
+        // This bid just got a new message from a rep
+        const bid = d.bids.find(b => String(b.id) === bidId);
+        if (bid) {
+          playChime();
+          showMsgPopup(bid);
+        }
+      }
+    }
+    _prevUnread = nowUnread;
+
+    // Update vAuto status set
+    if (d.vauto_done) _vautoDone = new Set(d.vauto_done);
 
     // Re-render table
     if (d.bids.length > 0) {
@@ -292,6 +448,16 @@ async function poll() {
   } catch(e) { console.warn('poll error', e); }
 }
 
+function showMsgPopup(bid) {
+  const vehicle = [bid.year, bid.make, bid.model].filter(Boolean).join(' ') || 'Vehicle';
+  document.getElementById('msg-popup-title').textContent = `New message on Bid #${bid.id}`;
+  document.getElementById('msg-popup-body').textContent = `${vehicle} — tap to view`;
+  const popup = document.getElementById('msg-popup');
+  popup.onclick = () => { popup.classList.remove('show'); window.location.href = `/bid/${bid.id}`; };
+  popup.classList.add('show');
+  setTimeout(() => popup.classList.remove('show'), 8000);
+}
+
 function showNewBidAlert(count) {
   let alert = document.getElementById('new-bid-alert');
   if (!alert) {
@@ -306,8 +472,38 @@ function showNewBidAlert(count) {
   alert._timer = setTimeout(() => { alert.remove(); newCount = 0; }, 8000);
 }
 
-// Poll every 5 seconds
-setInterval(poll, 5000);
+// Poll every 3 seconds
+setInterval(poll, 3000);
+
+// Poll active reps every 10 seconds
+async function pollActiveReps() {
+  try {
+    const r = await fetch('/api/active-reps');
+    const d = await r.json();
+    const el = document.getElementById('online-reps');
+    const txt = document.getElementById('online-reps-text');
+    const viewers = d.viewers || [];
+    const reps = d.reps || [];
+    const total = viewers.length + reps.length;
+    if (total > 0) {
+      let parts = [];
+      if (viewers.length) {
+        const ips = viewers.map(v => `<span style="color:#94a3b8;font-weight:500">${v.ip}</span>`).join(', ');
+        parts.push(`Dashboard: ${ips}`);
+      }
+      if (reps.length) {
+        const names = reps.map(r => `<span style="color:#34d399;font-weight:700">${r.name}</span> <span style="color:#64748b;font-weight:400;font-size:11px">${r.ip||''}</span>`).join(' &nbsp;·&nbsp; ');
+        parts.push(`Reps: ${names}`);
+      }
+      txt.innerHTML = parts.join(' <span style="color:#1e293b;margin:0 6px">|</span> ');
+      el.style.display = 'flex';
+    } else {
+      el.style.display = 'none';
+    }
+  } catch(e) {}
+}
+pollActiveReps();
+setInterval(pollActiveReps, 10000);
 // Update timestamps every minute
 setInterval(() => {
   document.querySelectorAll('.time-col').forEach(el => {

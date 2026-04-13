@@ -6,10 +6,13 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#0b0f19">
-<title>EW — Submit Bid</title>
+<link rel="manifest" href="/static/manifest.json">
+<link rel="apple-touch-icon" href="/static/icons/icon-180.png">
+<link rel="icon" type="image/svg+xml" href="/static/icons/icon.svg">
+<title>EW — Field App</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-body{font-family:-apple-system,'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh;padding-bottom:40px}
+body{font-family:-apple-system,'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh;padding-bottom:72px}
 
 /* ── Header ── */
 .header{background:#111827;border-bottom:1px solid #1e293b;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
@@ -122,6 +125,130 @@ input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;font-size:0}
 .summary-label{color:#64748b}
 .summary-value{color:#f1f5f9;font-weight:600}
 .btn-another{width:100%;padding:15px;background:#1e293b;border:1px solid #334155;border-radius:12px;color:#e2e8f0;font-size:16px;font-weight:600;font-family:-apple-system,'Inter',sans-serif;cursor:pointer;margin-top:8px}
+.btn-view-bids{width:100%;padding:15px;background:rgba(59,130,246,.15);border:1px solid rgba(59,130,246,.3);border-radius:12px;color:#60a5fa;font-size:16px;font-weight:600;font-family:-apple-system,'Inter',sans-serif;cursor:pointer;margin-top:8px}
+
+/* ── Bottom nav ── */
+.bottom-nav{position:fixed;bottom:0;left:0;right:0;background:#111827;border-top:1px solid #1e293b;display:flex;z-index:150;padding-bottom:env(safe-area-inset-bottom,0px)}
+.nav-tab{flex:1;padding:10px 8px 8px;background:none;border:none;color:#475569;font-size:12px;font-weight:600;font-family:-apple-system,'Inter',sans-serif;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px;transition:color .15s;-webkit-tap-highlight-color:transparent}
+.nav-tab.active{color:#3b82f6}
+.nav-tab-icon{font-size:22px}
+
+/* ── My Bids tab ── */
+.mybids-header{display:flex;align-items:center;justify-content:space-between;padding:20px 16px 4px;max-width:520px;margin:0 auto}
+.mybids-title{font-size:16px;font-weight:700;color:#f1f5f9}
+.mybids-refresh{font-size:13px;color:#3b82f6;cursor:pointer;padding:6px;-webkit-tap-highlight-color:transparent}
+.bids-list{padding:8px 16px 16px;max-width:520px;margin:0 auto}
+.bid-card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:14px;display:flex;gap:12px;margin-bottom:10px;-webkit-tap-highlight-color:transparent}
+.bid-card:active{border-color:#334155}
+.bid-thumb{width:72px;height:54px;border-radius:8px;object-fit:cover;flex-shrink:0}
+.bid-thumb-empty{width:72px;height:54px;border-radius:8px;background:#1e293b;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:20px;color:#334155}
+.bid-meta{flex:1;min-width:0}
+.bid-num{font-size:11px;color:#475569;font-weight:700;margin-bottom:2px}
+.bid-vehicle{font-size:15px;font-weight:700;color:#f1f5f9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bid-vin{font-size:11px;color:#64748b;font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:5px}
+.bid-bottom{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.status-chip{font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
+.chip-new{background:rgba(59,130,246,.15);color:#60a5fa}
+.chip-reviewing{background:rgba(245,158,11,.15);color:#fbbf24}
+.chip-bid_sent{background:rgba(34,197,94,.15);color:#4ade80}
+.chip-passed{background:rgba(239,68,68,.12);color:#f87171}
+.chip-bought{background:rgba(52,211,153,.15);color:#34d399}
+.bid-amount{font-size:11px;color:#4ade80;font-weight:700}
+.bid-time{font-size:11px;color:#475569;margin-left:auto}
+.mybids-empty{text-align:center;padding:60px 20px;color:#475569}
+.mybids-empty-icon{font-size:48px;margin-bottom:16px}
+.mybids-empty p{font-size:14px;line-height:1.6}
+.mybids-loading{text-align:center;padding:40px 20px;color:#475569;font-size:14px}
+
+/* ── Edit Bid screen ── */
+.edit-screen{display:none;position:fixed;inset:0;background:#0b0f19;z-index:400;flex-direction:column;overflow:hidden}
+.edit-screen.show{display:flex}
+.edit-header{background:#111827;border-bottom:1px solid #1e293b;padding:14px 16px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.edit-back{width:36px;height:36px;border-radius:50%;background:#1e293b;border:none;color:#e2e8f0;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent;flex-shrink:0}
+.edit-title{font-size:16px;font-weight:700;color:#f1f5f9;flex:1}
+.edit-body{flex:1;overflow-y:auto;padding:16px;-webkit-overflow-scrolling:touch}
+.edit-vehicle-summary{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:#94a3b8;line-height:1.7}
+.edit-vehicle-summary strong{color:#f1f5f9;font-size:15px;display:block;margin-bottom:2px}
+.edit-section-title{font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px;margin-top:20px}
+.edit-save-btn{width:100%;padding:16px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border:none;border-radius:12px;color:#fff;font-size:17px;font-weight:700;font-family:-apple-system,'Inter',sans-serif;cursor:pointer;margin-top:8px}
+.edit-save-btn:disabled{opacity:.35;cursor:not-allowed}
+.edit-photo-previews{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+.edit-add-btn{width:100%;padding:13px;display:flex;align-items:center;justify-content:center;gap:8px;color:#64748b;font-size:14px;font-weight:500;cursor:pointer;position:relative;background:#111827;border:2px dashed #1e293b;border-radius:10px}
+.edit-add-btn input{position:absolute;inset:0;opacity:0;cursor:pointer;font-size:0}
+.edit-toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#22c55e;color:#fff;font-size:14px;font-weight:600;padding:10px 20px;border-radius:20px;z-index:500;opacity:0;transition:opacity .3s;white-space:nowrap}
+.edit-toast.show{opacity:1}
+
+/* ── Bid detail tabs (messages / edit) ── */
+.detail-tabs{display:flex;gap:0;background:#111827;border-bottom:1px solid #1e293b;flex-shrink:0}
+.detail-tab{flex:1;padding:10px;background:none;border:none;color:#475569;font-size:13px;font-weight:700;font-family:-apple-system,'Inter',sans-serif;cursor:pointer;text-align:center;border-bottom:2px solid transparent;transition:all .15s}
+.detail-tab.active{color:#3b82f6;border-bottom-color:#3b82f6}
+
+/* ── Message thread in mobile ── */
+.msg-thread{display:flex;flex-direction:column;gap:10px;padding:4px 0;min-height:80px}
+.msg-bubble{padding:10px 14px;border-radius:12px;font-size:14px;line-height:1.5;max-width:85%}
+.msg-bubble.inbound{background:#1e293b;color:#e2e8f0;border-bottom-left-radius:3px;align-self:flex-start}
+.msg-bubble.outbound{background:#1e3a5f;color:#93c5fd;border-bottom-right-radius:3px;align-self:flex-end}
+.msg-bubble-meta{font-size:11px;color:#475569;margin-top:3px}
+.msg-bubble.outbound .msg-bubble-meta{text-align:right}
+.msg-empty{text-align:center;color:#334155;font-size:13px;font-style:italic;padding:20px 0}
+.bid-response-card{background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:10px;padding:12px 14px;margin-bottom:12px}
+.bid-response-amount{font-size:20px;font-weight:800;color:#4ade80}
+.bid-response-label{font-size:11px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px}
+
+/* ── Reply input bar ── */
+.reply-bar{display:flex;gap:8px;padding:12px 16px;background:#111827;border-top:1px solid #1e293b;flex-shrink:0}
+.reply-input{flex:1;background:#0f172a;border:1.5px solid #1e293b;border-radius:10px;padding:10px 14px;color:#e2e8f0;font-size:14px;font-family:-apple-system,'Inter',sans-serif;outline:none;resize:none;min-height:40px;max-height:100px}
+.reply-input:focus{border-color:#3b82f6}
+.reply-send{width:40px;height:40px;background:#3b82f6;border:none;border-radius:10px;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.reply-send:active{background:#1d4ed8}
+.reply-send:disabled{opacity:.35}
+
+/* ── PWA Install Banner ── */
+.install-banner{display:none;position:fixed;bottom:64px;left:12px;right:12px;background:linear-gradient(135deg,#1e3a5f,#1e293b);border:1px solid #3b82f6;border-radius:14px;padding:16px;z-index:160;box-shadow:0 8px 32px rgba(0,0,0,.5);animation:slideUp .3s ease}
+.install-banner.show{display:flex;align-items:center;gap:14px}
+@keyframes slideUp{from{transform:translateY(100px);opacity:0}to{transform:translateY(0);opacity:1}}
+.install-icon{width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;color:#fff;flex-shrink:0}
+.install-text{flex:1}
+.install-text h4{font-size:15px;font-weight:700;color:#f1f5f9;margin-bottom:2px}
+.install-text p{font-size:12px;color:#94a3b8;line-height:1.4}
+.install-btn{padding:10px 18px;background:#3b82f6;border:none;border-radius:10px;color:#fff;font-size:14px;font-weight:700;cursor:pointer;white-space:nowrap;font-family:-apple-system,'Inter',sans-serif}
+.install-dismiss{position:absolute;top:8px;right:12px;background:none;border:none;color:#475569;font-size:18px;cursor:pointer;padding:4px}
+
+/* ── Offline indicator ── */
+.offline-bar{display:none;position:fixed;top:0;left:0;right:0;background:#dc2626;color:#fff;font-size:13px;font-weight:600;text-align:center;padding:6px;z-index:600}
+.offline-bar.show{display:block}
+.offline-bar.syncing{background:#f59e0b;color:#0b0f19}
+
+/* ── Pending queue badge ── */
+.queue-badge{display:none;position:absolute;top:-4px;right:-4px;width:18px;height:18px;background:#f59e0b;border-radius:50%;font-size:10px;font-weight:800;color:#0b0f19;text-align:center;line-height:18px}
+.queue-badge.show{display:block}
+
+/* ── Header install button ── */
+.install-header-btn{display:none;padding:6px 12px;background:rgba(59,130,246,.15);border:1px solid rgba(59,130,246,.35);border-radius:8px;color:#60a5fa;font-size:12px;font-weight:700;cursor:pointer;font-family:-apple-system,'Inter',sans-serif;white-space:nowrap}
+.install-header-btn:active{background:rgba(59,130,246,.3)}
+
+/* ── Notification opt-in banner ── */
+.notif-banner{display:none;margin:0 16px 16px;background:linear-gradient(135deg,#1e3a5f,#1e293b);border:1px solid #3b82f6;border-radius:12px;padding:14px 16px;animation:slideUp .3s ease}
+.notif-banner.show{display:flex;align-items:center;gap:12px}
+.notif-banner-icon{font-size:28px;flex-shrink:0}
+.notif-banner-text{flex:1}
+.notif-banner-text h4{font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px}
+.notif-banner-text p{font-size:12px;color:#94a3b8;line-height:1.4}
+.notif-enable-btn{padding:9px 16px;background:#22c55e;border:none;border-radius:10px;color:#fff;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;font-family:-apple-system,'Inter',sans-serif}
+.notif-enable-btn:active{opacity:.8}
+.notif-dismiss{background:none;border:none;color:#475569;font-size:16px;cursor:pointer;padding:4px;flex-shrink:0}
+
+/* ── iOS install instructions modal ── */
+.ios-install{display:none;position:fixed;inset:0;background:rgba(11,15,25,.95);z-index:600;flex-direction:column;align-items:center;justify-content:center;padding:32px;text-align:center}
+.ios-install.show{display:flex}
+.ios-install-card{background:#111827;border:1px solid #1e293b;border-radius:16px;padding:28px 24px;max-width:340px;width:100%}
+.ios-install-card h3{font-size:18px;font-weight:800;color:#f1f5f9;margin-bottom:16px}
+.ios-step{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #0f172a;text-align:left}
+.ios-step:last-of-type{border-bottom:none}
+.ios-step-num{width:28px;height:28px;background:#1e293b;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;color:#60a5fa;flex-shrink:0}
+.ios-step-text{font-size:14px;color:#e2e8f0;line-height:1.4}
+.ios-step-text .icon-hint{font-size:18px;vertical-align:middle}
+.ios-close-btn{width:100%;padding:14px;background:#1e293b;border:1px solid #334155;border-radius:12px;color:#e2e8f0;font-size:16px;font-weight:600;font-family:-apple-system,'Inter',sans-serif;cursor:pointer;margin-top:20px}
 </style>
 </head>
 <body>
@@ -145,15 +272,77 @@ input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;font-size:0}
       <div class="logo-sub">Field Submission</div>
     </div>
   </div>
-  <div class="rep-chip" onclick="showSetup()" id="rep-chip">
-    <div class="rep-avatar" id="rep-avatar">?</div>
-    <span class="rep-name-label" id="rep-name-label">Set name</span>
-    <span class="rep-edit">✎</span>
+  <div style="display:flex;align-items:center;gap:8px">
+    <button class="install-header-btn" id="install-header-btn" onclick="handleInstallClick()">Install App</button>
+    <button id="notif-header-btn" onclick="enableNotifications()" style="display:none;width:32px;height:32px;background:rgba(251,191,36,.15);border:1px solid rgba(251,191,36,.35);border-radius:8px;color:#fbbf24;font-size:16px;cursor:pointer;position:relative">🔔</button>
+    <div class="rep-chip" onclick="showSetup()" id="rep-chip">
+      <div class="rep-avatar" id="rep-avatar">?</div>
+      <span class="rep-name-label" id="rep-name-label">Set name</span>
+      <span class="rep-edit">✎</span>
+    </div>
+  </div>
+</div>
+
+<!-- iOS Install Instructions -->
+<div class="ios-install" id="ios-install">
+  <div class="ios-install-card">
+    <h3>Install EW Field App</h3>
+    <div class="ios-step">
+      <div class="ios-step-num">1</div>
+      <div class="ios-step-text">Tap the <span class="icon-hint">&#x1F4E4;</span> Share button in Safari's toolbar</div>
+    </div>
+    <div class="ios-step">
+      <div class="ios-step-num">2</div>
+      <div class="ios-step-text">Scroll down and tap <strong>"Add to Home Screen"</strong></div>
+    </div>
+    <div class="ios-step">
+      <div class="ios-step-num">3</div>
+      <div class="ios-step-text">Tap <strong>"Add"</strong> — the EW icon will appear on your home screen</div>
+    </div>
+    <button class="ios-close-btn" onclick="document.getElementById('ios-install').classList.remove('show')">Got it</button>
+  </div>
+</div>
+
+<!-- Chrome-on-iOS: must use Safari -->
+<div class="ios-install" id="ios-chrome-modal">
+  <div class="ios-install-card">
+    <h3>Open in Safari to Install</h3>
+    <p style="font-size:14px;color:#94a3b8;line-height:1.6;margin-bottom:16px">iPhone only allows app installs from <strong style="color:#f1f5f9">Safari</strong>. Chrome can't do it — that's an Apple restriction.</p>
+    <div class="ios-step">
+      <div class="ios-step-num">1</div>
+      <div class="ios-step-text">Copy the link below</div>
+    </div>
+    <div class="ios-step">
+      <div class="ios-step-num">2</div>
+      <div class="ios-step-text">Open <strong>Safari</strong> and paste it</div>
+    </div>
+    <div class="ios-step">
+      <div class="ios-step-num">3</div>
+      <div class="ios-step-text">Tap <span class="icon-hint">&#x1F4E4;</span> Share, then <strong>"Add to Home Screen"</strong></div>
+    </div>
+    <button id="copy-link-btn" onclick="copyLinkToClipboard()" style="width:100%;padding:14px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border:none;border-radius:12px;color:#fff;font-size:16px;font-weight:700;font-family:-apple-system,'Inter',sans-serif;cursor:pointer;margin-top:16px">Copy Link</button>
+    <button class="ios-close-btn" onclick="document.getElementById('ios-chrome-modal').classList.remove('show')">Close</button>
   </div>
 </div>
 
 <!-- ── Main Form ── -->
-<div class="page">
+<div class="page" id="tab-submit">
+
+  <!-- Notification opt-in -->
+  <div class="notif-banner" id="notif-banner">
+    <div class="notif-banner-icon">🔔</div>
+    <div class="notif-banner-text">
+      <h4>Get bid alerts</h4>
+      <p>Get notified when a bid comes back on your submissions</p>
+    </div>
+    <button class="notif-enable-btn" onclick="enableNotifications()">Enable</button>
+    <button class="notif-dismiss" onclick="dismissNotifBanner()">&times;</button>
+  </div>
+
+  <!-- Clear form button -->
+  <div style="display:flex;justify-content:flex-end;margin-bottom:4px">
+    <button onclick="resetForm()" style="padding:6px 14px;background:transparent;border:1px solid #334155;border-radius:8px;color:#64748b;font-size:12px;font-weight:600;font-family:-apple-system,'Inter',sans-serif;cursor:pointer">Clear Form</button>
+  </div>
 
   <!-- Vehicle Photos -->
   <div class="section">
@@ -254,22 +443,124 @@ input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;font-size:0}
     <div class="check-row" id="chk-car">
       <div class="check-dot" id="dot-car">1</div>
       <span id="chk-label-car">Vehicle photos (at least 1)</span>
-      <span class="req-badge" id="badge-car">Required</span>
+      <span class="req-badge" id="badge-car" style="color:#64748b;background:rgba(100,116,139,.1);border-color:rgba(100,116,139,.2)">Optional</span>
     </div>
     <div class="check-row" id="chk-vin">
       <div class="check-dot" id="dot-vin">2</div>
-      <span id="chk-label-vin">VIN sticker photo</span>
-      <span class="req-badge" id="badge-vin">Required</span>
+      <span id="chk-label-vin">VIN sticker (optional)</span>
+      <span class="req-badge" id="badge-vin" style="color:#64748b;background:rgba(100,116,139,.1);border-color:rgba(100,116,139,.2)">Optional</span>
     </div>
     <div class="check-row" id="chk-odo">
       <div class="check-dot" id="dot-odo">3</div>
-      <span id="chk-label-odo">Odometer photo</span>
-      <span class="req-badge" id="badge-odo">Required</span>
+      <span id="chk-label-odo">Odometer (optional)</span>
+      <span class="req-badge" id="badge-odo" style="color:#64748b;background:rgba(100,116,139,.1);border-color:rgba(100,116,139,.2)">Optional</span>
     </div>
   </div>
 
   <button class="submit-btn" id="submit-btn" onclick="submitBid()">Submit Bid Request</button>
 
+</div>
+
+<!-- ── My Bids Tab ── -->
+<div id="tab-mybids" style="display:none">
+  <div class="mybids-header">
+    <div class="mybids-title">My Submissions</div>
+    <span class="mybids-refresh" onclick="fetchMyBids()">↻ Refresh</span>
+  </div>
+  <div class="bids-list" id="bids-list">
+    <div class="mybids-loading">Loading...</div>
+  </div>
+</div>
+
+<!-- ── Bid Detail Screen (Messages + Edit) ── -->
+<div class="edit-screen" id="edit-screen">
+  <div class="edit-header">
+    <button class="edit-back" onclick="closeEditScreen()">←</button>
+    <div class="edit-title" id="edit-screen-title">Bid #</div>
+  </div>
+  <div class="detail-tabs">
+    <button class="detail-tab active" id="dtab-messages" onclick="showDetailTab('messages')">Messages</button>
+    <button class="detail-tab" id="dtab-edit" onclick="showDetailTab('edit')">Edit</button>
+  </div>
+
+  <!-- Messages Tab -->
+  <div id="detail-messages" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+    <div style="flex:1;overflow-y:auto;padding:16px;-webkit-overflow-scrolling:touch">
+      <div class="edit-vehicle-summary" id="msg-summary"></div>
+      <div id="bid-response-area"></div>
+      <div class="msg-thread" id="msg-thread">
+        <div class="msg-empty">Loading messages...</div>
+      </div>
+    </div>
+    <div class="reply-bar">
+      <textarea class="reply-input" id="rep-reply-input" placeholder="Type a message..." rows="1"></textarea>
+      <button class="reply-send" id="rep-reply-send" onclick="sendRepMessage()">&#x27A4;</button>
+    </div>
+  </div>
+
+  <!-- Edit Tab -->
+  <div id="detail-edit" style="flex:1;overflow-y:auto;padding:16px;-webkit-overflow-scrolling:touch;display:none">
+    <div class="edit-vehicle-summary" id="edit-summary"></div>
+
+    <div class="edit-section-title">Add More Photos</div>
+    <div>
+      <div class="edit-photo-previews" id="edit-previews"></div>
+      <label class="edit-add-btn">
+        📷 Add Photos
+        <input type="file" accept="image/*" multiple onchange="addEditPhotos(this)">
+      </label>
+    </div>
+
+    <div class="edit-section-title">Update VIN</div>
+    <div class="field">
+      <input type="text" id="edit-vin" placeholder="Leave blank to keep current" maxlength="17"
+             style="text-transform:uppercase;font-family:monospace;letter-spacing:1px">
+    </div>
+
+    <div class="edit-section-title">Update Mileage</div>
+    <div class="field">
+      <input type="number" id="edit-mileage" placeholder="Leave blank to keep current" inputmode="numeric">
+    </div>
+
+    <div class="edit-section-title">Asking Price</div>
+    <div class="field dollar-wrap">
+      <span>$</span>
+      <input type="number" id="edit-asking" placeholder="Leave blank to keep current" inputmode="decimal">
+    </div>
+
+    <div class="edit-section-title">Notes</div>
+    <div class="field">
+      <textarea id="edit-notes" placeholder="Additional notes..." rows="3"></textarea>
+    </div>
+
+    <button class="edit-save-btn" id="edit-save-btn" onclick="submitEdit()">Save & Update</button>
+    <div style="height:16px"></div>
+  </div>
+</div>
+<div class="edit-toast" id="edit-toast"></div>
+
+<!-- Offline indicator -->
+<div class="offline-bar" id="offline-bar">You're offline — submissions will be saved and sent when you reconnect</div>
+
+<!-- PWA Install Banner -->
+<div class="install-banner" id="install-banner">
+  <div class="install-icon">EW</div>
+  <div class="install-text">
+    <h4>Install EW Field App</h4>
+    <p>Add to your home screen for quick access</p>
+  </div>
+  <button class="install-btn" id="install-btn" onclick="installPWA()">Install</button>
+  <button class="install-dismiss" onclick="dismissInstall()">&times;</button>
+</div>
+
+<!-- Bottom Nav -->
+<div class="bottom-nav">
+  <button class="nav-tab active" id="nav-submit" onclick="showTab('submit')">
+    <span class="nav-tab-icon">📝</span>Submit
+  </button>
+  <button class="nav-tab" id="nav-mybids" onclick="showTab('mybids')">
+    <span class="nav-tab-icon">📋</span>My Bids
+  </button>
 </div>
 
 <!-- Processing Overlay -->
@@ -286,6 +577,7 @@ input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;font-size:0}
   <p>Your submission is now live in the dashboard.</p>
   <div class="bid-id" id="success-bid-id"></div>
   <div class="extracted-summary" id="success-summary"></div>
+  <button class="btn-view-bids" onclick="showTab('mybids')">View My Bids</button>
   <button class="btn-another" onclick="resetForm()">Submit Another</button>
 </div>
 
@@ -354,6 +646,12 @@ function saveRep() {
   localStorage.setItem('ew_rep_name', name);
   renderRepChip(name);
   hideSetup();
+  // Register rep in the system immediately
+  fetch('/api/register-rep', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rep_name: name })
+  }).catch(() => {});
 }
 
 // Allow Enter key on setup input
@@ -372,6 +670,12 @@ if ({{ 'true' if force_setup else 'false' }}) {
 const savedName = localStorage.getItem('ew_rep_name');
 if (savedName) {
   renderRepChip(savedName);
+  // Re-register on every open to ensure they're in the system
+  fetch('/api/register-rep', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rep_name: savedName })
+  }).catch(() => {});
 } else {
   showSetup();
 }
@@ -394,11 +698,11 @@ function onVinManualInput(el) {
 function updateChecklist() {
   const rejectedCount = photoVerified.filter(v => v !== null && v !== true).length;
   const pendingCount = photoVerified.filter(v => v === null).length;
-  const carDone = carFiles.length > 0 && rejectedCount === 0 && pendingCount === 0;
+  const carDone = carFiles.length === 0 || (rejectedCount === 0 && pendingCount === 0);
   const manualVin = document.getElementById('vin-manual').value.trim();
-  const vinDone = vinFile !== null || manualVin.length >= 5;
+  const vinDone = vinFile !== null || manualVin.length >= 5 || manualVin.length === 0;
   const manualOdo = parseInt(document.getElementById('odo-manual').value);
-  const odoDone = odoFile !== null || (!isNaN(manualOdo) && manualOdo > 0);
+  const odoDone = odoFile !== null || (!isNaN(manualOdo) && manualOdo > 0) || document.getElementById('odo-manual').value === '';
 
   function set(id, done, num, label) {
     document.getElementById('chk-' + id).classList.toggle('done', done);
@@ -415,17 +719,17 @@ function updateChecklist() {
       ? `Checking ${pendingCount} photo${pendingCount>1?'s':''}...`
       : carFiles.length > 0
         ? `Vehicle photos (${carFiles.length})`
-        : 'Vehicle photos (at least 1)';
-  set('car', carDone && rejectedCount === 0 && pendingCount === 0, '1', carLabel);
+        : 'Vehicle photos (optional)';
+  set('car', carDone, '1', carLabel);
 
   const vinLabel = extractedVin
     ? `VIN: ${extractedVin}`
-    : (manualVin.length >= 5 ? `VIN: ${manualVin}` : (vinFile ? 'VIN photo — could not read, submit anyway?' : 'VIN sticker photo'));
+    : (manualVin.length >= 5 ? `VIN: ${manualVin}` : (vinFile ? 'VIN photo — could not read, submit anyway?' : 'VIN sticker (optional)'));
   set('vin', vinDone, '2', vinLabel);
 
   const odoLabel = extractedMileage
     ? `Mileage: ${parseInt(extractedMileage).toLocaleString()} mi`
-    : (!isNaN(manualOdo) && manualOdo > 0 ? `Mileage: ${manualOdo.toLocaleString()} mi` : (odoFile ? 'Odometer photo — could not read, submit anyway?' : 'Odometer photo'));
+    : (!isNaN(manualOdo) && manualOdo > 0 ? `Mileage: ${manualOdo.toLocaleString()} mi` : (odoFile ? 'Odometer photo — could not read, submit anyway?' : 'Odometer (optional)'));
   set('odo', odoDone, '3', odoLabel);
 
   // Warn rows where photo taken but extraction failed
@@ -596,7 +900,6 @@ function setOverlayStep(text) {
 }
 
 async function submitBid() {
-  if (!carFiles.length || !vinFile || !odoFile) return;
 
   const repName = localStorage.getItem('ew_rep_name') || '';
   const notes = document.getElementById('notes').value.trim();
@@ -618,8 +921,8 @@ async function submitBid() {
   setOverlayStep('Uploading vehicle photos...');
   carFiles.forEach((f, i) => fd.append(`car_photo_${i}`, f));
   setOverlayStep('Uploading photos...');
-  fd.append('vin_photo', vinFile);
-  fd.append('odo_photo', odoFile);
+  if (vinFile) fd.append('vin_photo', vinFile);
+  if (odoFile) fd.append('odo_photo', odoFile);
   setOverlayStep('Saving bid...');
 
   try {
@@ -680,11 +983,643 @@ function resetForm() {
   document.getElementById('odo-result').innerHTML = '';
   document.getElementById('asking-price').value = '';
   document.getElementById('notes').value = '';
+  document.getElementById('vin-manual').value = '';
+  document.getElementById('odo-manual').value = '';
   updateChecklist();
 }
 
 // Init checklist state
 updateChecklist();
+
+// ── Tab navigation ────────────────────────────────────────────────────────────
+
+let myBidsPollTimer = null;
+
+function showTab(tab) {
+  const isMyBids = tab === 'mybids';
+  document.getElementById('tab-submit').style.display = isMyBids ? 'none' : '';
+  document.getElementById('tab-mybids').style.display = isMyBids ? '' : 'none';
+  document.getElementById('nav-submit').classList.toggle('active', !isMyBids);
+  document.getElementById('nav-mybids').classList.toggle('active', isMyBids);
+  // Reset form when switching back to Submit tab
+  document.getElementById('success').classList.remove('show');
+  if (!isMyBids) resetForm();
+  if (isMyBids) {
+    fetchMyBids();
+    if (!myBidsPollTimer) {
+      myBidsPollTimer = setInterval(fetchMyBids, 30000);
+    }
+  } else {
+    if (myBidsPollTimer) { clearInterval(myBidsPollTimer); myBidsPollTimer = null; }
+  }
+}
+
+// ── My Bids feed ──────────────────────────────────────────────────────────────
+
+const STATUS_LABELS = {
+  new: 'New',
+  reviewing: 'Reviewing',
+  bid_sent: 'Bid Sent',
+  passed: 'Passed',
+  bought: 'Bought'
+};
+
+function timeAgo(isoStr) {
+  if (!isoStr) return '';
+  const diff = Math.floor((Date.now() - new Date(isoStr)) / 1000);
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+
+async function fetchMyBids() {
+  const repName = localStorage.getItem('ew_rep_name') || '';
+  if (!repName) {
+    document.getElementById('bids-list').innerHTML =
+      '<div class="mybids-empty"><div class="mybids-empty-icon">👤</div><p>Set your name first to see your submissions.</p></div>';
+    return;
+  }
+  try {
+    const resp = await fetch('/api/rep-bids?rep=' + encodeURIComponent(repName));
+    const data = await resp.json();
+    renderBidsList(data.bids || []);
+  } catch(e) {
+    document.getElementById('bids-list').innerHTML =
+      '<div class="mybids-empty"><div class="mybids-empty-icon">⚠️</div><p>Could not load bids. Check connection.</p></div>';
+  }
+}
+
+let _bidsCache = [];
+
+function renderBidsList(bids) {
+  _bidsCache = bids;
+  if (!bids.length) {
+    document.getElementById('bids-list').innerHTML =
+      '<div class="mybids-empty"><div class="mybids-empty-icon">📭</div><p>No submissions yet.<br>Submit your first vehicle above.</p></div>';
+    return;
+  }
+  let html = '';
+  for (let i = 0; i < bids.length; i++) {
+    const b = bids[i];
+    const vehicle = [b.year, b.make, b.model].filter(Boolean).join(' ') || 'Vehicle';
+    const statusClass = 'chip-' + (b.status || 'new');
+    const statusLabel = STATUS_LABELS[b.status] || b.status || 'New';
+    const thumb = b.first_photo
+      ? `<img class="bid-thumb" src="${b.first_photo}" loading="lazy" onerror="this.style.display='none';this.nextSibling.style.display='flex'">`
+        + `<div class="bid-thumb-empty" style="display:none">🚗</div>`
+      : `<div class="bid-thumb-empty">🚗</div>`;
+    const amount = b.bid_amount ? `<span class="bid-amount">$${Math.round(b.bid_amount).toLocaleString()}</span>` : '';
+    html += `<div class="bid-card" onclick="openEditScreen(${i})">
+      <div style="display:flex;flex-direction:column;gap:0">${thumb}</div>
+      <div class="bid-meta">
+        <div class="bid-num">Bid #${b.id} &nbsp;✎ Edit</div>
+        <div class="bid-vehicle">${vehicle}</div>
+        <div class="bid-vin">${b.vin || 'VIN pending'}</div>
+        <div class="bid-bottom">
+          <span class="status-chip ${statusClass}">${statusLabel}</span>
+          ${amount}
+          <span class="bid-time">${timeAgo(b.created_at)}</span>
+        </div>
+      </div>
+    </div>`;
+  }
+  document.getElementById('bids-list').innerHTML = html;
+}
+
+// ── Edit screen ───────────────────────────────────────────────────────────────
+
+let _editBid = null;
+let _editFiles = [];
+
+function openEditScreen(idx) {
+  const b = _bidsCache[idx];
+  if (!b) return;
+  _editBid = b;
+  _editFiles = [];
+  document.getElementById('edit-previews').innerHTML = '';
+  document.getElementById('edit-vin').value = '';
+  document.getElementById('edit-mileage').value = '';
+  document.getElementById('edit-asking').value = '';
+  document.getElementById('edit-notes').value = '';
+  document.getElementById('edit-screen-title').textContent = `Bid #${b.id}`;
+  const vehicle = [b.year, b.make, b.model].filter(Boolean).join(' ') || 'Vehicle';
+  const mileStr = b.mileage ? parseInt(b.mileage).toLocaleString() + ' mi' : 'mileage unknown';
+  const summaryHTML = `<strong>${vehicle}</strong>${b.vin ? `<span style="font-family:monospace;color:#64748b">${b.vin}</span><br>` : ''}${mileStr}`;
+  document.getElementById('edit-summary').innerHTML = summaryHTML;
+  document.getElementById('msg-summary').innerHTML = summaryHTML;
+  document.getElementById('edit-save-btn').disabled = false;
+
+  // Show bid amount + response if present
+  const responseArea = document.getElementById('bid-response-area');
+  if (b.bid_amount) {
+    responseArea.innerHTML = `<div class="bid-response-card">
+      <div class="bid-response-label">Bid Amount</div>
+      <div class="bid-response-amount">$${Math.round(b.bid_amount).toLocaleString()}</div>
+      ${b.bid_response ? `<div style="font-size:13px;color:#94a3b8;margin-top:8px;line-height:1.5">${b.bid_response}</div>` : ''}
+    </div>`;
+  } else {
+    responseArea.innerHTML = '';
+  }
+
+  // Default to messages tab
+  showDetailTab('messages');
+  loadBidMessages(b.id);
+  document.getElementById('edit-screen').classList.add('show');
+}
+
+function closeEditScreen() {
+  document.getElementById('edit-screen').classList.remove('show');
+  _editBid = null;
+  _editFiles = [];
+  if (_msgPollTimer) { clearInterval(_msgPollTimer); _msgPollTimer = null; }
+}
+
+function showDetailTab(tab) {
+  document.getElementById('detail-messages').style.display = tab === 'messages' ? 'flex' : 'none';
+  document.getElementById('detail-edit').style.display = tab === 'edit' ? '' : 'none';
+  document.getElementById('dtab-messages').classList.toggle('active', tab === 'messages');
+  document.getElementById('dtab-edit').classList.toggle('active', tab === 'edit');
+}
+
+// ── Message thread ──
+let _msgPollTimer = null;
+
+async function loadBidMessages(bidId) {
+  const repName = localStorage.getItem('ew_rep_name') || '';
+  try {
+    const resp = await fetch(`/api/bid/${bidId}/messages?rep=${encodeURIComponent(repName)}`);
+    const data = await resp.json();
+    renderMessages(data.messages || []);
+  } catch(e) {
+    document.getElementById('msg-thread').innerHTML = '<div class="msg-empty">Could not load messages</div>';
+  }
+  // Poll every 10s while detail is open
+  if (_msgPollTimer) clearInterval(_msgPollTimer);
+  _msgPollTimer = setInterval(() => {
+    if (_editBid) loadBidMessages(_editBid.id);
+  }, 10000);
+}
+
+function renderMessages(msgs) {
+  const container = document.getElementById('msg-thread');
+  if (!msgs.length) {
+    container.innerHTML = '<div class="msg-empty">No messages yet. Send one below or wait for a bid response.</div>';
+    return;
+  }
+  container.innerHTML = msgs.map(m => {
+    const isOut = m.direction === 'outbound';
+    const label = isOut ? 'Manager' : 'You';
+    const ago = m.created_at ? timeAgo(m.created_at) : '';
+    return `<div>
+      <div class="msg-bubble ${m.direction}">${m.message}</div>
+      <div class="msg-bubble-meta" style="text-align:${isOut ? 'left' : 'right'}">${label} · ${ago}</div>
+    </div>`;
+  }).join('');
+  // Scroll to bottom
+  container.scrollTop = container.scrollHeight;
+}
+
+async function sendRepMessage() {
+  if (!_editBid) return;
+  const input = document.getElementById('rep-reply-input');
+  const message = input.value.trim();
+  if (!message) return;
+
+  const btn = document.getElementById('rep-reply-send');
+  btn.disabled = true;
+  const repName = localStorage.getItem('ew_rep_name') || '';
+
+  try {
+    const resp = await fetch(`/api/bid/${_editBid.id}/rep-message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rep_name: repName, message })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      input.value = '';
+      loadBidMessages(_editBid.id);
+    } else {
+      showEditToast(data.error || 'Failed to send');
+    }
+  } catch(e) {
+    showEditToast('Connection error');
+  }
+  btn.disabled = false;
+}
+
+function addEditPhotos(input) {
+  Array.from(input.files).forEach(f => {
+    _editFiles.push(f);
+    const url = URL.createObjectURL(f);
+    const wrap = document.createElement('div');
+    wrap.className = 'preview-thumb';
+    wrap.innerHTML = `<img src="${url}" style="width:100%;height:100%;object-fit:cover;border-radius:8px">`;
+    document.getElementById('edit-previews').appendChild(wrap);
+  });
+  input.value = '';
+}
+
+async function submitEdit() {
+  if (!_editBid) return;
+  const btn = document.getElementById('edit-save-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+
+  const repName = localStorage.getItem('ew_rep_name') || '';
+  const fd = new FormData();
+  fd.append('rep_name', repName);
+
+  const vin = document.getElementById('edit-vin').value.trim().toUpperCase();
+  const mileage = document.getElementById('edit-mileage').value.trim();
+  const asking = document.getElementById('edit-asking').value.trim();
+  const notes = document.getElementById('edit-notes').value.trim();
+  if (vin) fd.append('manual_vin', vin);
+  if (mileage) fd.append('manual_mileage', mileage);
+  if (asking) fd.append('asking_price', asking);
+  if (notes) fd.append('notes', notes);
+
+  // Resize and append new photos
+  for (let i = 0; i < _editFiles.length; i++) {
+    const resized = await resizeImage(_editFiles[i]);
+    fd.append(`car_photo_${i}`, resized);
+  }
+
+  try {
+    const resp = await fetch(`/api/bid/${_editBid.id}/field-update`, { method: 'PATCH', body: fd });
+    const data = await resp.json();
+    if (data.success) {
+      showEditToast('Updated!');
+      closeEditScreen();
+      fetchMyBids();
+    } else {
+      alert(data.error || 'Update failed');
+      btn.disabled = false;
+      btn.textContent = 'Save & Update';
+    }
+  } catch(e) {
+    alert('Connection error. Try again.');
+    btn.disabled = false;
+    btn.textContent = 'Save & Update';
+  }
+}
+
+function showEditToast(msg) {
+  const t = document.getElementById('edit-toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PWA — Service Worker, Install Prompt, Offline Queue
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── Service Worker Registration ──
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
+    .then(reg => {
+      console.log('SW registered, scope:', reg.scope);
+      // Listen for sync-success messages from SW
+      navigator.serviceWorker.addEventListener('message', event => {
+        if (event.data && event.data.type === 'sync-success') {
+          showEditToast('Queued submission sent!');
+          updateQueueBadge();
+        }
+      });
+    })
+    .catch(err => console.warn('SW registration failed:', err));
+}
+
+// ── Install Prompt ──
+let _deferredInstallPrompt = null;
+const _isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+const _isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const _isChromeOnIOS = _isIOS && /CriOS/.test(navigator.userAgent);
+const _isSafari = _isIOS && /Safari/.test(navigator.userAgent) && !_isChromeOnIOS && !/FxiOS|OPiOS|EdgiOS/.test(navigator.userAgent);
+
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  _deferredInstallPrompt = e;
+  document.getElementById('install-header-btn').style.display = 'inline-block';
+  if (!localStorage.getItem('ew_install_dismissed')) {
+    setTimeout(() => {
+      document.getElementById('install-banner').classList.add('show');
+    }, 3000);
+  }
+});
+
+function installPWA() {
+  if (_deferredInstallPrompt) {
+    _deferredInstallPrompt.prompt();
+    _deferredInstallPrompt.userChoice.then(() => {
+      document.getElementById('install-banner').classList.remove('show');
+      document.getElementById('install-header-btn').style.display = 'none';
+      _deferredInstallPrompt = null;
+    });
+  }
+}
+
+function handleInstallClick() {
+  if (_deferredInstallPrompt) {
+    installPWA();
+  } else if (_isIOS && !_isSafari) {
+    // Chrome/Firefox/Edge on iOS — can't install from here
+    document.getElementById('ios-chrome-modal').classList.add('show');
+  } else if (_isIOS) {
+    // Safari on iOS — show share instructions
+    document.getElementById('ios-install').classList.add('show');
+  } else {
+    document.getElementById('ios-install').classList.add('show');
+  }
+}
+
+function dismissInstall() {
+  document.getElementById('install-banner').classList.remove('show');
+  localStorage.setItem('ew_install_dismissed', '1');
+}
+
+function copyLinkToClipboard() {
+  navigator.clipboard.writeText('https://experience-wholesale.net/mobile').then(() => {
+    const btn = document.getElementById('copy-link-btn');
+    btn.textContent = 'Copied!';
+    btn.style.background = '#22c55e';
+    setTimeout(() => { btn.textContent = 'Copy Link'; btn.style.background = ''; }, 2000);
+  });
+}
+
+// Show/hide install header button based on context
+if (_isStandalone) {
+  document.getElementById('install-header-btn').style.display = 'none';
+} else if (_isIOS) {
+  document.getElementById('install-header-btn').style.display = 'inline-block';
+} else {
+  setTimeout(() => {
+    if (!_isStandalone) {
+      document.getElementById('install-header-btn').style.display = 'inline-block';
+    }
+  }, 2000);
+}
+
+// ── Online / Offline Detection ──
+function updateOnlineStatus() {
+  const bar = document.getElementById('offline-bar');
+  if (navigator.onLine) {
+    bar.classList.remove('show');
+  } else {
+    bar.classList.add('show');
+  }
+}
+window.addEventListener('online', () => {
+  updateOnlineStatus();
+  // Trigger background sync if available
+  if ('serviceWorker' in navigator && 'SyncManager' in window) {
+    navigator.serviceWorker.ready.then(reg => {
+      reg.sync.register('ew-offline-submit');
+    });
+  } else {
+    // Fallback: manually replay queue
+    replayOfflineQueueFromApp();
+  }
+});
+window.addEventListener('offline', updateOnlineStatus);
+updateOnlineStatus();
+
+// ── IndexedDB Offline Queue ──
+function openOfflineDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('ew_offline', 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains('offline_queue')) {
+        req.result.createObjectStore('offline_queue', { keyPath: 'id', autoIncrement: true });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function queueOfflineSubmission(url, fields, photoFiles) {
+  const db = await openOfflineDB();
+  // Convert photo Files to ArrayBuffers for storage
+  const photos = [];
+  for (const [name, file] of photoFiles) {
+    const buf = await file.arrayBuffer();
+    photos.push({ name, data: buf, type: file.type, filename: file.name });
+  }
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('offline_queue', 'readwrite');
+    tx.objectStore('offline_queue').add({
+      url,
+      fields,
+      photos,
+      timestamp: Date.now()
+    });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getOfflineQueueCount() {
+  try {
+    const db = await openOfflineDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction('offline_queue', 'readonly');
+      const req = tx.objectStore('offline_queue').count();
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(0);
+    });
+  } catch { return 0; }
+}
+
+async function updateQueueBadge() {
+  const count = await getOfflineQueueCount();
+  // Could add a badge to the submit tab later
+  if (count === 0) {
+    const bar = document.getElementById('offline-bar');
+    bar.classList.remove('show', 'syncing');
+  }
+}
+
+// Manual replay for browsers without Background Sync
+async function replayOfflineQueueFromApp() {
+  const db = await openOfflineDB();
+  const tx = db.transaction('offline_queue', 'readonly');
+  const store = tx.objectStore('offline_queue');
+  const all = await new Promise(r => { const q = store.getAll(); q.onsuccess = () => r(q.result); });
+
+  if (!all.length) return;
+
+  const bar = document.getElementById('offline-bar');
+  bar.textContent = `Sending ${all.length} queued submission${all.length > 1 ? 's' : ''}...`;
+  bar.classList.add('show', 'syncing');
+
+  for (const entry of all) {
+    try {
+      const fd = new FormData();
+      for (const [key, value] of Object.entries(entry.fields || {})) {
+        fd.append(key, value);
+      }
+      for (const photo of (entry.photos || [])) {
+        fd.append(photo.name, new Blob([photo.data], { type: photo.type }), photo.filename);
+      }
+      const resp = await fetch(entry.url, { method: 'POST', body: fd });
+      if (resp.ok) {
+        const delTx = db.transaction('offline_queue', 'readwrite');
+        delTx.objectStore('offline_queue').delete(entry.id);
+      }
+    } catch (e) { /* still offline */ }
+  }
+  updateQueueBadge();
+  showEditToast('Queued submissions sent!');
+}
+
+// ── Patch submitBid to handle offline ──
+const _originalSubmitBid = submitBid;
+submitBid = async function() {
+  // If offline, queue the submission locally
+  if (!navigator.onLine) {
+    const repName = localStorage.getItem('ew_rep_name') || '';
+    const notes = document.getElementById('notes').value.trim();
+    const askingPrice = document.getElementById('asking-price').value;
+    const finalVin = extractedVin || document.getElementById('vin-manual').value.trim();
+    const finalMileage = extractedMileage || document.getElementById('odo-manual').value.trim();
+
+    const fields = { rep_name: repName };
+    if (notes) fields.notes = notes;
+    if (askingPrice) fields.asking_price = askingPrice;
+    if (finalVin) fields.manual_vin = finalVin;
+    if (finalMileage) fields.manual_mileage = String(finalMileage);
+
+    const photoFiles = [];
+    carFiles.forEach((f, i) => photoFiles.push([`car_photo_${i}`, f]));
+    if (vinFile) photoFiles.push(['vin_photo', vinFile]);
+    if (odoFile) photoFiles.push(['odo_photo', odoFile]);
+
+    try {
+      await queueOfflineSubmission('/api/mobile-submit', fields, photoFiles);
+      // Register sync
+      if ('serviceWorker' in navigator && 'SyncManager' in window) {
+        const reg = await navigator.serviceWorker.ready;
+        await reg.sync.register('ew-offline-submit');
+      }
+      // Show success-like feedback
+      document.getElementById('overlay').classList.remove('show');
+      showOfflineQueued();
+    } catch (e) {
+      alert('Could not save offline. Try again.');
+    }
+    return;
+  }
+
+  // Online — use original flow
+  return _originalSubmitBid();
+};
+
+function showOfflineQueued() {
+  document.getElementById('success-bid-id').textContent = 'Queued';
+  document.getElementById('success-summary').innerHTML = `
+    <div class="summary-row"><span class="summary-label">Status</span><span class="summary-value" style="color:#fbbf24">Saved offline — will send when you reconnect</span></div>
+    <div class="summary-row"><span class="summary-label">Photos</span><span class="summary-value">${carFiles.length + 2} saved locally</span></div>
+    <div class="summary-row"><span class="summary-label">Submitted by</span><span class="summary-value">${localStorage.getItem('ew_rep_name') || ''}</span></div>
+  `;
+  document.getElementById('success').querySelector('h2').textContent = 'Saved Offline!';
+  document.getElementById('success').querySelector('.success-icon').textContent = '📡';
+  document.getElementById('success').classList.add('show');
+}
+
+updateQueueBadge();
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Push Notifications — subscribe after SW is ready
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function enableNotifications() {
+  const repName = localStorage.getItem('ew_rep_name');
+  if (!repName) { showSetup(); return; }
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+
+  try {
+    const reg = await navigator.serviceWorker.ready;
+
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') return;
+
+    const resp = await fetch('/api/vapid-public-key');
+    const data = await resp.json();
+    if (!data.publicKey) return;
+
+    const rawKey = data.publicKey.replace(/-/g, '+').replace(/_/g, '/');
+    const padding = '='.repeat((4 - rawKey.length % 4) % 4);
+    const keyBytes = atob(rawKey + padding);
+    const keyArray = new Uint8Array(keyBytes.length);
+    for (let i = 0; i < keyBytes.length; i++) keyArray[i] = keyBytes.charCodeAt(i);
+
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: keyArray
+      });
+    }
+
+    await saveSubscription(repName, sub);
+    localStorage.setItem('ew_push_enabled', '1');
+    document.getElementById('notif-banner').classList.remove('show');
+    document.getElementById('notif-header-btn').style.display = 'none';
+    showEditToast('Notifications enabled!');
+  } catch (e) {
+    console.warn('Push setup:', e);
+  }
+}
+
+async function saveSubscription(repName, sub) {
+  try {
+    await fetch('/api/push-subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rep_name: repName,
+        subscription: sub.toJSON()
+      })
+    });
+  } catch (e) {
+    console.warn('Could not save push subscription:', e);
+  }
+}
+
+function dismissNotifBanner() {
+  document.getElementById('notif-banner').classList.remove('show');
+  localStorage.setItem('ew_notif_dismissed', '1');
+}
+
+// Show notification banner + header bell if not yet enabled
+function checkNotifBanner() {
+  if (!('PushManager' in window) || !('Notification' in window)) return;
+
+  if (Notification.permission === 'granted' && localStorage.getItem('ew_push_enabled')) {
+    // Already subscribed — hide bell, silently re-register in case subscription expired
+    document.getElementById('notif-header-btn').style.display = 'none';
+    enableNotifications();
+    return;
+  }
+
+  if (Notification.permission === 'denied') {
+    // Permission stuck as denied — hide bell, nothing we can do from JS
+    document.getElementById('notif-header-btn').style.display = 'none';
+    return;
+  }
+
+  // Not yet subscribed — show bell icon + banner
+  document.getElementById('notif-header-btn').style.display = '';
+  if (!localStorage.getItem('ew_notif_dismissed')) {
+    setTimeout(() => {
+      document.getElementById('notif-banner').classList.add('show');
+    }, 1500);
+  }
+}
+checkNotifBanner();
 </script>
 </body>
 </html>
