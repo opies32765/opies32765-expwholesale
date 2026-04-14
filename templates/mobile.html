@@ -1077,8 +1077,9 @@ function renderBidsList(bids) {
     const vehicle = [b.year, b.make, b.model].filter(Boolean).join(' ') || 'Vehicle';
     const statusClass = 'chip-' + (b.status || 'new');
     const statusLabel = STATUS_LABELS[b.status] || b.status || 'New';
-    const thumb = b.first_photo
-      ? `<img class="bid-thumb" src="${b.first_photo}" loading="lazy" onerror="this.style.display='none';this.nextSibling.style.display='flex'">`
+    const thumbSrc = b.first_photo ? '/thumb?size=mobile&url=' + encodeURIComponent(b.first_photo) : '';
+    const thumb = thumbSrc
+      ? `<img class="bid-thumb" src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextSibling.style.display='flex'">`
         + `<div class="bid-thumb-empty" style="display:none">🚗</div>`
       : `<div class="bid-thumb-empty">🚗</div>`;
     const amount = b.bid_amount ? `<span class="bid-amount">$${Math.round(b.bid_amount).toLocaleString()}</span>` : '';

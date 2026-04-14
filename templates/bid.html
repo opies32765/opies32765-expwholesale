@@ -279,7 +279,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
     <div class="photos-scroll" id="photos-scroll">
       {% for photo in photos %}
       <div class="photo-thumb{% if loop.index > max_visible %} photo-hidden{% endif %}" onclick="openLightbox('{{ photo.url }}')">
-        <img src="{{ photo.url }}" alt="Vehicle photo" loading="lazy">
+        <img src="{{ photo.url|thumb_url('strip') }}" alt="Vehicle photo" loading="lazy">
       </div>
       {% endfor %}
       {% if extra > 0 %}

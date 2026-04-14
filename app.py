@@ -25,6 +25,12 @@ def msg_display_filter(raw):
     kept = [p for p in parts if not any(p.startswith(s) for s in _FIELD_PREFIXES)]
     return ' | '.join(kept).strip()
 
+@app.template_filter('thumb_url')
+def thumb_url_filter(src, size='strip'):
+    """Build a /thumb?url=...&size=... URL for templates."""
+    from urllib.parse import urlencode
+    return '/thumb?' + urlencode({'url': src, 'size': size})
+
 DB_URL = os.environ.get('DATABASE_URL', 'postgresql://expuser:ExpWholesale2026!@localhost/expwholesale')
 DIA_DB_URL = 'postgresql://scraper@62.146.226.100/dealer_intelligence'
 TWILIO_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
@@ -34,6 +40,15 @@ ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 UPLOAD_DIR = os.environ.get('UPLOAD_DIR', '/opt/expwholesale/static/uploads')
 VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY', '')
 VAPID_PUBLIC_KEY = os.environ.get('VAPID_PUBLIC_KEY', '')
+
+THUMB_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'thumb_cache')
+os.makedirs(THUMB_CACHE_DIR, exist_ok=True)
+
+THUMB_SIZES = {
+    'strip': (400, 280),     # photo strip on bid detail
+    'mobile': (200, 150),    # mobile My Bids list
+    'full': (1400, 1050),    # lightbox
+}
 
 VIN_RE = re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b')
 
@@ -2320,6 +2335,64 @@ def api_vauto_upload_report():
 def serve_vauto_report(filename):
     """Serve Carfax/AutoCheck screenshot images."""
     return send_from_directory(VAUTO_REPORTS_DIR, filename)
+
+
+@app.route('/thumb')
+def thumb():
+    """On-demand thumbnail proxy with disk cache.
+
+    Works for both local uploads (/static/uploads/...) and external CDN URLs.
+    Query params:
+        url  = source image URL or path
+        size = 'strip' (400x280), 'mobile' (200x150), or 'full' (1400x1050)
+    """
+    import hashlib
+    from io import BytesIO
+    from PIL import Image, ImageOps
+
+    src = request.args.get('url', '')
+    size_key = request.args.get('size', 'strip')
+    if not src or size_key not in THUMB_SIZES:
+        return 'Bad request', 400
+
+    max_w, max_h = THUMB_SIZES[size_key]
+    cache_key = hashlib.sha1(f'{src}|{size_key}'.encode()).hexdigest()
+    cache_path = os.path.join(THUMB_CACHE_DIR, f'{cache_key}.jpg')
+
+    if not os.path.exists(cache_path):
+        raw = None
+        try:
+            if src.startswith('/static/uploads/'):
+                # Local upload
+                local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), src.lstrip('/'))
+                if os.path.exists(local_path):
+                    with open(local_path, 'rb') as f:
+                        raw = f.read()
+            elif src.startswith('http'):
+                # External CDN URL
+                import urllib.request
+                req = urllib.request.Request(src, headers={'User-Agent': 'EW-Thumb/1.0'})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    raw = r.read()
+        except Exception:
+            pass
+
+        if not raw:
+            return 'Source not found', 404
+
+        try:
+            img = Image.open(BytesIO(raw))
+            img = ImageOps.exif_transpose(img)
+            if img.mode not in ('RGB', 'L'):
+                img = img.convert('RGB')
+            img.thumbnail((max_w, max_h), Image.LANCZOS)
+            img.save(cache_path, 'JPEG', quality=80, optimize=True)
+        except Exception:
+            return 'Resize failed', 500
+
+    resp = send_from_directory(THUMB_CACHE_DIR, f'{cache_key}.jpg', mimetype='image/jpeg')
+    resp.headers['Cache-Control'] = 'public, max-age=604800, immutable'
+    return resp
 
 
 @app.route('/api/vauto/status/<int:bid_id>')
