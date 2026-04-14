@@ -35,15 +35,21 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 .qs-btn.active{border-color:transparent}
 
 /* ---- Row 2: Photos Strip ---- */
-.photos-strip{background:#0e1420;border-bottom:1px solid #1e293b;padding:10px 24px;flex-shrink:0}
-.photos-label{font-size:11px;color:#475569;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px}
-.photos-scroll{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin;scrollbar-color:#1e293b transparent}
+.photos-strip{background:#0e1420;border-bottom:1px solid #1e293b;padding:8px 24px;flex-shrink:0}
+.photos-top{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.photos-label{font-size:11px;color:#475569;font-weight:600;text-transform:uppercase;letter-spacing:.8px}
+.photos-toggle{background:none;border:1px solid #1e293b;border-radius:5px;color:#64748b;font-size:11px;padding:3px 8px;cursor:pointer;font-family:'Inter',sans-serif}
+.photos-toggle:hover{color:#94a3b8;border-color:#334155}
+.photos-scroll{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin;scrollbar-color:#1e293b transparent}
 .photos-scroll::-webkit-scrollbar{height:4px}
 .photos-scroll::-webkit-scrollbar-track{background:transparent}
 .photos-scroll::-webkit-scrollbar-thumb{background:#1e293b;border-radius:2px}
-.photo-thumb{flex-shrink:0;width:200px;height:140px;border-radius:8px;overflow:hidden;background:#0f172a;cursor:pointer;border:1px solid #1e293b;transition:border .15s}
+.photo-thumb{flex-shrink:0;width:140px;height:100px;border-radius:6px;overflow:hidden;background:#0f172a;cursor:pointer;border:1px solid #1e293b;transition:border .15s}
 .photo-thumb:hover{border-color:#3b82f6}
 .photo-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.photo-thumb.photo-hidden{display:none}
+.photo-more{flex-shrink:0;width:80px;height:100px;border-radius:6px;background:#1e293b;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#94a3b8;font-size:14px;font-weight:700;border:1px solid #334155}
+.photo-more:hover{background:#334155;color:#e2e8f0}
 
 /* ---- Row 3: Columns ---- */
 .columns-area{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:12px 20px;overflow:hidden}
@@ -57,7 +63,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 .card-title{font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.8px;margin-bottom:16px}
 
 /* ---- AI Assessment: elevated card ---- */
-.card-assess{background:#0f1624;border-color:#2d1b69;display:flex;flex-direction:column;min-height:0}
+.card-assess{background:#0f1624;border-color:#2d1b69;display:flex;flex-direction:column;min-height:0;overflow:hidden}
 .card-assess.expanded{flex:0 0 auto}
 .assess-header{display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}
 .assess-chevron{font-size:13px;color:#475569;transition:transform .2s;margin-left:8px;flex-shrink:0}
@@ -67,6 +73,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 #assess-body.collapsed{display:none !important}
 #assess-body.expanded{display:block !important}
 #assess-output{overflow-y:auto;scrollbar-width:thin;scrollbar-color:#1e293b transparent;min-height:0;max-height:400px;padding-right:4px}
+.card-assess.expanded #assess-output{max-height:none}
 .assess-section{font-size:11px;font-weight:700;color:#818cf8;text-transform:uppercase;letter-spacing:.7px;margin-top:14px;margin-bottom:6px;padding-bottom:5px;border-bottom:1px solid #1e2a45}
 .assess-section:first-child{margin-top:2px}
 .assess-line{font-size:13px;line-height:1.7;color:#94a3b8;margin-bottom:2px}
@@ -75,7 +82,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 .assess-list li{font-size:13px;line-height:1.6;color:#94a3b8;padding-left:14px;position:relative}
 .assess-list li::before{content:'›';position:absolute;left:0;color:#475569;font-weight:700}
 .assess-gap{height:8px}
-.assess-buyprice{margin-top:12px;padding:10px 14px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.25);border-radius:8px;font-size:14px;font-weight:700;color:#4ade80;text-align:center;cursor:pointer}
+.assess-buyprice{margin:12px 0 4px;padding:10px 14px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.25);border-radius:8px;font-size:14px;font-weight:700;color:#4ade80;text-align:center;cursor:pointer}
 
 /* ---- Action column: compact sizing ---- */
 .col-action .card{padding:13px 16px}
@@ -184,7 +191,8 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
   .vb-right{width:100%}
   .quick-status-group{display:grid;grid-template-columns:1fr 1fr;width:100%;gap:6px}
   .qs-btn{text-align:center}
-  .photo-thumb{width:140px;height:100px}
+  .photo-thumb{width:110px;height:78px}
+  .photo-more{width:60px;height:78px;font-size:12px}
   .photos-strip{padding:8px 12px}
   .columns-area{padding:10px 12px;gap:10px}
   .fields{grid-template-columns:1fr}
@@ -259,14 +267,24 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
   <!-- ROW 2: Photos Strip (full-width, always visible) -->
   {% if photos %}
+  {% set max_visible = 8 %}
+  {% set extra = photos|length - max_visible if photos|length > max_visible else 0 %}
   <div class="photos-strip">
-    <div class="photos-label">Photos ({{ photos|length }})</div>
-    <div class="photos-scroll">
+    <div class="photos-top">
+      <span class="photos-label">Photos ({{ photos|length }})</span>
+      {% if extra > 0 %}
+      <button class="photos-toggle" id="photos-toggle-btn" onclick="toggleAllPhotos()">Show all {{ photos|length }}</button>
+      {% endif %}
+    </div>
+    <div class="photos-scroll" id="photos-scroll">
       {% for photo in photos %}
-      <div class="photo-thumb" onclick="openLightbox('{{ photo.url }}')">
+      <div class="photo-thumb{% if loop.index > max_visible %} photo-hidden{% endif %}" onclick="openLightbox('{{ photo.url }}')">
         <img src="{{ photo.url }}" alt="Vehicle photo" loading="lazy">
       </div>
       {% endfor %}
+      {% if extra > 0 %}
+      <div class="photo-more" id="photo-more-btn" onclick="toggleAllPhotos()">+{{ extra }}</div>
+      {% endif %}
     </div>
   </div>
   {% endif %}
@@ -361,52 +379,6 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           </div>
         </div>
       </div>
-
-      {% if bid.vin %}
-      <div class="card">
-        <div class="card-title">DIA — Dealer & Auction History</div>
-        {% if dia_data %}
-          {% if dia_data.dealers %}
-          <div style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px">Dealer Inventory ({{ dia_data.dealers|length }})</div>
-          <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">
-            {% for d in dia_data.dealers %}
-            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px 12px">
-              <div style="font-size:12px;font-weight:600;color:#e2e8f0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ d.dealer_name }}</div>
-              <div style="font-size:11px;color:#64748b;margin-top:2px">{{ d.city }}{% if d.state %}, {{ d.state }}{% endif %} · {{ d.status or '?' }}{% if d.price %} · ${{ '{:,.0f}'.format(d.price) }}{% endif %}</div>
-              {% if d.last_seen %}<div style="font-size:10px;color:#475569;margin-top:2px;display:flex;justify-content:space-between">
-                <span>Last seen {{ d.last_seen }}{% if d.mileage %} · {{ '{:,}'.format(d.mileage) }} mi{% endif %}</span>
-                {% if d.url %}<a href="{{ d.url }}" target="_blank" style="color:#60a5fa;font-size:11px;font-weight:600;text-decoration:none">View →</a>{% endif %}
-              </div>{% endif %}
-            </div>
-            {% endfor %}
-          </div>
-          {% endif %}
-          {% if dia_data.auctions %}
-          <div style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px">Auction History ({{ dia_data.auctions|length }})</div>
-          <div style="display:flex;flex-direction:column;gap:6px">
-            {% for a in dia_data.auctions %}
-            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px 12px">
-              <div style="font-size:12px;font-weight:600;color:#e2e8f0;display:flex;justify-content:space-between;align-items:center">
-                <span>{{ a.house_name }}</span>
-                {% if a.lot_url %}<a href="{{ a.lot_url }}" target="_blank" style="color:#60a5fa;font-size:11px;font-weight:600;text-decoration:none">View →</a>{% endif %}
-              </div>
-              <div style="font-size:11px;color:#64748b;margin-top:3px">
-                {% if a.sold %}<span style="color:#4ade80;font-weight:700">✓ Sold</span>{% else %}<span style="color:#f87171">✕ Not sold</span>{% endif %}
-                {% if a.hammer_price %} · ${{ '{:,.0f}'.format(a.hammer_price) }}{% endif %}
-                {% if a.sale_date %} · {{ a.sale_date }}{% endif %}
-              </div>
-            </div>
-            {% endfor %}
-          </div>
-          {% endif %}
-          {% if not dia_data.dealers and not dia_data.auctions %}
-          <div style="font-size:13px;color:#475569;font-style:italic">No history found for this VIN.</div>
-          {% endif %}
-        {% else %}
-        <div style="font-size:13px;color:#475569;font-style:italic">DIA database unavailable.</div>
-        {% endif %}
-      </div>
-      {% endif %}
 
       {% if bid.vin %}
       <div class="card">
@@ -676,14 +648,14 @@ function toggleAssess() {
   const bar     = document.getElementById('assess-summary-bar');
   const hint = `<span style="color:#64748b;font-weight:400;font-size:12px">tap to ${assessExpanded ? 'collapse' : 'expand'}</span>`;
   if (assessExpanded) {
-    body.classList.remove("collapsed"); body.classList.add("expanded");
-    
+    body.classList.remove('collapsed');
+    body.classList.add('expanded');
     chevron.classList.add('open');
     if (AI_PRICE) bar.innerHTML = `✦ Buy Price: $${Math.round(AI_PRICE).toLocaleString()} &nbsp;·&nbsp; ${hint}`;
     else if (AI_ASSESSMENT) bar.innerHTML = `✦ Assessment complete &nbsp;·&nbsp; ${hint}`;
   } else {
-    body.classList.remove("expanded"); body.classList.add("collapsed");
-    
+    body.classList.remove('expanded');
+    body.classList.add('collapsed');
     chevron.classList.remove('open');
     updateSummaryBar();
   }
@@ -893,6 +865,22 @@ async function rerunAssess() {
     if (d.success) location.reload();
     else { badge.textContent = '✕ FAILED'; badge.style.color = '#f87171'; }
   } catch(e) { badge.textContent = '✕ ERROR'; badge.style.color = '#f87171'; }
+}
+
+function toggleAllPhotos() {
+  var hidden = document.querySelectorAll('.photo-hidden');
+  var moreBtn = document.getElementById('photo-more-btn');
+  var toggleBtn = document.getElementById('photos-toggle-btn');
+  if (hidden.length > 0) {
+    hidden.forEach(function(el){ el.classList.remove('photo-hidden'); });
+    if (moreBtn) moreBtn.style.display = 'none';
+    if (toggleBtn) toggleBtn.textContent = 'Show fewer';
+  } else {
+    var thumbs = document.querySelectorAll('#photos-scroll .photo-thumb');
+    for (var i = 8; i < thumbs.length; i++) thumbs[i].classList.add('photo-hidden');
+    if (moreBtn) { moreBtn.style.display = ''; }
+    if (toggleBtn) toggleBtn.textContent = 'Show all ' + thumbs.length;
+  }
 }
 
 function openLightbox(url) {

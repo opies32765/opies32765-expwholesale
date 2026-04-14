@@ -1097,14 +1097,6 @@ def _run_assessment(bid_id):
 
 Based on all the data above — book values, photos, Carfax, AutoCheck, history, and market listings — what should we pay for this vehicle at wholesale?
 
-IMPORTANT RULES:
-- Open recalls are FREE (manufacturer pays). NEVER dock for recall costs.
-- Cosmetic cleaning (detail, wash) costs $200-400 max. Do not inflate.
-- LOOK AT THE TIRE PHOTOS CAREFULLY before claiming tires need replacement. Only dock if you can SEE visible wear, bald spots, or damage. Good-looking tires = no dock.
-- Only dock for REAL mechanical/body issues you can verify in photos or reports.
-- SHOW YOUR MATH. State the anchor value (MMR, Black Book, or avg wholesale), subtract specific dollar amounts for specific issues, show the calculation that leads to your buy price. No vague "targeting below X for margin".
-- DO NOT subtract any "margin buffer" or "wholesale margin". Give the TRUE wholesale market value minus only real condition issues. The team decides their own margin per deal.
-
 Keep it under 200 words. End with:
 Max wholesale buy price: **$X,XXX**"""
 
@@ -1885,6 +1877,9 @@ def bid_messages_poll(bid_id):
         new_msgs = [{'id': r['id'], 'direction': r['direction'], 'message': r['message'],
                       'created_at': r['created_at'].isoformat() if r['created_at'] else None}
                      for r in cur.fetchall()]
+    # Clear unread flag since the manager is actively viewing this bid
+    cur.execute("UPDATE bids SET has_unread=FALSE WHERE id=%s AND has_unread=TRUE", (bid_id,))
+    db.commit()
     db.close()
     return jsonify({'total': total, 'max_id': max_id, 'new_messages': new_msgs})
 
@@ -2370,6 +2365,115 @@ def api_verify_comps():
                 results[vin] = {'status': 'error'}
 
     return jsonify({'results': results})
+
+
+# ---------------------------------------------------------------------------
+# External bid intake (CarHub → EW push)
+# ---------------------------------------------------------------------------
+@app.route('/api/bid/external', methods=['POST'])
+def api_bid_external():
+    """Accept a bid from an external system (e.g., CarHub) with all enrichment data.
+    Treated as a brand-new bid — EW's own vAuto worker runs a fresh lookup."""
+    data = request.json
+    if not data:
+        return jsonify({'error': 'missing JSON body'}), 400
+
+    vin = (data.get('vin') or '').strip().upper()
+    if not vin or len(vin) != 17:
+        return jsonify({'error': 'valid 17-char VIN required'}), 400
+
+    db = get_db()
+    cur = db.cursor()
+
+    # Use rep name if provided so the bid shows up in their mobile My Bids.
+    # Falls back to ext:<source> for anonymous pushes.
+    source = data.get('source', 'external')
+    rep_name = (data.get('rep_name') or '').strip()
+    if rep_name:
+        rep_phone = f'field:{rep_name.replace(" ", "_").lower()}'
+        contact_name = rep_name
+    else:
+        rep_phone = f'ext:{source}'
+        contact_name = f'{source.title()} Integration'
+
+    cur.execute("""
+        INSERT INTO contacts (phone, name)
+        VALUES (%s, %s)
+        ON CONFLICT (phone) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+    """, (rep_phone, contact_name))
+    contact_id = cur.fetchone()['id']
+
+    # Build raw_message summary
+    parts = [f'[{source.upper()}]']
+    if rep_name:
+        parts.append(f'Rep: {rep_name}')
+    parts.append(f'VIN: {vin}')
+    if data.get('year') and data.get('make') and data.get('model'):
+        parts.append(f'{data["year"]} {data["make"]} {data["model"]}')
+    if data.get('trim'):
+        parts.append(data['trim'])
+    if data.get('mileage'):
+        try:
+            parts.append(f'{int(data["mileage"]):,} mi')
+        except (ValueError, TypeError):
+            pass
+    if data.get('asking_price'):
+        try:
+            parts.append(f'Asking: ${float(data["asking_price"]):,.0f}')
+        except (ValueError, TypeError):
+            pass
+    raw_message = ' | '.join(parts)
+
+    # Only store manually entered notes — no auto-generated enrichment
+    notes_text = None
+    if rep_name and data.get('notes'):
+        notes_text = f'[Field: {rep_name}] {data["notes"]}'
+    elif rep_name:
+        notes_text = f'[Field: {rep_name}]'
+    elif data.get('notes'):
+        notes_text = data['notes']
+
+    cur.execute("""
+        INSERT INTO bids (contact_id, phone, vin, year, make, model, trim, mileage, color,
+                          raw_message, asking_price, notes, status)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new') RETURNING id
+    """, (contact_id, rep_phone, vin,
+          data.get('year'), data.get('make'), data.get('model'), data.get('trim'),
+          data.get('mileage'), data.get('color'),
+          raw_message, data.get('asking_price'), notes_text))
+    bid_id = cur.fetchone()['id']
+
+    # Store listing photos (CDN URLs)
+    for photo_url in (data.get('photos') or []):
+        cur.execute("INSERT INTO bid_photos (bid_id, url) VALUES (%s, %s)",
+                    (bid_id, photo_url))
+
+    # Save additional photos (base64 uploads from user's machine)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    for photo in (data.get('additional_photos') or []):
+        try:
+            img_bytes = base64.b64decode(photo['data'])
+            ext = os.path.splitext(photo.get('filename', '.jpg'))[1] or '.jpg'
+            fname = f'{uuid.uuid4().hex}{ext}'
+            fpath = os.path.join(UPLOAD_DIR, fname)
+            with open(fpath, 'wb') as f:
+                f.write(img_bytes)
+            cur.execute("INSERT INTO bid_photos (bid_id, url) VALUES (%s, %s)",
+                        (bid_id, f'/static/uploads/{fname}'))
+        except Exception:
+            pass  # skip bad photos
+
+    # Always flag for fresh vAuto lookup
+    cur.execute("UPDATE bids SET vauto_priority=TRUE WHERE id=%s", (bid_id,))
+
+    db.commit()
+    db.close()
+
+    # Auto-search Autotrader, Cars.com, CarGurus for this VIN (same as field agent bids)
+    trigger_market_check(bid_id, vin)
+
+    return jsonify({'success': True, 'bid_id': bid_id, 'vin': vin})
 
 
 if __name__ == '__main__':

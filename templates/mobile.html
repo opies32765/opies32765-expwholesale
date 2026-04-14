@@ -667,15 +667,27 @@ if ({{ 'true' if force_setup else 'false' }}) {
   window.history.replaceState({}, '', '/mobile');
 }
 
+// Deep-link: /mobile#bid=30&rep=Oscar_Pastrana
+// Hash carries rep name so it works cross-domain (CarHub → EW)
+const _hashRaw = window.location.hash.replace(/^#/, '');
+const _hashParams = {};
+_hashRaw.split('&').forEach(function(p) {
+  var parts = p.split('=');
+  if (parts[0] && parts[1]) _hashParams[parts[0]] = decodeURIComponent(parts[1]);
+});
+if (_hashParams.rep) {
+  var dlName = _hashParams.rep.replace(/_/g, ' ');
+  localStorage.setItem('ew_rep_name', dlName);
+}
+
 const savedName = localStorage.getItem('ew_rep_name');
 if (savedName) {
   renderRepChip(savedName);
-  // Re-register on every open to ensure they're in the system
   fetch('/api/register-rep', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ rep_name: savedName })
-  }).catch(() => {});
+  }).catch(function(){});
 } else {
   showSetup();
 }
@@ -1620,6 +1632,32 @@ function checkNotifBanner() {
   }
 }
 checkNotifBanner();
+
+// ── Deep-link auto-open (runs last, after all functions are defined) ─────────
+(function() {
+  if (!_hashParams.bid) return;
+  var repName = localStorage.getItem('ew_rep_name');
+  if (!repName) return;
+  var targetId = parseInt(_hashParams.bid);
+  // Switch to My Bids tab without triggering fetchMyBids
+  document.getElementById('tab-submit').style.display = 'none';
+  document.getElementById('tab-mybids').style.display = '';
+  document.getElementById('nav-submit').classList.remove('active');
+  document.getElementById('nav-mybids').classList.add('active');
+  // Single fetch — render list then open the target bid
+  fetch('/api/rep-bids?rep=' + encodeURIComponent(repName))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      renderBidsList(data.bids || []);
+      for (var i = 0; i < _bidsCache.length; i++) {
+        if (_bidsCache[i].id === targetId) {
+          openEditScreen(i);
+          return;
+        }
+      }
+    })
+    .catch(function() {});
+})();
 </script>
 </body>
 </html>
