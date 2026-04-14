@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tesla VIN Decoder — Experience Wholesale</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh}
+.header{background:#111827;border-bottom:1px solid #1e293b;padding:0 24px;height:60px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-mark{width:34px;height:34px;background:linear-gradient(135deg,#e31937,#cc0000);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;color:#fff}
+.logo-text{font-size:15px;font-weight:700;color:#f1f5f9}
+.back-btn{display:flex;align-items:center;gap:6px;color:#64748b;font-size:13px;font-weight:500;text-decoration:none;padding:6px 12px;border-radius:6px;border:1px solid #1e293b}
+.back-btn:hover{border-color:#334155;color:#e2e8f0}
+
+.container{max-width:720px;margin:40px auto;padding:0 20px}
+h1{font-size:24px;font-weight:800;margin-bottom:6px}
+.subtitle{color:#64748b;font-size:14px;margin-bottom:30px}
+
+.input-row{display:flex;gap:10px;margin-bottom:30px}
+.input-row input{flex:1;padding:12px 16px;background:#111827;border:1px solid #1e293b;border-radius:10px;color:#e2e8f0;font-size:17px;font-family:'Consolas',monospace;letter-spacing:1.5px;text-transform:uppercase}
+.input-row input:focus{outline:none;border-color:#e31937}
+.input-row input::placeholder{color:#334155;text-transform:none;letter-spacing:0;font-family:'Inter',sans-serif;font-size:14px}
+.input-row button{padding:12px 24px;background:#e31937;border:none;border-radius:10px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;white-space:nowrap}
+.input-row button:hover{background:#cc0000}
+.input-row button:disabled{opacity:.5;cursor:wait}
+
+#result{display:none}
+#error{display:none;color:#f87171;font-size:14px;padding:12px;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.2);border-radius:8px;margin-bottom:20px}
+
+.decode-card{background:#111827;border:1px solid #1e293b;border-radius:14px;overflow:hidden}
+.decode-header{padding:20px 24px;border-bottom:1px solid #1e293b;display:flex;align-items:center;justify-content:space-between}
+.decode-title{font-size:20px;font-weight:800}
+.decode-year{font-size:28px;font-weight:800;color:#e31937}
+.decode-vin{font-family:'Consolas',monospace;font-size:13px;color:#64748b;letter-spacing:1px;margin-top:4px}
+
+.decode-grid{display:grid;grid-template-columns:1fr 1fr;gap:0}
+.decode-cell{padding:16px 24px;border-bottom:1px solid #0f172a;border-right:1px solid #0f172a}
+.decode-cell:nth-child(even){border-right:none}
+.decode-label{font-size:11px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px}
+.decode-value{font-size:15px;font-weight:600;color:#e2e8f0}
+.decode-value.highlight{color:#4ade80}
+.decode-value.red{color:#e31937}
+
+.raw-section{padding:16px 24px;border-top:1px solid #1e293b;background:#0d1220}
+.raw-title{font-size:11px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px;cursor:pointer}
+.raw-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:6px}
+.raw-pos{background:#111827;border:1px solid #1e293b;border-radius:6px;padding:6px 8px;text-align:center}
+.raw-pos-label{font-size:9px;color:#475569;text-transform:uppercase}
+.raw-pos-val{font-size:16px;font-weight:700;font-family:'Consolas',monospace;color:#e2e8f0;margin-top:2px}
+.opt-cat{margin-bottom:14px}
+.opt-cat-title{font-size:11px;font-weight:700;color:#818cf8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid #1e293b}
+.opt-list{display:flex;flex-wrap:wrap;gap:6px}
+.opt-tag{font-size:12px;padding:4px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#94a3b8}
+.opt-tag.highlight{color:#4ade80;border-color:rgba(74,222,128,.3);background:rgba(74,222,128,.06)}
+.opt-tag.warn{color:#fbbf24;border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.06)}
+.opt-lookup-btn{padding:8px 16px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#94a3b8;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
+.opt-lookup-btn:hover{background:#334155;color:#e2e8f0}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <div class="logo-mark">T</div>
+    <span class="logo-text">Tesla VIN Decoder</span>
+  </div>
+  <a href="/" class="back-btn">← Dashboard</a>
+</div>
+
+<div class="container">
+  <h1>Tesla VIN Decoder</h1>
+  <p class="subtitle">Enter any Tesla VIN to decode model, trim, battery, motor, and production details.</p>
+
+  <div class="input-row">
+    <input type="text" id="vin-input" maxlength="17" placeholder="Enter 17-digit Tesla VIN" autofocus>
+    <button id="decode-btn" onclick="decodeVin()">Decode</button>
+  </div>
+
+  <div id="error"></div>
+
+  <div id="result">
+    <div class="decode-card">
+      <div class="decode-header">
+        <div>
+          <div class="decode-title" id="r-title"></div>
+          <div class="decode-vin" id="r-vin"></div>
+        </div>
+        <div class="decode-year" id="r-year"></div>
+      </div>
+      <div class="decode-grid">
+        <div class="decode-cell"><div class="decode-label">Model</div><div class="decode-value" id="r-model"></div></div>
+        <div class="decode-cell"><div class="decode-label">Trim</div><div class="decode-value" id="r-trim"></div></div>
+        <div class="decode-cell"><div class="decode-label">Motor / Drive</div><div class="decode-value highlight" id="r-motor"></div></div>
+        <div class="decode-cell"><div class="decode-label">Drive Type</div><div class="decode-value" id="r-drive"></div></div>
+        <div class="decode-cell"><div class="decode-label">Battery</div><div class="decode-value" id="r-battery"></div></div>
+        <div class="decode-cell"><div class="decode-label">Body</div><div class="decode-value" id="r-body"></div></div>
+        <div class="decode-cell"><div class="decode-label">Plant</div><div class="decode-value" id="r-plant"></div></div>
+        <div class="decode-cell"><div class="decode-label">Manufacturer</div><div class="decode-value" id="r-mfr"></div></div>
+        <div class="decode-cell"><div class="decode-label">Base MSRP (new)</div><div class="decode-value red" id="r-msrp"></div></div>
+        <div class="decode-cell"><div class="decode-label">Serial #</div><div class="decode-value" id="r-serial"></div></div>
+      </div>
+      <div id="options-section" style="display:none;border-top:1px solid #1e293b">
+        <div style="padding:16px 24px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <div style="font-size:11px;font-weight:600;color:#e31937;text-transform:uppercase;letter-spacing:.6px">Factory Options (tesla-info)</div>
+            <span id="options-match" style="font-size:11px;color:#475569"></span>
+          </div>
+          <div id="options-loading" style="display:none;color:#fbbf24;font-size:13px;padding:10px 0">Looking up factory options via Beelink worker... this may take 30-60 seconds.</div>
+          <div id="options-grid"></div>
+        </div>
+      </div>
+      <div class="raw-section">
+        <div class="raw-title">VIN Position Breakdown</div>
+        <div class="raw-grid" id="r-raw"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+var input = document.getElementById('vin-input');
+input.addEventListener('keydown', function(e) { if (e.key === 'Enter') decodeVin(); });
+
+function decodeVin() {
+  var vin = input.value.trim().toUpperCase();
+  if (vin.length !== 17) {
+    document.getElementById('error').style.display = 'block';
+    document.getElementById('error').textContent = 'VIN must be exactly 17 characters.';
+    document.getElementById('result').style.display = 'none';
+    return;
+  }
+
+  var btn = document.getElementById('decode-btn');
+  btn.disabled = true;
+  btn.textContent = 'Decoding...';
+  document.getElementById('error').style.display = 'none';
+  document.getElementById('result').style.display = 'none';
+
+  fetch('/api/tesla-vin/' + encodeURIComponent(vin))
+    .then(function(r) { return r.json().then(function(d) { return {ok: r.ok, data: d}; }); })
+    .then(function(res) {
+      btn.disabled = false;
+      btn.textContent = 'Decode';
+
+      if (!res.ok) {
+        document.getElementById('error').style.display = 'block';
+        document.getElementById('error').textContent = res.data.error || 'Not a Tesla VIN';
+        return;
+      }
+
+      var d = res.data;
+      document.getElementById('r-title').textContent = d.trim;
+      document.getElementById('r-vin').textContent = d.vin;
+      document.getElementById('r-year').textContent = d.year;
+      document.getElementById('r-model').textContent = d.model;
+      document.getElementById('r-trim').textContent = d.trim;
+      document.getElementById('r-motor').textContent = d.motor;
+      document.getElementById('r-drive').textContent = d.drive;
+      document.getElementById('r-battery').textContent = d.battery;
+      document.getElementById('r-body').textContent = d.body;
+      document.getElementById('r-plant').textContent = d.plant;
+      document.getElementById('r-mfr').textContent = d.manufacturer;
+      document.getElementById('r-msrp').textContent = d.msrp ? '$' + d.msrp.toLocaleString() : 'N/A';
+      document.getElementById('r-serial').textContent = d.serial;
+
+      // Factory options — Fleet API (primary) or tesla-info (fallback)
+      var optSection = document.getElementById('options-section');
+      var optGrid = document.getElementById('options-grid');
+      var optLoading = document.getElementById('options-loading');
+      var optMatch = document.getElementById('options-match');
+      optSection.style.display = 'block';
+
+      if (d.fleet_specs) {
+        renderFleetSpecs(d.fleet_specs);
+      } else if (d.tesla_options && d.tesla_options.categories) {
+        renderOptions(d.tesla_options);
+      } else {
+        // Auto-request tesla-info fallback
+        optGrid.innerHTML = '<button class="opt-lookup-btn" onclick="requestLookup()">Lookup Factory Options</button>';
+        optLoading.style.display = 'none';
+        requestLookup();
+      }
+
+      // Raw positions
+      var labels = ['WMI','WMI','WMI','Model','Body','Safety','Battery','Motor','Check','Year','Plant','S1','S2','S3','S4','S5','S6'];
+      var html = '';
+      for (var i = 0; i < 17; i++) {
+        html += '<div class="raw-pos"><div class="raw-pos-label">P' + (i+1) + ' ' + labels[i] + '</div><div class="raw-pos-val">' + d.vin[i] + '</div></div>';
+      }
+      document.getElementById('r-raw').innerHTML = html;
+      document.getElementById('result').style.display = 'block';
+    })
+    .catch(function(err) {
+      btn.disabled = false;
+      btn.textContent = 'Decode';
+      document.getElementById('error').style.display = 'block';
+      document.getElementById('error').textContent = 'Network error: ' + err.message;
+    });
+}
+
+function renderFleetSpecs(fs) {
+  var grid = document.getElementById('options-grid');
+  var match = document.getElementById('options-match');
+  document.getElementById('options-loading').style.display = 'none';
+  match.innerHTML = '<span style="color:#4ade80;font-weight:700">Tesla Fleet API — Exact Factory Data</span>';
+
+  // Override MSRP with real total price
+  if (fs.totalPrice) {
+    document.getElementById('r-msrp').textContent = '$' + fs.totalPrice.toLocaleString();
+  }
+
+  var fields = [
+    ['Exterior Color', fs.paintCode],
+    ['Interior', fs.interiorCode],
+    ['Wheels', fs.wheelsCode],
+    ['Trim', fs.trim],
+    ['Autopilot Hardware', fs.autopilotHardwareCode],
+    ['Autopilot Software', fs.autopilotSoftwareCode],
+    ['Drive', fs.typeOfDrive],
+    ['Body', fs.bodyType],
+    ['Seats', fs.numberOfSeats],
+    ['Roof', (fs.equipmentPrice || []).filter(function(e){ return e.code && e.code.indexOf('RF') === 1; }).map(function(e){ return e.name; }).join(', ')],
+    ['Towing', fs.towingCode],
+    ['Production Date', fs.productionDate ? fs.productionDate.split('T')[0] : null],
+    ['Country', fs.countryOfOrigin],
+  ];
+
+  var html = '<div class="decode-grid">';
+  fields.forEach(function(f) {
+    if (f[1]) {
+      html += '<div class="decode-cell"><div class="decode-label">' + f[0] + '</div><div class="decode-value highlight">' + f[1] + '</div></div>';
+    }
+  });
+  html += '</div>';
+
+  // Equipment/options with prices
+  var equip = fs.equipmentPrice || [];
+  if (equip.length) {
+    html += '<div class="opt-cat" style="margin-top:16px"><div class="opt-cat-title">Factory Equipment & Pricing</div><div style="display:flex;flex-direction:column;gap:4px">';
+    equip.forEach(function(e) {
+      var price = e.price > 0 ? ' — $' + e.price.toLocaleString() : '';
+      var name = e.name || e.code;
+      if (name.charAt(0) === '$') name = name.substring(1);
+      html += '<div style="display:flex;justify-content:space-between;padding:6px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b"><span style="color:#e2e8f0;font-size:13px">' + name + '</span><span style="color:' + (e.price > 0 ? '#4ade80' : '#475569') + ';font-size:13px;font-weight:600">' + (e.price > 0 ? '+$' + e.price.toLocaleString() : 'Included') + '</span></div>';
+    });
+    html += '</div></div>';
+  }
+
+  grid.innerHTML = html;
+}
+
+var _currentVin = '';
+var _pollTimer = null;
+
+function renderOptions(opts) {
+  var grid = document.getElementById('options-grid');
+  var loading = document.getElementById('options-loading');
+  var match = document.getElementById('options-match');
+  loading.style.display = 'none';
+
+  if (opts.error) {
+    grid.innerHTML = '<div style="color:#64748b;font-size:13px;font-style:italic">No factory data found for this VIN.</div>';
+    return;
+  }
+
+  var matchType = opts.exact_match ? 'Exact match' : 'Close VIN match';
+  match.textContent = matchType + (opts.match_vin ? ' (' + opts.match_vin + ')' : '') +
+    (opts.manufactured ? ' | Built ' + opts.manufactured : '');
+
+  var cats = opts.categories || {};
+  var catNames = {
+    color: 'Exterior Color', interior: 'Interior', wheels: 'Wheels & Tires',
+    battery: 'Battery', autopilot: 'Autopilot / FSD', seating: 'Seating',
+    audio: 'Audio', charging: 'Charging', packages: 'Packages', other: 'Other'
+  };
+  var highlightCats = new Set(['color', 'autopilot', 'wheels', 'interior']);
+
+  var html = '';
+  Object.keys(catNames).forEach(function(key) {
+    var items = (cats[key] || []).filter(function(item) {
+      var low = item.toLowerCase();
+      // Skip negatives — only show what the car HAS
+      if (low.indexOf('no ') === 0 || low.indexOf('not ') === 0 || low.indexOf('non ') === 0) return false;
+      // Skip generic/filler entries
+      if (low === 'battery badge' || low === 'blind spot' || low === 'charge port') return false;
+      return true;
+    });
+    if (!items.length) return;
+    html += '<div class="opt-cat"><div class="opt-cat-title">' + catNames[key] + '</div><div class="opt-list">';
+    items.forEach(function(item) {
+      var cls = 'opt-tag';
+      if (highlightCats.has(key)) cls += ' highlight';
+      html += '<span class="' + cls + '">' + item + '</span>';
+    });
+    html += '</div></div>';
+  });
+  grid.innerHTML = html || '<div style="color:#64748b;font-size:13px">No options decoded.</div>';
+}
+
+function requestLookup() {
+  var vin = document.getElementById('vin-input').value.trim().toUpperCase();
+  if (vin.length !== 17) return;
+  _currentVin = vin;
+
+  document.getElementById('options-loading').style.display = 'block';
+  document.getElementById('options-grid').innerHTML = '';
+
+  fetch('/api/tesla-vin/request', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({vin: vin})
+  }).catch(function(){});
+
+  // Poll every 5s for results
+  if (_pollTimer) clearInterval(_pollTimer);
+  _pollTimer = setInterval(function() { pollOptions(vin); }, 5000);
+}
+
+function pollOptions(vin) {
+  if (vin !== _currentVin) { clearInterval(_pollTimer); return; }
+  fetch('/api/tesla-vin/' + encodeURIComponent(vin))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.tesla_options && (d.tesla_options.categories || d.tesla_options.error)) {
+        clearInterval(_pollTimer);
+        renderOptions(d.tesla_options);
+      }
+    })
+    .catch(function(){});
+}
+</script>
+</body>
+</html>

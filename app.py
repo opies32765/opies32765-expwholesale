@@ -8,11 +8,93 @@ import psycopg2
 import psycopg2.extras
 import requests
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, redirect, url_for, send_from_directory
+from flask import Flask, render_template, request, jsonify, redirect, url_for, send_from_directory, session
 from twilio.rest import Client as TwilioClient
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'expwholesale2026!')
+app.permanent_session_lifetime = 86400 * 30  # 30 days
+
+# ── Dashboard login ───────────────────────────────────────────────────────────
+EW_USERNAME = os.environ.get('EW_USERNAME', 'admin')
+EW_PASSWORD = os.environ.get('EW_PASSWORD', 'Sedecrem3')
+
+# Paths that don't require login
+_PUBLIC_PREFIXES = (
+    '/login', '/mobile', '/webhook/', '/static/', '/thumb',
+    '/vauto_reports/', '/service-worker', '/privacy', '/terms',
+    '/api/mobile-submit', '/api/rep-bids', '/api/register-rep',
+    '/api/vauto/', '/api/bid/external', '/api/push-subscribe',
+    '/api/push-unsubscribe', '/api/vapid-public-key',
+    '/.well-known/', '/api/tesla-vin/',
+)
+
+
+@app.route('/.well-known/appspecific/<path:filename>')
+def well_known(filename):
+    return send_from_directory(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', '.well-known', 'appspecific'),
+        filename,
+        mimetype='application/x-pem-file'
+    )
+_PUBLIC_SUFFIXES = ('/rep-message', '/field-update', '/messages', '/messages-poll')
+
+
+@app.before_request
+def require_login():
+    if session.get('logged_in'):
+        return
+    path = request.path
+    if any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+        return
+    if any(path.endswith(s) for s in _PUBLIC_SUFFIXES):
+        return
+    return redirect('/login')
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = None
+    if request.method == 'POST':
+        if (request.form.get('username') == EW_USERNAME and
+                request.form.get('password') == EW_PASSWORD):
+            session.permanent = True
+            session['logged_in'] = True
+            return redirect('/')
+        error = 'Invalid credentials'
+    return f'''<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Login — Experience Wholesale</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;display:flex;align-items:center;justify-content:center;height:100vh}}
+.login-card{{background:#111827;border:1px solid #1e293b;border-radius:16px;padding:40px;width:360px;max-width:90vw}}
+.logo{{text-align:center;margin-bottom:28px}}
+.logo-mark{{display:inline-flex;align-items:center;justify-content:center;width:48px;height:48px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:12px;font-size:22px;font-weight:800;color:#fff;margin-bottom:10px}}
+.logo-text{{display:block;font-size:17px;font-weight:700;color:#f1f5f9}}
+.logo-sub{{display:block;font-size:12px;color:#475569;margin-top:2px}}
+label{{display:block;font-size:12px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px;margin-top:18px}}
+input{{width:100%;padding:10px 14px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;color:#e2e8f0;font-size:15px;font-family:inherit}}
+input:focus{{outline:none;border-color:#3b82f6}}
+button{{width:100%;padding:12px;margin-top:24px;background:#3b82f6;border:none;border-radius:8px;color:#fff;font-size:15px;font-weight:600;cursor:pointer;font-family:inherit}}
+button:hover{{background:#2563eb}}
+.error{{color:#f87171;font-size:13px;text-align:center;margin-top:12px}}
+</style></head><body>
+<div class="login-card">
+<div class="logo"><div class="logo-mark">EW</div><span class="logo-text">Experience Wholesale</span><span class="logo-sub">Buy Center</span></div>
+<form method="post">
+<label>Username</label><input type="text" name="username" autofocus>
+<label>Password</label><input type="password" name="password">
+<button type="submit">Sign In</button>
+{'<p class="error">' + error + '</p>' if error else ''}
+</form></div></body></html>'''
+
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/login')
+
 
 _FIELD_PREFIXES = ('Rep:', 'VIN:', 'Mileage:', 'Asking:')
 
@@ -2435,6 +2517,391 @@ def api_verify_comps():
                 results[vin] = {'status': 'error'}
 
     return jsonify({'results': results})
+
+
+# ---------------------------------------------------------------------------
+# Tesla VIN Decoder
+# ---------------------------------------------------------------------------
+TESLA_MODELS = {'S': 'Model S', 'X': 'Model X', '3': 'Model 3', 'Y': 'Model Y', 'C': 'Cybertruck', 'R': 'Roadster'}
+
+TESLA_BODY = {
+    'A': '5-door Hatchback/Sedan LHD',
+    'B': '5-door Hatchback/Sedan RHD',
+    'C': 'MPV Class E LHD',
+    'D': 'MPV Class D LHD',
+    'E': '4-door Sedan LHD',
+    'F': '4-door Sedan RHD',
+    'G': 'MPV Class D',
+}
+
+TESLA_BATTERY = {
+    'E': 'Standard/Extended Range (NCA/NMC)',
+    'F': 'Lithium Iron Phosphate (LFP)',
+    'H': 'High Capacity LFP',
+    'S': 'Standard Capacity',
+    'V': 'Very High Capacity (NCA/NMC)',
+}
+
+TESLA_MOTOR = {
+    '3': {'A': 'Single Motor (Standard)', 'B': 'Dual Motor AWD', 'C': 'Dual Motor Performance',
+           'J': 'Single Motor (Hairpin)', 'K': 'Dual Motor (Hairpin)', 'L': 'Performance (Hairpin)'},
+    'Y': {'D': 'Single Motor (Standard)', 'E': 'Dual Motor AWD', 'F': 'Dual Motor Performance',
+           'J': 'Single Motor (Hairpin)', 'K': 'Dual Motor (Hairpin)', 'L': 'Performance (Hairpin)'},
+    'S': {'1': 'Single Motor (60/70/85)', '2': 'Dual Motor AWD', '3': 'Dual Motor Performance',
+           '4': 'Dual Motor Performance (Ludicrous)', '5': 'Dual Motor', '6': 'Tri Motor (Plaid)',
+           'A': 'Single Motor', 'B': 'Dual Motor', 'C': 'Dual Motor Performance'},
+    'X': {'1': 'Single Motor', '2': 'Dual Motor AWD', '3': 'Dual Motor Performance',
+           '4': 'Dual Motor Performance (Ludicrous)', '5': 'Dual Motor', '6': 'Tri Motor (Plaid)',
+           'A': 'Single Motor', 'B': 'Dual Motor', 'C': 'Dual Motor Performance'},
+    'C': {'D': 'Dual Motor AWD', 'E': 'Tri Motor', 'F': 'Single Motor (Foundation)'},
+}
+
+TESLA_YEAR = {
+    'A': 2010, 'B': 2011, 'C': 2012, 'D': 2013, 'E': 2014, 'F': 2015,
+    'G': 2016, 'H': 2017, 'J': 2018, 'K': 2019, 'L': 2020, 'M': 2021,
+    'N': 2022, 'P': 2023, 'R': 2024, 'S': 2025, 'T': 2026, 'V': 2027,
+}
+
+TESLA_PLANT = {
+    'A': 'Austin, TX (Giga Texas)',
+    'B': 'Berlin, Germany (Giga Berlin)',
+    'C': 'Shanghai, China (Giga Shanghai)',
+    'F': 'Fremont, CA',
+    'N': 'Reno, NV (Gigafactory 1)',
+}
+
+TESLA_WMI = {
+    '5YJ': 'Tesla USA (Fremont)',
+    '7SA': 'Tesla USA (Fremont)',
+    '7G2': 'Tesla USA (Trucks)',
+    'LRW': 'Tesla China (Shanghai)',
+    'XP7': 'Tesla Germany (Berlin)',
+    'SFZ': 'Tesla UK',
+}
+
+
+# Base MSRP by (model_code, motor_key, year). motor_key derived from trim.
+# Sources: Tesla.com historical pricing, press releases, community records.
+TESLA_MSRP = {
+    # Model 3
+    ('3', 'SR', 2018): 35000, ('3', 'SR', 2019): 35000, ('3', 'SR', 2020): 37990,
+    ('3', 'SR', 2021): 39490, ('3', 'SR', 2022): 46990, ('3', 'SR', 2023): 40240,
+    ('3', 'SR', 2024): 38990, ('3', 'SR', 2025): 38990,
+    ('3', 'LR', 2018): 49000, ('3', 'LR', 2019): 48990, ('3', 'LR', 2020): 46990,
+    ('3', 'LR', 2021): 48490, ('3', 'LR', 2022): 55990, ('3', 'LR', 2023): 47240,
+    ('3', 'LR', 2024): 45990, ('3', 'LR', 2025): 45990,
+    ('3', 'P', 2018): 64000, ('3', 'P', 2019): 56990, ('3', 'P', 2020): 54990,
+    ('3', 'P', 2021): 56490, ('3', 'P', 2022): 62990, ('3', 'P', 2023): 53240,
+    ('3', 'P', 2024): 52990, ('3', 'P', 2025): 52990,
+    # Model Y
+    ('Y', 'SR', 2020): 39990, ('Y', 'SR', 2021): 41990, ('Y', 'SR', 2022): 47990,
+    ('Y', 'SR', 2023): 43990, ('Y', 'SR', 2024): 44990, ('Y', 'SR', 2025): 44990,
+    ('Y', 'LR', 2020): 49990, ('Y', 'LR', 2021): 53990, ('Y', 'LR', 2022): 59990,
+    ('Y', 'LR', 2023): 50490, ('Y', 'LR', 2024): 48990, ('Y', 'LR', 2025): 48990,
+    ('Y', 'P', 2020): 59990, ('Y', 'P', 2021): 60990, ('Y', 'P', 2022): 67990,
+    ('Y', 'P', 2023): 54490, ('Y', 'P', 2024): 52490, ('Y', 'P', 2025): 52490,
+    # Model S
+    ('S', 'SR', 2014): 64000, ('S', 'SR', 2015): 70000,
+    ('S', 'SR', 2016): 66000, ('S', 'SR', 2017): 68000, ('S', 'SR', 2018): 74500,
+    ('S', 'SR', 2019): 79990, ('S', 'LR', 2016): 75000, ('S', 'LR', 2017): 78000,
+    ('S', 'LR', 2018): 82500, ('S', 'LR', 2019): 87490,
+    ('S', 'LR', 2020): 74990, ('S', 'LR', 2021): 79990,
+    ('S', 'LR', 2022): 94990, ('S', 'LR', 2023): 89990, ('S', 'LR', 2024): 74990,
+    ('S', 'LR', 2025): 74990,
+    ('S', 'P', 2016): 108000, ('S', 'P', 2017): 115000, ('S', 'P', 2018): 115000,
+    ('S', 'P', 2019): 99990, ('S', 'P', 2020): 94990,
+    ('S', 'Plaid', 2021): 129990, ('S', 'Plaid', 2022): 135990,
+    ('S', 'Plaid', 2023): 108990, ('S', 'Plaid', 2024): 89990, ('S', 'Plaid', 2025): 89990,
+    # Model X
+    ('X', 'SR', 2016): 80000, ('X', 'SR', 2017): 83000, ('X', 'SR', 2018): 84990,
+    ('X', 'SR', 2019): 84990, ('X', 'LR', 2016): 93500, ('X', 'LR', 2017): 96000,
+    ('X', 'LR', 2018): 97500, ('X', 'LR', 2019): 94990,
+    ('X', 'LR', 2020): 79990, ('X', 'LR', 2021): 89990,
+    ('X', 'LR', 2022): 104990, ('X', 'LR', 2023): 98990, ('X', 'LR', 2024): 79990,
+    ('X', 'LR', 2025): 79990,
+    ('X', 'P', 2016): 115000, ('X', 'P', 2017): 120000, ('X', 'P', 2018): 118000,
+    ('X', 'P', 2019): 104990, ('X', 'P', 2020): 99990,
+    ('X', 'Plaid', 2021): 119990, ('X', 'Plaid', 2022): 138990,
+    ('X', 'Plaid', 2023): 109990, ('X', 'Plaid', 2024): 94990, ('X', 'Plaid', 2025): 94990,
+    # Cybertruck
+    ('C', 'SR', 2024): 60990, ('C', 'SR', 2025): 60990,
+    ('C', 'LR', 2024): 79990, ('C', 'LR', 2025): 79990,
+    ('C', 'P', 2024): 99990, ('C', 'P', 2025): 99990,
+}
+
+
+def _tesla_msrp_key(model_code, motor_str):
+    """Map motor description to MSRP lookup key."""
+    m = motor_str.lower()
+    if 'plaid' in m or 'tri motor' in m:
+        return 'Plaid'
+    if 'performance' in m or 'ludicrous' in m:
+        return 'P'
+    if 'dual' in m:
+        return 'LR'
+    if 'single' in m:
+        return 'SR'
+    return 'SR'
+
+
+def decode_tesla_vin(vin):
+    """Decode a Tesla VIN into human-readable configuration."""
+    if not vin or len(vin) != 17:
+        return None
+
+    vin = vin.upper()
+    wmi = vin[:3]
+    if wmi not in TESLA_WMI:
+        return None  # not a Tesla
+
+    model_code = vin[3]
+    body_code = vin[4]
+    battery_code = vin[6]
+    motor_code = vin[7]
+    year_code = vin[9]
+    plant_code = vin[10]
+    serial = vin[11:]
+
+    model = TESLA_MODELS.get(model_code, f'Unknown ({model_code})')
+    body = TESLA_BODY.get(body_code, f'Unknown ({body_code})')
+    battery = TESLA_BATTERY.get(battery_code, f'Unknown ({battery_code})')
+
+    # Motor is model-dependent
+    motor_map = TESLA_MOTOR.get(model_code, {})
+    motor = motor_map.get(motor_code, f'Unknown ({motor_code})')
+
+    year = TESLA_YEAR.get(year_code, f'Unknown ({year_code})')
+    plant = TESLA_PLANT.get(plant_code, f'Unknown ({plant_code})')
+    manufacturer = TESLA_WMI.get(wmi, wmi)
+
+    # Derive trim name
+    trim = model
+    if 'Performance' in motor or 'Plaid' in motor:
+        trim += ' Performance' if 'Performance' in motor else ' Plaid'
+    elif 'Dual Motor' in motor or 'Tri Motor' in motor:
+        trim += ' Long Range AWD' if 'Dual' in motor else ' Tri Motor'
+    elif 'Single Motor' in motor:
+        trim += ' Standard Range'
+
+    # Drive type
+    if 'Dual' in motor or 'Tri' in motor or 'AWD' in motor:
+        drive = 'All-Wheel Drive'
+    else:
+        drive = 'Rear-Wheel Drive'
+
+    # MSRP lookup
+    msrp_key = _tesla_msrp_key(model_code, motor)
+    msrp = TESLA_MSRP.get((model_code, msrp_key, year))
+
+    return {
+        'vin': vin,
+        'manufacturer': manufacturer,
+        'model': model,
+        'trim': trim,
+        'body': body,
+        'battery': battery,
+        'motor': motor,
+        'drive': drive,
+        'year': year,
+        'plant': plant,
+        'serial': serial,
+        'msrp': msrp,
+        'raw': {
+            'wmi': wmi, 'model': model_code, 'body': body_code,
+            'restraint': vin[5], 'battery': battery_code,
+            'motor': motor_code, 'check': vin[8],
+            'year': year_code, 'plant': plant_code,
+        }
+    }
+
+
+# ── Tesla Fleet API ───────────────────────────────────────────────────────────
+TESLA_CLIENT_ID = os.environ.get('TESLA_CLIENT_ID', '434873df-71ed-45f7-9bcf-1f1a4a45b171')
+TESLA_CLIENT_SECRET = os.environ.get('TESLA_CLIENT_SECRET', 'ta-secret.CYv2CB&F2_G-2Dnn')
+TESLA_TOKEN_URL = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token'
+TESLA_FLEET_URL = 'https://fleet-api.prd.na.vn.cloud.tesla.com'
+
+_tesla_token_cache = {'token': None, 'expires': 0}
+
+
+def _get_tesla_partner_token():
+    """Get or refresh Tesla partner token (machine-to-machine)."""
+    import time
+    if _tesla_token_cache['token'] and time.time() < _tesla_token_cache['expires'] - 60:
+        return _tesla_token_cache['token']
+
+    try:
+        data = {
+            'grant_type': 'client_credentials',
+            'client_id': TESLA_CLIENT_ID,
+            'client_secret': TESLA_CLIENT_SECRET,
+            'scope': 'vehicle_device_data vehicle_specs',
+            'audience': TESLA_FLEET_URL,
+        }
+        resp = requests.post(TESLA_TOKEN_URL, data=data, timeout=15)
+        if resp.status_code != 200:
+            print(f'Tesla token error: {resp.status_code} {resp.text[:200]}')
+            return None
+        token_data = resp.json()
+        _tesla_token_cache['token'] = token_data['access_token']
+        _tesla_token_cache['expires'] = time.time() + token_data.get('expires_in', 3600)
+        return _tesla_token_cache['token']
+    except Exception as e:
+        print(f'Tesla token request failed: {e}')
+        return None
+
+
+def _tesla_fleet_vehicle_specs(vin):
+    """Call Tesla Fleet API /vehicles/{vin}/specs for full factory options."""
+    token = _get_tesla_partner_token()
+    if not token:
+        return None
+
+    try:
+        resp = requests.get(
+            f'{TESLA_FLEET_URL}/api/1/vehicles/{vin}/specs',
+            headers={'Authorization': f'Bearer {token}'},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        print(f'Tesla Fleet API error: {resp.status_code} {resp.text[:200]}')
+        return None
+    except Exception as e:
+        print(f'Tesla Fleet API request failed: {e}')
+        return None
+
+
+# ── Tesla VIN options cache (DB-backed) ───────────────────────────────────────
+def _ensure_tesla_table():
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tesla_vin_cache (
+                vin VARCHAR(17) PRIMARY KEY,
+                options_json JSONB,
+                source VARCHAR(50),
+                looked_up_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+_ensure_tesla_table()
+
+
+@app.route('/tesla-vin')
+def tesla_vin_page():
+    return render_template('tesla_vin.html')
+
+
+@app.route('/api/tesla-vin/<vin>')
+def api_tesla_vin(vin):
+    vin = vin.upper().strip()
+    result = decode_tesla_vin(vin)
+    if not result:
+        return jsonify({'error': 'Not a valid Tesla VIN'}), 400
+
+    # NHTSA data
+    nhtsa = decode_vin(vin)
+    if nhtsa:
+        result['nhtsa'] = nhtsa
+
+    # Check DB cache first
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("SELECT options_json, source FROM tesla_vin_cache WHERE vin=%s", (vin,))
+        row = cur.fetchone()
+        db.close()
+        if row and row['options_json'] and row['source'] == 'tesla-fleet-api':
+            result['fleet_specs'] = row['options_json']
+            return jsonify(result)
+        if row and row['options_json']:
+            result['tesla_options'] = row['options_json']
+    except Exception:
+        pass
+
+    # Try Tesla Fleet API (authoritative, $0.10/call)
+    specs = _tesla_fleet_vehicle_specs(vin)
+    if specs and specs.get('response'):
+        fleet_data = specs['response']
+        result['fleet_specs'] = fleet_data
+        # Cache in DB
+        try:
+            db = get_db()
+            cur = db.cursor()
+            cur.execute("""
+                INSERT INTO tesla_vin_cache (vin, options_json, source, looked_up_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (vin) DO UPDATE SET
+                    options_json=EXCLUDED.options_json, source=EXCLUDED.source, looked_up_at=NOW()
+            """, (vin, json.dumps(fleet_data), 'tesla-fleet-api'))
+            db.commit()
+            db.close()
+        except Exception:
+            pass
+
+    return jsonify(result)
+
+
+@app.route('/api/tesla-vin/pending')
+def api_tesla_vin_pending():
+    """Return VINs that need tesla-info lookup (requested but not cached)."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT vin FROM tesla_vin_cache
+        WHERE options_json IS NULL
+        ORDER BY looked_up_at ASC LIMIT 5
+    """)
+    rows = cur.fetchall()
+    db.close()
+    return jsonify({'pending': [r['vin'] for r in rows]})
+
+
+@app.route('/api/tesla-vin/request', methods=['POST'])
+def api_tesla_vin_request():
+    """Queue a VIN for tesla-info lookup."""
+    data = request.json or {}
+    vin = (data.get('vin') or '').upper().strip()
+    if not vin or len(vin) != 17:
+        return jsonify({'error': 'invalid VIN'}), 400
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO tesla_vin_cache (vin) VALUES (%s)
+        ON CONFLICT (vin) DO NOTHING
+    """, (vin,))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'vin': vin})
+
+
+@app.route('/api/tesla-vin/submit', methods=['POST'])
+def api_tesla_vin_submit():
+    """Accept tesla-info results from Beelink worker."""
+    data = request.json or {}
+    vin = (data.get('vin') or '').upper().strip()
+    options = data.get('options')
+    if not vin or not options:
+        return jsonify({'error': 'missing vin or options'}), 400
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO tesla_vin_cache (vin, options_json, source, looked_up_at)
+        VALUES (%s, %s, %s, NOW())
+        ON CONFLICT (vin) DO UPDATE SET
+            options_json=EXCLUDED.options_json,
+            source=EXCLUDED.source,
+            looked_up_at=NOW()
+    """, (vin, json.dumps(options), data.get('source', 'tesla-info')))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'vin': vin})
 
 
 # ---------------------------------------------------------------------------
