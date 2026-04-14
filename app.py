@@ -1097,6 +1097,14 @@ def _run_assessment(bid_id):
 
 Based on all the data above — book values, photos, Carfax, AutoCheck, history, and market listings — what should we pay for this vehicle at wholesale?
 
+IMPORTANT RULES:
+- Open recalls are FREE (manufacturer pays). NEVER dock for recall costs.
+- Cosmetic cleaning (detail, wash) costs $200-400 max. Do not inflate.
+- LOOK AT THE TIRE PHOTOS CAREFULLY before claiming tires need replacement. Only dock if you can SEE visible wear, bald spots, or damage. Good-looking tires = no dock.
+- Only dock for REAL mechanical/body issues you can verify in photos or reports.
+- SHOW YOUR MATH. State the anchor value (MMR, Black Book, or avg wholesale), subtract specific dollar amounts for specific issues, show the calculation that leads to your buy price. No vague "targeting below X for margin".
+- DO NOT subtract any "margin buffer" or "wholesale margin". Give the TRUE wholesale market value minus only real condition issues. The team decides their own margin per deal.
+
 Keep it under 200 words. End with:
 Max wholesale buy price: **$X,XXX**"""
 

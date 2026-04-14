@@ -676,14 +676,14 @@ function toggleAssess() {
   const bar     = document.getElementById('assess-summary-bar');
   const hint = `<span style="color:#64748b;font-weight:400;font-size:12px">tap to ${assessExpanded ? 'collapse' : 'expand'}</span>`;
   if (assessExpanded) {
-    body.classList.remove('collapsed');
-    body.classList.add('expanded');
+    body.classList.remove("collapsed"); body.classList.add("expanded");
+    
     chevron.classList.add('open');
     if (AI_PRICE) bar.innerHTML = `✦ Buy Price: $${Math.round(AI_PRICE).toLocaleString()} &nbsp;·&nbsp; ${hint}`;
     else if (AI_ASSESSMENT) bar.innerHTML = `✦ Assessment complete &nbsp;·&nbsp; ${hint}`;
   } else {
-    body.classList.remove('expanded');
-    body.classList.add('collapsed');
+    body.classList.remove("expanded"); body.classList.add("collapsed");
+    
     chevron.classList.remove('open');
     updateSummaryBar();
   }
