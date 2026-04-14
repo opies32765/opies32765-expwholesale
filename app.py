@@ -509,9 +509,6 @@ def bid_detail(bid_id):
     if bid['vin'] and bid['market_check'] is None:
         trigger_market_check(bid_id, bid['vin'])
 
-    # DIA lookup — synchronous, fast direct DB query
-    dia_data = dia_vin_lookup(bid['vin']) if bid['vin'] else None
-
     # vAuto lookup data
     cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid_id,))
     vauto_data = cur.fetchone()
@@ -519,7 +516,7 @@ def bid_detail(bid_id):
     db.close()
     return render_template('bid.html', bid=bid, photos=photos,
                            messages=messages, valuations=valuations,
-                           dia_data=dia_data, vauto_data=vauto_data,
+                           vauto_data=vauto_data,
                            ai_assessment=bid.get('ai_assessment'),
                            time_ago=time_ago)
 
