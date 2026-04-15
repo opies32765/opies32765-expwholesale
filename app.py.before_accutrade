@@ -24,8 +24,7 @@ _PUBLIC_PREFIXES = (
     '/login', '/mobile', '/webhook/', '/static/', '/thumb',
     '/vauto_reports/', '/service-worker', '/privacy', '/terms',
     '/api/mobile-submit', '/api/rep-bids', '/api/register-rep',
-    '/api/vauto/', '/api/accutrade/', '/accutrade_reports/',
-    '/api/bid/external', '/api/push-subscribe',
+    '/api/vauto/', '/api/bid/external', '/api/push-subscribe',
     '/api/push-unsubscribe', '/api/vapid-public-key',
     '/.well-known/', '/api/tesla-vin/', '/share/',
 )
@@ -674,6 +673,10 @@ def bid_detail(bid_id):
             db.commit()
             bid = dict(bid)
             bid.update(decoded)
+
+    # Auto-trigger market check if VIN exists but no check done yet
+    if bid['vin'] and bid['market_check'] is None:
+        trigger_market_check(bid_id, bid['vin'])
 
     # vAuto lookup data
     cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid_id,))
@@ -1592,16 +1595,11 @@ def api_bids():
         stats['total'] += int(r['cnt'])
     cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE created_at::date = CURRENT_DATE")
     stats['today'] = int(cur.fetchone()['cnt'])
-    cur.execute("SELECT status, COUNT(*) as cnt FROM bids WHERE created_at::date = CURRENT_DATE GROUP BY status")
-    for r in cur.fetchall():
-        stats[f'today_{r["status"]}'] = int(r['cnt'])
     cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE phone LIKE 'field:%'")
     stats['field'] = int(cur.fetchone()['cnt'])
 
     conditions, params = [], []
-    if status_filter == 'today':
-        conditions.append("b.created_at::date = CURRENT_DATE")
-    elif status_filter == 'field':
+    if status_filter == 'field':
         conditions.append("b.phone LIKE 'field:%'")
     elif status_filter != 'all':
         conditions.append("b.status = %s")
@@ -1999,8 +1997,8 @@ def mobile_submit():
 
     cur.execute("""
         INSERT INTO bids (contact_id, phone, vin, mileage, year, make, model, trim, color,
-                          raw_message, asking_price, notes, status, has_unread)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new', TRUE) RETURNING id
+                          raw_message, asking_price, notes, status)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new') RETURNING id
     """, (contact_id, rep_phone, vin, mileage,
           decoded_vin.get('year'), decoded_vin.get('make'),
           decoded_vin.get('model'), decoded_vin.get('trim'),
@@ -3586,122 +3584,6 @@ def _ensure_share_columns():
         pass
 
 _ensure_share_columns()
-
-
-@app.route('/reports')
-def reports_page():
-    return render_template('reports.html')
-
-
-@app.route('/api/reports')
-def api_reports():
-    """Return bid stats for the selected period."""
-    period = request.args.get('period', 'this_week')
-    db = get_db()
-    cur = db.cursor()
-
-    # Build date range based on period
-    if period == 'today':
-        where = "created_at::date = CURRENT_DATE"
-        group_by = "date_trunc('hour', created_at)"
-        fmt = 'hour'
-    elif period == 'yesterday':
-        where = "created_at::date = CURRENT_DATE - 1"
-        group_by = "date_trunc('hour', created_at)"
-        fmt = 'hour'
-    elif period == 'this_week':
-        where = "created_at >= date_trunc('week', CURRENT_DATE)"
-        group_by = "created_at::date"
-        fmt = 'day'
-    elif period == 'last_week':
-        where = "created_at >= date_trunc('week', CURRENT_DATE) - INTERVAL '7 days' AND created_at < date_trunc('week', CURRENT_DATE)"
-        group_by = "created_at::date"
-        fmt = 'day'
-    elif period == 'this_month':
-        where = "created_at >= date_trunc('month', CURRENT_DATE)"
-        group_by = "created_at::date"
-        fmt = 'day'
-    elif period == 'last_month':
-        where = "created_at >= date_trunc('month', CURRENT_DATE) - INTERVAL '1 month' AND created_at < date_trunc('month', CURRENT_DATE)"
-        group_by = "created_at::date"
-        fmt = 'day'
-    elif period == 'last_90':
-        where = "created_at >= NOW() - INTERVAL '90 days'"
-        group_by = "date_trunc('week', created_at)"
-        fmt = 'week'
-    elif period == 'this_year':
-        where = "created_at >= date_trunc('year', CURRENT_DATE)"
-        group_by = "date_trunc('month', created_at)"
-        fmt = 'month'
-    else:  # last_30
-        where = "created_at >= NOW() - INTERVAL '30 days'"
-        group_by = "created_at::date"
-        fmt = 'day'
-
-    cur.execute(f"""
-        SELECT {group_by} as period, status, COUNT(*) as cnt
-        FROM bids WHERE {where}
-        GROUP BY period, status ORDER BY period
-    """)
-    rows = cur.fetchall()
-
-    from collections import OrderedDict
-    data = OrderedDict()
-    for r in rows:
-        if fmt == 'hour':
-            d = r['period'].strftime('%H:%M') if hasattr(r['period'], 'strftime') else str(r['period'])
-        elif fmt == 'month':
-            d = r['period'].strftime('%Y-%m') if hasattr(r['period'], 'strftime') else str(r['period'])
-        else:
-            d = r['period'].strftime('%Y-%m-%d') if hasattr(r['period'], 'strftime') else str(r['period'])
-        if d not in data:
-            data[d] = {'new': 0, 'reviewing': 0, 'bid_sent': 0, 'bought': 0, 'passed': 0, 'total': 0}
-        data[d][r['status']] = int(r['cnt'])
-        data[d]['total'] += int(r['cnt'])
-
-    cur.execute(f"SELECT status, COUNT(*) as cnt FROM bids WHERE {where} GROUP BY status")
-    totals = {'new': 0, 'reviewing': 0, 'bid_sent': 0, 'bought': 0, 'passed': 0, 'total': 0}
-    for r in cur.fetchall():
-        totals[r['status']] = int(r['cnt'])
-        totals['total'] += int(r['cnt'])
-
-    if totals['total'] > 0:
-        totals['buy_rate'] = round(totals['bought'] / totals['total'] * 100, 1)
-        totals['pass_rate'] = round(totals['passed'] / totals['total'] * 100, 1)
-    else:
-        totals['buy_rate'] = 0
-        totals['pass_rate'] = 0
-
-    # Date range label
-    cur.execute(f"SELECT MIN(created_at)::date as start_date, MAX(created_at)::date as end_date FROM bids WHERE {where}")
-    range_row = cur.fetchone()
-    range_label = ''
-    if range_row and range_row['start_date']:
-        s = range_row['start_date'].strftime('%b %d, %Y')
-        e = range_row['end_date'].strftime('%b %d, %Y')
-        range_label = f'{s} — {e}' if s != e else s
-
-    cur.execute(f"""
-        SELECT c.name, COUNT(*) as cnt,
-               COUNT(*) FILTER (WHERE b.status='bought') as bought,
-               COUNT(*) FILTER (WHERE b.status='passed') as passed,
-               COUNT(*) FILTER (WHERE b.status='bid_sent') as sent
-        FROM bids b LEFT JOIN contacts c ON b.contact_id = c.id
-        WHERE {where.replace('created_at', 'b.created_at')} AND b.phone LIKE 'field:%%'
-        GROUP BY c.name ORDER BY cnt DESC LIMIT 10
-    """)
-    reps = [dict(r) for r in cur.fetchall()]
-
-    db.close()
-    return jsonify({
-        'labels': list(data.keys()),
-        'series': data,
-        'totals': totals,
-        'reps': reps,
-        'period': period,
-        'fmt': fmt,
-        'range_label': range_label,
-    })
 
 
 @app.route('/api/share-contacts', methods=['GET'])

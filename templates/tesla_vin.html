@@ -218,12 +218,12 @@ function renderFleetSpecs(fs) {
     ['Wheels', fs.wheelsCode],
     ['Trim', fs.trim],
     ['Autopilot Hardware', fs.autopilotHardwareCode],
+    ['Production Date', fs.productionDate ? fs.productionDate.split('T')[0] : null],
     ['Drive', fs.typeOfDrive],
     ['Body', fs.bodyType],
     ['Seats', fs.numberOfSeats],
     ['Roof', (fs.equipmentPrice || []).filter(function(e){ return e.code && e.code.indexOf('RF') === 1; }).map(function(e){ return e.name; }).join(', ')],
     ['Towing', fs.towingCode],
-    ['Production Date', fs.productionDate ? fs.productionDate.split('T')[0] : null],
     ['Country', fs.countryOfOrigin],
   ];
 
@@ -239,7 +239,7 @@ function renderFleetSpecs(fs) {
   // ── Autopilot / FSD Summary ──
   var activeSw = (fs.autopilotSoftwareCode || '').toLowerCase();
   var hasFsdEquip = false;
-  var fsdPrice = 0;
+  var fsdPrice = -1;
   (fs.equipmentPrice || []).forEach(function(e) {
     var n = (e.name || '').toLowerCase();
     if (n.indexOf('full self') >= 0 || n.indexOf('fsd') >= 0) {
@@ -247,24 +247,32 @@ function renderFleetSpecs(fs) {
       fsdPrice = e.price || 0;
     }
   });
+  var fsdFirmwareActive = activeSw.indexOf('premium') >= 0 || activeSw.indexOf('full self') >= 0 || activeSw.indexOf('fsd') >= 0;
 
   var apStatus, apColor, apBorder, apNote;
-  if (activeSw.indexOf('base') >= 0 && !hasFsdEquip) {
-    apStatus = 'Basic Autopilot';
-    apColor = '#94a3b8'; apBorder = '#1e293b';
-    apNote = 'TACC + Autosteer only. No FSD.';
-  } else if (activeSw.indexOf('base') >= 0 && hasFsdEquip) {
-    apStatus = 'FSD NOT ACTIVE';
+  if (fsdFirmwareActive && hasFsdEquip && fsdPrice === 0) {
+    // FSD at $0 = purchased/included (factory, Foundation Series, etc)
+    apStatus = 'FSD Purchased';
+    apColor = '#4ade80'; apBorder = '#166534';
+    apNote = 'Full Self-Driving is purchased and included in the vehicle price. Transfers with the car.';
+  } else if (fsdFirmwareActive && (!hasFsdEquip || fsdPrice > 0)) {
+    // FSD firmware active but not $0 in equipment = likely subscription
+    apStatus = 'FSD Active — Likely Subscription';
+    apColor = '#fbbf24'; apBorder = '#78350f';
+    apNote = 'FSD firmware is active but was not included at $0 in factory equipment. This is likely a $99/mo subscription which does NOT transfer with the car. Verify with seller — ask for proof of purchase.';
+  } else if (activeSw.indexOf('base') >= 0 && hasFsdEquip && fsdPrice > 0) {
+    // FSD in equipment at full price but running Base = not active
+    apStatus = 'FSD Not Active';
     apColor = '#f87171'; apBorder = '#7f1d1d';
-    apNote = 'FSD was configured at factory ($' + fsdPrice.toLocaleString() + ') but is not currently active. May have been transferred or never activated.';
+    apNote = 'FSD was configured at factory ($' + fsdPrice.toLocaleString() + ') but is not currently active. May have been removed at resale, transferred, or never activated. No FSD value.';
   } else if (activeSw.indexOf('enhanced') >= 0) {
     apStatus = 'Enhanced Autopilot';
     apColor = '#60a5fa'; apBorder = '#1e3a5f';
-    apNote = 'Navigate on Autopilot, auto lane change, summon. FSD not included.';
-  } else if (activeSw.indexOf('premium') >= 0 || activeSw.indexOf('full self') >= 0 || activeSw.indexOf('fsd') >= 0) {
-    apStatus = 'FSD Detected — Verify with Seller';
-    apColor = '#fbbf24'; apBorder = '#78350f';
-    apNote = 'Tesla reports active FSD firmware, but cannot confirm if purchased outright (transfers with car) or monthly subscription ($99/mo, does NOT transfer). Ask seller for proof of purchase.';
+    apNote = 'Navigate on Autopilot, auto lane change, auto park, summon. FSD not included.';
+  } else if (activeSw.indexOf('base') >= 0 || !activeSw) {
+    apStatus = 'Basic Autopilot';
+    apColor = '#94a3b8'; apBorder = '#1e293b';
+    apNote = 'Traffic-Aware Cruise Control + Autosteer only. No FSD, no Enhanced AP.';
   } else {
     apStatus = fs.autopilotSoftwareCode || 'Unknown';
     apColor = '#94a3b8'; apBorder = '#1e293b';
@@ -277,6 +285,53 @@ function renderFleetSpecs(fs) {
   if (apNote) html += '<div style="font-size:12px;color:#64748b;line-height:1.5">' + apNote + '</div>';
   if (fs.autopilotHardwareCode) html += '<div style="font-size:11px;color:#475569;margin-top:6px">Hardware: ' + fs.autopilotHardwareCode + '</div>';
   html += '</div>';
+
+  // ── Battery Health ──
+  var soh = fs.batterySoH ? parseFloat(fs.batterySoH) : null;
+  var sohTs = fs.batterySoHTimestamp || '';
+  var capKwh = fs.batteryCapacityKwh ? parseFloat(fs.batteryCapacityKwh) : null;
+
+  if (soh !== null) {
+    var bhColor, bhStatus, bhBorder;
+    if (soh >= 90) {
+      bhColor = '#4ade80'; bhBorder = '#166534'; bhStatus = 'Excellent';
+    } else if (soh >= 80) {
+      bhColor = '#60a5fa'; bhBorder = '#1e3a5f'; bhStatus = 'Good';
+    } else if (soh >= 70) {
+      bhColor = '#fbbf24'; bhBorder = '#78350f'; bhStatus = 'Fair — Approaching Warranty Threshold';
+    } else {
+      bhColor = '#f87171'; bhBorder = '#7f1d1d'; bhStatus = 'Poor — Below Warranty Threshold';
+    }
+
+    // Check timestamp freshness
+    var tsNote = '';
+    if (sohTs) {
+      var tsDate = new Date(sohTs);
+      var daysDiff = Math.floor((Date.now() - tsDate.getTime()) / 86400000);
+      var tsStr = tsDate.toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'});
+      if (daysDiff > 30) {
+        tsNote = '<span style="color:#fbbf24;font-weight:600"> — Reading is ' + daysDiff + ' days old, may be stale</span>';
+      } else {
+        tsNote = '<span style="color:#475569"> — Last reported ' + tsStr + '</span>';
+      }
+    }
+
+    html += '<div style="margin-top:14px;padding:14px 16px;background:#0f172a;border:1px solid ' + bhBorder + ';border-radius:10px">';
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><span style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.5px">Battery Health (SoH)</span>';
+    html += '<span style="font-size:14px;font-weight:800;color:' + bhColor + '">' + bhStatus + '</span></div>';
+
+    // Big SoH number + bar
+    html += '<div style="display:flex;align-items:center;gap:16px;margin-bottom:8px">';
+    html += '<span style="font-size:36px;font-weight:800;color:' + bhColor + ';line-height:1">' + soh.toFixed(1) + '%</span>';
+    html += '<div style="flex:1;display:flex;flex-direction:column;gap:6px">';
+    html += '<div style="height:10px;background:#1e293b;border-radius:5px;overflow:hidden"><div style="height:100%;width:' + soh + '%;background:' + bhColor + ';border-radius:5px"></div></div>';
+    if (capKwh) html += '<div style="font-size:12px;color:#64748b">Usable capacity: ' + capKwh.toFixed(1) + ' kWh</div>';
+    html += '</div></div>';
+
+    html += '<div style="font-size:11px;color:#475569">' + tsNote + '</div>';
+    html += '<div style="font-size:11px;color:#334155;margin-top:6px">Tesla BMS data • ±2-3% margin • Warranty threshold: 70% over 8yr/120K mi</div>';
+    html += '</div>';
+  }
 
   // ── Equipment list ──
   var equip = fs.equipmentPrice || [];

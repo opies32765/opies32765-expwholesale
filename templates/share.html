@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+{% set ymm = ((bid.year|string if bid.year else '') ~ ' ' ~ (bid.make or '') ~ ' ' ~ (bid.model or '')).strip() %}
+<title>{{ ymm or ('VIN ' ~ bid.vin[:8] ~ '...') if bid.vin else 'Vehicle Details' }} — Experience Wholesale</title>
+
+<!-- Open Graph for rich link previews in iMessage/WhatsApp -->
+<meta property="og:title" content="{{ ymm ~ (' ' ~ bid.trim if bid.trim else '') if ymm else 'Vehicle Details' }}">
+<meta property="og:description" content="{{ (bid.mileage|int|string ~ ' mi' if bid.mileage else '') }}{{ (' | ' ~ bid.color if bid.color else '') }}{{ ' | VIN: ' ~ bid.vin if bid.vin else '' }}">
+{% if photos %}
+<meta property="og:image" content="{{ 'https://experience-wholesale.net' ~ photos[0].url if photos[0].url.startswith('/') else photos[0].url }}">
+{% endif %}
+<meta property="og:type" content="website">
+
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh}
+
+.header{background:#111827;border-bottom:1px solid #1e293b;padding:16px 20px;text-align:center}
+.header-logo{display:inline-flex;align-items:center;gap:10px}
+.logo-mark{width:32px;height:32px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;color:#fff}
+.logo-text{font-size:14px;font-weight:600;color:#64748b}
+
+.content{max-width:600px;margin:0 auto;padding:0 0 40px}
+
+/* Photos */
+.photo-gallery{position:relative;background:#000;overflow:hidden}
+.photo-main{width:100%;aspect-ratio:4/3;object-fit:cover;display:block}
+.photo-counter{position:absolute;bottom:12px;right:12px;background:rgba(0,0,0,.7);color:#fff;font-size:12px;font-weight:600;padding:4px 10px;border-radius:6px}
+.photo-thumbs{display:flex;gap:2px;overflow-x:auto;background:#111827;padding:2px}
+.photo-thumbs img{width:72px;height:54px;object-fit:cover;flex-shrink:0;cursor:pointer;opacity:.6;transition:opacity .15s}
+.photo-thumbs img:hover,.photo-thumbs img.active{opacity:1}
+.no-photos{padding:60px 20px;text-align:center;background:#111827;color:#475569;font-size:14px}
+
+/* Vehicle info */
+.vehicle-header{padding:20px;background:#111827;border-bottom:1px solid #1e293b}
+.vehicle-ymm{font-size:24px;font-weight:800;color:#fff;line-height:1.2}
+.vehicle-trim{font-size:16px;color:#94a3b8;font-weight:500;margin-top:2px}
+.vehicle-vin{font-size:14px;color:#64748b;font-family:monospace;letter-spacing:.5px;margin-top:8px}
+
+/* Detail cards */
+.details{padding:16px 20px;display:flex;flex-direction:column;gap:12px}
+.detail-card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:16px 18px}
+.card-title{font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.7px;margin-bottom:12px}
+.detail-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #1e293b}
+.detail-row:last-child{border-bottom:none}
+.detail-label{font-size:13px;color:#64748b;font-weight:500}
+.detail-value{font-size:14px;color:#e2e8f0;font-weight:600;text-align:right}
+.detail-value.green{color:#4ade80}
+.detail-value.yellow{color:#fbbf24}
+.detail-value.red{color:#f87171}
+
+/* Asking price banner */
+.asking-bar{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:18px;text-align:center}
+.asking-label{font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.asking-amount{font-size:28px;font-weight:800;color:#fff}
+
+/* Report screenshots */
+.report-card{background:#111827;border:1px solid #1e293b;border-radius:12px;overflow:hidden}
+.report-label{font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.7px;padding:14px 18px 0}
+.report-img{width:100%;cursor:pointer;display:block;border-top:1px solid #1e293b;margin-top:10px}
+
+/* Notes */
+.notes-card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:16px 18px}
+.notes-title{font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.7px;margin-bottom:10px}
+.notes-text{font-size:14px;color:#94a3b8;line-height:1.6;white-space:pre-wrap}
+
+/* Lightbox */
+.lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:999;align-items:center;justify-content:center;cursor:pointer}
+.lightbox.show{display:flex}
+.lightbox img{max-width:95vw;max-height:95vh;object-fit:contain}
+
+/* Footer */
+.footer{text-align:center;padding:32px 20px;color:#334155;font-size:12px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-logo">
+    <div class="logo-mark">EW</div>
+    <span class="logo-text">Experience Wholesale</span>
+  </div>
+</div>
+
+<div class="content">
+
+  <!-- Photos -->
+  {% if photos %}
+  <div class="photo-gallery">
+    <img class="photo-main" id="mainPhoto"
+         src="{{ photos[0].url if not photos[0].url.startswith('/static') else '/thumb?size=full&url=' ~ photos[0].url }}"
+         alt="Vehicle photo"
+         onclick="openLightbox(this.src)">
+    {% if photos|length > 1 %}
+    <div class="photo-counter" id="photoCounter">1 / {{ photos|length }}</div>
+    {% endif %}
+  </div>
+  {% if photos|length > 1 %}
+  <div class="photo-thumbs" id="thumbStrip">
+    {% for p in photos %}
+    <img src="{{ p.url if not p.url.startswith('/static') else '/thumb?size=mobile&url=' ~ p.url }}"
+         data-full="{{ p.url if not p.url.startswith('/static') else '/thumb?size=full&url=' ~ p.url }}"
+         class="{{ 'active' if loop.index0 == 0 else '' }}"
+         data-idx="{{ loop.index0 }}">
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% else %}
+  <div class="no-photos">No photos available</div>
+  {% endif %}
+
+  <!-- Vehicle header -->
+  <div class="vehicle-header">
+    {% if ymm %}
+    <div class="vehicle-ymm">{{ ymm }}</div>
+    {% endif %}
+    {% if bid.trim %}
+    <div class="vehicle-trim">{{ bid.trim }}</div>
+    {% endif %}
+    {% if bid.vin %}
+    <div class="vehicle-vin">VIN: {{ bid.vin }}</div>
+    {% endif %}
+  </div>
+
+  <div class="details">
+
+    <!-- Asking price (share-specific, not internal) -->
+    {% if bid.share_asking %}
+    <div class="asking-bar">
+      <div class="asking-label">Asking Price</div>
+      <div class="asking-amount">${{ '{:,.0f}'.format(bid.share_asking) }}</div>
+    </div>
+    {% endif %}
+
+    <!-- Notes (share-specific, right under asking) -->
+    {% if bid.share_notes %}
+    <div class="notes-card">
+      <div class="notes-text">{{ bid.share_notes }}</div>
+    </div>
+    {% endif %}
+
+    <!-- Vehicle details -->
+    <div class="detail-card">
+      {% if bid.mileage %}
+      <div class="detail-row">
+        <span class="detail-label">Mileage</span>
+        <span class="detail-value">{{ '{:,}'.format(bid.mileage|int) }} mi</span>
+      </div>
+      {% endif %}
+      {% if bid.color %}
+      <div class="detail-row">
+        <span class="detail-label">Color</span>
+        <span class="detail-value">{{ bid.color }}</span>
+      </div>
+      {% endif %}
+
+      {% set notes_text = bid.notes or '' %}
+      {% if 'Title: ' in notes_text %}
+      <div class="detail-row">
+        <span class="detail-label">Title</span>
+        {% set title_clean = notes_text.split('Title: ')[1].split(' |')[0].split(' —')[0].strip() %}
+        <span class="detail-value {{ 'green' if title_clean == 'Clean' else 'red' }}">{{ title_clean }}</span>
+      </div>
+      {% endif %}
+      {% if 'Accidents: ' in notes_text %}
+      <div class="detail-row">
+        <span class="detail-label">Accidents</span>
+        {% set acc = notes_text.split('Accidents: ')[1].split(' |')[0].split(' —')[0].strip() %}
+        <span class="detail-value {{ 'green' if acc == '0' else 'yellow' }}">{{ acc }}</span>
+      </div>
+      {% endif %}
+      {% if 'Owners: ' in notes_text %}
+      <div class="detail-row">
+        <span class="detail-label">Owners</span>
+        {% set owners = notes_text.split('Owners: ')[1].split(' |')[0].split(' —')[0].strip() %}
+        <span class="detail-value">{{ owners }}</span>
+      </div>
+      {% endif %}
+
+      {% if vauto and vauto.title_status %}
+      <div class="detail-row">
+        <span class="detail-label">Title Status</span>
+        <span class="detail-value {{ 'green' if 'clean' in (vauto.title_status|lower) else 'red' }}">{{ vauto.title_status }}</span>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Carfax Report Screenshot -->
+    {% if vauto and vauto.carfax_screenshot %}
+    <div class="report-card">
+      <div class="report-label">Carfax Report</div>
+      <img class="report-img" src="{{ vauto.carfax_screenshot }}" alt="Carfax Report" onclick="openLightbox(this.src)">
+    </div>
+    {% endif %}
+
+    <!-- AutoCheck Report Screenshot -->
+    {% if vauto and vauto.autocheck_screenshot %}
+    <div class="report-card">
+      <div class="report-label">AutoCheck Report</div>
+      <img class="report-img" src="{{ vauto.autocheck_screenshot }}" alt="AutoCheck Report" onclick="openLightbox(this.src)">
+    </div>
+    {% endif %}
+
+    <!-- AccuTrade Screenshot -->
+    {% if accutrade and accutrade.screenshot %}
+    <div class="report-card">
+      <div class="report-label">AccuTrade Appraisal</div>
+      <img class="report-img" src="{{ accutrade.screenshot }}" alt="AccuTrade Appraisal" onclick="openLightbox(this.src)">
+    </div>
+    {% endif %}
+
+  </div>
+</div>
+
+<div class="footer">Experience Wholesale</div>
+
+<!-- Lightbox for full-size report viewing -->
+<div class="lightbox" id="lightbox" onclick="this.classList.remove('show')">
+  <img id="lightboxImg" src="" alt="Full size">
+</div>
+
+<script>
+function openLightbox(src) {
+  document.getElementById('lightboxImg').src = src;
+  document.getElementById('lightbox').classList.add('show');
+}
+
+{% if photos|length > 1 %}
+(function(){
+  var mainPhoto = document.getElementById('mainPhoto');
+  var counter = document.getElementById('photoCounter');
+  var thumbs = document.querySelectorAll('#thumbStrip img');
+  thumbs.forEach(function(t){
+    t.addEventListener('click', function(){
+      thumbs.forEach(function(x){x.classList.remove('active')});
+      t.classList.add('active');
+      mainPhoto.src = t.dataset.full;
+      counter.textContent = (parseInt(t.dataset.idx)+1) + ' / ' + thumbs.length;
+    });
+  });
+})();
+{% endif %}
+</script>
+</body>
+</html>

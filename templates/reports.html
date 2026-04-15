@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reports — EW Buy Center</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh}
+
+.header{background:#111827;border-bottom:1px solid #1e293b;padding:0 32px;height:66px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:12px;text-decoration:none}
+.logo-mark{width:38px;height:38px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;color:#fff}
+.logo-text{font-size:17px;font-weight:700;color:#f1f5f9;letter-spacing:-0.3px}
+.logo-sub{font-size:11px;color:#7a9bb5;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+.header-right{display:flex;align-items:center;gap:16px}
+.nav-link{font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s}
+.nav-link:hover{color:#e2e8f0;border-color:#334155}
+.nav-link.active{color:#60a5fa;border-color:#3b82f6;background:rgba(59,130,246,.1)}
+
+.content{max-width:1200px;margin:0 auto;padding:32px 24px}
+
+/* Period tabs */
+.period-tabs{display:flex;gap:8px;margin-bottom:28px}
+.period-tab{padding:10px 24px;border-radius:8px;border:1px solid #1e293b;background:transparent;color:#64748b;font-size:14px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s}
+.period-tab:hover{border-color:#334155;color:#94a3b8}
+.period-tab.active{background:#1e3a5f;border-color:#3b82f6;color:#60a5fa}
+
+/* KPI cards */
+.kpi-row{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:28px}
+.kpi{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:20px;text-align:center}
+.kpi-value{font-size:32px;font-weight:800;line-height:1}
+.kpi-label{font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-top:6px}
+.kpi-sub{font-size:11px;color:#475569;margin-top:4px}
+.kpi-value.blue{color:#60a5fa}
+.kpi-value.yellow{color:#fbbf24}
+.kpi-value.green{color:#4ade80}
+.kpi-value.emerald{color:#34d399}
+.kpi-value.red{color:#fca5a5}
+.kpi-value.white{color:#f1f5f9}
+
+/* Chart containers */
+.charts-row{display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-bottom:24px}
+.chart-card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:20px}
+.chart-title{font-size:13px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.7px;margin-bottom:16px}
+.chart-wrap{position:relative;height:300px}
+
+/* Rep table */
+.rep-card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:20px}
+.rep-table{width:100%;border-collapse:collapse}
+.rep-table th{text-align:left;padding:8px 12px;font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.6px;border-bottom:1px solid #1e293b}
+.rep-table td{padding:10px 12px;border-bottom:1px solid #1e293b;font-size:14px}
+.rep-table tr:last-child td{border-bottom:none}
+.rep-table tr:hover td{background:rgba(255,255,255,.02)}
+.rep-name{font-weight:600;color:#e2e8f0}
+.rep-num{color:#94a3b8;font-weight:600;text-align:center}
+.rep-num.green{color:#4ade80}
+.rep-num.red{color:#fca5a5}
+
+/* Loading */
+.loading{text-align:center;padding:60px;color:#475569;font-size:15px}
+.spinner{width:32px;height:32px;border:3px solid #1e293b;border-top-color:#3b82f6;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 12px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+@media(max-width:900px){
+  .kpi-row{grid-template-columns:repeat(3,1fr)}
+  .charts-row{grid-template-columns:1fr}
+}
+@media(max-width:600px){
+  .kpi-row{grid-template-columns:repeat(2,1fr)}
+  .content{padding:20px 12px}
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <a href="/" class="logo">
+    <div class="logo-mark">EW</div>
+    <div>
+      <div class="logo-text">EW Buy Center</div>
+      <div class="logo-sub">Vehicle Acquisition</div>
+    </div>
+  </a>
+  <div class="header-right">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/contacts" class="nav-link">Contacts</a>
+    <a href="/drop" class="nav-link">Quick Drop</a>
+    <a href="/reports" class="nav-link active">Reports</a>
+  </div>
+</div>
+
+<div class="content">
+  <div style="display:flex;align-items:center;gap:16px;margin-bottom:28px">
+    <select id="periodSelect" style="padding:12px 40px 12px 18px;background:#111827;border:1px solid #1e293b;border-radius:10px;color:#e2e8f0;font-size:15px;font-weight:600;font-family:'Inter',sans-serif;appearance:none;cursor:pointer;background-image:url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237a9bb5' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E&quot;);background-repeat:no-repeat;background-position:right 14px center;min-width:200px">
+      <option value="today">Today</option>
+      <option value="yesterday">Yesterday</option>
+      <option value="this_week" selected>This Week</option>
+      <option value="last_week">Last Week</option>
+      <option value="this_month">This Month</option>
+      <option value="last_month">Last Month</option>
+      <option value="last_30">Last 30 Days</option>
+      <option value="last_90">Last 90 Days</option>
+      <option value="this_year">This Year</option>
+    </select>
+    <span id="periodRange" style="font-size:13px;color:#475569;font-weight:500"></span>
+  </div>
+
+  <!-- KPI Cards -->
+  <div class="kpi-row" id="kpiRow" style="grid-template-columns:repeat(5,1fr)">
+    <div class="kpi"><div class="kpi-value white" id="kpi-total">—</div><div class="kpi-label">Total Bids</div></div>
+    <div class="kpi"><div class="kpi-value yellow" id="kpi-reviewing">—</div><div class="kpi-label">Under Review</div></div>
+    <div class="kpi"><div class="kpi-value green" id="kpi-sent">—</div><div class="kpi-label">Bids Sent</div></div>
+    <div class="kpi"><div class="kpi-value emerald" id="kpi-bought">—</div><div class="kpi-label">Bought</div><div class="kpi-sub" id="kpi-buy-rate"></div></div>
+    <div class="kpi"><div class="kpi-value red" id="kpi-passed">—</div><div class="kpi-label">Passed</div><div class="kpi-sub" id="kpi-pass-rate"></div></div>
+  </div>
+
+  <!-- Charts -->
+  <div class="charts-row">
+    <div class="chart-card">
+      <div class="chart-title">Bid Volume</div>
+      <div class="chart-wrap"><canvas id="volumeChart"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Outcomes</div>
+      <div class="chart-wrap"><canvas id="outcomeChart"></canvas></div>
+    </div>
+  </div>
+
+  <div class="charts-row">
+    <div class="chart-card">
+      <div class="chart-title">Status Breakdown</div>
+      <div class="chart-wrap"><canvas id="stackedChart"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Buy Rate Trend</div>
+      <div class="chart-wrap"><canvas id="rateChart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Rep leaderboard -->
+  <div class="rep-card" id="repCard" style="display:none">
+    <div class="chart-title">Rep Activity</div>
+    <table class="rep-table">
+      <thead><tr><th>Rep</th><th style="text-align:center">Total</th><th style="text-align:center">Sent</th><th style="text-align:center">Bought</th><th style="text-align:center">Passed</th></tr></thead>
+      <tbody id="repBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const chartColors = {
+  new: '#60a5fa',
+  reviewing: '#fbbf24',
+  bid_sent: '#4ade80',
+  bought: '#34d399',
+  passed: '#fca5a5',
+  total: '#94a3b8'
+};
+
+let volumeChart, outcomeChart, stackedChart, rateChart;
+
+// Period select
+document.getElementById('periodSelect').addEventListener('change', function() {
+  loadReports(this.value);
+});
+
+function formatLabel(dateStr, fmt) {
+  if (fmt === 'hour') return dateStr; // Already "HH:MM"
+  if (fmt === 'month') {
+    const parts = dateStr.split('-');
+    const d = new Date(parseInt(parts[0]), parseInt(parts[1])-1, 1);
+    return d.toLocaleDateString('en-US', {month: 'short', year: '2-digit'});
+  }
+  const d = new Date(dateStr + 'T00:00:00');
+  if (fmt === 'week') return d.toLocaleDateString('en-US', {month: 'short', day: 'numeric'});
+  return d.toLocaleDateString('en-US', {weekday: 'short', month: 'short', day: 'numeric'});
+}
+
+async function loadReports(period) {
+  period = period || 'this_week';
+  try {
+    const r = await fetch('/api/reports?period=' + period);
+    const d = await r.json();
+    renderKPIs(d.totals);
+    renderCharts(d, d.fmt || 'day');
+    renderReps(d.reps);
+    document.getElementById('periodRange').textContent = d.range_label || '';
+  } catch(e) {
+    console.error('Reports error', e);
+  }
+}
+
+function renderKPIs(t) {
+  document.getElementById('kpi-total').textContent = t.total;
+  document.getElementById('kpi-reviewing').textContent = (t.new||0) + (t.reviewing||0);
+  document.getElementById('kpi-sent').textContent = t.bid_sent || 0;
+  document.getElementById('kpi-bought').textContent = t.bought || 0;
+  document.getElementById('kpi-passed').textContent = t.passed || 0;
+  document.getElementById('kpi-buy-rate').textContent = t.buy_rate + '% buy rate';
+  document.getElementById('kpi-pass-rate').textContent = t.pass_rate + '% pass rate';
+}
+
+function renderCharts(d, fmt) {
+  const labels = d.labels.map(l => formatLabel(l, fmt));
+  const series = d.series;
+  const dates = d.labels;
+
+  const totals = dates.map(dt => (series[dt]||{}).total||0);
+  const bought = dates.map(dt => (series[dt]||{}).bought||0);
+  const passed = dates.map(dt => (series[dt]||{}).passed||0);
+  const sent = dates.map(dt => (series[dt]||{}).bid_sent||0);
+  const reviewing = dates.map(dt => (series[dt]||{}).reviewing||0);
+  const newBids = dates.map(dt => (series[dt]||{}).new||0);
+
+  // Buy rate per period
+  const buyRates = dates.map(dt => {
+    const t = (series[dt]||{}).total||0;
+    const b = (series[dt]||{}).bought||0;
+    return t > 0 ? Math.round(b/t*100) : 0;
+  });
+
+  const gridColor = 'rgba(30,41,59,.5)';
+  const defaultOpts = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {legend: {display: false}},
+    scales: {
+      x: {ticks: {color: '#475569', font: {size: 11}}, grid: {color: gridColor}},
+      y: {ticks: {color: '#475569', font: {size: 11}}, grid: {color: gridColor}, beginAtZero: true}
+    }
+  };
+
+  // Volume chart (bar)
+  if (volumeChart) volumeChart.destroy();
+  volumeChart = new Chart(document.getElementById('volumeChart'), {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Total Bids',
+        data: totals,
+        backgroundColor: 'rgba(96,165,250,.6)',
+        borderColor: '#60a5fa',
+        borderWidth: 1,
+        borderRadius: 4,
+      }]
+    },
+    options: {...defaultOpts}
+  });
+
+  // Outcome donut
+  if (outcomeChart) outcomeChart.destroy();
+  outcomeChart = new Chart(document.getElementById('outcomeChart'), {
+    type: 'doughnut',
+    data: {
+      labels: ['Bought', 'Bid Sent', 'Reviewing', 'New', 'Passed'],
+      datasets: [{
+        data: [d.totals.bought||0, d.totals.bid_sent||0, d.totals.reviewing||0, d.totals.new||0, d.totals.passed||0],
+        backgroundColor: ['#34d399','#4ade80','#fbbf24','#60a5fa','#fca5a5'],
+        borderWidth: 0,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '60%',
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: {color: '#94a3b8', font: {size: 12, family: 'Inter'}, padding: 16, usePointStyle: true, pointStyleWidth: 10}
+        }
+      }
+    }
+  });
+
+  // Stacked bar
+  if (stackedChart) stackedChart.destroy();
+  stackedChart = new Chart(document.getElementById('stackedChart'), {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [
+        {label: 'Bought', data: bought, backgroundColor: '#34d399', borderRadius: 2},
+        {label: 'Bid Sent', data: sent, backgroundColor: '#4ade80', borderRadius: 2},
+        {label: 'Reviewing', data: reviewing, backgroundColor: '#fbbf24', borderRadius: 2},
+        {label: 'New', data: newBids, backgroundColor: '#60a5fa', borderRadius: 2},
+        {label: 'Passed', data: passed, backgroundColor: '#fca5a5', borderRadius: 2},
+      ]
+    },
+    options: {
+      ...defaultOpts,
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: {color: '#94a3b8', font: {size: 11, family: 'Inter'}, padding: 12, usePointStyle: true, pointStyleWidth: 8}
+        }
+      },
+      scales: {
+        ...defaultOpts.scales,
+        x: {...defaultOpts.scales.x, stacked: true},
+        y: {...defaultOpts.scales.y, stacked: true}
+      }
+    }
+  });
+
+  // Buy rate trend (line)
+  if (rateChart) rateChart.destroy();
+  rateChart = new Chart(document.getElementById('rateChart'), {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Buy Rate %',
+        data: buyRates,
+        borderColor: '#34d399',
+        backgroundColor: 'rgba(52,211,153,.1)',
+        fill: true,
+        tension: .3,
+        pointRadius: 3,
+        pointBackgroundColor: '#34d399',
+      }]
+    },
+    options: {
+      ...defaultOpts,
+      scales: {
+        ...defaultOpts.scales,
+        y: {...defaultOpts.scales.y, max: 100, ticks: {...defaultOpts.scales.y.ticks, callback: v => v + '%'}}
+      }
+    }
+  });
+}
+
+function renderReps(reps) {
+  const card = document.getElementById('repCard');
+  const body = document.getElementById('repBody');
+  if (!reps || !reps.length) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  body.innerHTML = reps.map(function(r) {
+    return '<tr>' +
+      '<td class="rep-name">' + (r.name || 'Unknown') + '</td>' +
+      '<td class="rep-num">' + r.cnt + '</td>' +
+      '<td class="rep-num">' + (r.sent||0) + '</td>' +
+      '<td class="rep-num green">' + (r.bought||0) + '</td>' +
+      '<td class="rep-num red">' + (r.passed||0) + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+// Load on start
+loadReports('this_week');
+</script>
+</body>
+</html>

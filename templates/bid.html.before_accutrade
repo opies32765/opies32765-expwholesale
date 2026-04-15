@@ -403,78 +403,33 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
       </div>
 
-      <!-- Reports & Appraisals (Carfax, AutoCheck, AccuTrade) -->
-      <div class="card" style="border-color:#1e3a5f">
-        <div class="card-title">Reports & Appraisals</div>
-
-        <!-- Carfax + AutoCheck screenshots side by side -->
-        {% if vauto_data and (vauto_data.carfax_screenshot or vauto_data.autocheck_screenshot) %}
-        <div style="display:flex;gap:8px;margin-bottom:12px">
-          {% if vauto_data.carfax_screenshot %}
-          <div style="flex:1;cursor:pointer" onclick="openReportLightbox('{{ vauto_data.carfax_screenshot }}')">
-            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Carfax</div>
-            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:80px">
-              <img src="{{ vauto_data.carfax_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="Carfax Report">
-            </div>
-          </div>
-          {% endif %}
-          {% if vauto_data.autocheck_screenshot %}
-          <div style="flex:1;cursor:pointer" onclick="openReportLightbox('{{ vauto_data.autocheck_screenshot }}')">
-            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AutoCheck</div>
-            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:80px">
-              <img src="{{ vauto_data.autocheck_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AutoCheck Report">
-            </div>
-          </div>
-          {% endif %}
+      {% if bid.vin %}
+      <div class="card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          Market Listings
+          <button onclick="recheck()" id="recheck-btn" style="padding:5px 10px;background:transparent;border:1px solid #1e293b;border-radius:6px;color:#475569;font-size:11px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer">↻</button>
         </div>
-        {% endif %}
-
-        <!-- AccuTrade screenshot -->
-        {% if accutrade_data and accutrade_data.screenshot %}
-        <div style="cursor:pointer;margin-bottom:12px" onclick="openReportLightbox('{{ accutrade_data.screenshot }}')">
-          <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AccuTrade Appraisal</div>
-          <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:80px">
-            <img src="{{ accutrade_data.screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AccuTrade Report">
-          </div>
-        </div>
-        {% endif %}
-
-        <!-- AccuTrade values -->
-        {% if accutrade_data %}
-        <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">AccuTrade Values</div>
-        <div style="display:flex;flex-direction:column;gap:5px">
-          {% set at_books = [
-            ('Guaranteed Offer', accutrade_data.guaranteed_offer),
-            ('Trade-In', accutrade_data.trade_in),
-            ('Trade Market', accutrade_data.trade_market),
-            ('Retail', accutrade_data.retail),
-            ('Market Average', accutrade_data.market_avg)
-          ] %}
-          {% for label, val in at_books %}
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
-            <span style="font-size:12px;font-weight:500;color:#94a3b8">{{ label }}</span>
-            {% if val %}
-            <span style="font-size:13px;font-weight:700;color:#e2e8f0;font-family:monospace">${{ '{:,}'.format(val) }}</span>
-            {% else %}
-            <span style="font-size:12px;color:#334155">—</span>
-            {% endif %}
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:4px">
+          {% set mc = bid.market_check %}
+          {% for short, key, label in [('at','autotrader','Autotrader'),('cc','cars_com','Cars.com'),('cg','cargurus','CarGurus')] %}
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:#0f172a;border-radius:8px;border:1px solid #1e293b">
+            <span style="font-size:12px;font-weight:600;color:#94a3b8">{{ label }}</span>
+            <span id="mkt-{{ short }}" style="font-size:13px">
+              {% if mc and mc[key] is defined %}
+                {% if mc[key].found == true %}
+                  <span style="color:#4ade80;font-weight:700">✓</span>&nbsp;<a href="{{ mc[key].url }}" target="_blank" style="color:#60a5fa;font-size:12px;font-weight:600;text-decoration:none">View →</a>
+                {% else %}
+                  <span style="color:#475569;font-size:12px">✕ Not listed</span>
+                {% endif %}
+              {% else %}
+                <span style="color:#475569">⏳</span>
+              {% endif %}
+            </span>
           </div>
           {% endfor %}
-          {% if accutrade_data.looked_up_at %}
-          <div style="font-size:10px;color:#334155;text-align:right;margin-top:2px">AccuTrade looked up {{ time_ago(accutrade_data.looked_up_at) }}</div>
-          {% endif %}
         </div>
-        {% elif bid.vin %}
-        <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">AccuTrade</div>
-        <div style="font-size:12px;color:#475569;font-style:italic">Pending — waiting for worker...</div>
-        {% endif %}
-
-        {% if not vauto_data and not accutrade_data and not bid.vin %}
-        <div style="font-size:13px;color:#334155;font-style:italic">Submit a VIN to trigger lookups.</div>
-        {% elif not vauto_data and not accutrade_data %}
-        <div style="font-size:13px;color:#475569;font-style:italic">Lookups queued — waiting for worker...</div>
-        {% endif %}
       </div>
+      {% endif %}
 
     </div><!-- /col 2 -->
 
@@ -584,6 +539,28 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           {% endfor %}
         </div>
 
+        <!-- Carfax / AutoCheck screenshots -->
+        {% if vauto_data.carfax_screenshot or vauto_data.autocheck_screenshot %}
+        <div style="margin-top:14px;display:flex;gap:8px">
+          {% if vauto_data.carfax_screenshot %}
+          <div style="flex:1;cursor:pointer" onclick="openReportLightbox('{{ vauto_data.carfax_screenshot }}')">
+            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Carfax</div>
+            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:80px">
+              <img src="{{ vauto_data.carfax_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="Carfax Report">
+            </div>
+          </div>
+          {% endif %}
+          {% if vauto_data.autocheck_screenshot %}
+          <div style="flex:1;cursor:pointer" onclick="openReportLightbox('{{ vauto_data.autocheck_screenshot }}')">
+            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AutoCheck</div>
+            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:80px">
+              <img src="{{ vauto_data.autocheck_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AutoCheck Report">
+            </div>
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+
         {% if vauto_data.looked_up_at %}
         <div style="margin-top:10px;font-size:10px;color:#334155;text-align:right">Looked up {{ time_ago(vauto_data.looked_up_at) }}</div>
         {% endif %}
@@ -594,99 +571,6 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         <div style="font-size:13px;color:#334155;font-style:italic">Submit a VIN to trigger vAuto lookup.</div>
         {% endif %}
       </div>
-
-      <!-- Tesla Decode (only for Tesla VINs) -->
-      {% if tesla_data %}
-      <div class="card" style="border-color:#dc2626" id="tesla-card">
-        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-          Tesla Decode
-          <span style="font-size:10px;font-weight:700;color:#f87171;background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">TESLA</span>
-        </div>
-
-        <div style="display:flex;flex-direction:column;gap:6px">
-          {% set tesla_fields = [
-            ('Model', tesla_data.model),
-            ('Trim', tesla_data.trim),
-            ('Battery', tesla_data.battery),
-            ('Motor', tesla_data.motor),
-            ('Drive', tesla_data.drive),
-            ('Plant', tesla_data.plant),
-            ('Year', tesla_data.year)
-          ] %}
-          {% for label, val in tesla_fields %}
-          {% if val %}
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
-            <span style="font-size:12px;font-weight:500;color:#94a3b8">{{ label }}</span>
-            <span style="font-size:13px;font-weight:600;color:#e2e8f0">{{ val }}</span>
-          </div>
-          {% endif %}
-          {% endfor %}
-
-          {% if tesla_data.msrp %}
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
-            <span style="font-size:12px;font-weight:500;color:#94a3b8">Original MSRP</span>
-            <span style="font-size:13px;font-weight:700;color:#4ade80;font-family:monospace">${{ '{:,.0f}'.format(tesla_data.msrp) }}</span>
-          </div>
-          {% endif %}
-        </div>
-
-        <!-- FSD + Battery Status (from Fleet API) -->
-        {% if tesla_data.fleet_specs %}
-        <div id="tesla-fleet-data" style="margin-top:12px"></div>
-        <script>
-        (function(){
-          var fs = {{ tesla_data.fleet_specs|tojson }};
-          if (typeof fs === 'string') { try { fs = JSON.parse(fs); } catch(e) { return; } }
-          if (!fs) return;
-          var html = '';
-
-          // FSD Status
-          var sw = (fs.autopilotSoftwareCode || '').toLowerCase();
-          var equip = fs.equipmentPrice || [];
-          var hasFsd = false, fsdPrice = -1;
-          equip.forEach(function(e) {
-            var n = (e.name || '').toLowerCase();
-            if (n.indexOf('full self') >= 0 || n.indexOf('fsd') >= 0) { hasFsd = true; fsdPrice = e.price || 0; }
-          });
-          var fsdActive = sw.indexOf('premium') >= 0 || sw.indexOf('full self') >= 0;
-          var status, color, border, note;
-          if (fsdActive && hasFsd && fsdPrice === 0) {
-            status = 'FSD Purchased'; color = '#4ade80'; border = '#166534';
-            note = 'Transfers with the car.';
-          } else if (fsdActive && (!hasFsd || fsdPrice > 0)) {
-            status = 'FSD Subscription'; color = '#fbbf24'; border = '#78350f';
-            note = 'Likely $99/mo — does NOT transfer.';
-          } else if (hasFsd && fsdPrice > 0) {
-            status = 'FSD Not Active'; color = '#f87171'; border = '#7f1d1d';
-            note = 'Configured at factory but not active.';
-          } else {
-            status = 'Basic Autopilot'; color = '#94a3b8'; border = '#1e293b';
-            note = 'TACC + Autosteer only.';
-          }
-          html += '<div style="padding:10px 12px;background:#0f172a;border:1px solid '+border+';border-radius:8px;margin-bottom:8px">';
-          html += '<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="font-size:10px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.5px">FSD Status</span>';
-          html += '<span style="font-size:12px;font-weight:800;color:'+color+'">'+status+'</span></div>';
-          html += '<div style="font-size:11px;color:#64748b">'+note+'</div></div>';
-
-          // Battery
-          var soh = fs.batterySoH ? parseFloat(fs.batterySoH) : null;
-          if (soh !== null) {
-            var bhColor = soh >= 90 ? '#4ade80' : soh >= 80 ? '#60a5fa' : soh >= 70 ? '#fbbf24' : '#f87171';
-            html += '<div style="padding:10px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:8px">';
-            html += '<div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="font-size:10px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.5px">Battery Health</span>';
-            html += '<span style="font-size:14px;font-weight:800;color:'+bhColor+'">'+soh.toFixed(1)+'%</span></div>';
-            html += '<div style="height:6px;background:#1e293b;border-radius:3px;overflow:hidden"><div style="height:100%;width:'+soh+'%;background:'+bhColor+';border-radius:3px"></div></div>';
-            var cap = fs.batteryCapacityKwh ? parseFloat(fs.batteryCapacityKwh).toFixed(1) + ' kWh' : '';
-            if (cap) html += '<div style="font-size:10px;color:#475569;margin-top:4px">Capacity: '+cap+'</div>';
-            html += '</div>';
-          }
-
-          document.getElementById('tesla-fleet-data').innerHTML = html;
-        })();
-        </script>
-        {% endif %}
-      </div>
-      {% endif %}
 
     </div><!-- /col-action -->
 
@@ -911,6 +795,50 @@ async function sendReply(action) {
   }
 }
 
+const MKT_MAP = {at:'autotrader', cc:'cars_com', cg:'cargurus'};
+const MKT_FALLBACK = {
+  at: `https://www.autotrader.com/cars-for-sale/all-cars?vin=${BID_VIN}`,
+  cc: `https://www.cars.com/shopping/results/?keyword=${BID_VIN}&stock_type=all`,
+  cg: `https://www.cargurus.com/Cars/new/nl?zip=10001&vin=${BID_VIN}`
+};
+
+function renderMarket(data) {
+  for (const [short, key] of Object.entries(MKT_MAP)) {
+    const el = document.getElementById('mkt-' + short);
+    if (!el) continue;
+    const res = data[key];
+    if (!res) { el.innerHTML = '<span style="color:#475569">—</span>'; continue; }
+    if (res.found === true) {
+      el.innerHTML = `<span style="color:#4ade80;font-weight:700">✓ Listed</span>&nbsp;&nbsp;<a href="${res.url}" target="_blank" style="color:#60a5fa;font-size:13px;font-weight:600;text-decoration:none">View →</a>`;
+    } else if (res.found === false) {
+      el.innerHTML = '<span style="color:#475569">✕ Not listed</span>';
+    } else {
+      el.innerHTML = `<a href="${MKT_FALLBACK[short]}" target="_blank" style="color:#64748b;font-size:13px">Search manually →</a>`;
+    }
+  }
+}
+
+let _pollTimer = null;
+async function pollMarket() {
+  const r = await fetch(`/api/bid/${BID_ID}/market-status`);
+  const d = await r.json();
+  if (d.ready && d.data) { renderMarket(d.data); clearInterval(_pollTimer); }
+}
+
+async function recheck() {
+  const btn = document.getElementById('recheck-btn');
+  btn.textContent = '⏳'; btn.disabled = true;
+  ['at','cc','cg'].forEach(k => {
+    const el = document.getElementById('mkt-' + k);
+    if (el) el.innerHTML = '<span style="color:#475569">⏳</span>';
+  });
+  await fetch(`/api/bid/${BID_ID}/market-check`, {method:'POST'});
+  _pollTimer = setInterval(pollMarket, 4000);
+  setTimeout(() => { btn.textContent = '↻ Re-check'; btn.disabled = false; }, 5000);
+}
+
+const _needsPoll = document.getElementById('mkt-at')?.textContent.trim() === '⏳';
+if (_needsPoll && BID_VIN) _pollTimer = setInterval(pollMarket, 4000);
 
 async function detectColor() {
   const btn = document.getElementById('color-detect-btn');
@@ -1201,24 +1129,6 @@ setInterval(pollMessages, 3000);
     } catch(e) {}
   }
   _vautoPoll = setInterval(checkVauto, 5000);
-})();
-{% endif %}
-
-// ── AccuTrade auto-poll (while pending) ──────────────────────────────────
-{% if not accutrade_data and bid.vin %}
-(function() {
-  let _atPoll;
-  async function checkAccuTrade() {
-    try {
-      const r = await fetch(`/api/accutrade/status/${BID_ID}`);
-      const d = await r.json();
-      if (d.status === 'complete') {
-        clearInterval(_atPoll);
-        location.reload();
-      }
-    } catch(e) {}
-  }
-  _atPoll = setInterval(checkAccuTrade, 5000);
 })();
 {% endif %}
 
