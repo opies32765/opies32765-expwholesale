@@ -7,7 +7,6 @@ import threading
 import psycopg2
 import psycopg2.extras
 import requests
-import time as _time
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, redirect, url_for, send_from_directory, session
 from twilio.rest import Client as TwilioClient
@@ -27,7 +26,7 @@ _PUBLIC_PREFIXES = (
     '/api/mobile-submit', '/api/rep-bids', '/api/register-rep',
     '/api/vauto/', '/api/bid/external', '/api/push-subscribe',
     '/api/push-unsubscribe', '/api/vapid-public-key',
-    '/.well-known/', '/api/tesla-vin/',
+    '/.well-known/', '/api/tesla-vin/', '/share/',
 )
 
 
@@ -683,10 +682,38 @@ def bid_detail(bid_id):
     cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid_id,))
     vauto_data = cur.fetchone()
 
+    # AccuTrade lookup data
+    accutrade_data = None
+    try:
+        cur.execute("SELECT * FROM accutrade_lookups WHERE bid_id = %s", (bid_id,))
+        accutrade_data = cur.fetchone()
+    except Exception:
+        pass
+
+    # Tesla auto-decode (if VIN is Tesla)
+    tesla_data = None
+    TESLA_WMIS = ('5YJ', '7SA', '7G2', 'SFZ', 'XP7', 'LRW')
+    if bid['vin'] and len(bid['vin']) >= 3 and bid['vin'][:3].upper() in TESLA_WMIS:
+        try:
+            tesla_data = decode_tesla_vin(bid['vin'])
+            # Check cache for Fleet API options
+            cur.execute("SELECT options_json, source FROM tesla_vin_cache WHERE vin=%s", (bid['vin'],))
+            cached = cur.fetchone()
+            if cached and cached.get('options_json'):
+                tesla_data['fleet_specs'] = cached['options_json']
+            elif not cached:
+                # Queue for Fleet API lookup
+                cur.execute("INSERT INTO tesla_vin_cache (vin) VALUES (%s) ON CONFLICT DO NOTHING", (bid['vin'],))
+                db.commit()
+        except Exception:
+            pass
+
     db.close()
     return render_template('bid.html', bid=bid, photos=photos,
                            messages=messages, valuations=valuations,
                            vauto_data=vauto_data,
+                           accutrade_data=accutrade_data,
+                           tesla_data=tesla_data,
                            ai_assessment=bid.get('ai_assessment'),
                            time_ago=time_ago)
 
@@ -1054,6 +1081,28 @@ def _run_assessment(bid_id):
     # ── vAuto book values ─────────────────────────────────────────────────────
     cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid_id,))
     vauto = cur.fetchone()
+
+    # ── AccuTrade values ──────────────────────────────────────────────────────
+    accutrade = None
+    try:
+        cur.execute("SELECT * FROM accutrade_lookups WHERE bid_id = %s", (bid_id,))
+        accutrade = cur.fetchone()
+    except Exception:
+        pass
+
+    # ── Tesla decode (if Tesla VIN) ───────────────────────────────────────────
+    tesla_data = None
+    TESLA_WMIS = ('5YJ', '7SA', '7G2', 'SFZ', 'XP7', 'LRW')
+    if bid['vin'] and len(bid['vin']) >= 3 and bid['vin'][:3].upper() in TESLA_WMIS:
+        try:
+            tesla_data = decode_tesla_vin(bid['vin'])
+            cur.execute("SELECT options_json, source FROM tesla_vin_cache WHERE vin=%s", (bid['vin'],))
+            cached = cur.fetchone()
+            if cached and cached.get('options_json'):
+                tesla_data['fleet_specs'] = cached['options_json']
+        except Exception:
+            pass
+
     db.close()
 
     # ── Build vehicle context ─────────────────────────────────────────────────
@@ -1194,6 +1243,80 @@ def _run_assessment(bid_id):
         except Exception as e:
             print(f'DIA comps error: {e}')
 
+    # AccuTrade values section
+    if accutrade:
+        ctx += "\nACCUTRADE VALUES:\n"
+        at_fields = [
+            ('guaranteed_offer', 'Guaranteed Offer'),
+            ('trade_in', 'Trade-In'),
+            ('trade_market', 'Trade Market'),
+            ('retail', 'Retail'),
+            ('market_avg', 'Market Average'),
+        ]
+        for field, label in at_fields:
+            val = accutrade.get(field)
+            if val is not None:
+                try:
+                    ctx += f"  {label}: ${int(float(val)):,}\n"
+                except (ValueError, TypeError):
+                    ctx += f"  {label}: {val}\n"
+
+    # Tesla factory data section
+    if tesla_data:
+        ctx += "\nTESLA FACTORY DATA:\n"
+        if tesla_data.get('model'):
+            ctx += f"  Model: {tesla_data['model']}\n"
+        if tesla_data.get('trim'):
+            ctx += f"  Trim: {tesla_data['trim']}\n"
+        if tesla_data.get('battery'):
+            ctx += f"  Battery: {tesla_data['battery']}\n"
+        if tesla_data.get('motor'):
+            ctx += f"  Motor: {tesla_data['motor']}\n"
+        if tesla_data.get('drive'):
+            ctx += f"  Drive: {tesla_data['drive']}\n"
+        if tesla_data.get('msrp'):
+            ctx += f"  Original MSRP: ${tesla_data['msrp']:,.0f}\n"
+        if tesla_data.get('plant'):
+            ctx += f"  Plant: {tesla_data['plant']}\n"
+        fleet = tesla_data.get('fleet_specs')
+        if fleet:
+            if isinstance(fleet, str):
+                try:
+                    fleet = json.loads(fleet)
+                except Exception:
+                    fleet = None
+            if fleet:
+                # FSD status
+                ap_sw = (fleet.get('autopilotSoftwareCode') or '').lower()
+                equip = fleet.get('equipmentPrice') or []
+                has_fsd = any(('full self' in (e.get('name') or '').lower() or 'fsd' in (e.get('name') or '').lower()) for e in equip)
+                fsd_price = next((e.get('price', 0) for e in equip if 'full self' in (e.get('name') or '').lower() or 'fsd' in (e.get('name') or '').lower()), None)
+                if 'premium' in ap_sw or 'full self' in ap_sw:
+                    if has_fsd and fsd_price == 0:
+                        ctx += "  FSD Status: PURCHASED (transfers with vehicle)\n"
+                    else:
+                        ctx += "  FSD Status: ACTIVE — likely subscription ($99/mo, does NOT transfer)\n"
+                elif has_fsd and fsd_price and fsd_price > 0:
+                    ctx += f"  FSD Status: NOT ACTIVE (was ${fsd_price:,} at factory, may have been removed)\n"
+                else:
+                    ctx += "  FSD Status: Not included\n"
+                # Battery health
+                soh = fleet.get('batterySoH')
+                if soh:
+                    ctx += f"  Battery Health: {float(soh):.1f}% SoH\n"
+                cap = fleet.get('batteryCapacityKwh')
+                if cap:
+                    ctx += f"  Battery Capacity: {float(cap):.1f} kWh\n"
+                # Equipment list
+                if equip:
+                    ctx += "  Factory Equipment:\n"
+                    for e in equip:
+                        name = e.get('name') or e.get('code') or ''
+                        price = e.get('price', 0)
+                        if name:
+                            price_str = f"+${price:,}" if price > 0 else "Included"
+                            ctx += f"    {name}: {price_str}\n"
+
     # ── Load vehicle photos ─────────────────────────────────────────────────
     content = []
     photo_count = 0
@@ -1250,19 +1373,47 @@ def _run_assessment(bid_id):
             except Exception as e:
                 print(f'assess report load error ({label}): {e}')
 
+    # ── Load AccuTrade screenshot ───────────────────────────────────────────
+    accutrade_report = 0
+    if accutrade and accutrade.get('screenshot'):
+        report_path = accutrade['screenshot']
+        try:
+            if report_path.startswith('/accutrade_reports/'):
+                full_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), report_path.lstrip('/'))
+            else:
+                full_path = report_path
+            if os.path.exists(full_path) and os.path.getsize(full_path) > 1024:
+                with open(full_path, 'rb') as f:
+                    img_bytes = f.read()
+                try:
+                    img_bytes, media_type = resize_for_claude(img_bytes)
+                except Exception:
+                    media_type = 'image/png'
+                content.append({'type': 'text', 'text': '\n--- ACCUTRADE APPRAISAL (screenshot) ---'})
+                content.append({'type': 'image', 'source': {
+                    'type': 'base64', 'media_type': media_type,
+                    'data': base64.standard_b64encode(img_bytes).decode()
+                }})
+                accutrade_report = 1
+                ctx += "\nACCUTRADE APPRAISAL: screenshot attached below\n"
+        except Exception as e:
+            print(f'assess AccuTrade screenshot error: {e}')
+
     # ── Prompt ────────────────────────────────────────────────────────────────
     img_summary = []
     if photo_count:
         img_summary.append(f"{photo_count} vehicle photos")
     if report_count:
         img_summary.append(f"Carfax/AutoCheck report screenshots")
+    if accutrade_report:
+        img_summary.append(f"AccuTrade appraisal screenshot")
     img_line = "I've attached " + " and ".join(img_summary) + "." if img_summary else "No photos available."
 
     prompt = f"""{ctx}
 
 {img_line}
 
-Based on all the data above — book values, photos, Carfax, AutoCheck, history, and market listings — what should we pay for this vehicle at wholesale?
+Based on all the data above — book values, photos, Carfax, AutoCheck, AccuTrade, history, and market listings — what should we pay for this vehicle at wholesale?
 
 Keep it under 200 words. End with:
 Max wholesale buy price: **$X,XXX**"""
@@ -2105,6 +2256,7 @@ def rep_message(bid_id):
 # ── vAuto worker API ─────────────────────────────────────────────────────────
 
 VAUTO_REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vauto_reports')
+ACCUTRADE_REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accutrade_reports')
 
 
 def _live_scan_comps(bid_id):
@@ -2388,6 +2540,37 @@ def verify_comp(url):
     except Exception:
         return {'status': 'error'}
 os.makedirs(VAUTO_REPORTS_DIR, exist_ok=True)
+os.makedirs(ACCUTRADE_REPORTS_DIR, exist_ok=True)
+
+
+def _ensure_accutrade_table():
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS accutrade_lookups (
+                id SERIAL PRIMARY KEY,
+                bid_id INTEGER REFERENCES bids(id) ON DELETE CASCADE,
+                vin VARCHAR(17) NOT NULL,
+                guaranteed_offer INTEGER,
+                trade_in INTEGER,
+                trade_market INTEGER,
+                retail INTEGER,
+                market_avg INTEGER,
+                local_comps JSONB,
+                screenshot TEXT,
+                raw_json JSONB,
+                looked_up_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_accutrade_bid_id ON accutrade_lookups(bid_id)")
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+
+_ensure_accutrade_table()
 
 
 @app.route('/api/vauto/urgent')
@@ -2425,7 +2608,6 @@ def api_vauto_pending():
     rows = cur.fetchall()
     # Don't clear priority here — clear it when worker submits results
     db.close()
-    _ew_check_heartbeat_stale('ew')
     return jsonify({'pending': [dict(r) for r in rows]})
 
 
@@ -2569,118 +2751,99 @@ def api_vauto_status(bid_id):
     return jsonify({'status': 'pending'})
 
 
+# ── AccuTrade worker API ────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# vAuto Worker Heartbeat Monitoring
-# ---------------------------------------------------------------------------
-_TELEGRAM_BOT_TOKEN = "8528106109:AAFczHqjWoiUBs7adZwBEJ6217bQzYGhI_o"
-_TELEGRAM_CHAT_ID = "7985611488"
-_EW_HEARTBEAT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worker_heartbeats.json')
-_EW_ALERT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'heartbeat_alerts.json')
+@app.route('/api/accutrade/pending')
+def api_accutrade_pending():
+    """Return bids that need AccuTrade lookup."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT b.id as bid_id, b.vin, b.mileage, b.year, b.make, b.model
+        FROM bids b
+        LEFT JOIN accutrade_lookups al ON al.bid_id = b.id
+        WHERE b.vin IS NOT NULL AND length(b.vin) = 17
+          AND al.id IS NULL
+        ORDER BY b.created_at DESC
+        LIMIT 20
+    """)
+    rows = cur.fetchall()
+    db.close()
+    return jsonify({'pending': [dict(r) for r in rows]})
 
 
-def _ew_read_heartbeats():
+@app.route('/api/accutrade/submit', methods=['POST'])
+def api_accutrade_submit():
+    """Accept AccuTrade lookup results from worker."""
+    data = request.json
+    if not data or not data.get('bid_id'):
+        return jsonify({'error': 'missing bid_id'}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    bid_id = data['bid_id']
+
+    cur.execute("""
+        INSERT INTO accutrade_lookups
+            (bid_id, vin, guaranteed_offer, trade_in, trade_market, retail,
+             market_avg, local_comps, screenshot, raw_json, looked_up_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (bid_id) DO UPDATE SET
+            vin=EXCLUDED.vin, guaranteed_offer=EXCLUDED.guaranteed_offer,
+            trade_in=EXCLUDED.trade_in, trade_market=EXCLUDED.trade_market,
+            retail=EXCLUDED.retail, market_avg=EXCLUDED.market_avg,
+            local_comps=EXCLUDED.local_comps, screenshot=EXCLUDED.screenshot,
+            raw_json=EXCLUDED.raw_json, looked_up_at=NOW()
+    """, (
+        bid_id, data.get('vin', ''),
+        data.get('guaranteed_offer'), data.get('trade_in'),
+        data.get('trade_market'), data.get('retail'),
+        data.get('market_avg'),
+        json.dumps(data.get('local_comps')) if data.get('local_comps') else None,
+        data.get('screenshot'),
+        json.dumps(data.get('raw', {})) if data.get('raw') else None,
+    ))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'bid_id': bid_id})
+
+
+@app.route('/api/accutrade/upload_report', methods=['POST'])
+def api_accutrade_upload_report():
+    """Accept AccuTrade screenshot upload from worker."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'no file'}), 400
+    f = request.files['file']
+    filename = f.filename
+    save_path = os.path.join(ACCUTRADE_REPORTS_DIR, filename)
+    f.save(save_path)
+    return jsonify({'ok': True, 'filename': filename})
+
+
+@app.route('/accutrade_reports/<path:filename>')
+def serve_accutrade_report(filename):
+    """Serve AccuTrade screenshot images."""
+    return send_from_directory(ACCUTRADE_REPORTS_DIR, filename)
+
+
+@app.route('/api/accutrade/status/<int:bid_id>')
+def api_accutrade_status(bid_id):
+    """Check if AccuTrade lookup is complete for a bid."""
+    db = get_db()
+    cur = db.cursor()
     try:
-        with open(_EW_HEARTBEAT_FILE) as _f:
-            return json.load(_f)
+        cur.execute("SELECT * FROM accutrade_lookups WHERE bid_id = %s", (bid_id,))
+        row = cur.fetchone()
     except Exception:
-        return {}
-
-
-def _ew_write_heartbeats(data):
-    try:
-        with open(_EW_HEARTBEAT_FILE, 'w') as _f:
-            json.dump(data, _f)
-    except Exception:
-        pass
-
-
-def _ew_read_alerts():
-    try:
-        with open(_EW_ALERT_FILE) as _f:
-            return json.load(_f)
-    except Exception:
-        return {}
-
-
-def _ew_write_alerts(data):
-    try:
-        with open(_EW_ALERT_FILE, 'w') as _f:
-            json.dump(data, _f)
-    except Exception:
-        pass
-
-
-def _ew_tg_alert(msg):
-    """Fire-and-forget Telegram alert."""
-    try:
-        import urllib.request as _ur
-        data = json.dumps({'chat_id': _TELEGRAM_CHAT_ID, 'text': msg}).encode()
-        req = _ur.Request(
-            f'https://api.telegram.org/bot{_TELEGRAM_BOT_TOKEN}/sendMessage',
-            data=data,
-            headers={'Content-Type': 'application/json'},
-        )
-        _ur.urlopen(req, timeout=5)
-    except Exception:
-        pass
-
-
-def _ew_check_heartbeat_stale(worker_name='ew'):
-    """Check if worker heartbeat is stale (>5 min). Alert once per downtime."""
-    hb = _ew_read_heartbeats()
-    info = hb.get(worker_name)
-    if not info:
-        return
-    age = _time.time() - info.get('ts', 0)
-    alerts = _ew_read_alerts()
-    if age > 300:
-        if not alerts.get(worker_name):
-            mins = int(age // 60)
-            _ew_tg_alert(f'⚠️ EW vAuto worker is DOWN — no heartbeat in {mins} minutes')
-            alerts[worker_name] = True
-            _ew_write_alerts(alerts)
-    else:
-        if alerts.get(worker_name):
-            alerts[worker_name] = False
-            _ew_write_alerts(alerts)
-
-
-@app.route('/api/vauto/heartbeat', methods=['POST'])
-def api_vauto_heartbeat():
-    """Accept heartbeat from vAuto worker."""
-    data = request.json or {}
-    worker = data.get('worker', 'ew')
-    hb = _ew_read_heartbeats()
-    hb[worker] = {
-        'ts': _time.time(),
-        'chrome_alive': data.get('chrome_alive', False),
-        'lookups_done': data.get('lookups_done', 0),
-        'last_lookup_at': data.get('last_lookup_at'),
-    }
-    _ew_write_heartbeats(hb)
-    alerts = _ew_read_alerts()
-    if alerts.get(worker):
-        alerts[worker] = False
-        _ew_write_alerts(alerts)
-    return jsonify({'ok': True})
-
-
-@app.route('/api/vauto/worker-status')
-def api_vauto_worker_status():
-    """Return worker heartbeat status for dashboard display."""
-    hb = _ew_read_heartbeats()
-    result = {}
-    for name, info in hb.items():
-        age = _time.time() - info.get('ts', 0)
-        result[name] = {
-            'last_heartbeat_ago_seconds': int(age),
-            'status': 'ok' if age < 300 else 'stale',
-            'chrome_alive': info.get('chrome_alive', False),
-            'lookups_done': info.get('lookups_done', 0),
-            'last_lookup_at': info.get('last_lookup_at'),
-        }
-    return jsonify(result)
+        row = None
+    db.close()
+    if row:
+        d = dict(row)
+        for k, v in d.items():
+            if hasattr(v, 'isoformat'):
+                d[k] = v.isoformat()
+        return jsonify({'status': 'complete', 'data': d})
+    return jsonify({'status': 'pending'})
 
 
 @app.route('/api/verify-comps', methods=['POST'])
@@ -3362,6 +3525,298 @@ def api_bid_quick_drop():
             'owners': extracted.get('owners'),
         }
     })
+
+
+# ---------------------------------------------------------------------------
+# Share — public vehicle page + clipboard copy
+# ---------------------------------------------------------------------------
+def _ensure_share_columns():
+    """One-time migration: add share columns if missing."""
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS share_token VARCHAR(36)")
+        cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS share_notes TEXT")
+        cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS share_asking NUMERIC(10,2)")
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+_ensure_share_columns()
+
+
+@app.route('/api/share-contacts', methods=['GET'])
+def api_share_contacts_list():
+    """Return saved share contacts."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT id, name, phone FROM share_contacts ORDER BY name")
+    contacts = cur.fetchall()
+    db.close()
+    return jsonify([{'id': c['id'], 'name': c['name'], 'phone': c['phone']} for c in contacts])
+
+
+@app.route('/api/share-contacts', methods=['POST'])
+def api_share_contacts_save():
+    """Save a new share contact."""
+    data = request.json or {}
+    name = (data.get('name') or '').strip()
+    phone = (data.get('phone') or '').strip()
+    if not name or not phone:
+        return jsonify({'error': 'Name and phone required'}), 400
+    digits = re.sub(r'\D', '', phone)
+    if len(digits) == 10:
+        digits = '1' + digits
+    if len(digits) != 11 or not digits.startswith('1'):
+        return jsonify({'error': 'Invalid phone number'}), 400
+    formatted = f'+{digits}'
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO share_contacts (name, phone)
+        VALUES (%s, %s)
+        ON CONFLICT (phone) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+    """, (name, formatted))
+    contact_id = cur.fetchone()['id']
+    db.commit()
+    db.close()
+    return jsonify({'success': True, 'id': contact_id, 'name': name, 'phone': formatted})
+
+
+@app.route('/api/share-contacts/<int:contact_id>', methods=['DELETE'])
+def api_share_contacts_delete(contact_id):
+    """Delete a share contact."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("DELETE FROM share_contacts WHERE id=%s", (contact_id,))
+    db.commit()
+    db.close()
+    return jsonify({'success': True})
+
+
+@app.route('/api/bid/<int:bid_id>/share-media', methods=['GET'])
+def api_bid_share_media(bid_id):
+    """Return available media (reports + photos) for the share modal picker."""
+    base_url = 'https://experience-wholesale.net'
+    db = get_db()
+    cur = db.cursor()
+
+    reports = []
+    cur.execute("SELECT carfax_screenshot, autocheck_screenshot FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+    vauto_row = cur.fetchone()
+    if vauto_row:
+        if vauto_row.get('carfax_screenshot'):
+            url = vauto_row['carfax_screenshot']
+            reports.append({'key': 'carfax', 'label': 'Carfax', 'url': url if url.startswith('http') else base_url + url})
+        if vauto_row.get('autocheck_screenshot'):
+            url = vauto_row['autocheck_screenshot']
+            reports.append({'key': 'autocheck', 'label': 'AutoCheck', 'url': url if url.startswith('http') else base_url + url})
+
+    try:
+        cur.execute("SELECT screenshot FROM accutrade_lookups WHERE bid_id=%s", (bid_id,))
+        acc_row = cur.fetchone()
+        if acc_row and acc_row.get('screenshot'):
+            url = acc_row['screenshot']
+            reports.append({'key': 'accutrade', 'label': 'AccuTrade', 'url': url if url.startswith('http') else base_url + url})
+    except Exception:
+        pass
+
+    photos = []
+    cur.execute("SELECT id, url FROM bid_photos WHERE bid_id=%s ORDER BY id", (bid_id,))
+    for row in cur.fetchall():
+        url = row['url']
+        thumb = base_url + '/thumb?url=' + url + '&size=mobile' if url.startswith('/static/uploads/') else base_url + '/thumb?url=' + url + '&size=mobile' if not url.startswith('http') else base_url + '/thumb?url=' + url + '&size=mobile'
+        photos.append({'id': row['id'], 'url': url if url.startswith('http') else base_url + url, 'thumb': thumb})
+
+    db.close()
+    return jsonify({'reports': reports, 'photos': photos})
+
+
+@app.route('/api/bid/<int:bid_id>/share', methods=['POST'])
+def api_bid_share(bid_id):
+    """Generate share token, save custom notes/asking, return clipboard text."""
+    data = request.json or {}
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT b.*, c.name as contact_name
+        FROM bids b LEFT JOIN contacts c ON b.contact_id = c.id
+        WHERE b.id = %s
+    """, (bid_id,))
+    bid = cur.fetchone()
+    if not bid:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+
+    # Generate token if not exists
+    token = bid.get('share_token')
+    if not token:
+        token = uuid.uuid4().hex[:12]
+
+    # Save share-specific notes and asking price
+    share_notes = (data.get('share_notes') or '').strip() or None
+    share_asking = None
+    if data.get('share_asking'):
+        try:
+            share_asking = float(str(data['share_asking']).replace(',', '').replace('$', ''))
+        except (ValueError, TypeError):
+            pass
+
+    cur.execute("""
+        UPDATE bids SET share_token=%s, share_notes=%s, share_asking=%s WHERE id=%s
+    """, (token, share_notes, share_asking, bid_id))
+    db.commit()
+    db.close()
+
+    share_url = f'https://experience-wholesale.net/share/{token}'
+
+    # Build clipboard text — NO internal prices
+    lines = []
+    ymm = ''
+    if bid.get('year') or bid.get('make'):
+        ymm = f"{bid.get('year', '')} {bid.get('make', '')} {bid.get('model', '')}".strip()
+        if bid.get('trim'):
+            ymm += f" {bid['trim']}"
+        lines.append(ymm)
+    if bid.get('vin'):
+        lines.append(f"VIN: {bid['vin']}")
+
+    details = []
+    if bid.get('mileage'):
+        details.append(f"{bid['mileage']:,} mi")
+    if bid.get('color'):
+        details.append(bid['color'])
+    if details:
+        lines.append(' | '.join(details))
+
+    if share_asking:
+        lines.append(f"Asking: ${share_asking:,.0f}")
+
+    if share_notes:
+        lines.append(share_notes)
+
+    lines.append('')
+    lines.append(share_url)
+
+    clipboard_text = '\n'.join(lines)
+
+    result = {
+        'success': True,
+        'share_url': share_url,
+        'clipboard_text': clipboard_text,
+    }
+
+    # Send MMS if phone number provided (via A2P messaging service)
+    share_phone = (data.get('share_phone') or '').strip()
+    if share_phone:
+        digits = re.sub(r'\D', '', share_phone)
+        if len(digits) == 10:
+            digits = '1' + digits
+        if len(digits) == 11 and digits.startswith('1'):
+            to_phone = f'+{digits}'
+
+            try:
+                twilio_client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+                twilio_client.messages.create(
+                    messaging_service_sid='MGf87b5c3822c46a1e0c28f14d2d6006ce',
+                    to=to_phone,
+                    body=clipboard_text
+                )
+                result['sms_sent'] = True
+            except Exception as e:
+                print(f'Share SMS error: {e}')
+                result['sms_sent'] = False
+                result['sms_error'] = str(e)[:80]
+        else:
+            result['sms_sent'] = False
+            result['sms_error'] = 'Invalid phone number'
+
+    return jsonify(result)
+
+
+@app.route('/share/<token>')
+def share_page(token):
+    """Public share page — no login required."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT b.*, c.name as contact_name
+        FROM bids b LEFT JOIN contacts c ON b.contact_id = c.id
+        WHERE b.share_token = %s
+    """, (token,))
+    bid = cur.fetchone()
+    if not bid:
+        db.close()
+        return 'Not found', 404
+
+    cur.execute("SELECT url FROM bid_photos WHERE bid_id = %s ORDER BY id", (bid['id'],))
+    photos = cur.fetchall()
+
+    cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid['id'],))
+    vauto = cur.fetchone()
+
+    accutrade = None
+    try:
+        cur.execute("SELECT * FROM accutrade_lookups WHERE bid_id = %s", (bid['id'],))
+        accutrade = cur.fetchone()
+    except Exception:
+        pass
+
+    db.close()
+
+    return render_template('share.html', bid=bid, photos=photos, vauto=vauto, accutrade=accutrade)
+
+
+
+
+# ── Worker Heartbeat Monitoring ───────────────────────────────────────────────
+_HB_FILE = '/opt/expwholesale/worker_heartbeats.json'
+_HB_ALERTED = {}
+
+
+@app.route('/api/vauto/heartbeat', methods=['POST'])
+def api_vauto_heartbeat():
+    data = request.json or {}
+    worker = data.get('worker', 'unknown')
+    try:
+        hb = {}
+        if os.path.exists(_HB_FILE):
+            with open(_HB_FILE) as f:
+                hb = json.load(f)
+        hb[worker] = {**data, 'last_heartbeat': datetime.now().isoformat()}
+        with open(_HB_FILE, 'w') as f:
+            json.dump(hb, f)
+        _HB_ALERTED.pop(worker, None)
+    except Exception:
+        pass
+    return jsonify({'ok': True})
+
+
+@app.route('/api/vauto/worker-status')
+def api_vauto_worker_status():
+    try:
+        if not os.path.exists(_HB_FILE):
+            return jsonify({})
+        with open(_HB_FILE) as f:
+            hb = json.load(f)
+        result = {}
+        for w, info in hb.items():
+            last = datetime.fromisoformat(info['last_heartbeat'])
+            ago = (datetime.now() - last).total_seconds()
+            result[w] = {
+                'status': 'ok' if ago < 300 else 'stale',
+                'last_heartbeat_ago_seconds': int(ago),
+                'chrome_alive': info.get('chrome_alive'),
+                'lookups_done': info.get('lookups_done'),
+                'last_lookup_at': info.get('last_lookup_at'),
+            }
+        return jsonify(result)
+    except Exception:
+        return jsonify({})
+
 
 
 if __name__ == '__main__':
