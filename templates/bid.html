@@ -19,7 +19,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 .back-btn:hover{border-color:#334155;color:#e2e8f0}
 
 /* ---- Page shell: 3 rows (banner, photos, columns) ---- */
-.page{width:100%;height:calc(100vh - 60px);display:grid;grid-template-rows:auto auto minmax(0,1fr);overflow:hidden}
+.page{width:100%;height:calc(100vh - 60px);display:flex;flex-direction:column;overflow:hidden}
 
 /* ---- Row 1: Vehicle Banner ---- */
 .vehicle-banner{background:#111827;border-bottom:1px solid #1e293b;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;flex-shrink:0}
@@ -52,8 +52,8 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 .photo-more:hover{background:#334155;color:#e2e8f0}
 
 /* ---- Row 3: Columns ---- */
-.columns-area{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:12px 20px;overflow:hidden}
-.col{height:100%;overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding:14px;background:#0d1220;border:1px solid #1e293b;border-radius:12px;scrollbar-width:thin;scrollbar-color:#1e293b transparent}
+.columns-area{display:grid;grid-template-columns:1fr 1fr 1.3fr 0.7fr;grid-template-rows:1fr;gap:12px;padding:12px 20px;overflow:hidden;flex:1;min-height:0}
+.col{overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding:14px;background:#0d1220;border:1px solid #1e293b;border-radius:12px;scrollbar-width:thin;scrollbar-color:#1e293b transparent}
 .col::-webkit-scrollbar{width:4px}
 .col::-webkit-scrollbar-track{background:transparent}
 .col::-webkit-scrollbar-thumb{background:#1e293b;border-radius:2px}
@@ -165,9 +165,9 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
 /* ====== RESPONSIVE ====== */
 
-/* Laptop 1024-1439: 2 columns (col-context merges into col-intel via JS) */
+/* Tablet 1024-1439: single column */
 @media(max-width:1439px){
-  .columns-area{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .columns-area{grid-template-columns:1fr}
 }
 
 /* Tablet 640-1023: single column, page scrolls */
@@ -351,6 +351,31 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
       </div>
 
+      <!-- AI Assessment -->
+      <div class="card card-assess" id="assess-card" style="flex-shrink:0">
+        <div class="assess-header" onclick="toggleAssess()">
+          <span class="card-title" style="margin:0">AI Assessment</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            {% if ai_assessment %}
+            <span onclick="event.stopPropagation();rerunAssess()" title="Click to re-run assessment" style="cursor:pointer;padding:3px 8px;border-radius:5px;font-size:10px;font-weight:600;letter-spacing:.3px;color:#64748b;border:1px solid #334155;background:transparent">↻</span>
+            {% elif vauto_data %}
+            <span style="padding:5px 12px;border-radius:6px;font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:rgba(245,158,11,.12);color:#fbbf24;border:1px solid rgba(245,158,11,.2);animation:pulse 2s infinite">ANALYZING...</span>
+            {% else %}
+            <span style="padding:5px 12px;border-radius:6px;font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:rgba(100,116,139,.1);color:#64748b;border:1px solid rgba(100,116,139,.2)">WAITING FOR vAUTO</span>
+            {% endif %}
+            <span class="assess-chevron" id="assess-chevron">▼</span>
+          </div>
+        </div>
+        <div id="assess-summary-bar" onclick="toggleAssess()"></div>
+        <div id="assess-body" class="collapsed">
+          <div id="assess-output">
+            {% if not ai_assessment %}
+            <div style="font-size:13px;color:#334155;font-style:italic">Opus reviews all photos, mileage, notes, DIA dealer history, auction comps, and market listings — then recommends a buy price.</div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
       <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:400px">
         <div class="card-title">Message Thread</div>
         <div class="messages" id="msg-thread-desktop" style="flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#1e293b transparent;min-height:250px">
@@ -376,165 +401,11 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
     </div><!-- /col 1 -->
 
-    <!-- COL 2: AI Assessment (fills full height) -->
-    <div class="col col-context">
-
-      <div class="card card-assess" id="assess-card">
-        <div class="assess-header" onclick="toggleAssess()">
-          <span class="card-title" style="margin:0">AI Assessment</span>
-          <div style="display:flex;align-items:center;gap:8px">
-            {% if ai_assessment %}
-            <span onclick="event.stopPropagation();rerunAssess()" title="Click to re-run assessment" style="cursor:pointer;padding:3px 8px;border-radius:5px;font-size:10px;font-weight:600;letter-spacing:.3px;color:#64748b;border:1px solid #334155;background:transparent">↻</span>
-            {% elif vauto_data %}
-            <span style="padding:5px 12px;border-radius:6px;font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:rgba(245,158,11,.12);color:#fbbf24;border:1px solid rgba(245,158,11,.2);animation:pulse 2s infinite">ANALYZING...</span>
-            {% else %}
-            <span style="padding:5px 12px;border-radius:6px;font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:rgba(100,116,139,.1);color:#64748b;border:1px solid rgba(100,116,139,.2)">WAITING FOR vAUTO</span>
-            {% endif %}
-            <span class="assess-chevron" id="assess-chevron">▼</span>
-          </div>
-        </div>
-        <div id="assess-summary-bar" onclick="toggleAssess()"></div>
-        <div id="assess-body" class="collapsed">
-          <div id="assess-output">
-            {% if not ai_assessment %}
-            <div style="font-size:13px;color:#334155;font-style:italic">Opus reviews all photos, mileage, notes, DIA dealer history, auction comps, and market listings — then recommends a buy price.</div>
-            {% endif %}
-          </div>
-        </div>
-      </div>
-
-      <!-- Reports & Appraisals (Carfax, AutoCheck, AccuTrade) -->
-      <div class="card" style="border-color:#1e3a5f">
-        <div class="card-title">Reports & Appraisals</div>
-
-        <!-- Carfax + AutoCheck screenshots side by side -->
-        {% if vauto_data and (vauto_data.carfax_screenshot or vauto_data.autocheck_screenshot) %}
-        <div style="display:flex;gap:8px;margin-bottom:12px">
-          {% if vauto_data.carfax_screenshot %}
-          <div style="flex:1;cursor:pointer" onclick="openReportLightbox('{{ vauto_data.carfax_screenshot }}')">
-            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Carfax</div>
-            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:80px">
-              <img src="{{ vauto_data.carfax_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="Carfax Report">
-            </div>
-          </div>
-          {% endif %}
-          {% if vauto_data.autocheck_screenshot %}
-          <div style="flex:1;cursor:pointer" onclick="openReportLightbox('{{ vauto_data.autocheck_screenshot }}')">
-            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AutoCheck</div>
-            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:80px">
-              <img src="{{ vauto_data.autocheck_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AutoCheck Report">
-            </div>
-          </div>
-          {% endif %}
-        </div>
-        {% endif %}
-
-        <!-- AccuTrade screenshot -->
-        {% if accutrade_data and accutrade_data.screenshot %}
-        <div style="cursor:pointer;margin-bottom:12px" onclick="openReportLightbox('{{ accutrade_data.screenshot }}')">
-          <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AccuTrade Appraisal</div>
-          <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:80px">
-            <img src="{{ accutrade_data.screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AccuTrade Report">
-          </div>
-        </div>
-        {% endif %}
-
-        <!-- AccuTrade values -->
-        {% if accutrade_data %}
-        <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">AccuTrade Values</div>
-        <div style="display:flex;flex-direction:column;gap:5px">
-          {% set at_books = [
-            ('Guaranteed Offer', accutrade_data.guaranteed_offer),
-            ('Trade-In', accutrade_data.trade_in),
-            ('Trade Market', accutrade_data.trade_market),
-            ('Retail', accutrade_data.retail),
-            ('Market Average', accutrade_data.market_avg)
-          ] %}
-          {% for label, val in at_books %}
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
-            <span style="font-size:12px;font-weight:500;color:#94a3b8">{{ label }}</span>
-            {% if val %}
-            <span style="font-size:13px;font-weight:700;color:#e2e8f0;font-family:monospace">${{ '{:,}'.format(val) }}</span>
-            {% else %}
-            <span style="font-size:12px;color:#334155">—</span>
-            {% endif %}
-          </div>
-          {% endfor %}
-          {% if accutrade_data.looked_up_at %}
-          <div style="font-size:10px;color:#334155;text-align:right;margin-top:2px">AccuTrade looked up {{ time_ago(accutrade_data.looked_up_at) }}</div>
-          {% endif %}
-        </div>
-        {% elif bid.vin %}
-        <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">AccuTrade</div>
-        <div style="font-size:12px;color:#475569;font-style:italic">Pending — waiting for worker...</div>
-        {% endif %}
-
-        {% if not vauto_data and not accutrade_data and not bid.vin %}
-        <div style="font-size:13px;color:#334155;font-style:italic">Submit a VIN to trigger lookups.</div>
-        {% elif not vauto_data and not accutrade_data %}
-        <div style="font-size:13px;color:#475569;font-style:italic">Lookups queued — waiting for worker...</div>
-        {% endif %}
-      </div>
-
-    </div><!-- /col 2 -->
-
-    <!-- COL-ACTION: Reply, Contact, Market (fixed width) -->
-    <div class="col col-action">
-
-      <div class="card">
-        <div class="card-title">Send Reply</div>
-        <div class="reply-section">
-          <div class="reply-tabs">
-            <button class="reply-tab active-bid" id="tab-bid" onclick="setTab('bid')">Send Bid</button>
-            <button class="reply-tab" id="tab-pass" onclick="setTab('pass')">Pass</button>
-          </div>
-          <div id="bid-section">
-            <div class="bid-amount-wrap">
-              <label>Bid Amount</label>
-              <div class="bid-amount-input">
-                <span>$</span>
-                <input type="number" id="bid-amount" placeholder="0" step="100" oninput="autofillBidText(this.value)">
-              </div>
-            </div>
-            <textarea class="reply-textarea" id="reply-text" placeholder="We're in at $XX,XXX. Let me know if you want to move forward."></textarea>
-            <button class="btn-send-bid" onclick="sendReply('bid')">Send Bid</button>
-          </div>
-          <div id="pass-section" style="display:none">
-            <textarea class="reply-textarea" id="pass-text" placeholder="Thanks, but we're going to pass on this one."></textarea>
-            <button class="btn-pass" onclick="sendReply('pass')">Send & Mark Passed</button>
-          </div>
-          {% if bid.bid_sent_at %}
-          <div style="margin-top:12px;padding:10px 14px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.15);border-radius:7px;font-size:12px;color:#4ade80">
-            {% if bid.bid_amount %}Bid of ${{ '{:,.0f}'.format(bid.bid_amount) }} sent{% else %}Response sent{% endif %} · {{ time_ago(bid.bid_sent_at) }}
-          </div>
-          {% endif %}
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Contact</div>
-        <div class="contact-phone-big">{{ bid.phone }}</div>
-        <div class="contact-fields">
-          <div class="field"><label>Name</label><input id="c-name" value="{{ bid.contact_name or '' }}" placeholder="Full name"></div>
-          <div class="field"><label>Company</label><input id="c-company" value="{{ bid.contact_company or '' }}" placeholder="Dealership / Company"></div>
-        </div>
-        <button class="save-btn" onclick="saveContact()">Save Contact</button>
-      </div>
-
-      {% if valuations %}
-      <div class="card">
-        <div class="card-title">Valuations</div>
-        {% for v in valuations %}
-        <div class="val-source">{{ v.source }}</div>
-        {% if v.data %}{% for key, val in v.data.items() %}
-        <div class="val-row"><span class="val-label">{{ key }}</span><span class="val-value">{{ val }}</span></div>
-        {% endfor %}{% endif %}
-        {% endfor %}
-      </div>
-      {% endif %}
+    <!-- COL 2: vAuto Book Values + Reports -->
+    <div class="col col-vauto">
 
       <!-- vAuto Book Values + Reports -->
-      <div class="card" style="border-color:#1e3a5f" id="vauto-card">
+      <div class="card" style="border-color:#1e3a5f;flex:1" id="vauto-card">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
           vAuto
           {% if vauto_data %}
@@ -584,6 +455,28 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           {% endfor %}
         </div>
 
+        <!-- Carfax / AutoCheck screenshots -->
+        {% if vauto_data.carfax_screenshot or vauto_data.autocheck_screenshot %}
+        <div style="margin-top:14px;display:flex;gap:8px;flex:1">
+          {% if vauto_data.carfax_screenshot %}
+          <div style="flex:1;cursor:pointer;min-height:0" onclick="openReportLightbox('{{ vauto_data.carfax_screenshot }}')">
+            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Carfax</div>
+            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
+              <img src="{{ vauto_data.carfax_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="Carfax Report">
+            </div>
+          </div>
+          {% endif %}
+          {% if vauto_data.autocheck_screenshot %}
+          <div style="flex:1;cursor:pointer;min-height:0" onclick="openReportLightbox('{{ vauto_data.autocheck_screenshot }}')">
+            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AutoCheck</div>
+            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
+              <img src="{{ vauto_data.autocheck_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AutoCheck Report">
+            </div>
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+
         {% if vauto_data.looked_up_at %}
         <div style="margin-top:10px;font-size:10px;color:#334155;text-align:right">Looked up {{ time_ago(vauto_data.looked_up_at) }}</div>
         {% endif %}
@@ -595,100 +488,115 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         {% endif %}
       </div>
 
-      <!-- Tesla Decode (only for Tesla VINs) -->
-      {% if tesla_data %}
-      <div class="card" style="border-color:#dc2626" id="tesla-card">
+    </div><!-- /col 2 -->
+
+    <!-- COL 3: AccuTrade -->
+    <div class="col col-accutrade">
+
+      <div class="card" style="border-color:#065f46;flex:1;display:flex;flex-direction:column" id="accutrade-card">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-          Tesla Decode
-          <span style="font-size:10px;font-weight:700;color:#f87171;background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">TESLA</span>
+          AccuTrade
+          {% if accutrade_data %}
+          <span style="font-size:10px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">COMPLETE</span>
+          {% elif bid.vin %}
+          <span id="accutrade-status-badge" style="font-size:10px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px;animation:pulse 2s infinite">PENDING</span>
+          {% else %}
+          <span style="font-size:10px;font-weight:700;color:#475569;background:rgba(71,85,105,.12);border:1px solid rgba(71,85,105,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">NO VIN</span>
+          {% endif %}
         </div>
 
+        {% if accutrade_data %}
         <div style="display:flex;flex-direction:column;gap:6px">
-          {% set tesla_fields = [
-            ('Model', tesla_data.model),
-            ('Trim', tesla_data.trim),
-            ('Battery', tesla_data.battery),
-            ('Motor', tesla_data.motor),
-            ('Drive', tesla_data.drive),
-            ('Plant', tesla_data.plant),
-            ('Year', tesla_data.year)
+          {% set at_books = [
+            ('Instant Offer', accutrade_data.guaranteed_offer),
+            ('Target Auction', accutrade_data.trade_in),
+            ('Target Retail', accutrade_data.trade_market),
+            ('Manheim', accutrade_data.retail),
+            ('Wholesale / Avg', accutrade_data.market_avg)
           ] %}
-          {% for label, val in tesla_fields %}
-          {% if val %}
+          {% for label, val in at_books %}
           <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
             <span style="font-size:12px;font-weight:500;color:#94a3b8">{{ label }}</span>
-            <span style="font-size:13px;font-weight:600;color:#e2e8f0">{{ val }}</span>
+            {% if val %}
+            <span style="font-size:13px;font-weight:700;color:#e2e8f0;font-family:monospace">${{ '{:,}'.format(val) }}</span>
+            {% else %}
+            <span style="font-size:12px;color:#334155">—</span>
+            {% endif %}
           </div>
-          {% endif %}
           {% endfor %}
+        </div>
 
-          {% if tesla_data.msrp %}
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
-            <span style="font-size:12px;font-weight:500;color:#94a3b8">Original MSRP</span>
-            <span style="font-size:13px;font-weight:700;color:#4ade80;font-family:monospace">${{ '{:,.0f}'.format(tesla_data.msrp) }}</span>
+        {% if accutrade_data.screenshot %}
+        <div style="margin-top:14px;cursor:pointer;flex:1;min-height:0" onclick="openReportLightbox('{{ accutrade_data.screenshot }}')">
+          <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AccuTrade Report</div>
+          <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
+            <img src="{{ accutrade_data.screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AccuTrade Report">
+          </div>
+        </div>
+        {% endif %}
+
+        {% if accutrade_data.looked_up_at %}
+        <div style="margin-top:10px;font-size:10px;color:#334155;text-align:right">Looked up {{ time_ago(accutrade_data.looked_up_at) }}</div>
+        {% endif %}
+
+        {% elif bid.vin %}
+        <div style="font-size:13px;color:#475569;font-style:italic">AccuTrade lookup queued — waiting for worker...</div>
+        {% else %}
+        <div style="font-size:13px;color:#334155;font-style:italic">Submit a VIN to trigger AccuTrade lookup.</div>
+        {% endif %}
+      </div>
+
+    </div><!-- /col 3 -->
+
+    <!-- COL 4: Send Bid + Contact -->
+    <div class="col col-action">
+
+      <div class="card">
+        <div class="card-title">Send Bid</div>
+        <div class="reply-section">
+          <div class="reply-tabs">
+            <button class="reply-tab active-bid" id="tab-bid" onclick="setTab('bid')">Send Bid</button>
+            <button class="reply-tab" id="tab-pass" onclick="setTab('pass')">Pass</button>
+          </div>
+          <div id="bid-section">
+            <div class="bid-amount-wrap">
+              <label>Bid Amount</label>
+              <div class="bid-amount-input">
+                <span>$</span>
+                <input type="number" id="bid-amount" placeholder="0" step="100" oninput="autofillBidText(this.value)">
+              </div>
+            </div>
+            <textarea class="reply-textarea" id="reply-text" placeholder="We're in at $XX,XXX. Let me know if you want to move forward."></textarea>
+            <button class="btn-send-bid" onclick="sendReply('bid')">Send Bid</button>
+          </div>
+          <div id="pass-section" style="display:none">
+            <textarea class="reply-textarea" id="pass-text" placeholder="Thanks, but we're going to pass on this one."></textarea>
+            <button class="btn-pass" onclick="sendReply('pass')">Send & Mark Passed</button>
+          </div>
+          {% if bid.bid_sent_at %}
+          <div style="margin-top:12px;padding:10px 14px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.15);border-radius:7px;font-size:12px;color:#4ade80">
+            {% if bid.bid_amount %}Bid of ${{ '{:,.0f}'.format(bid.bid_amount) }} sent{% else %}Response sent{% endif %} · {{ time_ago(bid.bid_sent_at) }}
           </div>
           {% endif %}
         </div>
-
-        <!-- FSD + Battery Status (from Fleet API) -->
-        {% if tesla_data.fleet_specs %}
-        <div id="tesla-fleet-data" style="margin-top:12px"></div>
-        <script>
-        (function(){
-          var fs = {{ tesla_data.fleet_specs|tojson }};
-          if (typeof fs === 'string') { try { fs = JSON.parse(fs); } catch(e) { return; } }
-          if (!fs) return;
-          var html = '';
-
-          // FSD Status
-          var sw = (fs.autopilotSoftwareCode || '').toLowerCase();
-          var equip = fs.equipmentPrice || [];
-          var hasFsd = false, fsdPrice = -1;
-          equip.forEach(function(e) {
-            var n = (e.name || '').toLowerCase();
-            if (n.indexOf('full self') >= 0 || n.indexOf('fsd') >= 0) { hasFsd = true; fsdPrice = e.price || 0; }
-          });
-          var fsdActive = sw.indexOf('premium') >= 0 || sw.indexOf('full self') >= 0;
-          var status, color, border, note;
-          if (fsdActive && hasFsd && fsdPrice === 0) {
-            status = 'FSD Purchased'; color = '#4ade80'; border = '#166534';
-            note = 'Transfers with the car.';
-          } else if (fsdActive && (!hasFsd || fsdPrice > 0)) {
-            status = 'FSD Subscription'; color = '#fbbf24'; border = '#78350f';
-            note = 'Likely $99/mo — does NOT transfer.';
-          } else if (hasFsd && fsdPrice > 0) {
-            status = 'FSD Not Active'; color = '#f87171'; border = '#7f1d1d';
-            note = 'Configured at factory but not active.';
-          } else {
-            status = 'Basic Autopilot'; color = '#94a3b8'; border = '#1e293b';
-            note = 'TACC + Autosteer only.';
-          }
-          html += '<div style="padding:10px 12px;background:#0f172a;border:1px solid '+border+';border-radius:8px;margin-bottom:8px">';
-          html += '<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="font-size:10px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.5px">FSD Status</span>';
-          html += '<span style="font-size:12px;font-weight:800;color:'+color+'">'+status+'</span></div>';
-          html += '<div style="font-size:11px;color:#64748b">'+note+'</div></div>';
-
-          // Battery
-          var soh = fs.batterySoH ? parseFloat(fs.batterySoH) : null;
-          if (soh !== null) {
-            var bhColor = soh >= 90 ? '#4ade80' : soh >= 80 ? '#60a5fa' : soh >= 70 ? '#fbbf24' : '#f87171';
-            html += '<div style="padding:10px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:8px">';
-            html += '<div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="font-size:10px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.5px">Battery Health</span>';
-            html += '<span style="font-size:14px;font-weight:800;color:'+bhColor+'">'+soh.toFixed(1)+'%</span></div>';
-            html += '<div style="height:6px;background:#1e293b;border-radius:3px;overflow:hidden"><div style="height:100%;width:'+soh+'%;background:'+bhColor+';border-radius:3px"></div></div>';
-            var cap = fs.batteryCapacityKwh ? parseFloat(fs.batteryCapacityKwh).toFixed(1) + ' kWh' : '';
-            if (cap) html += '<div style="font-size:10px;color:#475569;margin-top:4px">Capacity: '+cap+'</div>';
-            html += '</div>';
-          }
-
-          document.getElementById('tesla-fleet-data').innerHTML = html;
-        })();
-        </script>
-        {% endif %}
       </div>
-      {% endif %}
 
-    </div><!-- /col-action -->
+      <div class="card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none" onclick="toggleContact()">
+          <span>Contact <span style="color:#64748b;font-weight:500;font-size:12px;margin-left:6px">{{ bid.contact_name or bid.phone or '' }}</span></span>
+          <span id="contact-chevron" style="font-size:11px;color:#475569;transition:transform .2s;display:inline-block;transform:rotate(0deg)">&#9660;</span>
+        </div>
+        <div id="contact-body" style="display:none">
+          <div class="contact-phone-big">{{ bid.phone }}</div>
+          <div class="contact-fields">
+            <div class="field"><label>Name</label><input id="c-name" value="{{ bid.contact_name or '' }}" placeholder="Full name"></div>
+            <div class="field"><label>Company</label><input id="c-company" value="{{ bid.contact_company or '' }}" placeholder="Dealership / Company"></div>
+          </div>
+          <button class="save-btn" onclick="saveContact()">Save Contact</button>
+        </div>
+      </div>
+
+    </div><!-- /col 3 -->
 
   </div><!-- /columns-area -->
 
@@ -1052,6 +960,13 @@ function toggleVehicleDetails() {
   document.getElementById('vd-chevron').style.transform = _vdCollapsed ? 'rotate(0deg)' : 'rotate(180deg)';
 }
 
+let _contactCollapsed = true;
+function toggleContact() {
+  _contactCollapsed = !_contactCollapsed;
+  document.getElementById('contact-body').style.display = _contactCollapsed ? 'none' : '';
+  document.getElementById('contact-chevron').style.transform = _contactCollapsed ? 'rotate(0deg)' : 'rotate(180deg)';
+}
+
 // ── Thread reply from bid detail page ─────────────────────────────────────
 async function sendThreadReply() {
   const input = document.getElementById('thread-reply-input');
@@ -1164,27 +1079,6 @@ function showMsgPopupBid(msg) {
 
 setInterval(pollMessages, 3000);
 
-// Column merge: at ≤1439px, move col-context cards into col-intel
-(function() {
-  const colIntel   = document.querySelector('.col-intel');
-  const colContext = document.querySelector('.col-context');
-  if (!colIntel || !colContext) return;
-  const ctxCards = [...colContext.children];
-
-  function handleBP(e) {
-    if (e.matches) {
-      ctxCards.forEach(c => colIntel.appendChild(c));
-      colContext.style.display = 'none';
-    } else {
-      ctxCards.forEach(c => colContext.appendChild(c));
-      colContext.style.display = '';
-    }
-  }
-
-  const mql = window.matchMedia('(max-width: 1439px)');
-  mql.addEventListener('change', handleBP);
-  handleBP(mql);
-})();
 
 // ── vAuto auto-poll (while pending) ──────────────────────────────────────
 {% if not vauto_data and bid.vin %}

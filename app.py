@@ -28,6 +28,7 @@ _PUBLIC_PREFIXES = (
     '/api/bid/external', '/api/push-subscribe',
     '/api/push-unsubscribe', '/api/vapid-public-key',
     '/.well-known/', '/api/tesla-vin/', '/share/',
+    '/api/quick-extract',
 )
 
 
@@ -1284,11 +1285,11 @@ def _run_assessment(bid_id):
     if accutrade:
         ctx += "\nACCUTRADE VALUES:\n"
         at_fields = [
-            ('guaranteed_offer', 'Guaranteed Offer'),
-            ('trade_in', 'Trade-In'),
-            ('trade_market', 'Trade Market'),
-            ('retail', 'Retail'),
-            ('market_avg', 'Market Average'),
+            ('guaranteed_offer', 'Instant Offer'),
+            ('trade_in', 'Target Auction'),
+            ('trade_market', 'Target Retail'),
+            ('retail', 'Manheim'),
+            ('market_avg', 'Wholesale / Average'),
         ]
         for field, label in at_fields:
             val = accutrade.get(field)
@@ -2638,7 +2639,7 @@ def api_vauto_pending():
     db = get_db()
     cur = db.cursor()
     cur.execute("""
-        SELECT b.id as bid_id, b.vin, b.mileage, b.year, b.make, b.model,
+        SELECT b.id as bid_id, b.vin, b.mileage, b.year, b.make, b.model, b.trim,
                b.vauto_priority
         FROM bids b
         LEFT JOIN vauto_lookups vl ON vl.bid_id = b.id
