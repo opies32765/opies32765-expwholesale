@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quick Drop — EW Buy Center</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:100vh}
+
+/* Header — matches dashboard */
+.header{background:#243447;border-bottom:1px solid #344f68;padding:0 32px;height:66px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:12px;text-decoration:none}
+.logo-mark{width:38px;height:38px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;color:#fff}
+.logo-text{font-size:17px;font-weight:700;color:#f1f5f9;letter-spacing:-0.3px}
+.logo-sub{font-size:11px;color:#7a9bb5;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+.header-right{display:flex;align-items:center;gap:16px}
+.nav-link{font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s}
+.nav-link:hover{color:#e2e8f0;border-color:#334155}
+.nav-link.active{color:#60a5fa;border-color:#3b82f6;background:rgba(59,130,246,.1)}
+
+/* Main content */
+.content{max-width:800px;margin:0 auto;padding:40px 24px}
+.page-title{font-size:28px;font-weight:800;margin-bottom:6px}
+.page-desc{font-size:15px;color:#7a9bb5;margin-bottom:32px;line-height:1.5}
+
+/* Drop zone */
+.drop-zone{
+  border:2px dashed #344f68;border-radius:16px;padding:60px 40px;text-align:center;
+  cursor:pointer;transition:all .2s;background:#243447;position:relative;
+  min-height:220px;display:flex;flex-direction:column;align-items:center;justify-content:center;
+}
+.drop-zone:hover{border-color:#4d7a9e;background:#2a3f54}
+.drop-zone.drag-over{border-color:#3b82f6;background:rgba(59,130,246,.08);transform:scale(1.01)}
+.drop-zone.has-files{padding:24px;min-height:auto}
+.drop-icon{font-size:48px;margin-bottom:16px;opacity:.6}
+.drop-text{font-size:17px;font-weight:600;color:#a8c0d6}
+.drop-subtext{font-size:14px;color:#5a7a96;margin-top:8px}
+.drop-subtext kbd{background:#1a2a3a;border:1px solid #344f68;border-radius:4px;padding:2px 6px;font-family:'Inter',sans-serif;font-size:12px}
+
+/* File input (hidden) */
+.file-input{display:none}
+
+/* Preview grid */
+.preview-grid{display:flex;flex-wrap:wrap;gap:12px;margin-top:16px;width:100%}
+.preview-item{
+  position:relative;width:140px;height:105px;border-radius:8px;overflow:hidden;
+  border:1px solid #344f68;flex-shrink:0;
+}
+.preview-item img{width:100%;height:100%;object-fit:cover}
+.preview-remove{
+  position:absolute;top:4px;right:4px;width:24px;height:24px;
+  background:rgba(0,0,0,.7);border:none;color:#fff;border-radius:50%;
+  cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;
+  line-height:1;
+}
+.preview-remove:hover{background:#ef4444}
+.preview-add{
+  width:140px;height:105px;border-radius:8px;border:2px dashed #344f68;
+  display:flex;align-items:center;justify-content:center;cursor:pointer;
+  color:#5a7a96;font-size:28px;transition:all .15s;flex-shrink:0;
+}
+.preview-add:hover{border-color:#4d7a9e;color:#7a9bb5}
+
+/* Form fields */
+.form-section{margin-top:28px;display:flex;flex-direction:column;gap:16px}
+.field-row{display:flex;gap:16px}
+.field-row .field{flex:1}
+.field label{display:block;font-size:12px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px}
+.field input,.field textarea{
+  width:100%;padding:10px 14px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;
+  color:#e2e8f0;font-size:15px;font-family:'Inter',sans-serif;transition:border-color .15s;
+}
+.field input:focus,.field textarea:focus{outline:none;border-color:#3b82f6}
+.field textarea{resize:vertical;min-height:60px}
+.field .hint{font-size:12px;color:#5a7a96;margin-top:4px}
+
+/* Manual VIN field */
+.vin-override{display:flex;gap:12px;align-items:flex-end}
+.vin-override .field{flex:1}
+.vin-override .vin-note{font-size:12px;color:#5a7a96;padding-bottom:12px;white-space:nowrap}
+
+/* Submit button */
+.submit-btn{
+  width:100%;padding:16px;margin-top:24px;background:#3b82f6;border:none;border-radius:10px;
+  color:#fff;font-size:17px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif;
+  transition:all .15s;display:flex;align-items:center;justify-content:center;gap:10px;
+}
+.submit-btn:hover{background:#2563eb}
+.submit-btn:disabled{background:#1e3a5f;color:#5a7a96;cursor:not-allowed}
+
+/* Processing state */
+.processing{display:none;margin-top:24px;text-align:center}
+.processing.show{display:block}
+.spinner{width:40px;height:40px;border:3px solid #344f68;border-top-color:#3b82f6;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.processing-text{font-size:15px;color:#a8c0d6;font-weight:500}
+.processing-step{font-size:13px;color:#5a7a96;margin-top:6px}
+
+/* Success state */
+.success-card{
+  display:none;margin-top:24px;background:#0d2d1a;border:1px solid rgba(34,197,94,.3);
+  border-radius:12px;padding:28px;text-align:center;
+}
+.success-card.show{display:block}
+.success-icon{font-size:48px;margin-bottom:12px}
+.success-title{font-size:20px;font-weight:700;color:#4ade80;margin-bottom:8px}
+.success-details{font-size:15px;color:#a8c0d6;line-height:1.6}
+.success-details strong{color:#e2e8f0}
+.success-extracted{
+  margin-top:16px;background:rgba(0,0,0,.2);border-radius:8px;padding:16px;text-align:left;
+  font-size:13px;color:#7a9bb5;line-height:1.8;
+}
+.success-extracted .label{color:#5a7a96;font-weight:600;display:inline-block;min-width:80px}
+.success-extracted .val{color:#e2e8f0}
+.success-extracted .val.warn{color:#fbbf24}
+.success-actions{display:flex;gap:12px;margin-top:20px;justify-content:center}
+.btn-view{padding:10px 24px;background:#3b82f6;border:none;border-radius:8px;color:#fff;font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;font-family:'Inter',sans-serif}
+.btn-view:hover{background:#2563eb}
+.btn-another{padding:10px 24px;background:transparent;border:1px solid #344f68;border-radius:8px;color:#a8c0d6;font-size:14px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif}
+.btn-another:hover{border-color:#4d7a9e;color:#e2e8f0}
+
+/* Error state */
+.error-msg{display:none;margin-top:16px;background:#3b1111;border:1px solid rgba(239,68,68,.3);border-radius:8px;padding:14px 18px;font-size:14px;color:#fca5a5}
+.error-msg.show{display:block}
+
+/* No VIN warning */
+.no-vin-warn{
+  display:none;margin-top:16px;background:#3b2f11;border:1px solid rgba(251,191,36,.3);
+  border-radius:8px;padding:14px 18px;font-size:14px;color:#fbbf24;line-height:1.5;
+}
+.no-vin-warn.show{display:block}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <a href="/" class="logo">
+    <div class="logo-mark">EW</div>
+    <div>
+      <div class="logo-text">EW Buy Center</div>
+      <div class="logo-sub">Vehicle Acquisition</div>
+    </div>
+  </a>
+  <div class="header-right">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/contacts" class="nav-link">Contacts</a>
+    <a href="/tesla-vin" class="nav-link">Tesla VIN</a>
+    <a href="/drop" class="nav-link active">Quick Drop</a>
+  </div>
+</div>
+
+<!-- Content -->
+<div class="content">
+  <div class="page-title">Quick Drop</div>
+  <div class="page-desc">Drag Carfax or AutoCheck screenshots here. AI reads the VIN, vehicle info, and history — then creates a bid and kicks off vAuto + assessment automatically.</div>
+
+  <!-- Drop Zone -->
+  <div class="drop-zone" id="dropZone">
+    <div class="drop-placeholder" id="dropPlaceholder">
+      <div class="drop-icon">&#128206;</div>
+      <div class="drop-text">Drag screenshots here from Messages, Desktop, or anywhere</div>
+      <div class="drop-subtext">or <kbd>Cmd</kbd>+<kbd>V</kbd> to paste &bull; or click to browse</div>
+    </div>
+    <div class="preview-grid" id="previewGrid" style="display:none"></div>
+    <input type="file" class="file-input" id="fileInput" multiple accept="image/*">
+  </div>
+
+  <!-- Error -->
+  <div class="error-msg" id="errorMsg"></div>
+
+  <!-- Form -->
+  <div class="form-section" id="formSection">
+    <div class="field-row">
+      <div class="field">
+        <label>Rep Name (optional)</label>
+        <input type="text" id="repName" placeholder="Who's submitting this bid?">
+      </div>
+      <div class="field">
+        <label>Asking Price (optional)</label>
+        <input type="text" id="askingPrice" placeholder="$0">
+      </div>
+    </div>
+    <div class="field">
+      <label>VIN Override (optional)</label>
+      <input type="text" id="manualVin" placeholder="If AI can't read the VIN, type it here" maxlength="17" style="font-family:monospace;letter-spacing:1px;text-transform:uppercase">
+      <div class="hint">Leave blank to let AI extract it from the screenshot</div>
+    </div>
+    <div class="field">
+      <label>Notes (optional)</label>
+      <textarea id="notes" placeholder="Any extra context about this vehicle..."></textarea>
+    </div>
+
+    <button class="submit-btn" id="submitBtn" disabled>
+      <span id="btnText">Drop screenshots to get started</span>
+    </button>
+  </div>
+
+  <!-- Processing -->
+  <div class="processing" id="processing">
+    <div class="spinner"></div>
+    <div class="processing-text">Reading screenshots with AI...</div>
+    <div class="processing-step" id="processingStep">Extracting VIN, vehicle info, and history from Carfax</div>
+  </div>
+
+  <!-- Success -->
+  <div class="success-card" id="successCard">
+    <div class="success-icon">&#9989;</div>
+    <div class="success-title">Bid Created</div>
+    <div class="success-details" id="successDetails"></div>
+    <div class="success-extracted" id="successExtracted"></div>
+    <div class="success-actions">
+      <a class="btn-view" id="btnViewBid" href="#">Open Bid</a>
+      <button class="btn-another" id="btnAnother">Drop Another</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const dropZone = document.getElementById('dropZone');
+  const fileInput = document.getElementById('fileInput');
+  const previewGrid = document.getElementById('previewGrid');
+  const placeholder = document.getElementById('dropPlaceholder');
+  const submitBtn = document.getElementById('submitBtn');
+  const btnText = document.getElementById('btnText');
+  const processing = document.getElementById('processing');
+  const processingStep = document.getElementById('processingStep');
+  const successCard = document.getElementById('successCard');
+  const successDetails = document.getElementById('successDetails');
+  const successExtracted = document.getElementById('successExtracted');
+  const errorMsg = document.getElementById('errorMsg');
+  const formSection = document.getElementById('formSection');
+
+  let files = []; // {file: File, url: string}
+
+  // --- Drag & Drop ---
+  dropZone.addEventListener('dragenter', function(e){ e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragover', function(e){ e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', function(e){
+    // Only remove if we actually left the drop zone (not a child)
+    if(!dropZone.contains(e.relatedTarget)) dropZone.classList.remove('drag-over');
+  });
+  dropZone.addEventListener('drop', function(e){
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    addFiles(e.dataTransfer.files);
+  });
+
+  // --- Click to browse ---
+  dropZone.addEventListener('click', function(e){
+    if(e.target.closest('.preview-remove') || e.target.closest('.preview-add')) return;
+    fileInput.click();
+  });
+  fileInput.addEventListener('change', function(){
+    addFiles(fileInput.files);
+    fileInput.value = '';
+  });
+
+  // --- Paste (Cmd+V) ---
+  document.addEventListener('paste', function(e){
+    const items = e.clipboardData && e.clipboardData.items;
+    if(!items) return;
+    const imageFiles = [];
+    for(let i = 0; i < items.length; i++){
+      if(items[i].type.startsWith('image/')){
+        const f = items[i].getAsFile();
+        if(f) imageFiles.push(f);
+      }
+    }
+    if(imageFiles.length){
+      e.preventDefault();
+      addFilesRaw(imageFiles);
+    }
+  });
+
+  function addFiles(fileList){
+    const arr = [];
+    for(let i = 0; i < fileList.length; i++){
+      if(fileList[i].type.startsWith('image/')) arr.push(fileList[i]);
+    }
+    addFilesRaw(arr);
+  }
+
+  function addFilesRaw(arr){
+    if(!arr.length) return;
+    arr.forEach(function(f){
+      // Give pasted images a proper name
+      if(!f.name || f.name === 'image.png'){
+        const ts = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
+        f = new File([f], 'carfax-' + ts + '.png', {type: f.type});
+      }
+      const url = URL.createObjectURL(f);
+      files.push({file: f, url: url});
+    });
+    renderPreviews();
+    updateButton();
+  }
+
+  function removeFile(idx){
+    URL.revokeObjectURL(files[idx].url);
+    files.splice(idx, 1);
+    renderPreviews();
+    updateButton();
+  }
+
+  function renderPreviews(){
+    if(!files.length){
+      previewGrid.style.display = 'none';
+      placeholder.style.display = '';
+      dropZone.classList.remove('has-files');
+      return;
+    }
+    placeholder.style.display = 'none';
+    previewGrid.style.display = 'flex';
+    dropZone.classList.add('has-files');
+
+    let html = '';
+    files.forEach(function(f, i){
+      html += '<div class="preview-item">';
+      html += '<img src="' + f.url + '" alt="Screenshot ' + (i+1) + '">';
+      html += '<button class="preview-remove" data-idx="' + i + '" title="Remove">&times;</button>';
+      html += '</div>';
+    });
+    html += '<div class="preview-add" title="Add more screenshots">+</div>';
+    previewGrid.innerHTML = html;
+
+    // Remove buttons
+    previewGrid.querySelectorAll('.preview-remove').forEach(function(btn){
+      btn.addEventListener('click', function(e){
+        e.stopPropagation();
+        removeFile(parseInt(this.dataset.idx));
+      });
+    });
+    // Add more button
+    previewGrid.querySelector('.preview-add').addEventListener('click', function(e){
+      e.stopPropagation();
+      fileInput.click();
+    });
+  }
+
+  function updateButton(){
+    if(files.length){
+      submitBtn.disabled = false;
+      btnText.textContent = 'Submit ' + files.length + ' screenshot' + (files.length > 1 ? 's' : '');
+    } else {
+      submitBtn.disabled = true;
+      btnText.textContent = 'Drop screenshots to get started';
+    }
+  }
+
+  // --- Submit ---
+  submitBtn.addEventListener('click', function(){
+    if(!files.length || submitBtn.disabled) return;
+    submitBtn.disabled = true;
+
+    // Hide form, show processing
+    errorMsg.classList.remove('show');
+    successCard.classList.remove('show');
+    processing.classList.add('show');
+    processingStep.textContent = 'Uploading ' + files.length + ' screenshot' + (files.length > 1 ? 's' : '') + '...';
+
+    const formData = new FormData();
+    files.forEach(function(f, i){
+      formData.append('photo_' + i, f.file);
+    });
+    if(document.getElementById('repName').value.trim())
+      formData.append('rep_name', document.getElementById('repName').value.trim());
+    if(document.getElementById('askingPrice').value.trim())
+      formData.append('asking_price', document.getElementById('askingPrice').value.trim());
+    if(document.getElementById('manualVin').value.trim())
+      formData.append('manual_vin', document.getElementById('manualVin').value.trim());
+    if(document.getElementById('notes').value.trim())
+      formData.append('notes', document.getElementById('notes').value.trim());
+
+    // Update processing text
+    setTimeout(function(){
+      processingStep.textContent = 'AI is reading the Carfax screenshots...';
+    }, 1500);
+    setTimeout(function(){
+      processingStep.textContent = 'Extracting VIN, vehicle details, and history...';
+    }, 5000);
+    setTimeout(function(){
+      processingStep.textContent = 'Creating bid and triggering vAuto lookup...';
+    }, 10000);
+
+    fetch('/api/bid/quick-drop', {method:'POST', body: formData})
+      .then(function(r){ return r.json().then(function(d){ return {ok: r.ok, data: d}; }); })
+      .then(function(res){
+        processing.classList.remove('show');
+        if(!res.ok || !res.data.success){
+          showError(res.data.error || 'Something went wrong. Try again.');
+          submitBtn.disabled = false;
+          return;
+        }
+        showSuccess(res.data);
+      })
+      .catch(function(err){
+        processing.classList.remove('show');
+        showError('Network error — check your connection and try again.');
+        submitBtn.disabled = false;
+      });
+  });
+
+  function showError(msg){
+    errorMsg.textContent = msg;
+    errorMsg.classList.add('show');
+  }
+
+  function showSuccess(data){
+    const ext = data.extracted || {};
+    const bidId = data.bid_id;
+
+    let ymm = '';
+    if(ext.year && ext.make && ext.model) ymm = ext.year + ' ' + ext.make + ' ' + ext.model + (ext.trim ? ' ' + ext.trim : '');
+
+    successDetails.innerHTML = 'Bid <strong>#' + bidId + '</strong>' + (ymm ? ' — <strong>' + ymm + '</strong>' : '') + '<br>vAuto lookup queued. AI assessment will run automatically.';
+
+    // Extracted info table
+    let rows = '';
+    function row(label, val, warn){
+      if(val === null || val === undefined) return;
+      rows += '<div><span class="label">' + label + ':</span> <span class="val' + (warn ? ' warn' : '') + '">' + val + '</span></div>';
+    }
+    row('VIN', ext.vin);
+    row('Vehicle', ymm || null);
+    row('Mileage', ext.mileage ? ext.mileage.toLocaleString() + ' mi' : null);
+    row('Color', ext.color);
+    row('Title', ext.title_status, ext.title_status && ext.title_status !== 'Clean');
+    row('Accidents', ext.accidents !== null && ext.accidents !== undefined ? ext.accidents : null, ext.accidents > 0);
+    row('Owners', ext.owners);
+
+    if(!ext.vin){
+      rows += '<div style="margin-top:8px;color:#fbbf24;font-weight:600">&#9888; No VIN detected — open the bid to add it manually</div>';
+    }
+
+    successExtracted.innerHTML = rows || '<div style="color:#5a7a96">No details could be extracted — open the bid to review screenshots</div>';
+
+    document.getElementById('btnViewBid').href = '/bid/' + bidId;
+    successCard.classList.add('show');
+  }
+
+  // --- Drop Another ---
+  document.getElementById('btnAnother').addEventListener('click', function(){
+    files.forEach(function(f){ URL.revokeObjectURL(f.url); });
+    files = [];
+    renderPreviews();
+    updateButton();
+    successCard.classList.remove('show');
+    errorMsg.classList.remove('show');
+    formSection.style.display = '';
+    dropZone.style.display = '';
+    // Keep rep name — they'll drop many in a row for the same person
+    document.getElementById('askingPrice').value = '';
+    document.getElementById('manualVin').value = '';
+    document.getElementById('notes').value = '';
+  });
+
+})();
+</script>
+</body>
+</html>

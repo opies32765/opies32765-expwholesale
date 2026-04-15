@@ -7,6 +7,7 @@ import threading
 import psycopg2
 import psycopg2.extras
 import requests
+import time as _time
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, redirect, url_for, send_from_directory, session
 from twilio.rest import Client as TwilioClient
@@ -464,6 +465,78 @@ def extract_color_from_file(file_bytes, media_type='image/jpeg'):
     except Exception as e:
         print(f'Color extract error: {e}')
     return None
+
+
+# ── Carfax screenshot extraction ─────────────────────────────────────────────
+
+CARFAX_PROMPT = (
+    'You are analyzing a CARFAX or AutoCheck vehicle history report screenshot.\n\n'
+    'Extract ALL of the following information visible in the image. '
+    'Return your answer as JSON with these exact keys:\n'
+    '{\n'
+    '  "vin": "17-char VIN or null",\n'
+    '  "year": 2024 or null,\n'
+    '  "make": "Toyota" or null,\n'
+    '  "model": "Camry" or null,\n'
+    '  "trim": "SE" or null,\n'
+    '  "mileage": 45000 or null,\n'
+    '  "title_status": "Clean" or "Salvage" or "Rebuilt" or null,\n'
+    '  "accidents": 0 or null,\n'
+    '  "owners": 2 or null,\n'
+    '  "color": "White" or null\n'
+    '}\n\n'
+    'RULES:\n'
+    '- VIN must be exactly 17 characters (A-Z, 0-9, no I/O/Q)\n'
+    '- Mileage: use the LAST/MOST RECENT odometer reading if multiple are shown\n'
+    '- Accidents: number of accidents reported. 0 means "No accidents reported"\n'
+    '- Owners: number of owners shown\n'
+    '- If a field is not visible or unclear, set it to null\n'
+    '- Return ONLY the JSON object, nothing else\n'
+)
+
+
+def extract_carfax_info(file_bytes, media_type='image/jpeg'):
+    """Use Claude Vision to extract vehicle info from a Carfax/AutoCheck screenshot."""
+    try:
+        import anthropic
+        img_b64 = base64.standard_b64encode(file_bytes).decode()
+        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        msg = client.messages.create(
+            model='claude-opus-4-6',
+            max_tokens=300,
+            messages=[{
+                'role': 'user',
+                'content': [
+                    {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': img_b64}},
+                    {'type': 'text', 'text': CARFAX_PROMPT}
+                ]
+            }]
+        )
+        raw = msg.content[0].text.strip()
+        # Strip markdown code fences if present
+        if raw.startswith('```'):
+            raw = re.sub(r'^```(?:json)?\s*', '', raw)
+            raw = re.sub(r'\s*```$', '', raw)
+        return json.loads(raw)
+    except Exception as e:
+        print(f'Carfax extract error: {e}')
+    return {}
+
+
+def extract_carfax_multi(files_list):
+    """Run Carfax extraction on multiple images, merge results (first non-null wins)."""
+    merged = {}
+    fields = ['vin', 'year', 'make', 'model', 'trim', 'mileage',
+              'title_status', 'accidents', 'owners', 'color']
+    for file_bytes, media_type in files_list:
+        info = extract_carfax_info(file_bytes, media_type)
+        for f in fields:
+            if not merged.get(f) and info.get(f) is not None:
+                merged[f] = info[f]
+        # If we have VIN + mileage, good enough to stop early
+        if merged.get('vin') and merged.get('mileage'):
+            break
+    return merged
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -2352,6 +2425,7 @@ def api_vauto_pending():
     rows = cur.fetchall()
     # Don't clear priority here — clear it when worker submits results
     db.close()
+    _ew_check_heartbeat_stale('ew')
     return jsonify({'pending': [dict(r) for r in rows]})
 
 
@@ -2493,6 +2567,120 @@ def api_vauto_status(bid_id):
                 d[k] = v.isoformat()
         return jsonify({'status': 'complete', 'data': d})
     return jsonify({'status': 'pending'})
+
+
+
+# ---------------------------------------------------------------------------
+# vAuto Worker Heartbeat Monitoring
+# ---------------------------------------------------------------------------
+_TELEGRAM_BOT_TOKEN = "8528106109:AAFczHqjWoiUBs7adZwBEJ6217bQzYGhI_o"
+_TELEGRAM_CHAT_ID = "7985611488"
+_EW_HEARTBEAT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worker_heartbeats.json')
+_EW_ALERT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'heartbeat_alerts.json')
+
+
+def _ew_read_heartbeats():
+    try:
+        with open(_EW_HEARTBEAT_FILE) as _f:
+            return json.load(_f)
+    except Exception:
+        return {}
+
+
+def _ew_write_heartbeats(data):
+    try:
+        with open(_EW_HEARTBEAT_FILE, 'w') as _f:
+            json.dump(data, _f)
+    except Exception:
+        pass
+
+
+def _ew_read_alerts():
+    try:
+        with open(_EW_ALERT_FILE) as _f:
+            return json.load(_f)
+    except Exception:
+        return {}
+
+
+def _ew_write_alerts(data):
+    try:
+        with open(_EW_ALERT_FILE, 'w') as _f:
+            json.dump(data, _f)
+    except Exception:
+        pass
+
+
+def _ew_tg_alert(msg):
+    """Fire-and-forget Telegram alert."""
+    try:
+        import urllib.request as _ur
+        data = json.dumps({'chat_id': _TELEGRAM_CHAT_ID, 'text': msg}).encode()
+        req = _ur.Request(
+            f'https://api.telegram.org/bot{_TELEGRAM_BOT_TOKEN}/sendMessage',
+            data=data,
+            headers={'Content-Type': 'application/json'},
+        )
+        _ur.urlopen(req, timeout=5)
+    except Exception:
+        pass
+
+
+def _ew_check_heartbeat_stale(worker_name='ew'):
+    """Check if worker heartbeat is stale (>5 min). Alert once per downtime."""
+    hb = _ew_read_heartbeats()
+    info = hb.get(worker_name)
+    if not info:
+        return
+    age = _time.time() - info.get('ts', 0)
+    alerts = _ew_read_alerts()
+    if age > 300:
+        if not alerts.get(worker_name):
+            mins = int(age // 60)
+            _ew_tg_alert(f'⚠️ EW vAuto worker is DOWN — no heartbeat in {mins} minutes')
+            alerts[worker_name] = True
+            _ew_write_alerts(alerts)
+    else:
+        if alerts.get(worker_name):
+            alerts[worker_name] = False
+            _ew_write_alerts(alerts)
+
+
+@app.route('/api/vauto/heartbeat', methods=['POST'])
+def api_vauto_heartbeat():
+    """Accept heartbeat from vAuto worker."""
+    data = request.json or {}
+    worker = data.get('worker', 'ew')
+    hb = _ew_read_heartbeats()
+    hb[worker] = {
+        'ts': _time.time(),
+        'chrome_alive': data.get('chrome_alive', False),
+        'lookups_done': data.get('lookups_done', 0),
+        'last_lookup_at': data.get('last_lookup_at'),
+    }
+    _ew_write_heartbeats(hb)
+    alerts = _ew_read_alerts()
+    if alerts.get(worker):
+        alerts[worker] = False
+        _ew_write_alerts(alerts)
+    return jsonify({'ok': True})
+
+
+@app.route('/api/vauto/worker-status')
+def api_vauto_worker_status():
+    """Return worker heartbeat status for dashboard display."""
+    hb = _ew_read_heartbeats()
+    result = {}
+    for name, info in hb.items():
+        age = _time.time() - info.get('ts', 0)
+        result[name] = {
+            'last_heartbeat_ago_seconds': int(age),
+            'status': 'ok' if age < 300 else 'stale',
+            'chrome_alive': info.get('chrome_alive', False),
+            'lookups_done': info.get('lookups_done', 0),
+            'last_lookup_at': info.get('last_lookup_at'),
+        }
+    return jsonify(result)
 
 
 @app.route('/api/verify-comps', methods=['POST'])
@@ -3011,6 +3199,169 @@ def api_bid_external():
     trigger_market_check(bid_id, vin)
 
     return jsonify({'success': True, 'bid_id': bid_id, 'vin': vin})
+
+
+# ---------------------------------------------------------------------------
+# Quick Drop — Carfax screenshot intake
+# ---------------------------------------------------------------------------
+@app.route('/drop')
+def quick_drop_page():
+    return render_template('drop.html')
+
+
+@app.route('/api/bid/quick-drop', methods=['POST'])
+def api_bid_quick_drop():
+    """Accept Carfax/AutoCheck screenshots, extract vehicle info, create bid."""
+
+    # Collect uploaded images
+    files_list = []
+    saved_photos = []
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+    i = 0
+    while True:
+        f = request.files.get(f'photo_{i}')
+        if not f:
+            break
+        file_bytes = f.read()
+        media_type = f.content_type or 'image/jpeg'
+        files_list.append((file_bytes, media_type))
+
+        # Save to disk
+        ext = os.path.splitext(f.filename)[1] or '.jpg'
+        fname = f'{uuid.uuid4().hex}{ext}'
+        fpath = os.path.join(UPLOAD_DIR, fname)
+        with open(fpath, 'wb') as out:
+            out.write(file_bytes)
+        saved_photos.append(f'/static/uploads/{fname}')
+        i += 1
+
+    if not files_list:
+        return jsonify({'error': 'No images uploaded'}), 400
+
+    # Extract info from Carfax screenshots via Claude Vision
+    extracted = extract_carfax_multi(files_list)
+
+    vin = (extracted.get('vin') or '').strip().upper()
+
+    # Allow manual VIN override from form
+    manual_vin = (request.form.get('manual_vin') or '').strip().upper()
+    if manual_vin and VIN_RE.match(manual_vin):
+        vin = manual_vin
+
+    # Get NHTSA decode if we have a VIN (supplements/overrides Carfax data)
+    nhtsa = {}
+    if vin and len(vin) == 17 and VIN_RE.match(vin):
+        nhtsa = decode_vin(vin)
+
+    year = nhtsa.get('year') or extracted.get('year')
+    make = nhtsa.get('make') or extracted.get('make')
+    model = nhtsa.get('model') or extracted.get('model')
+    trim = nhtsa.get('trim') or extracted.get('trim')
+    mileage = extracted.get('mileage')
+    color = extracted.get('color')
+
+    # Form fields
+    rep_name = (request.form.get('rep_name') or '').strip()
+    notes = (request.form.get('notes') or '').strip()
+    asking_price = request.form.get('asking_price')
+    if asking_price:
+        try:
+            asking_price = float(asking_price.replace(',', '').replace('$', ''))
+        except (ValueError, TypeError):
+            asking_price = None
+
+    # Build extra notes from Carfax extraction
+    carfax_notes = []
+    if extracted.get('title_status'):
+        carfax_notes.append(f'Title: {extracted["title_status"]}')
+    if extracted.get('accidents') is not None:
+        carfax_notes.append(f'Accidents: {extracted["accidents"]}')
+    if extracted.get('owners') is not None:
+        carfax_notes.append(f'Owners: {extracted["owners"]}')
+
+    full_notes_parts = []
+    if rep_name:
+        full_notes_parts.append(f'[Quick Drop: {rep_name}]')
+    else:
+        full_notes_parts.append('[Quick Drop]')
+    if carfax_notes:
+        full_notes_parts.append(' | '.join(carfax_notes))
+    if notes:
+        full_notes_parts.append(notes)
+    full_notes = ' — '.join(full_notes_parts)
+
+    # Create bid
+    db = get_db()
+    cur = db.cursor()
+
+    if rep_name:
+        rep_phone = f'field:{rep_name.replace(" ", "_").lower()}'
+        contact_name = rep_name
+    else:
+        rep_phone = 'drop:dashboard'
+        contact_name = 'Quick Drop'
+
+    cur.execute("""
+        INSERT INTO contacts (phone, name)
+        VALUES (%s, %s)
+        ON CONFLICT (phone) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+    """, (rep_phone, contact_name))
+    contact_id = cur.fetchone()['id']
+
+    # Raw message summary
+    parts = ['[QUICK DROP]']
+    if vin:
+        parts.append(f'VIN: {vin}')
+    if year and make and model:
+        parts.append(f'{year} {make} {model}')
+    if trim:
+        parts.append(trim)
+    if mileage:
+        parts.append(f'{mileage:,} mi')
+    raw_message = ' | '.join(parts)
+
+    cur.execute("""
+        INSERT INTO bids (contact_id, phone, vin, year, make, model, trim, mileage, color,
+                          raw_message, asking_price, notes, status)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new') RETURNING id
+    """, (contact_id, rep_phone, vin if vin and len(vin) == 17 else None,
+          year, make, model, trim, mileage, color,
+          raw_message, asking_price, full_notes))
+    bid_id = cur.fetchone()['id']
+
+    # Save photos
+    for photo_url in saved_photos:
+        cur.execute("INSERT INTO bid_photos (bid_id, url) VALUES (%s, %s)",
+                    (bid_id, photo_url))
+
+    # Flag for vAuto
+    cur.execute("UPDATE bids SET vauto_priority=TRUE WHERE id=%s", (bid_id,))
+
+    db.commit()
+    db.close()
+
+    # Trigger market check if we have a VIN
+    if vin and len(vin) == 17:
+        trigger_market_check(bid_id, vin)
+
+    return jsonify({
+        'success': True,
+        'bid_id': bid_id,
+        'extracted': {
+            'vin': vin if vin and len(vin) == 17 else None,
+            'year': year,
+            'make': make,
+            'model': model,
+            'trim': trim,
+            'mileage': mileage,
+            'color': color,
+            'title_status': extracted.get('title_status'),
+            'accidents': extracted.get('accidents'),
+            'owners': extracted.get('owners'),
+        }
+    })
 
 
 if __name__ == '__main__':

@@ -218,7 +218,6 @@ function renderFleetSpecs(fs) {
     ['Wheels', fs.wheelsCode],
     ['Trim', fs.trim],
     ['Autopilot Hardware', fs.autopilotHardwareCode],
-    ['Autopilot Software', fs.autopilotSoftwareCode],
     ['Drive', fs.typeOfDrive],
     ['Body', fs.bodyType],
     ['Seats', fs.numberOfSeats],
@@ -237,14 +236,61 @@ function renderFleetSpecs(fs) {
   html += '</div>';
 
   // Equipment/options with prices
+  // ── Autopilot / FSD Summary ──
+  var activeSw = (fs.autopilotSoftwareCode || '').toLowerCase();
+  var hasFsdEquip = false;
+  var fsdPrice = 0;
+  (fs.equipmentPrice || []).forEach(function(e) {
+    var n = (e.name || '').toLowerCase();
+    if (n.indexOf('full self') >= 0 || n.indexOf('fsd') >= 0) {
+      hasFsdEquip = true;
+      fsdPrice = e.price || 0;
+    }
+  });
+
+  var apStatus, apColor, apBorder, apNote;
+  if (activeSw.indexOf('base') >= 0 && !hasFsdEquip) {
+    apStatus = 'Basic Autopilot';
+    apColor = '#94a3b8'; apBorder = '#1e293b';
+    apNote = 'TACC + Autosteer only. No FSD.';
+  } else if (activeSw.indexOf('base') >= 0 && hasFsdEquip) {
+    apStatus = 'FSD NOT ACTIVE';
+    apColor = '#f87171'; apBorder = '#7f1d1d';
+    apNote = 'FSD was configured at factory ($' + fsdPrice.toLocaleString() + ') but is not currently active. May have been transferred or never activated.';
+  } else if (activeSw.indexOf('enhanced') >= 0) {
+    apStatus = 'Enhanced Autopilot';
+    apColor = '#60a5fa'; apBorder = '#1e3a5f';
+    apNote = 'Navigate on Autopilot, auto lane change, summon. FSD not included.';
+  } else if (activeSw.indexOf('premium') >= 0 || activeSw.indexOf('full self') >= 0 || activeSw.indexOf('fsd') >= 0) {
+    apStatus = 'FSD Detected — Verify with Seller';
+    apColor = '#fbbf24'; apBorder = '#78350f';
+    apNote = 'Tesla reports active FSD firmware, but cannot confirm if purchased outright (transfers with car) or monthly subscription ($99/mo, does NOT transfer). Ask seller for proof of purchase.';
+  } else {
+    apStatus = fs.autopilotSoftwareCode || 'Unknown';
+    apColor = '#94a3b8'; apBorder = '#1e293b';
+    apNote = '';
+  }
+
+  html += '<div style="margin-top:14px;padding:14px 16px;background:#0f172a;border:1px solid ' + apBorder + ';border-radius:10px">';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><span style="font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.5px">Autopilot / FSD Status</span>';
+  html += '<span style="font-size:14px;font-weight:800;color:' + apColor + '">' + apStatus + '</span></div>';
+  if (apNote) html += '<div style="font-size:12px;color:#64748b;line-height:1.5">' + apNote + '</div>';
+  if (fs.autopilotHardwareCode) html += '<div style="font-size:11px;color:#475569;margin-top:6px">Hardware: ' + fs.autopilotHardwareCode + '</div>';
+  html += '</div>';
+
+  // ── Equipment list ──
   var equip = fs.equipmentPrice || [];
   if (equip.length) {
     html += '<div class="opt-cat" style="margin-top:16px"><div class="opt-cat-title">Factory Equipment & Pricing</div><div style="display:flex;flex-direction:column;gap:4px">';
     equip.forEach(function(e) {
-      var price = e.price > 0 ? ' — $' + e.price.toLocaleString() : '';
       var name = e.name || e.code;
       if (name.charAt(0) === '$') name = name.substring(1);
-      html += '<div style="display:flex;justify-content:space-between;padding:6px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b"><span style="color:#e2e8f0;font-size:13px">' + name + '</span><span style="color:' + (e.price > 0 ? '#4ade80' : '#475569') + ';font-size:13px;font-weight:600">' + (e.price > 0 ? '+$' + e.price.toLocaleString() : 'Included') + '</span></div>';
+      var isFsd = name.toLowerCase().indexOf('full self') >= 0 || name.toLowerCase().indexOf('fsd') >= 0;
+      // Skip FSD from equipment list — already shown in status box above
+      if (isFsd) return;
+      var priceColor = e.price > 0 ? '#4ade80' : '#475569';
+      var priceText = e.price > 0 ? '+$' + e.price.toLocaleString() : 'Included';
+      html += '<div style="display:flex;justify-content:space-between;padding:6px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b"><span style="color:#e2e8f0;font-size:13px">' + name + '</span><span style="color:' + priceColor + ';font-size:13px;font-weight:600">' + priceText + '</span></div>';
     });
     html += '</div></div>';
   }
