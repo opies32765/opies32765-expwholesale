@@ -25,6 +25,7 @@ _PUBLIC_PREFIXES = (
     '/vauto_reports/', '/service-worker', '/privacy', '/terms',
     '/api/mobile-submit', '/api/rep-bids', '/api/register-rep',
     '/api/vauto/', '/api/accutrade/', '/accutrade_reports/',
+    '/api/ipacket/', '/ipacket_reports/',
     '/api/bid/external', '/api/push-subscribe',
     '/api/push-unsubscribe', '/api/vapid-public-key',
     '/.well-known/', '/api/tesla-vin/', '/share/',
@@ -351,6 +352,59 @@ def get_db():
     return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 
+# ── Gemini (Vertex AI) — replaces Claude for text + vision ──────────────────
+os.environ.setdefault('GOOGLE_APPLICATION_CREDENTIALS', '/opt/expwholesale/google_vision_key.json')
+
+_gemini_client = None
+
+def _gemini():
+    """Lazy-init Gemini client (Vertex AI mode, uses service account JSON)."""
+    global _gemini_client
+    if _gemini_client is None:
+        try:
+            from google import genai
+            _gemini_client = genai.Client(
+                vertexai=True,
+                project='my-project-dia-492415',
+                location='global',
+            )
+        except Exception as e:
+            print(f'Gemini init failed: {e}', flush=True)
+            _gemini_client = False  # poison so we don't retry every call
+    return _gemini_client if _gemini_client else None
+
+
+def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-flash',
+                max_tokens=1024, temperature=0.4):
+    """One-shot Gemini call. Returns text response or None on failure.
+    Pass image_bytes for vision tasks. Defaults to Flash (cheap).
+    Use model='gemini-2.5-pro' for high-quality reasoning (assessments)."""
+    client = _gemini()
+    if not client:
+        return None
+    try:
+        from google.genai import types
+        if image_bytes:
+            contents = [
+                types.Part.from_bytes(data=image_bytes, mime_type=mime),
+                prompt,
+            ]
+        else:
+            contents = prompt
+        resp = client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                max_output_tokens=max_tokens,
+                temperature=temperature,
+            ),
+        )
+        return resp.text.strip() if resp.text else None
+    except Exception as e:
+        print(f'Gemini call failed ({model}): {e}', flush=True)
+        return None
+
+
 # ── VIN extraction ───────────────────────────────────────────────────────────
 
 def extract_vin_from_text(text):
@@ -359,121 +413,172 @@ def extract_vin_from_text(text):
 
 
 def extract_vin_from_photo(image_url):
-    """Use Claude Vision to read a VIN from a photo (vehicle sticker, window, etc.)"""
+    """Read a VIN from a Twilio-hosted photo URL. Google Vision first, Gemini fallback."""
     try:
-        import anthropic
         resp = requests.get(image_url, auth=(TWILIO_SID, TWILIO_TOKEN), timeout=15)
-        img_b64 = base64.standard_b64encode(resp.content).decode()
+        if resp.status_code != 200:
+            return None
+        img_bytes = resp.content
         media_type = resp.headers.get('Content-Type', 'image/jpeg').split(';')[0]
-
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        msg = client.messages.create(
-            model='claude-opus-4-6',
-            max_tokens=100,
-            messages=[{
-                'role': 'user',
-                'content': [
-                    {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': img_b64}},
-                    {'type': 'text', 'text': VIN_PROMPT}
-                ]
-            }]
-        )
-        result = msg.content[0].text.strip().upper()
-        if VIN_RE.match(result):
-            return result
+        return extract_vin_from_file(img_bytes, media_type)
     except Exception as e:
-        print(f'VIN photo extract error: {e}')
+        print(f'VIN photo extract error: {e}', flush=True)
     return None
 
 
-def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
-    """Use Claude Vision to read a VIN from raw file bytes (mobile upload)."""
+# ── Google Cloud Vision OCR (cheap, fast for pure text extraction) ────────────
+GOOGLE_VISION_KEY_PATH = os.environ.get('GOOGLE_VISION_KEY_PATH', '/opt/expwholesale/google_vision_key.json')
+
+def _google_vision_ocr(file_bytes):
+    """Run Google Vision TEXT_DETECTION on raw image bytes. Returns all detected text as a single string, or None on failure."""
+    if not os.path.exists(GOOGLE_VISION_KEY_PATH):
+        return None
     try:
-        import anthropic
-        img_b64 = base64.standard_b64encode(file_bytes).decode()
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        msg = client.messages.create(
-            model='claude-opus-4-6',
-            max_tokens=100,
-            messages=[{
-                'role': 'user',
-                'content': [
-                    {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': img_b64}},
-                    {'type': 'text', 'text': VIN_PROMPT}
-                ]
-            }]
-        )
-        result = msg.content[0].text.strip().upper()
-        if VIN_RE.match(result):
-            return result
+        from google.cloud import vision
+        client = vision.ImageAnnotatorClient.from_service_account_json(GOOGLE_VISION_KEY_PATH)
+        image = vision.Image(content=file_bytes)
+        response = client.text_detection(image=image)
+        if response.error.message:
+            print(f'Google Vision error: {response.error.message}')
+            return None
+        if not response.text_annotations:
+            return None
+        # First annotation is the full detected text block
+        return response.text_annotations[0].description
     except Exception as e:
-        print(f'VIN file extract error: {e}')
+        print(f'Google Vision call failed: {e}')
+        return None
+
+
+def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
+    """Extract VIN from image. Google Vision first (cheap), Claude fallback."""
+    # Try Google Vision first — ~$0.0015/call vs Claude ~$0.05/call
+    text = _google_vision_ocr(file_bytes)
+    if text:
+        up = text.upper()
+        # VIN regex: 17 chars, no I/O/Q
+        match = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', up)
+        if match:
+            print(f'[OCR] VIN via Google Vision: {match.group(0)}', flush=True)
+            return match.group(0)
+        # Fallback: 17-char sequences with O/I/Q (likely OCR misreads) —
+        # try substituting O→0, I→1, Q→0 to recover
+        for m in re.finditer(r'\b[A-Z0-9]{17}\b', up):
+            candidate = m.group(0).replace('O', '0').replace('I', '1').replace('Q', '0')
+            if VIN_RE.match(candidate):
+                print(f'[OCR] VIN via Google Vision (O→0 recovered): {candidate}', flush=True)
+                return candidate
+    print('[OCR] Google Vision missed, falling back to Gemini Flash', flush=True)
+
+    # Fallback to Gemini Flash (cheap, multimodal)
+    result = gemini_call(VIN_PROMPT, image_bytes=file_bytes, mime=media_type,
+                         model='gemini-2.5-flash', max_tokens=100)
+    if result:
+        result = result.strip().upper()
+        if VIN_RE.match(result):
+            print(f'[OCR] VIN via Gemini Flash: {result}', flush=True)
+            return result
     return None
 
 
 def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
-    """Use Claude Vision to read odometer mileage from raw file bytes."""
-    try:
-        import anthropic
-        img_b64 = base64.standard_b64encode(file_bytes).decode()
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        msg = client.messages.create(
-            model='claude-sonnet-4-6',
-            max_tokens=50,
-            messages=[{
-                'role': 'user',
-                'content': [
-                    {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': img_b64}},
-                    {'type': 'text', 'text': ODO_PROMPT}
-                ]
-            }]
-        )
-        result = msg.content[0].text.strip().upper()
+    """Extract odometer mileage. Google Vision first, Claude fallback."""
+    text = _google_vision_ocr(file_bytes)
+    if text:
+        up = text.upper()
+        # Hard stop: VIN plates / weight stickers are NOT odometer photos
+        # If we see clear VIN-plate indicators, don't guess a mileage
+        plate_indicators = ['GVWR', 'GAWR', 'LBS', 'MFD BY', 'DATE OF MANUFACTURE',
+                           'VEHICLE SAFETY', 'BUMPER, AND THEFT', 'FEDERAL MOTOR']
+        if sum(1 for ind in plate_indicators if ind in up) >= 2:
+            print('[OCR] Google Vision: detected VIN plate (not odometer), returning None', flush=True)
+            return None
+
+        # First try: numbers explicitly labeled "mi" / "miles" / "km"
+        labeled = re.findall(r'(\d{1,3}(?:,\d{3})+|\d{3,7})\s*(?:MI|MILES|KM)\b', up)
+        if labeled:
+            for c in labeled:
+                n = int(c.replace(',', ''))
+                if 100 <= n <= 999999:
+                    print(f'[OCR] Mileage via Google Vision (labeled): {n}', flush=True)
+                    return n
+
+        # Fallback: any 4-7 digit number but avoid obvious false positives
+        # (skip numbers immediately followed/preceded by LBS, KG, $, year contexts)
+        candidates = []
+        for m in re.finditer(r'\b(\d{1,3}(?:,\d{3})+|\d{3,7})\b', up):
+            num_str = m.group(1)
+            n = int(num_str.replace(',', ''))
+            if not (100 <= n <= 999999):
+                continue
+            # Check surrounding context (50 chars before, 20 after)
+            ctx_start = max(0, m.start() - 50)
+            ctx_end = min(len(up), m.end() + 20)
+            ctx = up[ctx_start:ctx_end]
+            # Skip if near weight / price / year indicators
+            bad = ['LBS', 'KG', 'GVWR', 'GAWR', '$', 'MSRP', 'PRICE', 'PROD',
+                   'YEAR', 'MODEL YEAR', 'ZIP', 'PHONE', 'STOCK']
+            if any(b in ctx for b in bad):
+                continue
+            # Reject obvious year values (1990-2030)
+            if 1990 <= n <= 2030:
+                continue
+            candidates.append(n)
+
+        if candidates:
+            # Prefer the largest (odometers are usually prominent)
+            result = max(candidates)
+            print(f'[OCR] Mileage via Google Vision: {result}', flush=True)
+            return result
+    print('[OCR] Google Vision missed mileage, falling back to Claude', flush=True)
+
+    # Fallback to Gemini Flash
+    result = gemini_call(ODO_PROMPT, image_bytes=file_bytes, mime=media_type,
+                         model='gemini-2.5-flash', max_tokens=50)
+    if result:
+        result = result.strip().upper()
         if result != 'NONE':
             digits = re.sub(r'[^\d]', '', result)
             if digits:
-                return int(digits)
-    except Exception as e:
-        print(f'Mileage extract error: {e}')
+                n = int(digits)
+                if 100 <= n <= 999999:
+                    print(f'[OCR] Mileage via Gemini Flash: {n}', flush=True)
+                    return n
     return None
 
 
 def extract_color_from_file(file_bytes, media_type='image/jpeg'):
-    """Use Claude Vision to identify exterior vehicle color."""
-    try:
-        import anthropic
-        img_b64 = base64.standard_b64encode(file_bytes).decode()
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        msg = client.messages.create(
-            model='claude-sonnet-4-6',
-            max_tokens=20,
-            messages=[{
-                'role': 'user',
-                'content': [
-                    {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': img_b64}},
-                    {'type': 'text', 'text': (
-                        'What is the exterior color of the vehicle in this photo? '
-                        'Reply with only the color name (e.g. White, Black, Silver, Gray, Red, Blue, Green, Brown, Gold, Orange, Yellow, Purple). '
-                        'If you cannot clearly see a vehicle exterior, reply UNKNOWN.'
-                    )}
-                ]
-            }]
-        )
-        result = msg.content[0].text.strip().title()
-        if result.upper() == 'UNKNOWN' or not result:
-            return None
-        return result
-    except Exception as e:
-        print(f'Color extract error: {e}')
+    """Identify exterior vehicle color via Gemini Flash."""
+    prompt = (
+        'What is the exterior color of the vehicle in this photo? '
+        'Reply with only the color name (e.g. White, Black, Silver, Gray, Red, Blue, Green, Brown, Gold, Orange, Yellow, Purple). '
+        'If you cannot clearly see a vehicle exterior, reply UNKNOWN.'
+    )
+    result = gemini_call(prompt, image_bytes=file_bytes, mime=media_type,
+                         model='gemini-2.5-flash', max_tokens=20)
+    if result:
+        color = result.strip().title()
+        if color.upper() != 'UNKNOWN' and color:
+            return color
     return None
 
 
-# ── Carfax screenshot extraction ─────────────────────────────────────────────
+# ── Vehicle info extraction (any image with VIN/miles/etc) ──────────────────
 
 CARFAX_PROMPT = (
-    'You are analyzing a CARFAX or AutoCheck vehicle history report screenshot.\n\n'
-    'Extract ALL of the following information visible in the image. '
-    'Return your answer as JSON with these exact keys:\n'
+    'You are analyzing an image that contains vehicle information.\n'
+    'The image could be ANY of these:\n'
+    '- A CARFAX or AutoCheck vehicle history report\n'
+    '- A phone photo of a VIN sticker (door jamb, windshield, dashboard)\n'
+    '- An odometer / dashboard photo\n'
+    '- A Monroney window sticker\n'
+    '- A dealer inventory listing (Autotrader, Cars.com, CarGurus)\n'
+    '- A private-party listing screenshot\n'
+    '- A photo of a car exterior (just to identify color)\n'
+    '- A HANDWRITTEN note or paper with VIN, miles, price, etc.\n'
+    '- A whiteboard, notepad, or business card with vehicle info\n'
+    '- Any combination of the above\n\n'
+    'Extract whatever information is visible and return JSON with these exact keys:\n'
     '{\n'
     '  "vin": "17-char VIN or null",\n'
     '  "year": 2024 or null,\n'
@@ -484,43 +589,44 @@ CARFAX_PROMPT = (
     '  "title_status": "Clean" or "Salvage" or "Rebuilt" or null,\n'
     '  "accidents": 0 or null,\n'
     '  "owners": 2 or null,\n'
-    '  "color": "White" or null\n'
+    '  "color": "White" or null,\n'
+    '  "asking_price": 25000 or null\n'
     '}\n\n'
     'RULES:\n'
-    '- VIN must be exactly 17 characters (A-Z, 0-9, no I/O/Q)\n'
-    '- Mileage: use the LAST/MOST RECENT odometer reading if multiple are shown\n'
-    '- Accidents: number of accidents reported. 0 means "No accidents reported"\n'
-    '- Owners: number of owners shown\n'
-    '- If a field is not visible or unclear, set it to null\n'
-    '- Return ONLY the JSON object, nothing else\n'
+    '- VIN MUST be exactly 17 characters (A-Z, 0-9). Count the characters carefully — if you only see 16 or have 18, re-read the image.\n'
+    '- Letters I, O, Q are NEVER valid in a VIN. If you see what looks like O, it is 0. If you see I, it is 1. If you see Q, it is 0.\n'
+    '- For HANDWRITTEN VINs: handwriting often has 1/7 confusion, 0/O/Q confusion, 5/S/G confusion, 2/Z confusion, 4/A confusion. Apply standard VIN rules to disambiguate.\n'
+    '- If the handwriting shows crossed-out characters, use the intended (uncrossed) characters only.\n'
+    '- Common VIN prefixes: 1G=GM/USA, 1F=Ford, 1C=Chrysler, 1H/2H=Honda, 5J=Acura, 5Y=Tesla, 5Y/JN=Nissan, WP=Porsche, WB=BMW, WD=Mercedes, 7S=Tesla, YV=Volvo. Use this to validate the first 3 chars.\n'
+    '- Only extract year from the VIN decode or a clearly labeled year field — do NOT guess from the model.\n'
+    '- Mileage: use the LAST/MOST RECENT odometer reading if multiple are shown. Ignore GVWR/GAWR weights.\n'
+    '- Accidents: only set this if the image is a Carfax/AutoCheck report (number shown). Otherwise null.\n'
+    '- Owners: only set this if the image is a Carfax/AutoCheck report. Otherwise null.\n'
+    '- Color: only set if the exterior color is clearly visible (car photo or listing description)\n'
+    '- asking_price: only set if a listing/sticker shows an asking price, MSRP, or sale price\n'
+    '- If a field is not visible, not applicable, or unclear, set it to null\n'
+    '- Return ONLY the JSON object, nothing else. No markdown fences, no commentary.\n'
 )
 
 
 def extract_carfax_info(file_bytes, media_type='image/jpeg'):
-    """Use Claude Vision to extract vehicle info from a Carfax/AutoCheck screenshot."""
+    """Extract vehicle info from ANY vehicle-related image via Gemini.
+    Works on Carfax/AutoCheck reports, VIN stickers, odometer photos,
+    Monroney stickers, listings, handwritten notes, etc.
+
+    Uses Gemini 2.5 Pro for better accuracy on handwriting and ambiguous text."""
+    raw = gemini_call(CARFAX_PROMPT, image_bytes=file_bytes, mime=media_type,
+                      model='gemini-2.5-pro', max_tokens=1500)
+    if not raw:
+        return {}
     try:
-        import anthropic
-        img_b64 = base64.standard_b64encode(file_bytes).decode()
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        msg = client.messages.create(
-            model='claude-opus-4-6',
-            max_tokens=300,
-            messages=[{
-                'role': 'user',
-                'content': [
-                    {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': img_b64}},
-                    {'type': 'text', 'text': CARFAX_PROMPT}
-                ]
-            }]
-        )
-        raw = msg.content[0].text.strip()
         # Strip markdown code fences if present
         if raw.startswith('```'):
             raw = re.sub(r'^```(?:json)?\s*', '', raw)
             raw = re.sub(r'\s*```$', '', raw)
         return json.loads(raw)
     except Exception as e:
-        print(f'Carfax extract error: {e}')
+        print(f'Carfax JSON parse error: {e}', flush=True)
     return {}
 
 
@@ -528,7 +634,7 @@ def extract_carfax_multi(files_list):
     """Run Carfax extraction on multiple images, merge results (first non-null wins)."""
     merged = {}
     fields = ['vin', 'year', 'make', 'model', 'trim', 'mileage',
-              'title_status', 'accidents', 'owners', 'color']
+              'title_status', 'accidents', 'owners', 'color', 'asking_price']
     for file_bytes, media_type in files_list:
         info = extract_carfax_info(file_bytes, media_type)
         for f in fields:
@@ -688,6 +794,14 @@ def bid_detail(bid_id):
     except Exception:
         pass
 
+    # iPacket sticker data
+    ipacket_data = None
+    try:
+        cur.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
+        ipacket_data = cur.fetchone()
+    except Exception:
+        pass
+
     # Tesla auto-decode (if VIN is Tesla)
     tesla_data = None
     TESLA_WMIS = ('5YJ', '7SA', '7G2', 'SFZ', 'XP7', 'LRW')
@@ -711,6 +825,7 @@ def bid_detail(bid_id):
                            messages=messages, valuations=valuations,
                            vauto_data=vauto_data,
                            accutrade_data=accutrade_data,
+                           ipacket_data=ipacket_data,
                            tesla_data=tesla_data,
                            ai_assessment=bid.get('ai_assessment'),
                            time_ago=time_ago)
@@ -1096,11 +1211,8 @@ def decode_vin_route(bid_id):
 def _run_assessment(bid_id):
     """Core assessment logic — callable from endpoint or background thread.
     Returns dict: {'success': True, 'assessment': ..., 'buy_price': ...} or {'error': ...}
+    Uses Gemini 2.5 Pro (Vertex AI) for multi-modal reasoning.
     """
-    import anthropic
-
-    if not ANTHROPIC_KEY:
-        return {'error': 'No API key configured'}
 
     db = get_db()
     cur = db.cursor()
@@ -1281,6 +1393,17 @@ def _run_assessment(bid_id):
         except Exception as e:
             print(f'DIA comps error: {e}')
 
+    # iPacket sticker data
+    ipacket = None
+    try:
+        db2 = get_db()
+        cur2 = db2.cursor()
+        cur2.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
+        ipacket = cur2.fetchone()
+        db2.close()
+    except Exception:
+        pass
+
     # AccuTrade values section
     if accutrade:
         ctx += "\nACCUTRADE VALUES:\n"
@@ -1298,6 +1421,18 @@ def _run_assessment(bid_id):
                     ctx += f"  {label}: ${int(float(val)):,}\n"
                 except (ValueError, TypeError):
                     ctx += f"  {label}: {val}\n"
+
+    # iPacket sticker section
+    if ipacket:
+        ctx += "\niPACKET OEM STICKER:\n"
+        if ipacket.get('total_msrp'):
+            ctx += f"  Original MSRP: ${int(ipacket['total_msrp']):,}\n"
+        if ipacket.get('base_price'):
+            ctx += f"  Base Price: ${int(ipacket['base_price']):,}\n"
+        if ipacket.get('exterior_color'):
+            ctx += f"  Exterior: {ipacket['exterior_color']}\n"
+        if ipacket.get('interior_color'):
+            ctx += f"  Interior: {ipacket['interior_color']}\n"
 
     # Tesla factory data section
     if tesla_data:
@@ -1385,7 +1520,7 @@ def _run_assessment(bid_id):
         except Exception as e:
             print(f'assess photo error: {e}')
 
-    # ── Load Carfax/AutoCheck screenshots ─────────────────────────────────────
+    # ── Load Carfax/AutoCheck: OCR to TEXT (avoids Gemini hallucinating details) ─
     report_count = 0
     if vauto:
         for report_field, label in [('carfax_screenshot', 'CARFAX REPORT'), ('autocheck_screenshot', 'AUTOCHECK REPORT')]:
@@ -1393,7 +1528,6 @@ def _run_assessment(bid_id):
             if not report_path:
                 continue
             try:
-                # Path could be /vauto_reports/filename or absolute
                 if report_path.startswith('/vauto_reports/'):
                     full_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), report_path.lstrip('/'))
                 else:
@@ -1401,13 +1535,23 @@ def _run_assessment(bid_id):
                 if os.path.exists(full_path) and os.path.getsize(full_path) > 1024:
                     with open(full_path, 'rb') as f:
                         img_bytes = f.read()
-                    content.append({'type': 'text', 'text': f'\n--- {label} (screenshot) ---'})
-                    content.append({'type': 'image', 'source': {
-                        'type': 'base64', 'media_type': 'image/png',
-                        'data': base64.standard_b64encode(img_bytes).decode()
-                    }})
-                    report_count += 1
-                    ctx += f"\n{label}: screenshot attached below\n"
+                    # Use Google Vision OCR for reliable text extraction on dense reports
+                    ocr_text = _google_vision_ocr(img_bytes)
+                    if ocr_text:
+                        # Clean up whitespace
+                        clean_text = re.sub(r'[ \t]+', ' ', ocr_text)
+                        clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+                        ctx += f"\n--- {label} (OCR text) ---\n{clean_text}\n"
+                        report_count += 1
+                    else:
+                        # Fallback to image if OCR fails
+                        content.append({'type': 'text', 'text': f'\n--- {label} (screenshot fallback) ---'})
+                        content.append({'type': 'image', 'source': {
+                            'type': 'base64', 'media_type': 'image/png',
+                            'data': base64.standard_b64encode(img_bytes).decode()
+                        }})
+                        report_count += 1
+                        ctx += f"\n{label}: screenshot attached below (OCR failed)\n"
             except Exception as e:
                 print(f'assess report load error ({label}): {e}')
 
@@ -1437,6 +1581,32 @@ def _run_assessment(bid_id):
         except Exception as e:
             print(f'assess AccuTrade screenshot error: {e}')
 
+    # ── Load iPacket sticker screenshot ──────────────────────────────────────
+    ipacket_report = 0
+    if ipacket and ipacket.get('screenshot'):
+        report_path = ipacket['screenshot']
+        try:
+            if report_path.startswith('/ipacket_reports/'):
+                full_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), report_path.lstrip('/'))
+            else:
+                full_path = report_path
+            if os.path.exists(full_path) and os.path.getsize(full_path) > 1024:
+                with open(full_path, 'rb') as f:
+                    img_bytes = f.read()
+                try:
+                    img_bytes, media_type = resize_for_claude(img_bytes)
+                except Exception:
+                    media_type = 'image/png'
+                content.append({'type': 'text', 'text': '\n--- iPACKET OEM WINDOW STICKER (screenshot) ---'})
+                content.append({'type': 'image', 'source': {
+                    'type': 'base64', 'media_type': media_type,
+                    'data': base64.standard_b64encode(img_bytes).decode()
+                }})
+                ipacket_report = 1
+                ctx += "\niPACKET OEM STICKER: screenshot attached below\n"
+        except Exception as e:
+            print(f'assess iPacket screenshot error: {e}')
+
     # ── Prompt ────────────────────────────────────────────────────────────────
     img_summary = []
     if photo_count:
@@ -1445,13 +1615,21 @@ def _run_assessment(bid_id):
         img_summary.append(f"Carfax/AutoCheck report screenshots")
     if accutrade_report:
         img_summary.append(f"AccuTrade appraisal screenshot")
+    if ipacket_report:
+        img_summary.append(f"iPacket OEM window sticker")
     img_line = "I've attached " + " and ".join(img_summary) + "." if img_summary else "No photos available."
 
     prompt = f"""{ctx}
 
 {img_line}
 
-Based on all the data above — book values, photos, Carfax, AutoCheck, AccuTrade, history, and market listings — what should we pay for this vehicle at wholesale?
+Based on all the data above — book values, photos, Carfax, AutoCheck, AccuTrade, iPacket OEM sticker, history, and market listings — what should we pay for this vehicle at wholesale?
+
+IMPORTANT — read Carfax/AutoCheck carefully and be FACTUALLY ACCURATE:
+- If the report says "sideswipe" or "left/right side impact", that is a SIDE collision — do NOT call it a front-end or rear-end accident
+- If it says "minor damage", do not describe it as major
+- Quote the exact damage description from the report when possible
+- Do not invent facts that are not in the reports
 
 Keep it under 200 words. End with:
 Max wholesale buy price: **$X,XXX**"""
@@ -1459,13 +1637,29 @@ Max wholesale buy price: **$X,XXX**"""
     content.append({'type': 'text', 'text': prompt})
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        msg = client.messages.create(
-            model='claude-opus-4-6',
-            max_tokens=1000,
-            messages=[{'role': 'user', 'content': content}]
+        # Convert Claude-formatted `content` array → Gemini parts list
+        from google.genai import types as _gtypes
+        gemini_parts = []
+        for part in content:
+            if part.get('type') == 'image':
+                img_data = base64.standard_b64decode(part['source']['data'])
+                gemini_parts.append(_gtypes.Part.from_bytes(
+                    data=img_data, mime_type=part['source']['media_type']))
+            elif part.get('type') == 'text':
+                gemini_parts.append(part['text'])
+
+        gc = _gemini()
+        if not gc:
+            raise RuntimeError('Gemini client unavailable')
+        resp = gc.models.generate_content(
+            model='gemini-2.5-pro',
+            contents=gemini_parts,
+            config=_gtypes.GenerateContentConfig(max_output_tokens=3000, temperature=0.4),
         )
-        assessment = msg.content[0].text.strip()
+        assessment = (resp.text or '').strip()
+        if not assessment:
+            raise RuntimeError('Empty Gemini response')
+        print(f'[ASSESS] Bid {bid_id} via Gemini 2.5 Pro ({len(assessment)} chars)', flush=True)
 
         # Extract buy price for dashboard column (look for $X,XXX pattern near "Max wholesale")
         import re as _re
@@ -1690,8 +1884,10 @@ def update_contact_direct(contact_id):
     return jsonify({'success': True})
 
 
-def resize_for_claude(file_bytes, max_bytes=4_000_000, max_dim=1600):
-    """Resize image so it fits under Claude's 5MB limit."""
+def resize_for_claude(file_bytes, max_bytes=7_000_000, max_dim=3000):
+    """Resize image for Gemini (keeps text readable on Carfax/AutoCheck).
+    Gemini 2.5 Pro handles up to 20MB/8K images natively, so we only
+    resize if huge. Preserves fine text on long Carfax reports."""
     from PIL import Image
     import io
     img = Image.open(io.BytesIO(file_bytes))
@@ -1723,59 +1919,27 @@ def verify_photo():
 
 @app.route('/api/quick-extract', methods=['POST'])
 def quick_extract():
-    """Extract VIN or mileage from a single uploaded photo immediately."""
+    """Extract VIN or mileage from a single uploaded photo immediately.
+    Google Vision first (~$0.0015/call), Claude fallback."""
     extract_type = request.form.get('type', 'vin')  # 'vin' or 'odo'
     f = request.files.get('photo')
     if not f:
         return jsonify({'error': 'No photo'}), 400
-    if not ANTHROPIC_KEY:
-        return jsonify({'error': 'No API key'}), 500
 
     file_bytes = f.read()
     media_type = f.mimetype or 'image/jpeg'
-    try:
-        file_bytes, media_type = resize_for_claude(file_bytes)
-    except Exception as e:
-        print(f'resize error (extract): {e}')
 
-    try:
-        import anthropic
-        img_b64 = base64.standard_b64encode(file_bytes).decode()
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-        if extract_type == 'vin':
-            prompt = VIN_PROMPT
-        else:
-            prompt = ODO_PROMPT
-
-        model = 'claude-opus-4-6' if extract_type == 'vin' else 'claude-sonnet-4-6'
-        msg = client.messages.create(
-            model=model,
-            max_tokens=100,
-            messages=[{
-                'role': 'user',
-                'content': [
-                    {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': img_b64}},
-                    {'type': 'text', 'text': prompt}
-                ]
-            }]
-        )
-        result = msg.content[0].text.strip().upper()
-
-        if extract_type == 'vin':
-            if VIN_RE.match(result):
-                return jsonify({'success': True, 'value': result})
-            return jsonify({'success': False, 'raw': result})
-        else:
-            if result != 'NONE':
-                digits = re.sub(r'[^\d]', '', result)
-                if digits and 100 <= int(digits) <= 999999:
-                    return jsonify({'success': True, 'value': int(digits)})
-            return jsonify({'success': False, 'raw': result})
-
-    except Exception as e:
-        print(f'quick-extract error: {e}')
-        return jsonify({'error': str(e)}), 500
+    # Try Google Vision first via the shared helpers
+    if extract_type == 'vin':
+        vin = extract_vin_from_file(file_bytes, media_type)
+        if vin:
+            return jsonify({'success': True, 'value': vin})
+        return jsonify({'success': False, 'raw': 'Not detected'})
+    else:
+        miles = extract_mileage_from_file(file_bytes, media_type)
+        if miles:
+            return jsonify({'success': True, 'value': miles})
+        return jsonify({'success': False, 'raw': 'Not detected'})
 
 
 @app.route('/privacy')
@@ -2300,6 +2464,7 @@ def rep_message(bid_id):
 
 VAUTO_REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vauto_reports')
 ACCUTRADE_REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accutrade_reports')
+IPACKET_REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ipacket_reports')
 
 
 def _live_scan_comps(bid_id):
@@ -2584,6 +2749,7 @@ def verify_comp(url):
         return {'status': 'error'}
 os.makedirs(VAUTO_REPORTS_DIR, exist_ok=True)
 os.makedirs(ACCUTRADE_REPORTS_DIR, exist_ok=True)
+os.makedirs(IPACKET_REPORTS_DIR, exist_ok=True)
 
 
 def _ensure_accutrade_table():
@@ -2614,6 +2780,34 @@ def _ensure_accutrade_table():
 
 
 _ensure_accutrade_table()
+
+
+def _ensure_ipacket_table():
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ipacket_lookups (
+                id SERIAL PRIMARY KEY,
+                bid_id INTEGER REFERENCES bids(id) ON DELETE CASCADE,
+                vin VARCHAR(17) NOT NULL,
+                total_msrp INTEGER,
+                base_price INTEGER,
+                exterior_color TEXT,
+                interior_color TEXT,
+                screenshot TEXT,
+                raw_json JSONB,
+                looked_up_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ipacket_bid_id ON ipacket_lookups(bid_id)")
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+
+_ensure_ipacket_table()
 
 
 @app.route('/api/vauto/urgent')
@@ -2876,6 +3070,98 @@ def api_accutrade_status(bid_id):
     cur = db.cursor()
     try:
         cur.execute("SELECT * FROM accutrade_lookups WHERE bid_id = %s", (bid_id,))
+        row = cur.fetchone()
+    except Exception:
+        row = None
+    db.close()
+    if row:
+        d = dict(row)
+        for k, v in d.items():
+            if hasattr(v, 'isoformat'):
+                d[k] = v.isoformat()
+        return jsonify({'status': 'complete', 'data': d})
+    return jsonify({'status': 'pending'})
+
+
+# ── iPacket worker API ─────────────────────────────────────────────────────
+
+@app.route('/api/ipacket/pending')
+def api_ipacket_pending():
+    """Return bids that need iPacket sticker lookup."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT b.id as bid_id, b.vin, b.mileage, b.year, b.make, b.model
+        FROM bids b
+        LEFT JOIN ipacket_lookups il ON il.bid_id = b.id
+        WHERE b.vin IS NOT NULL AND length(b.vin) = 17
+          AND il.id IS NULL
+        ORDER BY b.created_at DESC
+        LIMIT 20
+    """)
+    rows = cur.fetchall()
+    db.close()
+    return jsonify({'pending': [dict(r) for r in rows]})
+
+
+@app.route('/api/ipacket/submit', methods=['POST'])
+def api_ipacket_submit():
+    """Accept iPacket sticker lookup results from worker."""
+    data = request.json
+    if not data or not data.get('bid_id'):
+        return jsonify({'error': 'missing bid_id'}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    bid_id = data['bid_id']
+
+    cur.execute("""
+        INSERT INTO ipacket_lookups
+            (bid_id, vin, total_msrp, base_price, exterior_color,
+             interior_color, screenshot, raw_json, looked_up_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (bid_id) DO UPDATE SET
+            vin=EXCLUDED.vin, total_msrp=EXCLUDED.total_msrp,
+            base_price=EXCLUDED.base_price, exterior_color=EXCLUDED.exterior_color,
+            interior_color=EXCLUDED.interior_color, screenshot=EXCLUDED.screenshot,
+            raw_json=EXCLUDED.raw_json, looked_up_at=NOW()
+    """, (
+        bid_id, data.get('vin', ''),
+        data.get('total_msrp'), data.get('base_price'),
+        data.get('exterior_color'), data.get('interior_color'),
+        data.get('screenshot'),
+        json.dumps(data.get('raw', {})) if data.get('raw') else None,
+    ))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'bid_id': bid_id})
+
+
+@app.route('/api/ipacket/upload_report', methods=['POST'])
+def api_ipacket_upload_report():
+    """Accept iPacket sticker screenshot upload from worker."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'no file'}), 400
+    f = request.files['file']
+    filename = f.filename
+    save_path = os.path.join(IPACKET_REPORTS_DIR, filename)
+    f.save(save_path)
+    return jsonify({'ok': True, 'filename': filename})
+
+
+@app.route('/ipacket_reports/<path:filename>')
+def serve_ipacket_report(filename):
+    """Serve iPacket screenshot images."""
+    return send_from_directory(IPACKET_REPORTS_DIR, filename)
+
+
+@app.route('/api/ipacket/status/<int:bid_id>')
+def api_ipacket_status(bid_id):
+    """Check if iPacket lookup is complete for a bid."""
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
         row = cur.fetchone()
     except Exception:
         row = None
@@ -3782,6 +4068,15 @@ def api_bid_share_media(bid_id):
     except Exception:
         pass
 
+    try:
+        cur.execute("SELECT screenshot FROM ipacket_lookups WHERE bid_id=%s", (bid_id,))
+        ip_row = cur.fetchone()
+        if ip_row and ip_row.get('screenshot'):
+            url = ip_row['screenshot']
+            reports.append({'key': 'ipacket', 'label': 'iPacket Sticker', 'url': url if url.startswith('http') else base_url + url})
+    except Exception:
+        pass
+
     photos = []
     cur.execute("SELECT id, url FROM bid_photos WHERE bid_id=%s ORDER BY id", (bid_id,))
     for row in cur.fetchall():
@@ -3936,9 +4231,16 @@ def share_page(token):
     except Exception:
         pass
 
+    ipacket = None
+    try:
+        cur.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s", (bid['id'],))
+        ipacket = cur.fetchone()
+    except Exception:
+        pass
+
     db.close()
 
-    return render_template('share.html', bid=bid, photos=photos, vauto=vauto, accutrade=accutrade)
+    return render_template('share.html', bid=bid, photos=photos, vauto=vauto, accutrade=accutrade, ipacket=ipacket)
 
 
 if __name__ == '__main__':

@@ -596,6 +596,67 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
       </div>
 
+      <!-- iPacket Window Sticker -->
+      <div class="card" style="border-color:#4338ca" id="ipacket-card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          iPacket Sticker
+          {% if ipacket_data %}
+          <span style="font-size:10px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">COMPLETE</span>
+          {% elif bid.vin %}
+          <span id="ipacket-status-badge" style="font-size:10px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px;animation:pulse 2s infinite">PENDING</span>
+          {% else %}
+          <span style="font-size:10px;font-weight:700;color:#475569;background:rgba(71,85,105,.12);border:1px solid rgba(71,85,105,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">NO VIN</span>
+          {% endif %}
+        </div>
+
+        {% if ipacket_data %}
+        <div style="display:flex;flex-direction:column;gap:6px">
+          {% if ipacket_data.total_msrp %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
+            <span style="font-size:12px;font-weight:500;color:#94a3b8">Original MSRP</span>
+            <span style="font-size:13px;font-weight:700;color:#e2e8f0;font-family:monospace">${{ '{:,}'.format(ipacket_data.total_msrp) }}</span>
+          </div>
+          {% endif %}
+          {% if ipacket_data.base_price %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
+            <span style="font-size:12px;font-weight:500;color:#94a3b8">Base Price</span>
+            <span style="font-size:13px;font-weight:700;color:#e2e8f0;font-family:monospace">${{ '{:,}'.format(ipacket_data.base_price) }}</span>
+          </div>
+          {% endif %}
+          {% if ipacket_data.exterior_color %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
+            <span style="font-size:12px;font-weight:500;color:#94a3b8">Exterior</span>
+            <span style="font-size:12px;font-weight:600;color:#e2e8f0">{{ ipacket_data.exterior_color }}</span>
+          </div>
+          {% endif %}
+          {% if ipacket_data.interior_color %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
+            <span style="font-size:12px;font-weight:500;color:#94a3b8">Interior</span>
+            <span style="font-size:12px;font-weight:600;color:#e2e8f0">{{ ipacket_data.interior_color }}</span>
+          </div>
+          {% endif %}
+        </div>
+
+        {% if ipacket_data.screenshot %}
+        <div style="margin-top:14px;cursor:pointer" onclick="openReportLightbox('{{ ipacket_data.screenshot }}')">
+          <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">OEM Window Sticker</div>
+          <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;max-height:300px">
+            <img src="{{ ipacket_data.screenshot }}" style="width:100%;object-fit:cover;object-position:top" alt="iPacket Sticker">
+          </div>
+        </div>
+        {% endif %}
+
+        {% if ipacket_data.looked_up_at %}
+        <div style="margin-top:10px;font-size:10px;color:#334155;text-align:right">Looked up {{ time_ago(ipacket_data.looked_up_at) }}</div>
+        {% endif %}
+
+        {% elif bid.vin %}
+        <div style="font-size:13px;color:#475569;font-style:italic">iPacket sticker queued — waiting for worker...</div>
+        {% else %}
+        <div style="font-size:13px;color:#334155;font-style:italic">Submit a VIN to trigger iPacket lookup.</div>
+        {% endif %}
+      </div>
+
     </div><!-- /col 3 -->
 
   </div><!-- /columns-area -->
@@ -1113,6 +1174,24 @@ setInterval(pollMessages, 3000);
     } catch(e) {}
   }
   _atPoll = setInterval(checkAccuTrade, 5000);
+})();
+{% endif %}
+
+// ── iPacket auto-poll (while pending) ────────────────────────────────────
+{% if not ipacket_data and bid.vin %}
+(function() {
+  let _ipPoll;
+  async function checkIpacket() {
+    try {
+      const r = await fetch(`/api/ipacket/status/${BID_ID}`);
+      const d = await r.json();
+      if (d.status === 'complete') {
+        clearInterval(_ipPoll);
+        location.reload();
+      }
+    } catch(e) {}
+  }
+  _ipPoll = setInterval(checkIpacket, 5000);
 })();
 {% endif %}
 
