@@ -424,7 +424,7 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
       if(val === null || val === undefined) return;
       rows += '<div><span class="label">' + label + ':</span> <span class="val' + (warn ? ' warn' : '') + '">' + val + '</span></div>';
     }
-    row('VIN', ext.vin);
+    row('VIN', ext.vin, ext.vin_check_digit_valid === false);
     row('Vehicle', ymm || null);
     row('Mileage', ext.mileage ? ext.mileage.toLocaleString() + ' mi' : null);
     row('Color', ext.color);
@@ -434,6 +434,8 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
 
     if(!ext.vin){
       rows += '<div style="margin-top:8px;color:#fbbf24;font-weight:600">&#9888; No VIN detected — open the bid to add it manually</div>';
+    } else if(ext.vin_check_digit_valid === false){
+      rows += '<div style="margin-top:8px;padding:10px;background:#fef3c7;color:#92400e;border:1px solid #f59e0b;border-radius:6px;font-weight:600">&#9888; VIN check digit failed — one or more characters may be misread. Please open the bid and verify each character before proceeding.</div>';
     }
 
     successExtracted.innerHTML = rows || '<div style="color:#5a7a96">No details could be extracted — open the bid to review screenshots</div>';

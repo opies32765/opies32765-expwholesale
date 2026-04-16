@@ -851,10 +851,20 @@ async function handleVinPhoto(input) {
     if (data.success) {
       extractedVin = data.value;
       document.getElementById('vin-manual').value = data.value;
-      document.getElementById('vin-check').textContent = '✅';
-      document.getElementById('vin-btn').classList.add('vin-ok');
-      document.getElementById('vin-sub').textContent = `VIN read successfully`;
-      document.getElementById('vin-result').innerHTML = `<div class="extracted" style="margin-top:8px">✓ ${data.value}</div>`;
+      if (data.check_digit_valid === false) {
+        // VIN read but check digit math fails — probably a misread character
+        document.getElementById('vin-check').textContent = '⚠️';
+        document.getElementById('vin-btn').classList.add('vin-warn');
+        document.getElementById('vin-sub').textContent = 'VIN may have errors — please verify';
+        document.getElementById('vin-result').innerHTML = `
+          <div class="extracted fail" style="margin-top:8px;background:#fef3c7;color:#92400e;border-color:#f59e0b">⚠️ ${data.value}</div>
+          <div class="retake-hint" style="color:#92400e">Check digit failed — one or more characters may be misread. Please verify each character above.</div>`;
+      } else {
+        document.getElementById('vin-check').textContent = '✅';
+        document.getElementById('vin-btn').classList.add('vin-ok');
+        document.getElementById('vin-sub').textContent = `VIN read successfully`;
+        document.getElementById('vin-result').innerHTML = `<div class="extracted" style="margin-top:8px">✓ ${data.value}</div>`;
+      }
     } else {
       document.getElementById('vin-check').textContent = '⚠️';
       document.getElementById('vin-sub').textContent = 'Could not read VIN';

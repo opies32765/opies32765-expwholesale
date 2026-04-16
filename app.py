@@ -137,6 +137,28 @@ THUMB_SIZES = {
 
 VIN_RE = re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b')
 
+
+def vin_check_digit_valid(vin):
+    """Validate VIN check digit (9th position) per ISO 3779 algorithm.
+    Returns True if the VIN math works out. Use this to catch misread VINs."""
+    if not vin or len(vin) != 17:
+        return False
+    vin = vin.upper()
+    # Transliteration: letters → numeric weights
+    trans = {'A':1,'B':2,'C':3,'D':4,'E':5,'F':6,'G':7,'H':8,
+             'J':1,'K':2,'L':3,'M':4,'N':5,'P':7,'R':9,
+             'S':2,'T':3,'U':4,'V':5,'W':6,'X':7,'Y':8,'Z':9,
+             '0':0,'1':1,'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9}
+    # Position weights
+    weights = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2]
+    try:
+        total = sum(trans[c] * weights[i] for i, c in enumerate(vin))
+    except KeyError:
+        return False
+    expected = total % 11
+    expected_char = 'X' if expected == 10 else str(expected)
+    return vin[8] == expected_char
+
 def decode_vin(vin):
     """Call NHTSA vPIC API and return dict with year/make/model/trim or empty dict."""
     if not vin or len(vin) != 17:
@@ -470,7 +492,7 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
                 return candidate
     print('[OCR] Google Vision missed, falling back to Gemini Flash', flush=True)
 
-    # Fallback to Gemini Flash (cheap, multimodal)
+    # Fallback 1: Gemini Flash (printed text, still cheap)
     result = gemini_call(VIN_PROMPT, image_bytes=file_bytes, mime=media_type,
                          model='gemini-2.5-flash', max_tokens=100)
     if result:
@@ -478,6 +500,40 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
         if VIN_RE.match(result):
             print(f'[OCR] VIN via Gemini Flash: {result}', flush=True)
             return result
+
+    # Fallback 2: Gemini Pro (handles handwriting + ambiguous text)
+    print('[OCR] Gemini Flash missed, trying Gemini Pro (handwriting)', flush=True)
+    hw_prompt = (
+        'Read the VIN from this image. The image may contain a handwritten note, '
+        'a VIN sticker, or any vehicle identifier. Apply strict VIN rules:\n'
+        '- Exactly 17 characters (A-Z, 0-9)\n'
+        '- Letters I, O, Q are NEVER valid — substitute 1, 0, 0\n'
+        '- Handwriting: resolve 1/7, 0/O/Q, 5/S/G, 2/Z, 4/Y/A confusion\n'
+        '- The 9th character is a math check digit. Common values: 0-9 or X.\n'
+        '- Common prefixes: 1G, 1F, 1C, 1H, 2H, 5J, 5Y, 7S, WP, WB, WD, YV\n\n'
+        'Reply with ONLY the 17-char VIN. No other text.'
+    )
+    # Collect candidates — may run twice if first fails check digit
+    candidates = []
+    for attempt in range(2):
+        result = gemini_call(hw_prompt, image_bytes=file_bytes, mime=media_type,
+                             model='gemini-2.5-pro', max_tokens=2000,
+                             temperature=0.2 + attempt * 0.3)
+        if not result:
+            continue
+        m = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', result.strip().upper())
+        if not m:
+            continue
+        vin = m.group(0)
+        candidates.append(vin)
+        if vin_check_digit_valid(vin):
+            print(f'[OCR] VIN via Gemini Pro (check digit OK): {vin}', flush=True)
+            return vin
+
+    # If no check-digit-valid VIN found, return the first candidate with a warning
+    if candidates:
+        print(f'[OCR] VIN via Gemini Pro (check digit FAILED, manual review needed): {candidates[0]}', flush=True)
+        return candidates[0]
     return None
 
 
@@ -616,7 +672,7 @@ def extract_carfax_info(file_bytes, media_type='image/jpeg'):
 
     Uses Gemini 2.5 Pro for better accuracy on handwriting and ambiguous text."""
     raw = gemini_call(CARFAX_PROMPT, image_bytes=file_bytes, mime=media_type,
-                      model='gemini-2.5-pro', max_tokens=1500)
+                      model='gemini-2.5-pro', max_tokens=3000)
     if not raw:
         return {}
     try:
@@ -1933,7 +1989,14 @@ def quick_extract():
     if extract_type == 'vin':
         vin = extract_vin_from_file(file_bytes, media_type)
         if vin:
-            return jsonify({'success': True, 'value': vin})
+            # Flag if check digit fails so UI can prompt user to verify
+            valid = vin_check_digit_valid(vin)
+            return jsonify({
+                'success': True,
+                'value': vin,
+                'check_digit_valid': valid,
+                'warning': None if valid else 'VIN check digit failed — please verify each character'
+            })
         return jsonify({'success': False, 'raw': 'Not detected'})
     else:
         miles = extract_mileage_from_file(file_bytes, media_type)
@@ -3838,11 +3901,17 @@ def api_bid_quick_drop():
     if vin and len(vin) == 17:
         trigger_market_check(bid_id, vin)
 
+    # Check VIN validity for UI warning
+    vin_final = vin if vin and len(vin) == 17 else None
+    vin_valid = vin_check_digit_valid(vin_final) if vin_final else None
+
     return jsonify({
         'success': True,
         'bid_id': bid_id,
         'extracted': {
-            'vin': vin if vin and len(vin) == 17 else None,
+            'vin': vin_final,
+            'vin_check_digit_valid': vin_valid,
+            'vin_warning': None if (vin_valid is None or vin_valid) else 'VIN check digit failed — please verify each character',
             'year': year,
             'make': make,
             'model': model,
