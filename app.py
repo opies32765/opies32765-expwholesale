@@ -934,6 +934,51 @@ def twilio_webhook():
         return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 200, {'Content-Type': 'text/xml'})
 
+    # # ORLANDO_AI_GUARD_v2
+    # If the sender was a recent Orlando AI SMS recipient, don't create a phantom EW bid.
+    try:
+        import sqlite3 as _oa_sqlite
+        import json as _oa_json
+        _oa_db = _oa_sqlite.connect('/opt/orlando-chatbot/bookings.db', timeout=2)
+        _oa_cur = _oa_db.cursor()
+        _oa_cur.execute(
+            "SELECT purpose FROM outbound_sms WHERE phone = ? "
+            "AND sent_at >= datetime('now','-7 days') "
+            "ORDER BY sent_at DESC LIMIT 1",
+            (from_phone,)
+        )
+        _oa_row = _oa_cur.fetchone()
+        if _oa_row:
+            _oa_purpose = _oa_row[0]
+            try:
+                _oa_meta = _oa_json.dumps({'from': from_phone, 'body': body[:200], 'purpose': _oa_purpose})
+                _oa_cur.execute(
+                    "INSERT INTO chat_events (ip, event_type, meta) VALUES (?, ?, ?)",
+                    ('sms:' + from_phone, 'sms_inbound', _oa_meta)
+                )
+                _oa_db.commit()
+            except Exception:
+                pass
+            _oa_db.close()
+            try:
+                from twilio.rest import Client as _TwC
+                _TwC(TWILIO_SID, TWILIO_TOKEN).messages.create(
+                    to='+14074309675',
+                    from_=TWILIO_PHONE,
+                    body='Orlando AI reply from ' + from_phone + ' (' + str(_oa_purpose) + '): ' + body[:400]
+                )
+            except Exception:
+                pass
+            try:
+                db.close()
+            except Exception:
+                pass
+            return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                    200, {'Content-Type': 'text/xml'})
+        _oa_db.close()
+    except Exception:
+        pass  # Fail-safe: if Orlando AI DB missing, fall through to normal EW flow
+
     # ── Normal flow: new bid from SMS ──
 
     # Upsert contact
