@@ -934,51 +934,6 @@ def twilio_webhook():
         return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 200, {'Content-Type': 'text/xml'})
 
-    # # ORLANDO_AI_GUARD_v2
-    # If the sender was a recent Orlando AI SMS recipient, don't create a phantom EW bid.
-    try:
-        import sqlite3 as _oa_sqlite
-        import json as _oa_json
-        _oa_db = _oa_sqlite.connect('/opt/orlando-chatbot/bookings.db', timeout=2)
-        _oa_cur = _oa_db.cursor()
-        _oa_cur.execute(
-            "SELECT purpose FROM outbound_sms WHERE phone = ? "
-            "AND sent_at >= datetime('now','-7 days') "
-            "ORDER BY sent_at DESC LIMIT 1",
-            (from_phone,)
-        )
-        _oa_row = _oa_cur.fetchone()
-        if _oa_row:
-            _oa_purpose = _oa_row[0]
-            try:
-                _oa_meta = _oa_json.dumps({'from': from_phone, 'body': body[:200], 'purpose': _oa_purpose})
-                _oa_cur.execute(
-                    "INSERT INTO chat_events (ip, event_type, meta) VALUES (?, ?, ?)",
-                    ('sms:' + from_phone, 'sms_inbound', _oa_meta)
-                )
-                _oa_db.commit()
-            except Exception:
-                pass
-            _oa_db.close()
-            try:
-                from twilio.rest import Client as _TwC
-                _TwC(TWILIO_SID, TWILIO_TOKEN).messages.create(
-                    to='+14074309675',
-                    from_=TWILIO_PHONE,
-                    body='Orlando AI reply from ' + from_phone + ' (' + str(_oa_purpose) + '): ' + body[:400]
-                )
-            except Exception:
-                pass
-            try:
-                db.close()
-            except Exception:
-                pass
-            return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-                    200, {'Content-Type': 'text/xml'})
-        _oa_db.close()
-    except Exception:
-        pass  # Fail-safe: if Orlando AI DB missing, fall through to normal EW flow
-
     # ── Normal flow: new bid from SMS ──
 
     # Upsert contact
@@ -2909,6 +2864,8 @@ def _ensure_ipacket_table():
             )
         """)
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_ipacket_bid_id ON ipacket_lookups(bid_id)")
+        cur.execute("ALTER TABLE ipacket_lookups ADD COLUMN IF NOT EXISTS not_available BOOLEAN DEFAULT FALSE")
+        cur.execute("ALTER TABLE ipacket_lookups ADD COLUMN IF NOT EXISTS unavailable_reason TEXT")
         db.commit()
         db.close()
     except Exception:
@@ -3226,19 +3183,25 @@ def api_ipacket_submit():
     cur.execute("""
         INSERT INTO ipacket_lookups
             (bid_id, vin, total_msrp, base_price, exterior_color,
-             interior_color, screenshot, raw_json, looked_up_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+             interior_color, screenshot, raw_json, not_available,
+             unavailable_reason, looked_up_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         ON CONFLICT (bid_id) DO UPDATE SET
             vin=EXCLUDED.vin, total_msrp=EXCLUDED.total_msrp,
             base_price=EXCLUDED.base_price, exterior_color=EXCLUDED.exterior_color,
             interior_color=EXCLUDED.interior_color, screenshot=EXCLUDED.screenshot,
-            raw_json=EXCLUDED.raw_json, looked_up_at=NOW()
+            raw_json=EXCLUDED.raw_json,
+            not_available=EXCLUDED.not_available,
+            unavailable_reason=EXCLUDED.unavailable_reason,
+            looked_up_at=NOW()
     """, (
         bid_id, data.get('vin', ''),
         data.get('total_msrp'), data.get('base_price'),
         data.get('exterior_color'), data.get('interior_color'),
         data.get('screenshot'),
         json.dumps(data.get('raw', {})) if data.get('raw') else None,
+        bool(data.get('not_available', False)),
+        data.get('unavailable_reason'),
     ))
     db.commit()
     db.close()
@@ -3279,7 +3242,8 @@ def api_ipacket_status(bid_id):
         for k, v in d.items():
             if hasattr(v, 'isoformat'):
                 d[k] = v.isoformat()
-        return jsonify({'status': 'complete', 'data': d})
+        status = 'not_available' if d.get('not_available') else 'complete'
+        return jsonify({'status': status, 'data': d})
     return jsonify({'status': 'pending'})
 
 

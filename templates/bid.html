@@ -600,7 +600,9 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
       <div class="card" style="border-color:#4338ca" id="ipacket-card">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
           iPacket Sticker
-          {% if ipacket_data %}
+          {% if ipacket_data and ipacket_data.not_available %}
+          <span style="font-size:10px;font-weight:700;color:#64748b;background:rgba(100,116,139,.12);border:1px solid rgba(100,116,139,.25);border-radius:4px;padding:2px 8px;letter-spacing:.4px">NOT AVAILABLE</span>
+          {% elif ipacket_data %}
           <span style="font-size:10px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">COMPLETE</span>
           {% elif bid.vin %}
           <span id="ipacket-status-badge" style="font-size:10px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px;animation:pulse 2s infinite">PENDING</span>
@@ -609,7 +611,18 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           {% endif %}
         </div>
 
-        {% if ipacket_data %}
+        {% if ipacket_data and ipacket_data.not_available %}
+        <div style="font-size:13px;color:#64748b;font-style:italic;line-height:1.5">
+          OEM window sticker not available for this VIN.
+          {% if ipacket_data.unavailable_reason %}
+          <div style="margin-top:4px;font-size:11px;color:#475569;font-style:normal">({{ ipacket_data.unavailable_reason }})</div>
+          {% endif %}
+        </div>
+        {% if ipacket_data.looked_up_at %}
+        <div style="margin-top:10px;font-size:10px;color:#334155;text-align:right">Checked {{ time_ago(ipacket_data.looked_up_at) }}</div>
+        {% endif %}
+
+        {% elif ipacket_data %}
         <div style="display:flex;flex-direction:column;gap:6px">
           {% if ipacket_data.total_msrp %}
           <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
@@ -1185,7 +1198,7 @@ setInterval(pollMessages, 3000);
     try {
       const r = await fetch(`/api/ipacket/status/${BID_ID}`);
       const d = await r.json();
-      if (d.status === 'complete') {
+      if (d.status === 'complete' || d.status === 'not_available') {
         clearInterval(_ipPoll);
         location.reload();
       }
