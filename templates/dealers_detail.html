@@ -142,6 +142,20 @@ a.veh-link:hover{text-decoration:underline}
   .dealer-head{flex-direction:column}
   .scan-row{grid-template-columns:1fr 1fr;gap:6px}
 }
+@media(max-width:768px){
+  .header{padding:0 12px;height:58px;gap:8px}
+  .logo{gap:8px;flex-shrink:0}
+  .logo-mark{width:32px;height:32px;font-size:15px}
+  .logo-text{font-size:14px}
+  .logo-sub{display:none}
+  .header-right{gap:6px;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none;min-width:0}
+  .header-right::-webkit-scrollbar{display:none}
+  .nav-link{font-size:12px;padding:4px 9px;white-space:nowrap;flex-shrink:0}
+}
+@media(max-width:480px){
+  .logo-text{font-size:13px}
+  .nav-link{font-size:11px;padding:4px 8px}
+}
 </style>
 </head>
 <body>

@@ -116,6 +116,21 @@ tr:last-child td{border-bottom:none}
   .table-wrap{padding:12px}
   .filters{padding:12px 16px}
   th,td{padding:10px 8px}
+  /* Mobile nav fix */
+  .header{padding:0 12px !important;height:58px;gap:8px}
+  .logo{gap:8px;flex-shrink:0}
+  .logo-mark{width:32px;height:32px;font-size:15px}
+  .logo-text{font-size:14px}
+  .logo-sub{display:none}
+  .header-right{gap:6px !important;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none;min-width:0}
+  .header-right::-webkit-scrollbar{display:none}
+  .header-right a{font-size:12px !important;padding:4px 9px !important;white-space:nowrap;flex-shrink:0}
+  .header-right .live-dot,.header-right .live-label{display:none}
+  #online-reps{display:none !important}
+}
+@media(max-width:480px){
+  .logo-text{font-size:13px}
+  .header-right a{font-size:11px !important;padding:4px 8px !important}
 }
 </style>
 </head>

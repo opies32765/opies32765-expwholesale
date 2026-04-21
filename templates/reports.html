@@ -68,9 +68,23 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:
   .kpi-row{grid-template-columns:repeat(3,1fr)}
   .charts-row{grid-template-columns:1fr}
 }
+@media(max-width:768px){
+  .header{padding:0 12px;height:58px;gap:8px}
+  .logo{gap:8px;flex-shrink:0}
+  .logo-mark{width:32px;height:32px;font-size:15px}
+  .logo-text{font-size:14px}
+  .logo-sub{display:none}
+  .header-right{gap:6px;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none;min-width:0}
+  .header-right::-webkit-scrollbar{display:none}
+  .nav-link{font-size:12px;padding:4px 9px;white-space:nowrap;flex-shrink:0}
+}
 @media(max-width:600px){
   .kpi-row{grid-template-columns:repeat(2,1fr)}
   .content{padding:20px 12px}
+}
+@media(max-width:480px){
+  .logo-text{font-size:13px}
+  .nav-link{font-size:11px;padding:4px 8px}
 }
 </style>
 </head>
