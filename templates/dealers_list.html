@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dealer DB — EW Buy Center</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:100vh}
+.header{background:#243447;border-bottom:1px solid #344f68;padding:0 32px;height:66px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-mark{width:38px;height:38px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;color:#fff}
+.logo-text{font-size:17px;font-weight:700;color:#f1f5f9;letter-spacing:-0.3px}
+.logo-sub{font-size:11px;color:#7a9bb5;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+.header-right{display:flex;align-items:center;gap:16px}
+.nav-link{font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s}
+.nav-link:hover{color:#e2e8f0;border-color:#334155}
+.nav-link.active{color:#60a5fa;border-color:#3b82f6;background:rgba(59,130,246,.1)}
+
+.stats-bar{background:#243447;border-bottom:1px solid #344f68;padding:18px 40px;display:flex;gap:48px;align-items:center}
+.stat-item{display:flex;flex-direction:column;align-items:center;gap:4px}
+.stat-num{font-size:32px;font-weight:800;line-height:1}
+.stat-label{font-size:12px;color:#7a9bb5;font-weight:600;text-transform:uppercase;letter-spacing:.8px}
+.stat-num.blue{color:#60a5fa}.stat-num.yellow{color:#fbbf24}.stat-num.green{color:#34d399}.stat-num.gray{color:#7a9bb5}.stat-num.white{color:#f1f5f9}
+.stat-divider{width:1px;height:44px;background:#344f68}
+
+.actions{padding:16px 32px;display:flex;gap:12px;align-items:center;border-bottom:1px solid #344f68}
+.btn{padding:9px 18px;border-radius:8px;border:1px solid #344f68;background:#243447;color:#e2e8f0;font-size:14px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-decoration:none;display:inline-block}
+.btn:hover{border-color:#4d7a9e}
+.btn-primary{background:#3b82f6;border-color:#3b82f6;color:#fff}
+.btn-primary:hover{background:#2563eb}
+.btn-ghost{background:transparent}
+.search{flex:1;max-width:360px;padding:9px 14px;background:#1a2838;border:1px solid #344f68;border-radius:8px;color:#e2e8f0;font-size:14px;font-family:inherit}
+.search:focus{outline:none;border-color:#3b82f6}
+
+.table-wrap{padding:24px 32px}
+table{width:100%;border-collapse:collapse;background:#243447;border-radius:10px;overflow:hidden;border:1px solid #344f68}
+th{text-align:left;padding:12px 14px;font-size:11px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #344f68;background:#1f2e40}
+th.num,td.num{text-align:right}
+td{padding:14px;border-bottom:1px solid #2a3f54;vertical-align:middle;font-size:14px}
+tr:hover td{background:rgba(255,255,255,.03);cursor:pointer}
+tr:last-child td{border-bottom:none}
+
+.dealer-name{font-size:15px;font-weight:700;color:#f1f5f9}
+.dealer-url{font-size:12px;color:#7a9bb5;margin-top:2px;font-family:monospace}
+.platform-badge{display:inline-block;padding:3px 8px;border-radius:5px;font-size:11px;font-weight:700;background:#1e3a5f;color:#60a5fa;border:1px solid rgba(59,130,246,.3);letter-spacing:.3px;text-transform:uppercase}
+.platform-badge.unknown{background:#2a2a2a;color:#a8a8a8;border-color:#444}
+.scrape-method{font-size:11px;color:#64748b;margin-top:3px}
+.age-chips{display:flex;gap:4px;flex-wrap:wrap}
+.age-chip{display:inline-flex;flex-direction:column;align-items:center;padding:4px 8px;border-radius:6px;min-width:46px}
+.age-chip .val{font-size:14px;font-weight:700}
+.age-chip .lbl{font-size:9px;color:#7a9bb5;letter-spacing:.5px;text-transform:uppercase;margin-top:1px}
+.chip-0{background:rgba(52,211,153,.10);color:#34d399}
+.chip-1{background:rgba(96,165,250,.10);color:#60a5fa}
+.chip-2{background:rgba(251,191,36,.10);color:#fbbf24}
+.chip-3{background:rgba(239,68,68,.12);color:#f87171}
+.stock-num{font-size:18px;font-weight:800;color:#f1f5f9}
+.sold-num{font-size:16px;font-weight:700;color:#34d399}
+.last-scan{font-size:13px;color:#a8c0d6}
+.last-scan .status-ok{color:#34d399}
+.last-scan .status-err{color:#f87171}
+.empty{text-align:center;padding:80px 24px;color:#5a7a96}
+.empty h3{font-size:18px;font-weight:600;color:#7a9bb5;margin-bottom:8px}
+
+/* Modal */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center}
+.modal-overlay.show{display:flex}
+.modal{background:#243447;border:1px solid #344f68;border-radius:12px;padding:28px;width:440px;max-width:92vw}
+.modal h3{font-size:18px;font-weight:700;color:#f1f5f9;margin-bottom:18px}
+.modal label{display:block;font-size:11px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.6px;margin:14px 0 5px}
+.modal input,.modal textarea{width:100%;padding:10px 12px;background:#1a2838;border:1px solid #344f68;border-radius:8px;color:#e2e8f0;font-size:14px;font-family:inherit}
+.modal input:focus,.modal textarea:focus{outline:none;border-color:#3b82f6}
+.modal textarea{min-height:72px;resize:vertical}
+.modal-footer{display:flex;gap:10px;justify-content:flex-end;margin-top:20px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <div class="logo-mark">EW</div>
+    <div><div class="logo-text">Dealer DB</div><div class="logo-sub">Partner Inventory Intel</div></div>
+  </div>
+  <div class="header-right">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/dealers" class="nav-link active">Dealer DB</a>
+    <a href="/contacts" class="nav-link">Contacts</a>
+    <a href="/drop" class="nav-link">Quick Drop</a>
+    <a href="/reports" class="nav-link">Reports</a>
+  </div>
+</div>
+
+<div class="stats-bar">
+  <div class="stat-item"><div class="stat-num white">{{ totals.total }}</div><div class="stat-label">Dealers</div></div>
+  <div class="stat-divider"></div>
+  <div class="stat-item"><div class="stat-num blue">{{ totals.scanned_24h }}</div><div class="stat-label">Scanned 24h</div></div>
+  <div class="stat-divider"></div>
+  <div class="stat-item"><div class="stat-num green">{{ totals.total_stock }}</div><div class="stat-label">In Stock</div></div>
+  <div class="stat-divider"></div>
+  <div class="stat-item"><div class="stat-num yellow">{{ totals.sold_7d }}</div><div class="stat-label">Sold 7d</div></div>
+</div>
+
+<div class="actions">
+  <input id="search" class="search" placeholder="Search dealer name or URL…">
+  <button class="btn btn-primary" onclick="openAdd()">+ Add Dealer</button>
+</div>
+
+<div class="table-wrap">
+{% if dealers %}
+<table id="dealers-table">
+  <thead>
+    <tr>
+      <th>Dealer</th>
+      <th>Platform</th>
+      <th>Last Scan</th>
+      <th class="num">In Stock</th>
+      <th class="num">Sold 7d</th>
+      <th>Age Buckets</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for d in dealers %}
+    <tr onclick="window.location='/dealers/{{ d.dealer_id }}'">
+      <td>
+        <div class="dealer-name">{{ d.name }}</div>
+        <div class="dealer-url">{{ d.url }}</div>
+      </td>
+      <td>
+        <span class="platform-badge {% if not d.platform %}unknown{% endif %}">{{ d.platform or 'unknown' }}</span>
+        <div class="scrape-method">{{ d.scrape_method or '—' }}</div>
+      </td>
+      <td class="last-scan">
+        <div>{{ d.last_scan_at|time_ago }}</div>
+        <div class="{% if d.last_scan_status == 'ok' %}status-ok{% elif d.last_scan_status and 'error' in d.last_scan_status %}status-err{% endif %}">
+          {{ d.last_scan_status or '—' }}
+        </div>
+      </td>
+      <td class="num"><span class="stock-num">{{ d.in_stock or 0 }}</span></td>
+      <td class="num"><span class="sold-num">{{ d.sold_last_7d or 0 }}</span></td>
+      <td>
+        <div class="age-chips">
+          <div class="age-chip chip-0"><div class="val">{{ d.age_under_30 or 0 }}</div><div class="lbl">&lt;30</div></div>
+          <div class="age-chip chip-1"><div class="val">{{ d.age_30_60 or 0 }}</div><div class="lbl">30-60</div></div>
+          <div class="age-chip chip-2"><div class="val">{{ d.age_60_90 or 0 }}</div><div class="lbl">60-90</div></div>
+          <div class="age-chip chip-3"><div class="val">{{ d.age_over_90 or 0 }}</div><div class="lbl">90+</div></div>
+        </div>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">
+  <h3>No dealers yet</h3>
+  <p>Add your first partner dealer to start tracking inventory, sold detection, and aging.</p>
+</div>
+{% endif %}
+</div>
+
+<div class="modal-overlay" id="addModal">
+  <div class="modal">
+    <h3>Add Dealer</h3>
+    <label>Dealer Name</label>
+    <input type="text" id="newName" placeholder="Park Avenue Motorcars" autofocus>
+    <label>Website URL</label>
+    <input type="text" id="newUrl" placeholder="https://example.com">
+    <label>Notes (optional)</label>
+    <textarea id="newNotes" placeholder="High-line indie, expect trades weekly"></textarea>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeAdd()">Cancel</button>
+      <button class="btn btn-primary" id="addBtn" onclick="submitAdd()">Add + Scan</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function openAdd(){document.getElementById('addModal').classList.add('show');document.getElementById('newName').focus()}
+function closeAdd(){document.getElementById('addModal').classList.remove('show')}
+document.getElementById('addModal').addEventListener('click',e=>{if(e.target.id==='addModal')closeAdd()})
+
+async function submitAdd(){
+  const name = document.getElementById('newName').value.trim();
+  const url  = document.getElementById('newUrl').value.trim();
+  const notes = document.getElementById('newNotes').value.trim();
+  if(!name || !url){alert('Name + URL required');return}
+  const btn = document.getElementById('addBtn');
+  btn.disabled = true; btn.textContent = 'Adding…';
+  try{
+    const r = await fetch('/api/dealer/create',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name,url,notes})
+    });
+    const data = await r.json();
+    if(data.dealer_id){window.location = '/dealers/' + data.dealer_id}
+    else{alert(data.error || 'Failed to add'); btn.disabled=false; btn.textContent='Add + Scan'}
+  }catch(e){
+    alert('Error: '+e.message); btn.disabled=false; btn.textContent='Add + Scan';
+  }
+}
+
+// Client-side search filter
+document.getElementById('search').addEventListener('input',e=>{
+  const q = e.target.value.toLowerCase();
+  document.querySelectorAll('#dealers-table tbody tr').forEach(tr=>{
+    tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+});
+</script>
+</body>
+</html>

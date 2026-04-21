@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ dealer.name }} — Dealer DB</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:100vh}
+.header{background:#243447;border-bottom:1px solid #344f68;padding:0 32px;height:66px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-mark{width:38px;height:38px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;color:#fff}
+.logo-text{font-size:17px;font-weight:700;color:#f1f5f9}
+.logo-sub{font-size:11px;color:#7a9bb5;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+.header-right{display:flex;align-items:center;gap:16px}
+.nav-link{font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px}
+.nav-link:hover{color:#e2e8f0;border-color:#334155}
+.nav-link.active{color:#60a5fa;border-color:#3b82f6;background:rgba(59,130,246,.1)}
+
+.page{max-width:1440px;margin:0 auto;padding:24px 32px}
+.dealer-head{background:#243447;border:1px solid #344f68;border-radius:12px;padding:24px;display:flex;gap:24px;align-items:flex-start;margin-bottom:20px}
+.dealer-head-main{flex:1}
+.dealer-title{font-size:28px;font-weight:800;color:#f1f5f9;margin-bottom:6px}
+.dealer-url{font-size:13px;color:#60a5fa;font-family:monospace;text-decoration:none}
+.dealer-url:hover{text-decoration:underline}
+.dealer-meta{display:flex;gap:16px;align-items:center;margin-top:10px;flex-wrap:wrap}
+.meta-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:6px;font-size:12px;font-weight:600;background:#1f2e40;border:1px solid #344f68;color:#a8c0d6}
+.meta-chip.platform{background:#1e3a5f;color:#60a5fa;border-color:rgba(59,130,246,.3)}
+.meta-chip.ok{color:#34d399}
+.meta-chip.err{color:#f87171}
+.dealer-head-actions{display:flex;flex-direction:column;gap:10px}
+.btn{padding:10px 20px;border-radius:8px;border:1px solid #344f68;background:#243447;color:#e2e8f0;font-size:14px;font-weight:600;font-family:inherit;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:8px}
+.btn:hover{border-color:#4d7a9e}
+.btn-primary{background:#3b82f6;border-color:#3b82f6;color:#fff}
+.btn-primary:hover{background:#2563eb}
+.btn-primary:disabled{background:#475569;border-color:#475569;cursor:not-allowed}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid #fff;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Pipeline status card */
+.pipeline{background:#243447;border:1px solid #344f68;border-radius:12px;padding:22px;margin-bottom:20px}
+.pipeline-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.pipeline-title{font-size:13px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.8px;display:flex;align-items:center;gap:8px}
+.pipeline-live-dot{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:livePulse 1.5s infinite;display:none}
+.pipeline-live-dot.show{display:inline-block}
+@keyframes livePulse{0%,100%{opacity:1}50%{opacity:.35}}
+.pipeline-last{font-size:12px;color:#7a9bb5}
+.pipeline-last b{color:#c4d6e8}
+.pipeline-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+.pipe-row{background:#1a2838;border-radius:8px;padding:14px 16px}
+.pipe-row .label{font-size:11px;color:#7a9bb5;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.pipe-row .count{font-size:20px;font-weight:800;color:#f1f5f9}
+.pipe-row .count small{font-size:13px;color:#64748b;font-weight:600;margin-left:4px}
+.pipe-bar{margin-top:8px;height:6px;background:#0f172a;border-radius:999px;overflow:hidden}
+.pipe-bar-fill{height:100%;border-radius:999px;transition:width .4s}
+.fill-green{background:#34d399}
+.fill-blue{background:#60a5fa}
+.fill-yellow{background:#fbbf24}
+.fill-gray{background:#64748b}
+
+/* Bucket chart */
+.buckets{background:#243447;border:1px solid #344f68;border-radius:12px;padding:22px;margin-bottom:20px}
+.buckets-title{font-size:13px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px}
+.bucket-bars{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.bucket{background:#1a2838;border-radius:8px;padding:16px;position:relative;overflow:hidden}
+.bucket-fill{position:absolute;left:0;bottom:0;width:100%;opacity:.15}
+.bucket-val{font-size:30px;font-weight:800;color:#f1f5f9;position:relative}
+.bucket-lbl{font-size:12px;color:#7a9bb5;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-top:4px;position:relative}
+.bucket-0 .bucket-fill{background:#34d399}.bucket-0 .bucket-val{color:#34d399}
+.bucket-1 .bucket-fill{background:#60a5fa}.bucket-1 .bucket-val{color:#60a5fa}
+.bucket-2 .bucket-fill{background:#fbbf24}.bucket-2 .bucket-val{color:#fbbf24}
+.bucket-3 .bucket-fill{background:#ef4444}.bucket-3 .bucket-val{color:#f87171}
+
+/* Search bar */
+.search-row{background:#243447;border:1px solid #344f68;border-radius:12px;padding:14px 20px;margin-bottom:14px;display:flex;align-items:center;gap:12px;position:sticky;top:66px;z-index:50}
+.search-icon{color:#7a9bb5;font-size:16px}
+.search-input{flex:1;padding:9px 12px;background:#1a2838;border:1px solid #344f68;border-radius:8px;color:#e2e8f0;font-size:14px;font-family:inherit}
+.search-input:focus{outline:none;border-color:#3b82f6}
+.search-meta{font-size:12px;color:#7a9bb5;font-weight:600;white-space:nowrap}
+.search-meta b{color:#60a5fa}
+
+/* Make tree table (flat — no model sub-group) */
+.section-title{font-size:14px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.8px;margin:12px 0 10px;display:flex;align-items:center;gap:10px}
+.section-count{background:#344f68;color:#a8c0d6;padding:2px 9px;border-radius:4px;font-size:12px}
+.tree{background:#243447;border:1px solid #344f68;border-radius:12px;overflow:hidden}
+.make-group{border-bottom:1px solid #344f68}
+.make-group:last-child{border-bottom:none}
+.make-header{padding:14px 18px;background:#1f2e40;cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none}
+.make-header:hover{background:#263648}
+.make-name{font-size:17px;font-weight:800;color:#f1f5f9;display:flex;align-items:center;gap:10px}
+.tree-caret{display:inline-block;transition:transform .15s;color:#7a9bb5}
+.make-group.open .tree-caret{transform:rotate(90deg)}
+.make-count{background:#3b82f6;color:#fff;padding:3px 10px;border-radius:5px;font-size:12px;font-weight:700}
+.make-body{display:none}
+.make-group.open .make-body{display:block}
+.make-hidden{display:none}
+
+table.veh{width:100%;border-collapse:collapse}
+table.veh th{text-align:left;padding:8px 14px;font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.7px;background:#1a2838;border-top:1px solid #2a3f54}
+table.veh th.num,table.veh td.num{text-align:right}
+table.veh th:first-child,table.veh td:first-child{padding-left:28px}
+table.veh td{padding:9px 14px;border-top:1px solid #2a3f54;font-size:13px;vertical-align:middle}
+table.veh tr:hover td{background:rgba(255,255,255,.02)}
+table.veh tr.veh-hidden{display:none}
+
+.vin{font-family:monospace;font-size:12px;color:#a8c0d6;letter-spacing:.3px}
+.trim-txt{color:#c4d6e8;font-weight:500}
+.color-txt{color:#a8c0d6}
+.miles-txt{color:#c4d6e8}
+.price-txt{color:#f1f5f9;font-weight:700}
+.age-txt{color:#7a9bb5;font-size:12px}
+.age-txt.aged{color:#fbbf24}
+.age-txt.stale{color:#f87171}
+.drop-chip{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:5px;font-size:11px;font-weight:700;background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.25)}
+.drop-blank{color:#344f68}
+.missing-chip{display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;background:rgba(239,68,68,.12);color:#f87171;border:1px solid rgba(239,68,68,.25);margin-left:6px;text-transform:uppercase;letter-spacing:.4px}
+a.veh-link{color:#60a5fa;text-decoration:none;font-size:12px;margin-left:8px}
+a.veh-link:hover{text-decoration:underline}
+
+/* Sold section (always collapsed, always shows count) */
+.sold-box{margin-top:20px;background:#243447;border:1px solid #344f68;border-radius:12px;overflow:hidden}
+.sold-head{padding:16px 22px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;user-select:none;background:#1f2e40}
+.sold-head:hover{background:#263648}
+.sold-title{font-size:15px;font-weight:700;color:#c4d6e8;display:flex;align-items:center;gap:10px}
+.sold-count{background:#34d399;color:#0b1d1a;padding:3px 11px;border-radius:5px;font-size:13px;font-weight:800}
+.sold-body{display:none;padding:0 22px 18px}
+.sold-box.open .sold-body{display:block}
+.sold-box.open .tree-caret{transform:rotate(90deg)}
+
+/* Scans log */
+.scans-list{background:#243447;border:1px solid #344f68;border-radius:12px;padding:16px 22px;margin-top:20px}
+.scan-row{display:grid;grid-template-columns:140px 100px 1fr 80px 80px 80px 80px 90px;gap:10px;padding:8px 0;border-bottom:1px solid #2a3f54;font-size:12px}
+.scan-row:last-child{border-bottom:none}
+.scan-row .label{color:#7a9bb5;font-size:10px;text-transform:uppercase;letter-spacing:.5px;font-weight:700}
+.scan-when{color:#a8c0d6}
+.scan-status-ok{color:#34d399;font-weight:700}
+.scan-status-err{color:#f87171;font-weight:700}
+
+@media(max-width:900px){
+  .bucket-bars{grid-template-columns:repeat(2,1fr)}
+  .dealer-head{flex-direction:column}
+  .scan-row{grid-template-columns:1fr 1fr;gap:6px}
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <div class="logo-mark">EW</div>
+    <div><div class="logo-text">Dealer DB</div><div class="logo-sub">{{ dealer.name }}</div></div>
+  </div>
+  <div class="header-right">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/dealers" class="nav-link active">Dealer DB</a>
+    <a href="/contacts" class="nav-link">Contacts</a>
+    <a href="/drop" class="nav-link">Quick Drop</a>
+    <a href="/reports" class="nav-link">Reports</a>
+  </div>
+</div>
+
+<div class="page">
+
+<div class="dealer-head">
+  <div class="dealer-head-main">
+    <div class="dealer-title">{{ dealer.name }}</div>
+    <a href="{{ dealer.url }}" target="_blank" rel="noopener" class="dealer-url">{{ dealer.url }}</a>
+    <div class="dealer-meta">
+      <span class="meta-chip platform">Platform · {{ dealer.platform or 'unknown' }}</span>
+      <span class="meta-chip">Method · {{ dealer.scrape_method or '—' }}</span>
+      <span class="meta-chip">In Stock · <b style="color:#f1f5f9;margin-left:4px">{{ dealer.in_stock or 0 }}</b></span>
+      <span class="meta-chip">Sold 7d · <b style="color:#34d399;margin-left:4px">{{ dealer.sold_last_7d or 0 }}</b></span>
+      <span class="meta-chip {% if dealer.last_scan_status == 'ok' %}ok{% elif dealer.last_scan_status and 'error' in dealer.last_scan_status %}err{% endif %}">
+        Last scan · {{ dealer.last_scan_at|time_ago }} ({{ dealer.last_scan_status or '—' }})
+      </span>
+    </div>
+  </div>
+  <div class="dealer-head-actions">
+    <button class="btn btn-primary" id="scanBtn" onclick="runScan()">↻ Scan Now</button>
+    <a href="/dealers" class="btn">← All Dealers</a>
+  </div>
+</div>
+
+<div class="pipeline">
+  <div class="pipeline-head">
+    <div class="pipeline-title">
+      Pipeline Status
+      <span class="pipeline-live-dot" id="pipeLiveDot"></span>
+      <span id="pipeLiveLabel" style="font-size:11px;color:#34d399;display:none">Scan in progress</span>
+    </div>
+    <div class="pipeline-last" id="pipeLastLine">
+      Last scan: <b>{{ dealer.last_scan_at|time_ago }}</b> ·
+      {% if scans and scans[0].duration_ms %}took <b>{{ (scans[0].duration_ms // 1000) }}s</b> ·{% endif %}
+      {% if scans and scans[0].vehicles_found is not none %}found <b>{{ scans[0].vehicles_found }}</b>{% endif %}
+    </div>
+  </div>
+  <div class="pipeline-grid">
+    <div class="pipe-row">
+      <div class="label">Active Inventory</div>
+      <div class="count" id="pipeActive">{{ pipeline.total_active }}</div>
+      <div class="pipe-bar"><div class="pipe-bar-fill fill-gray" style="width:100%"></div></div>
+    </div>
+    <div class="pipe-row">
+      <div class="label">Photos Scraped</div>
+      <div class="count"><span id="pipePhotos">{{ pipeline.with_photos }}</span><small>/ {{ pipeline.total_active }} · <span id="pipePhotoPct">{{ pipeline.photo_pct }}</span>%</small></div>
+      <div class="pipe-bar"><div class="pipe-bar-fill fill-blue" id="pipePhotoBar" style="width:{{ pipeline.photo_pct }}%"></div></div>
+    </div>
+    <div class="pipe-row">
+      <div class="label">Colors Detected</div>
+      <div class="count"><span id="pipeColors">{{ pipeline.with_color }}</span><small>/ {{ pipeline.total_active }} · <span id="pipeColorPct">{{ pipeline.color_pct }}</span>%</small></div>
+      <div class="pipe-bar"><div class="pipe-bar-fill fill-green" id="pipeColorBar" style="width:{{ pipeline.color_pct }}%"></div></div>
+      <div style="font-size:11px;color:#7a9bb5;margin-top:6px">
+        {{ pipeline.color_remaining }} remaining · <b style="color:#34d399">+{{ pipeline.colors_last_24h }}</b> in last 24h ({{ pipeline.scans_last_24h }} scans)
+      </div>
+    </div>
+    <div class="pipe-row">
+      <div class="label">Price Drops Flagged</div>
+      <div class="count" style="color:#fbbf24">{{ pipeline.with_drops }}</div>
+      <div class="pipe-bar"><div class="pipe-bar-fill fill-yellow" style="width:{{ (100 * pipeline.with_drops / pipeline.total_active) if pipeline.total_active else 0 }}%"></div></div>
+    </div>
+  </div>
+</div>
+
+<div class="buckets">
+  <div class="buckets-title">Inventory Age Buckets</div>
+  {% set max_bucket = [buckets.under_30, buckets.d30_60, buckets.d60_90, buckets.over_90]|max %}
+  <div class="bucket-bars">
+    <div class="bucket bucket-0">
+      <div class="bucket-fill" style="height:{{ (100 * buckets.under_30 / max_bucket) if max_bucket else 0 }}%"></div>
+      <div class="bucket-val">{{ buckets.under_30 }}</div>
+      <div class="bucket-lbl">&lt; 30 days</div>
+    </div>
+    <div class="bucket bucket-1">
+      <div class="bucket-fill" style="height:{{ (100 * buckets.d30_60 / max_bucket) if max_bucket else 0 }}%"></div>
+      <div class="bucket-val">{{ buckets.d30_60 }}</div>
+      <div class="bucket-lbl">30 – 60 days</div>
+    </div>
+    <div class="bucket bucket-2">
+      <div class="bucket-fill" style="height:{{ (100 * buckets.d60_90 / max_bucket) if max_bucket else 0 }}%"></div>
+      <div class="bucket-val">{{ buckets.d60_90 }}</div>
+      <div class="bucket-lbl">60 – 90 days</div>
+    </div>
+    <div class="bucket bucket-3">
+      <div class="bucket-fill" style="height:{{ (100 * buckets.over_90 / max_bucket) if max_bucket else 0 }}%"></div>
+      <div class="bucket-val">{{ buckets.over_90 }}</div>
+      <div class="bucket-lbl">90+ days</div>
+    </div>
+  </div>
+</div>
+
+<div class="search-row">
+  <span class="search-icon">🔍</span>
+  <input id="vehSearch" class="search-input" placeholder="Search VIN, make, model, trim, year, color…" autocomplete="off">
+  <span class="search-meta" id="searchMeta">{{ dealer.in_stock or 0 }} vehicles</span>
+</div>
+
+<div class="section-title">
+  Active Inventory
+  <span class="section-count">{{ dealer.in_stock or 0 }}</span>
+</div>
+
+{% if tree %}
+<div class="tree" id="inventoryTree">
+  {% for make, info in tree.items() %}
+  <div class="make-group open" data-make="{{ make|lower }}">
+    <div class="make-header" onclick="this.parentElement.classList.toggle('open')">
+      <div class="make-name"><span class="tree-caret">▶</span>{{ make }}</div>
+      <span class="make-count"><span class="visible-count">{{ info.count }}</span> / {{ info.count }}</span>
+    </div>
+    <div class="make-body">
+      <table class="veh">
+        <thead>
+          <tr>
+            <th>Year · Model · Trim</th>
+            <th>Color</th>
+            <th>VIN</th>
+            <th class="num">Miles</th>
+            <th class="num">Price</th>
+            <th class="num">Price Drop</th>
+            <th class="num">Age</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for v in info.rows %}
+          <tr data-search="{{ v.year or '' }} {{ make|lower }} {{ (v.model or '')|lower }} {{ (v.trim or '')|lower }} {{ (v.vin or '')|lower }} {{ (v.ext_color or '')|lower }}">
+            <td>
+              <span class="trim-txt">{{ v.year or '' }} {{ v.model or '' }}{% if v.trim %} · {{ v.trim }}{% endif %}</span>
+              {% if v.status == 'missing' %}<span class="missing-chip">missing</span>{% endif %}
+            </td>
+            <td class="color-txt">{{ v.ext_color or '—' }}</td>
+            <td><span class="vin">{{ v.vin or '—' }}</span></td>
+            <td class="num miles-txt">{{ v.mileage|miles }}</td>
+            <td class="num price-txt">{{ v.price|money }}</td>
+            <td class="num">
+              {% if v.price_drop_amount %}
+                <span class="drop-chip">−${{ '{:,}'.format(v.price_drop_amount) }}</span>
+              {% else %}
+                <span class="drop-blank">—</span>
+              {% endif %}
+            </td>
+            <td class="num">
+              {% set age = v.first_seen_at|age_days %}
+              <span class="age-txt {% if age|int >= 90 %}stale{% elif age|int >= 60 %}aged{% endif %}">{{ age }}d</span>
+            </td>
+            <td>{% if v.url %}<a class="veh-link" href="{{ v.url }}" target="_blank" rel="noopener">↗</a>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="tree" style="padding:60px;text-align:center;color:#7a9bb5">
+  No active inventory yet. Run a scan to populate.
+</div>
+{% endif %}
+
+<div class="sold-box">
+  <div class="sold-head" onclick="this.parentElement.classList.toggle('open')">
+    <div class="sold-title"><span class="tree-caret">▶</span>Sold · Detected</div>
+    <span class="sold-count">{{ sold|length }}</span>
+  </div>
+  <div class="sold-body">
+    {% if sold %}
+    <table class="veh" style="margin-top:12px">
+      <thead>
+        <tr>
+          <th>Year · Make · Model · Trim</th>
+          <th>Color</th>
+          <th>VIN</th>
+          <th class="num">Last Price</th>
+          <th class="num">Sold At</th>
+          <th class="num">Confidence</th>
+          <th>Signals</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for v in sold %}
+        <tr>
+          <td class="trim-txt">{{ v.year or '' }} {{ v.make or '' }} {{ v.model or '' }} {{ v.trim or '' }}</td>
+          <td class="color-txt">{{ v.ext_color or '—' }}</td>
+          <td><span class="vin">{{ v.vin or '—' }}</span></td>
+          <td class="num price-txt">{{ v.price|money }}</td>
+          <td class="num age-txt">{{ v.sold_at|time_ago }}</td>
+          <td class="num">{{ '%.0f'|format((v.sold_confidence or 0) * 100) }}%</td>
+          <td style="font-size:11px;color:#7a9bb5">
+            {% if v.sold_signals %}
+              {% for s in v.sold_signals %}{{ s.type }}{% if not loop.last %}, {% endif %}{% endfor %}
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div style="padding:30px;text-align:center;color:#7a9bb5">No sold detections yet.</div>
+    {% endif %}
+  </div>
+</div>
+
+{% if scans %}
+<div class="scans-list">
+  <div class="buckets-title" style="margin-bottom:12px">Recent Scans</div>
+  <div class="scan-row" style="border-bottom:1px solid #344f68;padding-bottom:10px">
+    <div class="label">Started</div><div class="label">Status</div><div class="label">Platform</div>
+    <div class="label">Found</div><div class="label">New</div><div class="label">Sold</div>
+    <div class="label">Colors</div><div class="label">Duration</div>
+  </div>
+  {% for s in scans %}
+  <div class="scan-row">
+    <div class="scan-when">{{ s.started_at|time_ago }}</div>
+    <div class="{% if s.status == 'ok' %}scan-status-ok{% elif s.status == 'blocked' %}scan-status-err{% else %}scan-status-err{% endif %}">{{ s.status }}</div>
+    <div style="color:#a8c0d6">{{ s.platform_detected or '—' }}</div>
+    <div class="num" style="color:#c4d6e8">{{ s.vehicles_found or 0 }}</div>
+    <div class="num" style="color:#60a5fa">{{ s.new_count or 0 }}</div>
+    <div class="num" style="color:#34d399">{{ s.sold_count or 0 }}</div>
+    <div class="num" style="color:#fbbf24">{{ s.colors_detected or 0 }}</div>
+    <div class="num" style="color:#7a9bb5">{% if s.duration_ms %}{{ (s.duration_ms // 1000) }}s{% else %}—{% endif %}</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+</div>
+
+<script>
+const DEALER_ID = {{ dealer.dealer_id }};
+let pollTimer = null;
+
+async function runScan(){
+  const btn = document.getElementById('scanBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span> Scanning…';
+  try{
+    const r = await fetch('/api/dealer/' + DEALER_ID + '/scan', {method:'POST'});
+    if(!r.ok) throw new Error('Scan request failed');
+    pollStatus();
+  }catch(e){
+    alert('Error: '+e.message);
+    btn.disabled = false;
+    btn.textContent = '↻ Scan Now';
+  }
+}
+
+function applyPipelineUpdate(p){
+  if(!p) return;
+  const el = (id, v) => { const e=document.getElementById(id); if(e) e.textContent = v; };
+  const bar = (id, pct) => { const e=document.getElementById(id); if(e) e.style.width = pct + '%'; };
+  el('pipeActive',  p.total_active);
+  el('pipePhotos',  p.with_photos);
+  el('pipeColors',  p.with_color);
+  el('pipePhotoPct', p.photo_pct);
+  el('pipeColorPct', p.color_pct);
+  bar('pipePhotoBar', p.photo_pct);
+  bar('pipeColorBar', p.color_pct);
+}
+
+async function pollStatus(){
+  try{
+    const r = await fetch('/api/dealer/' + DEALER_ID + '/scan-status');
+    const data = await r.json();
+    applyPipelineUpdate(data.pipeline);
+    const dot = document.getElementById('pipeLiveDot');
+    const lbl = document.getElementById('pipeLiveLabel');
+    if(data.running){
+      if(dot) dot.classList.add('show');
+      if(lbl) lbl.style.display = 'inline';
+      pollTimer = setTimeout(pollStatus, 2500);
+    } else {
+      if(dot) dot.classList.remove('show');
+      if(lbl) lbl.style.display = 'none';
+      // One final reload so the make→model tree reflects new rows
+      window.location.reload();
+    }
+  }catch(e){
+    pollTimer = setTimeout(pollStatus, 5000);
+  }
+}
+
+// If a scan was in flight when page loaded, pick up where it left off
+document.addEventListener('DOMContentLoaded', async () => {
+  const r = await fetch('/api/dealer/' + DEALER_ID + '/scan-status');
+  const data = await r.json();
+  if(data.running){
+    const btn = document.getElementById('scanBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span> Scanning…';
+    pollStatus();
+  }
+});
+
+// ─── Inventory search ────────────────────────────────────────────────
+const searchInput = document.getElementById('vehSearch');
+const searchMeta  = document.getElementById('searchMeta');
+const TOTAL_VEH   = {{ dealer.in_stock or 0 }};
+
+function applyFilter(){
+  const q = searchInput.value.trim().toLowerCase();
+  let totalVisible = 0;
+  document.querySelectorAll('.make-group').forEach(group => {
+    let visible = 0;
+    group.querySelectorAll('tbody tr').forEach(tr => {
+      const text = tr.dataset.search || '';
+      const hit = !q || text.includes(q);
+      tr.classList.toggle('veh-hidden', !hit);
+      if(hit) visible++;
+    });
+    totalVisible += visible;
+    const cnt = group.querySelector('.visible-count');
+    if(cnt) cnt.textContent = visible;
+    group.classList.toggle('make-hidden', visible === 0 && q);
+    if(q && visible > 0) group.classList.add('open');
+  });
+  if(q){
+    searchMeta.innerHTML = '<b>' + totalVisible + '</b> of ' + TOTAL_VEH + ' match';
+  } else {
+    searchMeta.textContent = TOTAL_VEH + ' vehicles';
+  }
+}
+searchInput.addEventListener('input', applyFilter);
+// Debounce-free; counts are cheap
+</script>
+
+</body>
+</html>

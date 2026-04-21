@@ -190,9 +190,14 @@ def decode_vin(vin):
                     except ValueError:
                         pass
                 else:
-                    # NHTSA returns ambiguous "Trim A / Trim B" — take the first option
-                    if ' / ' in val:
-                        val = val.split(' / ')[0].strip()
+                    # NHTSA sometimes returns ambiguous trim alternatives —
+                    # "Trim A / Trim B", "Trim A, Trim B", or "Trim A or Trim B".
+                    # Take the first (base/most-common) option so AccuTrade trim
+                    # picker and AI assessment aren't misled by the alternatives.
+                    for sep in (' / ', ', ', ' or ', '/'):
+                        if sep in val:
+                            val = val.split(sep)[0].strip()
+                            break
                     out[key] = val
         return out
     except Exception:
@@ -2843,6 +2848,8 @@ def _ensure_accutrade_table():
             )
         """)
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_accutrade_bid_id ON accutrade_lookups(bid_id)")
+        cur.execute("ALTER TABLE accutrade_lookups ADD COLUMN IF NOT EXISTS not_available BOOLEAN DEFAULT FALSE")
+        cur.execute("ALTER TABLE accutrade_lookups ADD COLUMN IF NOT EXISTS unavailable_reason TEXT")
         db.commit()
         db.close()
     except Exception:
@@ -3095,14 +3102,18 @@ def api_accutrade_submit():
     cur.execute("""
         INSERT INTO accutrade_lookups
             (bid_id, vin, guaranteed_offer, trade_in, trade_market, retail,
-             market_avg, local_comps, screenshot, raw_json, looked_up_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+             market_avg, local_comps, screenshot, raw_json,
+             not_available, unavailable_reason, looked_up_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         ON CONFLICT (bid_id) DO UPDATE SET
             vin=EXCLUDED.vin, guaranteed_offer=EXCLUDED.guaranteed_offer,
             trade_in=EXCLUDED.trade_in, trade_market=EXCLUDED.trade_market,
             retail=EXCLUDED.retail, market_avg=EXCLUDED.market_avg,
             local_comps=EXCLUDED.local_comps, screenshot=EXCLUDED.screenshot,
-            raw_json=EXCLUDED.raw_json, looked_up_at=NOW()
+            raw_json=EXCLUDED.raw_json,
+            not_available=EXCLUDED.not_available,
+            unavailable_reason=EXCLUDED.unavailable_reason,
+            looked_up_at=NOW()
     """, (
         bid_id, data.get('vin', ''),
         data.get('guaranteed_offer'), data.get('trade_in'),
@@ -3111,6 +3122,8 @@ def api_accutrade_submit():
         json.dumps(data.get('local_comps')) if data.get('local_comps') else None,
         data.get('screenshot'),
         json.dumps(data.get('raw', {})) if data.get('raw') else None,
+        bool(data.get('not_available', False)),
+        data.get('unavailable_reason'),
     ))
     db.commit()
     db.close()
@@ -3151,7 +3164,8 @@ def api_accutrade_status(bid_id):
         for k, v in d.items():
             if hasattr(v, 'isoformat'):
                 d[k] = v.isoformat()
-        return jsonify({'status': 'complete', 'data': d})
+        status = 'not_available' if d.get('not_available') else 'complete'
+        return jsonify({'status': status, 'data': d})
     return jsonify({'status': 'pending'})
 
 

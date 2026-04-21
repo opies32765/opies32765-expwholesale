@@ -1,0 +1,22 @@
+[Unit]
+Description=EW Dealer DB — continuous completion worker (fills ext_color across all dealers)
+After=network-online.target postgresql.service expwholesale.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/expwholesale
+Environment="DATABASE_URL=postgresql://expuser:ExpWholesale2026!@localhost/expwholesale"
+Environment="GOOGLE_APPLICATION_CREDENTIALS=/opt/expwholesale/google_vision_key.json"
+Environment="COMPLETION_CALL_INTERVAL=5"
+Environment="COMPLETION_EMPTY_SLEEP=60"
+Environment="COMPLETION_BATCH=20"
+ExecStart=/opt/expwholesale/venv/bin/python /opt/expwholesale/dealer_completion_worker.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/ew-dealer-completion.log
+StandardError=append:/var/log/ew-dealer-completion.log
+
+[Install]
+WantedBy=multi-user.target
