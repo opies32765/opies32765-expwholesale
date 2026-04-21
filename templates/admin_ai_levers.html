@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Levers — EW Buy Center</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:100vh}
+.header{background:#243447;border-bottom:1px solid #344f68;padding:0 32px;height:66px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:12px;text-decoration:none}
+.logo-mark{width:38px;height:38px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;color:#fff}
+.logo-text{font-size:17px;font-weight:700;color:#f1f5f9;letter-spacing:-0.3px}
+.logo-sub{font-size:11px;color:#7a9bb5;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+.header-right{display:flex;align-items:center;gap:16px}
+.nav-link{font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px}
+.nav-link:hover{color:#e2e8f0;border-color:#334155}
+.nav-link.active{color:#60a5fa;border-color:#3b82f6;background:rgba(59,130,246,.1)}
+
+.content{max-width:1400px;margin:0 auto;padding:32px 24px}
+.page-title{font-size:28px;font-weight:800;margin-bottom:4px}
+.page-desc{font-size:14px;color:#7a9bb5;margin-bottom:24px;line-height:1.5}
+.version-banner{background:#243447;border:1px solid #344f68;border-radius:10px;padding:12px 18px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between}
+.version-banner .label{font-size:11px;color:#7a9bb5;text-transform:uppercase;letter-spacing:.6px;margin-bottom:2px}
+.version-banner .val{font-size:16px;font-weight:700;color:#e2e8f0}
+.version-banner .active-pill{font-size:10px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.25);border-radius:4px;padding:2px 8px;letter-spacing:.4px;margin-left:8px}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:18px;margin-bottom:24px}
+.bucket-card{background:#243447;border:1px solid #344f68;border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:12px}
+.bucket-card.invalid{border-color:#ef4444;box-shadow:0 0 0 1px rgba(239,68,68,.3)}
+.bucket-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.bucket-title{font-size:15px;font-weight:700;color:#f1f5f9}
+.bucket-sum{font-size:12px;font-weight:700;font-family:monospace;padding:3px 8px;border-radius:4px}
+.bucket-sum.ok{color:#4ade80;background:rgba(74,222,128,.1)}
+.bucket-sum.bad{color:#ef4444;background:rgba(239,68,68,.12)}
+.bucket-desc{font-size:11px;color:#7a9bb5;line-height:1.4}
+.bucket-rules{background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:8px 10px;font-size:11px;color:#94a3b8;font-family:monospace;line-height:1.5;word-break:break-word;max-height:100px;overflow-y:auto}
+
+.weight-row{display:flex;align-items:center;gap:10px}
+.weight-label{flex:1;font-size:12px;color:#a8c0d6;font-family:monospace}
+.weight-slider{flex:1;height:4px;background:#1e293b;border-radius:2px;-webkit-appearance:none;appearance:none;outline:none}
+.weight-slider::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:#3b82f6;cursor:pointer;box-shadow:0 0 0 2px #243447}
+.weight-slider::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:#3b82f6;cursor:pointer;border:2px solid #243447}
+.weight-input{width:64px;padding:5px 8px;background:#0f172a;border:1px solid #1e293b;border-radius:5px;color:#e2e8f0;font-size:13px;font-family:monospace;text-align:right}
+.weight-input:focus{outline:none;border-color:#3b82f6}
+
+.global-card{background:#243447;border:1px solid #344f68;border-radius:10px;padding:18px;margin-bottom:24px}
+.global-card h3{font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:12px;text-transform:uppercase;letter-spacing:.4px}
+.global-row{display:flex;align-items:center;gap:14px;margin-bottom:10px}
+.global-row label{flex:0 0 200px;font-size:12px;color:#94a3b8}
+.global-row input[type="range"]{flex:1;height:4px;background:#1e293b;-webkit-appearance:none;appearance:none}
+.global-row input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:#3b82f6;cursor:pointer}
+.global-row .readout{font-size:14px;font-weight:700;color:#e2e8f0;font-family:monospace;min-width:60px;text-align:right}
+
+.action-bar{position:sticky;bottom:0;background:rgba(36,52,71,.95);border-top:1px solid #344f68;backdrop-filter:blur(8px);padding:14px 0;margin:0 -24px;display:flex;justify-content:space-between;align-items:center;gap:12px;padding-left:24px;padding-right:24px}
+.action-bar .status{font-size:13px;color:#94a3b8}
+.action-bar .status.err{color:#ef4444;font-weight:600}
+.btn{padding:10px 18px;border-radius:7px;border:none;cursor:pointer;font-family:'Inter',sans-serif;font-size:13px;font-weight:700}
+.btn-primary{background:#3b82f6;color:#fff}
+.btn-primary:hover{background:#2563eb}
+.btn-primary:disabled{background:#1e3a5f;color:#64748b;cursor:not-allowed}
+.btn-ghost{background:transparent;border:1px solid #344f68;color:#a8c0d6}
+.btn-ghost:hover{border-color:#4d7a9e;color:#e2e8f0}
+
+.preview-section{background:#243447;border:1px solid #344f68;border-radius:10px;padding:18px;margin-bottom:24px}
+.preview-section h3{font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:12px;text-transform:uppercase;letter-spacing:.4px}
+.preview-input-row{display:flex;gap:10px;align-items:center;margin-bottom:14px}
+.preview-input-row input{padding:8px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px;font-family:'Inter',sans-serif;width:120px}
+.preview-input-row input:focus{outline:none;border-color:#3b82f6}
+.preview-result{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.preview-col{background:#0f172a;border:1px solid #1e293b;border-radius:7px;padding:12px}
+.preview-col .label{font-size:10px;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.preview-col .val{font-size:20px;font-weight:800;color:#e2e8f0;font-family:monospace}
+.preview-col.proposed .val{color:#a78bfa}
+.preview-col .breakdown{margin-top:10px;display:flex;flex-direction:column;gap:3px;font-size:11px;font-family:monospace;color:#94a3b8}
+.preview-col .breakdown .row{display:flex;justify-content:space-between;padding:2px 0}
+.preview-col .breakdown .na{opacity:.4}
+.delta-banner{grid-column:1/-1;text-align:center;padding:10px;border-radius:6px;font-weight:700;font-size:14px}
+.delta-banner.up{color:#4ade80;background:rgba(74,222,128,.1);border:1px solid rgba(74,222,128,.25)}
+.delta-banner.down{color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25)}
+.delta-banner.same{color:#64748b;background:rgba(100,116,139,.1);border:1px solid rgba(100,116,139,.25)}
+
+.history-section{background:#243447;border:1px solid #344f68;border-radius:10px;padding:18px}
+.history-section h3{font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:12px;text-transform:uppercase;letter-spacing:.4px}
+.history-table{width:100%;border-collapse:collapse}
+.history-table th{text-align:left;padding:8px;font-size:10px;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #1e293b}
+.history-table td{padding:10px 8px;font-size:13px;color:#cbd5e1;border-bottom:1px solid #1e293b}
+.history-table tr.active{background:rgba(74,222,128,.05)}
+.history-table .v{font-family:monospace;font-weight:700;color:#e2e8f0}
+.history-table .btn-sm{padding:5px 10px;font-size:11px;border-radius:5px}
+
+.toast{position:fixed;top:20px;right:20px;background:#243447;border:1px solid #4ade80;color:#4ade80;padding:12px 18px;border-radius:8px;font-size:14px;font-weight:600;display:none;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.3)}
+.toast.err{border-color:#ef4444;color:#ef4444}
+.toast.show{display:block}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <a href="/" class="logo">
+    <div class="logo-mark">EW</div>
+    <div>
+      <div class="logo-text">EW Buy Center</div>
+      <div class="logo-sub">AI Levers — Admin</div>
+    </div>
+  </a>
+  <div class="header-right">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/dealers" class="nav-link">Dealer DB</a>
+    <a href="/drop" class="nav-link">Quick Drop</a>
+    <a href="/admin/ai-levers" class="nav-link active">AI Levers</a>
+  </div>
+</div>
+
+<div class="content">
+  <div class="page-title">AI Levers</div>
+  <div class="page-desc">Tune the deterministic baseline weights, AI adjustment cap, and bucket rules that drive every bid's wholesale assessment. Saves create a new versioned config; rollback anytime.</div>
+
+  <div class="version-banner">
+    <div>
+      <div class="label">Active config</div>
+      <div class="val">Version {{ active_version }}<span class="active-pill">LIVE</span></div>
+    </div>
+    <div style="text-align:right">
+      <div class="label">Last saved</div>
+      <div class="val" style="font-size:13px;font-weight:500;color:#7a9bb5">{{ versions[0].created_at_ago if versions else 'unknown' }}</div>
+    </div>
+  </div>
+
+  <!-- Bucket weight editors -->
+  <div class="grid" id="buckets-grid"></div>
+
+  <!-- Global settings -->
+  <div class="global-card">
+    <h3>Global Settings</h3>
+    <div class="global-row">
+      <label>LLM adjustment cap (±%)</label>
+      <input type="range" id="cap-slider" min="0" max="30" step="0.5" value="{{ active_config.llm_adjustment_cap_pct or 15 }}">
+      <div class="readout" id="cap-readout">±{{ active_config.llm_adjustment_cap_pct or 15 }}%</div>
+    </div>
+    <div class="global-row">
+      <label>LLM temperature</label>
+      <input type="range" id="temp-slider" min="0" max="1" step="0.05" value="{{ active_config.llm_temperature or 0.4 }}">
+      <div class="readout" id="temp-readout">{{ active_config.llm_temperature or 0.4 }}</div>
+    </div>
+  </div>
+
+  <!-- Live preview -->
+  <div class="preview-section">
+    <h3>Preview Impact on a Bid</h3>
+    <div class="preview-input-row">
+      <label style="font-size:12px;color:#94a3b8">Bid #</label>
+      <input type="number" id="preview-bid-id" placeholder="e.g. 127" min="1">
+      <button class="btn btn-ghost" onclick="runPreview()">Preview</button>
+      <span id="preview-status" style="font-size:12px;color:#64748b"></span>
+    </div>
+    <div class="preview-result" id="preview-result" style="display:none">
+      <div class="preview-col">
+        <div class="label">Current Active (v<span id="pv-active-ver"></span>)</div>
+        <div class="val" id="pv-active-price">—</div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px" id="pv-active-bucket"></div>
+        <div class="breakdown" id="pv-active-breakdown"></div>
+      </div>
+      <div class="preview-col proposed">
+        <div class="label">Proposed (unsaved)</div>
+        <div class="val" id="pv-proposed-price">—</div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px" id="pv-proposed-bucket"></div>
+        <div class="breakdown" id="pv-proposed-breakdown"></div>
+      </div>
+      <div class="delta-banner" id="pv-delta">—</div>
+    </div>
+  </div>
+
+  <!-- Save action bar -->
+  <div class="action-bar">
+    <div>
+      <div class="status" id="validation-status">Weights valid.</div>
+      <div style="font-size:11px;color:#64748b;margin-top:2px">Saving creates a new version; current active (v{{ active_version }}) is preserved in history.</div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <input type="text" id="save-description" placeholder="Describe this change (optional)" style="padding:10px 14px;background:#0f172a;border:1px solid #1e293b;border-radius:7px;color:#e2e8f0;font-size:13px;font-family:'Inter',sans-serif;width:280px">
+      <button class="btn btn-primary" id="save-btn" onclick="saveConfig()">Save as new version</button>
+    </div>
+  </div>
+
+  <!-- Version history -->
+  <div class="history-section" style="margin-top:24px">
+    <h3>Version History</h3>
+    <table class="history-table">
+      <thead>
+        <tr><th>v</th><th>Status</th><th>Description</th><th>By</th><th>When</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for v in versions %}
+        <tr class="{{ 'active' if v.is_active else '' }}">
+          <td class="v">{{ v.version }}</td>
+          <td>
+            {% if v.is_active %}
+            <span style="color:#4ade80;font-weight:700;font-size:11px">ACTIVE</span>
+            {% else %}
+            <span style="color:#64748b;font-size:11px">archived</span>
+            {% endif %}
+          </td>
+          <td>{{ v.description or '—' }}</td>
+          <td style="color:#7a9bb5">{{ v.created_by or 'system' }}</td>
+          <td style="color:#7a9bb5">{{ v.created_at_ago }}</td>
+          <td>
+            {% if not v.is_active %}
+            <button class="btn btn-ghost btn-sm" onclick="activateVersion({{ v.id }}, {{ v.version }})">Activate</button>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const INITIAL_CONFIG = {{ active_config | tojson }};
+const WEIGHT_LABELS = {
+  'mmr': 'Manheim MMR',
+  'black_book': 'Black Book (wholesale)',
+  'jd_power': 'J.D. Power',
+  'rbook': 'rBook (retail)',
+  'kbb': 'KBB',
+  'kbb_com': 'KBB.com',
+  'accutrade_target_auction': 'AccuTrade — Target Auction',
+  'accutrade_instant_offer': 'AccuTrade — Instant Offer',
+  'accutrade_target_retail': 'AccuTrade — Target Retail',
+  'accutrade_market_pricing': 'AccuTrade — Market Pricing',
+  'accutrade_wholesale_avg': 'AccuTrade — Wholesale Avg',
+};
+let workingConfig = JSON.parse(JSON.stringify(INITIAL_CONFIG));
+
+function renderBuckets() {
+  const grid = document.getElementById('buckets-grid');
+  grid.innerHTML = '';
+  workingConfig.buckets.forEach((bucket, bIdx) => {
+    const card = document.createElement('div');
+    card.className = 'bucket-card';
+    card.dataset.idx = bIdx;
+
+    const rulesStr = JSON.stringify(bucket.rules || {}, null, 0).slice(0, 400);
+
+    card.innerHTML = `
+      <div class="bucket-head">
+        <div>
+          <div class="bucket-title">${bucket.display_name || bucket.name}</div>
+          <div class="bucket-desc">${bucket.description || ''}</div>
+        </div>
+        <div class="bucket-sum" data-idx="${bIdx}">--</div>
+      </div>
+      <div class="bucket-rules">${rulesStr}</div>
+      <div class="weights-container"></div>
+    `;
+
+    const weightsEl = card.querySelector('.weights-container');
+    for (const [src, w] of Object.entries(bucket.weights || {})) {
+      const pct = Math.round(w * 1000) / 10;  // one decimal
+      const row = document.createElement('div');
+      row.className = 'weight-row';
+      const label = WEIGHT_LABELS[src] || src;
+      row.innerHTML = `
+        <span class="weight-label">${label}</span>
+        <input type="range" class="weight-slider" min="0" max="100" step="1" value="${pct}" data-bucket="${bIdx}" data-src="${src}">
+        <input type="number" class="weight-input" min="0" max="100" step="0.5" value="${pct}" data-bucket="${bIdx}" data-src="${src}">
+      `;
+      weightsEl.appendChild(row);
+    }
+    grid.appendChild(card);
+  });
+
+  // Wire up change listeners
+  document.querySelectorAll('.weight-slider, .weight-input').forEach(el => {
+    el.addEventListener('input', onWeightChange);
+  });
+  updateAllSums();
+}
+
+function onWeightChange(e) {
+  const b = +e.target.dataset.bucket;
+  const src = e.target.dataset.src;
+  const pct = Math.max(0, Math.min(100, parseFloat(e.target.value) || 0));
+  workingConfig.buckets[b].weights[src] = pct / 100;
+  // Sync sibling (slider ↔ number input)
+  const siblings = document.querySelectorAll(`[data-bucket="${b}"][data-src="${src}"]`);
+  siblings.forEach(s => { if (s !== e.target) s.value = pct; });
+  updateAllSums();
+}
+
+function updateAllSums() {
+  workingConfig.buckets.forEach((bucket, bIdx) => {
+    const sum = Object.values(bucket.weights).reduce((a, x) => a + (parseFloat(x) || 0), 0);
+    const pct = Math.round(sum * 1000) / 10;
+    const el = document.querySelector(`.bucket-sum[data-idx="${bIdx}"]`);
+    const card = el.closest('.bucket-card');
+    el.textContent = pct + '%';
+    if (Math.abs(sum - 1) < 0.01) {
+      el.className = 'bucket-sum ok';
+      card.classList.remove('invalid');
+    } else {
+      el.className = 'bucket-sum bad';
+      card.classList.add('invalid');
+    }
+  });
+  const allOk = !document.querySelector('.bucket-card.invalid');
+  const status = document.getElementById('validation-status');
+  const btn = document.getElementById('save-btn');
+  if (allOk) {
+    status.textContent = 'All bucket weights sum to 100%. Ready to save.';
+    status.className = 'status';
+    btn.disabled = false;
+  } else {
+    status.textContent = 'Some buckets do not sum to 100%. Fix before saving.';
+    status.className = 'status err';
+    btn.disabled = true;
+  }
+}
+
+// Global settings
+document.getElementById('cap-slider').addEventListener('input', e => {
+  const v = parseFloat(e.target.value);
+  workingConfig.llm_adjustment_cap_pct = v;
+  document.getElementById('cap-readout').textContent = '±' + v + '%';
+});
+document.getElementById('temp-slider').addEventListener('input', e => {
+  const v = parseFloat(e.target.value);
+  workingConfig.llm_temperature = v;
+  document.getElementById('temp-readout').textContent = v.toFixed(2);
+});
+
+async function runPreview() {
+  const bidId = parseInt(document.getElementById('preview-bid-id').value);
+  if (!bidId) { toast('Enter a bid #', false); return; }
+  const status = document.getElementById('preview-status');
+  status.textContent = 'Loading...'; status.style.color = '#94a3b8';
+  try {
+    const r = await fetch('/api/ai-config/preview', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({bid_id: bidId, config: workingConfig})
+    });
+    const d = await r.json();
+    if (!r.ok) { status.textContent = d.error || 'Error'; status.style.color='#ef4444'; return; }
+    status.textContent = d.vehicle || '';
+    renderPreview(d);
+  } catch (e) {
+    status.textContent = 'Network error'; status.style.color = '#ef4444';
+  }
+}
+
+function fmtBreakdown(rows) {
+  if (!rows || !rows.length) return '<div style="color:#475569;font-style:italic">no data</div>';
+  return rows.map(r => {
+    if (r.available) {
+      return `<div class="row"><span>${r.source}</span><span>$${(r.value||0).toLocaleString()} × ${r.effective_pct ?? r.weight_pct}% = $${(r.contribution||0).toLocaleString()}</span></div>`;
+    }
+    return `<div class="row na"><span>${r.source}</span><span>N/A</span></div>`;
+  }).join('');
+}
+
+function renderPreview(d) {
+  document.getElementById('preview-result').style.display = 'grid';
+  document.getElementById('pv-active-ver').textContent = d.active.version;
+  document.getElementById('pv-active-price').textContent =
+    d.active.baseline_price ? '$' + d.active.baseline_price.toLocaleString() : '—';
+  document.getElementById('pv-active-bucket').textContent =
+    d.active.bucket_display ? '[' + d.active.bucket_display + ']' : '';
+  document.getElementById('pv-active-breakdown').innerHTML = fmtBreakdown(d.active.breakdown);
+
+  document.getElementById('pv-proposed-price').textContent =
+    d.proposed.baseline_price ? '$' + d.proposed.baseline_price.toLocaleString() : '—';
+  document.getElementById('pv-proposed-bucket').textContent =
+    d.proposed.bucket_display ? '[' + d.proposed.bucket_display + ']' : '';
+  document.getElementById('pv-proposed-breakdown').innerHTML = fmtBreakdown(d.proposed.breakdown);
+
+  const delta = document.getElementById('pv-delta');
+  if (d.delta_dollars != null) {
+    const sign = d.delta_dollars >= 0 ? '+' : '';
+    const pctSign = d.delta_pct >= 0 ? '+' : '';
+    delta.textContent = `Proposed vs active: ${sign}$${Math.abs(d.delta_dollars).toLocaleString()} (${pctSign}${d.delta_pct}%)`;
+    if (Math.abs(d.delta_pct) < 0.5) delta.className = 'delta-banner same';
+    else if (d.delta_dollars > 0) delta.className = 'delta-banner up';
+    else delta.className = 'delta-banner down';
+  } else {
+    delta.textContent = 'Cannot compute delta — missing baseline';
+    delta.className = 'delta-banner same';
+  }
+}
+
+async function saveConfig() {
+  const desc = document.getElementById('save-description').value.trim();
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true; btn.textContent = 'Saving...';
+  try {
+    const r = await fetch('/api/ai-config/save', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({config: workingConfig, description: desc || 'User update'})
+    });
+    const d = await r.json();
+    if (!r.ok) { toast(d.error || 'Save failed', false); btn.textContent='Save as new version'; btn.disabled=false; return; }
+    toast('Saved as version ' + d.version + ' (now active)');
+    setTimeout(() => location.reload(), 800);
+  } catch (e) {
+    toast('Network error', false);
+    btn.textContent = 'Save as new version'; btn.disabled = false;
+  }
+}
+
+async function activateVersion(id, ver) {
+  if (!confirm('Activate version ' + ver + '? This will deactivate the current config.')) return;
+  try {
+    const r = await fetch('/api/ai-config/activate/' + id, {method: 'POST'});
+    const d = await r.json();
+    if (!r.ok) { toast(d.error || 'Activate failed', false); return; }
+    toast('Version ' + d.activated_version + ' is now active');
+    setTimeout(() => location.reload(), 800);
+  } catch (e) {
+    toast('Network error', false);
+  }
+}
+
+function toast(msg, ok=true) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (ok ? '' : ' err');
+  setTimeout(() => t.className = 'toast', 2500);
+}
+
+renderBuckets();
+</script>
+</body>
+</html>

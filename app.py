@@ -888,6 +888,28 @@ def bid_detail(bid_id):
         except Exception:
             pass
 
+    # ── Latest hybrid-assessment log row (bucket + baseline + adjustment) ───
+    ai_log = None
+    try:
+        cur.execute("""
+            SELECT * FROM ai_assessment_log
+            WHERE bid_id = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (bid_id,))
+        ai_log = cur.fetchone()
+        if ai_log:
+            ai_log = dict(ai_log)
+            # breakdown is JSONB — may come back as dict/list already or as str
+            b = ai_log.get('breakdown')
+            if isinstance(b, str):
+                try:
+                    ai_log['breakdown'] = json.loads(b)
+                except Exception:
+                    ai_log['breakdown'] = []
+    except Exception as _aelog_err:
+        print(f'ai_assessment_log read error: {_aelog_err}', flush=True)
+
     db.close()
     return render_template('bid.html', bid=bid, photos=photos,
                            messages=messages, valuations=valuations,
@@ -896,6 +918,7 @@ def bid_detail(bid_id):
                            ipacket_data=ipacket_data,
                            tesla_data=tesla_data,
                            ai_assessment=bid.get('ai_assessment'),
+                           ai_log=ai_log,
                            time_ago=time_ago)
 
 
@@ -1323,6 +1346,45 @@ def _run_assessment(bid_id):
 
     db.close()
 
+    # ── Hybrid assessment: classify segment + compute deterministic baseline ──
+    # This runs BEFORE the Gemini call so the baseline + breakdown can be
+    # injected into the prompt. Gemini's job shifts from "pick a price cold"
+    # to "adjust this baseline by a percentage, with reasoning, within ±cap%".
+    try:
+        from ai_assessment import (classify_bucket, compute_baseline,
+                                    apply_adjustment)
+    except Exception as _imp_err:
+        print(f'ai_assessment import failed: {_imp_err}', flush=True)
+        classify_bucket = None
+        compute_baseline = None
+        apply_adjustment = None
+
+    _ai_ver, _ai_cfg = (0, DEFAULT_AI_CONFIG)
+    _bucket = None
+    _baseline_result = None
+    _ai_cap = 15.0
+    if classify_bucket and compute_baseline:
+        try:
+            _ai_ver, _ai_cfg = get_active_ai_config()
+            _ai_cap = float(_ai_cfg.get('llm_adjustment_cap_pct', 15))
+            _bid_for_bucket = {
+                'make': bid.get('make'),
+                'model': bid.get('model'),
+                'year': bid.get('year'),
+                'asking_price': bid.get('asking_price'),
+            }
+            _bucket = classify_bucket(_bid_for_bucket, _ai_cfg)
+            _baseline_result = compute_baseline(
+                _bucket,
+                dict(vauto) if vauto else {},
+                dict(accutrade) if accutrade else {},
+            )
+            print(f'[ASSESS] Bid {bid_id} classified as "{_bucket.get("name")}" — '
+                  f'baseline ${(_baseline_result or {}).get("baseline_price") or 0:,}',
+                  flush=True)
+        except Exception as _cls_err:
+            print(f'hybrid classify/baseline error: {_cls_err}', flush=True)
+
     # ── Build vehicle context ─────────────────────────────────────────────────
     vparts = [str(bid['year'] or ''), bid['make'] or '', bid['model'] or '', bid['trim'] or '']
     vehicle_str = ' '.join(p for p in vparts if p).strip() or 'Unknown vehicle'
@@ -1687,7 +1749,66 @@ def _run_assessment(bid_id):
         img_summary.append(f"iPacket OEM window sticker")
     img_line = "I've attached " + " and ".join(img_summary) + "." if img_summary else "No photos available."
 
-    prompt = f"""{ctx}
+    # Inject bucket + baseline context (if we could compute one)
+    _hybrid_mode = bool(_baseline_result and _baseline_result.get('baseline_price'))
+    if _hybrid_mode:
+        ctx += f"\n\n═══ SEGMENT CLASSIFICATION ═══\n"
+        ctx += f"Bucket: {_bucket.get('display_name', _bucket.get('name'))}\n"
+        ctx += f"Description: {_bucket.get('description', '')}\n"
+        ctx += f"\n═══ DETERMINISTIC BASELINE (weighted books) ═══\n"
+        ctx += f"Baseline price: ${_baseline_result['baseline_price']:,}\n"
+        ctx += "Breakdown:\n"
+        for r in _baseline_result.get('breakdown', []):
+            if r.get('available'):
+                ctx += (f"  - {r['source']}: ${r['value']:,} "
+                        f"(weight {r.get('effective_pct', r['weight_pct'])}%) "
+                        f"= ${r['contribution']:,}\n")
+            else:
+                ctx += f"  - {r['source']}: N/A — skipped (weight redistributed)\n"
+        if _baseline_result.get('note'):
+            ctx += f"Note: {_baseline_result['note']}\n"
+
+    if _hybrid_mode:
+        prompt = f"""{ctx}
+
+{img_line}
+
+═══ YOUR JOB ═══
+You are a wholesale vehicle buyer. A deterministic baseline price has already
+been calculated above from weighted book values for this vehicle's segment.
+Your job is to adjust that baseline by a PERCENTAGE based on the qualitative
+data (Carfax, AutoCheck, photos, iPacket, AccuTrade, DIA history, market comps).
+
+Stay within ±{_ai_cap}%. Favorable factors adjust UP (clean Carfax, low miles
+for age, pristine photos, desirable options, rare build). Unfavorable factors
+adjust DOWN (accidents, fleet/rental title, rough condition, over-miles,
+salvage/rebuilt branding).
+
+IMPORTANT — read Carfax/AutoCheck carefully and be FACTUALLY ACCURATE:
+- If the report says "sideswipe" / "left/right side impact", that is a SIDE
+  collision — do NOT call it a front-end or rear-end accident
+- If it says "minor damage", do not describe it as major
+- Quote the exact damage description from the report when possible
+- Do NOT invent facts not in the reports
+
+Return ONLY this JSON (no markdown fences, no commentary):
+{{
+  "adjustment_pct": -5.0,
+  "confidence_low_pct": -8.0,
+  "confidence_high_pct": -2.0,
+  "reasoning": "1-3 sentences citing the KEY factors that drove the adjustment"
+}}
+
+Rules:
+- adjustment_pct must be between -{_ai_cap} and +{_ai_cap}
+- confidence_low_pct <= adjustment_pct <= confidence_high_pct
+- reasoning must reference SPECIFIC facts from the data (2 owners, 1 accident,
+  fleet title, pristine interior photos, etc.) — not generic statements
+- Do NOT include $ figures in reasoning — only factor references"""
+    else:
+        # Fallback: no baseline (missing book values) — use the legacy cold-pricing
+        # prompt so we still return something useful.
+        prompt = f"""{ctx}
 
 {img_line}
 
@@ -1729,10 +1850,105 @@ Max wholesale buy price: **$X,XXX**"""
             raise RuntimeError('Empty Gemini response')
         print(f'[ASSESS] Bid {bid_id} via Gemini 2.5 Pro ({len(assessment)} chars)', flush=True)
 
-        # Extract buy price for dashboard column (look for $X,XXX pattern near "Max wholesale")
         import re as _re
-        price_match = _re.search(r'Max wholesale buy price[^\$]*\$([0-9,]+)', assessment, _re.IGNORECASE)
-        buy_price = int(price_match.group(1).replace(',', '')) if price_match else None
+        import json as _json
+
+        buy_price = None
+        adjustment_result = None
+        applied = None
+
+        # ── Hybrid path: parse JSON adjustment, apply to baseline ───────────
+        if _hybrid_mode and apply_adjustment:
+            raw = assessment
+            # Strip markdown fences if Gemini added them despite instructions
+            if raw.startswith('```'):
+                raw = _re.sub(r'^```(?:json)?\s*', '', raw)
+                raw = _re.sub(r'\s*```$', '', raw)
+            try:
+                adjustment_result = _json.loads(raw)
+            except Exception as _je:
+                # Try to find a JSON object inside the text
+                m = _re.search(r'\{[^{}]*"adjustment_pct"[^{}]*\}', raw, _re.DOTALL)
+                if m:
+                    try:
+                        adjustment_result = _json.loads(m.group(0))
+                    except Exception:
+                        pass
+                if not adjustment_result:
+                    print(f'[ASSESS] JSON parse failed: {_je}; raw head={raw[:200]!r}', flush=True)
+
+        if _hybrid_mode and adjustment_result:
+            applied = apply_adjustment(
+                _baseline_result['baseline_price'],
+                float(adjustment_result.get('adjustment_pct') or 0),
+                float(adjustment_result.get('confidence_low_pct') or 0),
+                float(adjustment_result.get('confidence_high_pct') or 0),
+                _ai_cap,
+            )
+            buy_price = applied.get('final_price')
+            reasoning = (adjustment_result.get('reasoning') or '').strip()
+
+            # Render a human-readable narrative for the assessment card. The
+            # structured data lives in ai_assessment_log for the UI to render
+            # its own breakdown — this string is a concise fallback.
+            narrative = [
+                f"**SEGMENT**: {_bucket.get('display_name', _bucket.get('name'))}",
+                f"**BASELINE** (weighted books): ${_baseline_result['baseline_price']:,}",
+                "**BREAKDOWN**:",
+            ]
+            for r in _baseline_result.get('breakdown', []):
+                if r.get('available'):
+                    narrative.append(
+                        f"  • {r['source']}: ${r['value']:,} × "
+                        f"{r.get('effective_pct', r['weight_pct'])}% = ${r['contribution']:,}"
+                    )
+                else:
+                    narrative.append(f"  • {r['source']}: N/A (weight redistributed)")
+            adj = applied.get('effective_adjustment_pct', 0)
+            narrative.append(
+                f"**AI ADJUSTMENT**: {adj:+.1f}%"
+                + (" (clamped to cap)" if applied.get('clamped') else "")
+            )
+            if reasoning:
+                narrative.append(f"**REASONING**: {reasoning}")
+            if applied.get('confidence_low') is not None:
+                narrative.append(
+                    f"**CONFIDENCE RANGE**: ${applied['confidence_low']:,} – ${applied['confidence_high']:,}"
+                )
+            narrative.append("")
+            narrative.append(f"Max wholesale buy price: **${buy_price:,}**")
+            assessment = "\n".join(narrative)
+
+            # Audit log — one row per assessment, keyed by bid + created_at
+            try:
+                _db3 = get_db()
+                _cur3 = _db3.cursor()
+                _cur3.execute("""
+                    INSERT INTO ai_assessment_log
+                        (bid_id, config_version, bucket, bucket_display, baseline_price,
+                         breakdown, llm_adjustment_pct, llm_reasoning,
+                         confidence_low, confidence_high, final_price, raw_response)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    bid_id, _ai_ver, _bucket.get('name'), _bucket.get('display_name'),
+                    _baseline_result['baseline_price'],
+                    _json.dumps(_baseline_result.get('breakdown', [])),
+                    adj,
+                    reasoning,
+                    applied.get('confidence_low'),
+                    applied.get('confidence_high'),
+                    buy_price,
+                    _json.dumps(adjustment_result),
+                ))
+                _db3.commit()
+                _db3.close()
+            except Exception as _log_err:
+                print(f'ai_assessment_log write error: {_log_err}', flush=True)
+        else:
+            # Legacy path: regex-extract price from narrative
+            price_match = _re.search(
+                r'Max wholesale buy price[^\$]*\$([0-9,]+)', assessment, _re.IGNORECASE)
+            buy_price = int(price_match.group(1).replace(',', '')) if price_match else None
 
         db = get_db()
         try:
@@ -2887,6 +3103,424 @@ def _ensure_ipacket_table():
 
 
 _ensure_ipacket_table()
+
+
+# ── AI Assessment: hybrid bucket-weighted baseline + LLM adjustment ──────────
+# Rewire path 2026-04-21: replaces single-shot Gemini prompt with
+#   classify_bucket → compute_baseline → LLM percentage adjustment → log.
+# ai_config stores versioned settings (buckets, weights, caps) so user can
+# tune levers in admin UI without redeploying. Only one row has is_active=TRUE.
+# ai_assessment_log records every run with bucket + baseline + adjustment +
+# final so we can demo "before/after this lever change" to stakeholders.
+
+DEFAULT_AI_CONFIG = {
+    # Weights are wholesale-oriented: Manheim MMR (auction wholesale avg),
+    # Black Book Wholesale, AccuTrade Target Auction, AccuTrade Instant Offer,
+    # and J.D. Power (trade-in/wholesale-leaning). rBook / KBB are
+    # retail-leaning so they get small or zero weight for wholesale pricing.
+    # Client can tune every weight from the admin UI.
+    "buckets": [
+        {
+            "name": "exotic_collector",
+            "display_name": "Exotic / Collector",
+            "description": "Ferrari, Lamborghini, McLaren, Rolls-Royce, Bentley, etc.",
+            "rules": {
+                "makes": ["FERRARI", "LAMBORGHINI", "MCLAREN", "ROLLS-ROYCE", "ROLLS ROYCE",
+                          "BENTLEY", "ASTON MARTIN", "MAYBACH", "BUGATTI", "KOENIGSEGG",
+                          "PAGANI", "LOTUS"]
+            },
+            "weights": {
+                "mmr": 0.20,
+                "black_book": 0.15,
+                "accutrade_target_auction": 0.25,
+                "accutrade_instant_offer": 0.20,
+                "rbook": 0.20
+            }
+        },
+        {
+            "name": "highline",
+            "display_name": "High-Line",
+            "description": "Luxury brands and $40k+ premium vehicles",
+            "rules": {
+                "makes": ["PORSCHE", "MASERATI", "BMW", "MERCEDES-BENZ", "MERCEDES",
+                          "AUDI", "LEXUS", "JAGUAR", "LAND ROVER", "CADILLAC", "TESLA",
+                          "GENESIS", "ALFA ROMEO", "ACURA", "INFINITI", "VOLVO", "LINCOLN"],
+                "min_asking_price": 40000
+            },
+            "weights": {
+                "mmr": 0.30,
+                "black_book": 0.20,
+                "accutrade_target_auction": 0.25,
+                "accutrade_instant_offer": 0.15,
+                "rbook": 0.10
+            }
+        },
+        {
+            "name": "truck_commercial",
+            "display_name": "Truck / Commercial",
+            "description": "Pickups, heavy-duty, commercial vans",
+            "rules": {
+                "model_patterns": ["F-150", "F150", "F-250", "F250", "F-350", "F350",
+                                   "SILVERADO", "SIERRA", "RAM 1500", "RAM 2500", "RAM 3500",
+                                   "TUNDRA", "TITAN", "COLORADO", "CANYON", "RANGER",
+                                   "FRONTIER", "TACOMA", "GLADIATOR",
+                                   "TRANSIT", "SPRINTER", "PROMASTER", "EXPRESS", "SAVANA"]
+            },
+            "weights": {
+                "mmr": 0.40,
+                "black_book": 0.25,
+                "accutrade_target_auction": 0.20,
+                "jd_power": 0.15
+            }
+        },
+        {
+            "name": "mainstream_sub50k",
+            "display_name": "Mainstream (< $50k)",
+            "description": "Default catch-all: everyday vehicles",
+            "rules": {"catch_all": True},
+            "weights": {
+                "mmr": 0.35,
+                "black_book": 0.25,
+                "accutrade_target_auction": 0.20,
+                "jd_power": 0.10,
+                "rbook": 0.10
+            }
+        }
+    ],
+    "llm_adjustment_cap_pct": 15,      # max ± percentage LLM can adjust baseline
+    "confidence_range_pct": 5,         # ± range shown as confidence (e.g. ±5%)
+    "llm_temperature": 0.4,
+    "llm_max_tokens": 3000
+}
+
+
+def _ensure_ai_config_table():
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ai_config (
+                id SERIAL PRIMARY KEY,
+                version INTEGER NOT NULL,
+                config JSONB NOT NULL,
+                is_active BOOLEAN DEFAULT FALSE,
+                description TEXT,
+                created_by TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        # Partial unique index: only one row can be active at a time
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_config_active
+            ON ai_config(is_active) WHERE is_active = TRUE
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_config_version ON ai_config(version DESC)")
+
+        # Seed if empty
+        cur.execute("SELECT COUNT(*) as n FROM ai_config")
+        row = cur.fetchone()
+        n = (row.get('n') if hasattr(row, 'get') else row[0]) if row else 0
+        if n == 0:
+            cur.execute("""
+                INSERT INTO ai_config (version, config, is_active, description, created_by)
+                VALUES (1, %s, TRUE, 'Initial defaults', 'system')
+            """, (json.dumps(DEFAULT_AI_CONFIG),))
+        db.commit()
+        db.close()
+    except Exception as e:
+        print(f'ai_config ensure error: {e}', flush=True)
+
+
+def _ensure_ai_assessment_log_table():
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ai_assessment_log (
+                id SERIAL PRIMARY KEY,
+                bid_id INTEGER REFERENCES bids(id) ON DELETE CASCADE,
+                config_version INTEGER,
+                bucket TEXT,
+                bucket_display TEXT,
+                baseline_price INTEGER,
+                breakdown JSONB,
+                llm_adjustment_pct NUMERIC(6,2),
+                llm_reasoning TEXT,
+                confidence_low INTEGER,
+                confidence_high INTEGER,
+                final_price INTEGER,
+                raw_response JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_aslog_bid
+            ON ai_assessment_log(bid_id, created_at DESC)
+        """)
+        db.commit()
+        db.close()
+    except Exception as e:
+        print(f'ai_assessment_log ensure error: {e}', flush=True)
+
+
+def get_active_ai_config():
+    """Return the active ai_config dict (or DEFAULT_AI_CONFIG + version=0 fallback)."""
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("SELECT version, config FROM ai_config WHERE is_active=TRUE LIMIT 1")
+        row = cur.fetchone()
+        db.close()
+        if row:
+            cfg = row['config'] if hasattr(row, 'get') else row[1]
+            ver = row['version'] if hasattr(row, 'get') else row[0]
+            # psycopg2 returns JSONB as dict already; fall back to json.loads for TEXT
+            if isinstance(cfg, str):
+                cfg = json.loads(cfg)
+            return ver, cfg
+    except Exception as e:
+        print(f'get_active_ai_config error: {e}', flush=True)
+    return 0, DEFAULT_AI_CONFIG
+
+
+_ensure_ai_config_table()
+_ensure_ai_assessment_log_table()
+
+
+# ── AI Levers admin API ─────────────────────────────────────────────────────
+
+def _validate_ai_config(cfg):
+    """Validate config dict. Returns (ok, error_msg)."""
+    if not isinstance(cfg, dict):
+        return False, 'config must be an object'
+    buckets = cfg.get('buckets')
+    if not isinstance(buckets, list) or not buckets:
+        return False, 'buckets must be a non-empty list'
+    seen_names = set()
+    for i, b in enumerate(buckets):
+        if not isinstance(b, dict):
+            return False, f'bucket {i} must be an object'
+        name = b.get('name')
+        if not name or not isinstance(name, str):
+            return False, f'bucket {i} missing name'
+        if name in seen_names:
+            return False, f'duplicate bucket name: {name}'
+        seen_names.add(name)
+        weights = b.get('weights')
+        if not isinstance(weights, dict) or not weights:
+            return False, f'bucket "{name}" missing weights'
+        total = 0.0
+        for k, v in weights.items():
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                return False, f'bucket "{name}" weight "{k}" not numeric'
+            if fv < 0 or fv > 1:
+                return False, f'bucket "{name}" weight "{k}" = {fv}; must be 0.00 – 1.00'
+            total += fv
+        if abs(total - 1.0) > 0.01:
+            return False, f'bucket "{name}" weights sum to {total:.2f}, must be 1.00 (±0.01)'
+    # Last bucket must be catch_all
+    last = buckets[-1]
+    if not (last.get('rules') or {}).get('catch_all'):
+        return False, 'last bucket must have rules.catch_all=true'
+    cap = cfg.get('llm_adjustment_cap_pct')
+    if cap is None or not isinstance(cap, (int, float)) or cap < 0 or cap > 100:
+        return False, 'llm_adjustment_cap_pct must be 0 – 100'
+    return True, None
+
+
+@app.route('/admin/ai-levers')
+def admin_ai_levers():
+    """Render the AI Levers admin page."""
+    _ver, _cfg = get_active_ai_config()
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT id, version, is_active, description, created_by, created_at
+        FROM ai_config ORDER BY version DESC LIMIT 30
+    """)
+    versions = [dict(r) for r in cur.fetchall()]
+    # Convert timestamps to isoformat for template
+    for v in versions:
+        if hasattr(v.get('created_at'), 'isoformat'):
+            v['created_at_iso'] = v['created_at'].isoformat()
+            v['created_at_ago'] = time_ago(v['created_at'])
+    db.close()
+    return render_template('admin_ai_levers.html',
+                           active_version=_ver,
+                           active_config=_cfg,
+                           versions=versions,
+                           time_ago=time_ago)
+
+
+@app.route('/api/ai-config/active', methods=['GET'])
+def api_ai_config_active():
+    ver, cfg = get_active_ai_config()
+    return jsonify({'version': ver, 'config': cfg})
+
+
+@app.route('/api/ai-config/versions', methods=['GET'])
+def api_ai_config_versions():
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT id, version, is_active, description, created_by, created_at
+        FROM ai_config ORDER BY version DESC LIMIT 50
+    """)
+    rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        if hasattr(r.get('created_at'), 'isoformat'):
+            r['created_at'] = r['created_at'].isoformat()
+    db.close()
+    return jsonify({'versions': rows})
+
+
+@app.route('/api/ai-config/version/<int:version_id>', methods=['GET'])
+def api_ai_config_version(version_id):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT version, config, description FROM ai_config WHERE id=%s", (version_id,))
+    row = cur.fetchone()
+    db.close()
+    if not row:
+        return jsonify({'error': 'not found'}), 404
+    cfg = row['config'] if hasattr(row, 'get') else row[1]
+    if isinstance(cfg, str):
+        cfg = json.loads(cfg)
+    return jsonify({
+        'version': row['version'] if hasattr(row, 'get') else row[0],
+        'config': cfg,
+        'description': row['description'] if hasattr(row, 'get') else row[2],
+    })
+
+
+@app.route('/api/ai-config/save', methods=['POST'])
+def api_ai_config_save():
+    """Save a new config version and mark active. Keeps history for rollback."""
+    data = request.json or {}
+    cfg = data.get('config')
+    description = (data.get('description') or 'User update').strip()[:500]
+    ok, err = _validate_ai_config(cfg)
+    if not ok:
+        return jsonify({'error': err}), 400
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT COALESCE(MAX(version), 0) + 1 AS next_ver FROM ai_config")
+    row = cur.fetchone()
+    next_ver = row['next_ver'] if hasattr(row, 'get') else row[0]
+    cur.execute("UPDATE ai_config SET is_active = FALSE WHERE is_active = TRUE")
+    cur.execute("""
+        INSERT INTO ai_config (version, config, is_active, description, created_by)
+        VALUES (%s, %s, TRUE, %s, %s)
+        RETURNING id, version
+    """, (next_ver, json.dumps(cfg), description, session.get('user') or 'admin'))
+    saved = cur.fetchone()
+    db.commit()
+    db.close()
+    return jsonify({
+        'ok': True,
+        'id': saved['id'] if hasattr(saved, 'get') else saved[0],
+        'version': saved['version'] if hasattr(saved, 'get') else saved[1],
+    })
+
+
+@app.route('/api/ai-config/activate/<int:version_id>', methods=['POST'])
+def api_ai_config_activate(version_id):
+    """Activate an existing version (rollback)."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT version FROM ai_config WHERE id=%s", (version_id,))
+    row = cur.fetchone()
+    if not row:
+        db.close()
+        return jsonify({'error': 'version not found'}), 404
+    cur.execute("UPDATE ai_config SET is_active = FALSE WHERE is_active = TRUE")
+    cur.execute("UPDATE ai_config SET is_active = TRUE WHERE id = %s", (version_id,))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True,
+                    'activated_version': row['version'] if hasattr(row, 'get') else row[0]})
+
+
+@app.route('/api/ai-config/preview', methods=['POST'])
+def api_ai_config_preview():
+    """Preview baseline for a bid with arbitrary config.
+    Body: {bid_id: int, config?: dict}.  If config omitted, uses active.
+    Returns current baseline vs proposed baseline + breakdowns.
+    Does NOT call Gemini — fast deterministic preview only."""
+    data = request.json or {}
+    bid_id = data.get('bid_id')
+    proposed = data.get('config')
+    if not bid_id:
+        return jsonify({'error': 'missing bid_id'}), 400
+    if proposed is not None:
+        ok, err = _validate_ai_config(proposed)
+        if not ok:
+            return jsonify({'error': err}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT id, make, model, year, asking_price
+        FROM bids WHERE id = %s
+    """, (bid_id,))
+    bid = cur.fetchone()
+    if not bid:
+        db.close()
+        return jsonify({'error': 'bid not found'}), 404
+    cur.execute("SELECT * FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+    vauto = cur.fetchone()
+    cur.execute("SELECT * FROM accutrade_lookups WHERE bid_id=%s", (bid_id,))
+    accutrade = cur.fetchone()
+    db.close()
+
+    try:
+        from ai_assessment import classify_bucket, compute_baseline
+    except ImportError:
+        return jsonify({'error': 'ai_assessment module unavailable'}), 500
+
+    _ver, active_cfg = get_active_ai_config()
+    bid_dict = {
+        'make': bid.get('make'), 'model': bid.get('model'),
+        'year': bid.get('year'), 'asking_price': bid.get('asking_price'),
+    }
+    vdict = dict(vauto) if vauto else {}
+    adict = dict(accutrade) if accutrade else {}
+
+    # Active (current)
+    a_bucket = classify_bucket(bid_dict, active_cfg)
+    a_result = compute_baseline(a_bucket, vdict, adict)
+    result = {
+        'bid_id': bid_id,
+        'vehicle': f"{bid.get('year') or ''} {bid.get('make') or ''} {bid.get('model') or ''}".strip(),
+        'active': {
+            'version': _ver,
+            'bucket': a_bucket.get('name'),
+            'bucket_display': a_bucket.get('display_name'),
+            'baseline_price': a_result.get('baseline_price'),
+            'breakdown': a_result.get('breakdown'),
+            'note': a_result.get('note'),
+        }
+    }
+
+    if proposed:
+        p_bucket = classify_bucket(bid_dict, proposed)
+        p_result = compute_baseline(p_bucket, vdict, adict)
+        result['proposed'] = {
+            'bucket': p_bucket.get('name'),
+            'bucket_display': p_bucket.get('display_name'),
+            'baseline_price': p_result.get('baseline_price'),
+            'breakdown': p_result.get('breakdown'),
+            'note': p_result.get('note'),
+        }
+        if a_result.get('baseline_price') and p_result.get('baseline_price'):
+            result['delta_dollars'] = p_result['baseline_price'] - a_result['baseline_price']
+            result['delta_pct'] = round(
+                100 * (p_result['baseline_price'] - a_result['baseline_price'])
+                / a_result['baseline_price'], 1)
+
+    return jsonify(result)
 
 
 @app.route('/api/vauto/urgent')

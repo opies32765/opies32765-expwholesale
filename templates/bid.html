@@ -368,9 +368,69 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
         <div id="assess-summary-bar" onclick="toggleAssess()"></div>
         <div id="assess-body" class="collapsed">
+          {% if ai_log %}
+          <!-- ── Hybrid breakdown: bucket + baseline + adjustment + final ── -->
+          <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:12px;margin-bottom:12px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <span style="font-size:10px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.6px">Segment</span>
+              <span style="font-size:12px;font-weight:700;color:#a78bfa;background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.25);border-radius:4px;padding:2px 8px;letter-spacing:.3px">{{ ai_log.bucket_display or ai_log.bucket }}</span>
+            </div>
+
+            {% if ai_log.baseline_price %}
+            <div style="display:flex;justify-content:space-between;align-items:baseline;padding:6px 0;border-bottom:1px dashed #1e293b">
+              <span style="font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px">Baseline (weighted books)</span>
+              <span style="font-size:15px;font-weight:700;color:#e2e8f0;font-family:monospace">${{ '{:,}'.format(ai_log.baseline_price) }}</span>
+            </div>
+            {% if ai_log.breakdown %}
+            <div style="margin-top:8px;display:flex;flex-direction:column;gap:3px">
+              {% for r in ai_log.breakdown %}
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:3px 8px;font-size:11px;font-family:monospace;{% if not r.available %}opacity:.4{% endif %}">
+                <span style="color:#64748b">{{ r.source }}</span>
+                {% if r.available %}
+                <span style="color:#94a3b8">${{ '{:,}'.format(r.value) }} × {{ r.effective_pct or r.weight_pct }}% = <span style="color:#cbd5e1">${{ '{:,}'.format(r.contribution) }}</span></span>
+                {% else %}
+                <span style="color:#475569;font-style:italic">N/A — skipped</span>
+                {% endif %}
+              </div>
+              {% endfor %}
+            </div>
+            {% endif %}
+            {% endif %}
+
+            {% if ai_log.llm_adjustment_pct is not none %}
+            <div style="display:flex;justify-content:space-between;align-items:baseline;padding:8px 0;margin-top:6px;border-top:1px dashed #1e293b">
+              <span style="font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px">AI Adjustment</span>
+              {% set adj = ai_log.llm_adjustment_pct | float %}
+              <span style="font-size:14px;font-weight:700;font-family:monospace;color:{% if adj >= 0 %}#4ade80{% else %}#fbbf24{% endif %}">
+                {{ '%+.1f' % adj }}%
+              </span>
+            </div>
+            {% if ai_log.llm_reasoning %}
+            <div style="font-size:12px;color:#94a3b8;line-height:1.5;padding:6px 0 2px;font-style:italic">{{ ai_log.llm_reasoning }}</div>
+            {% endif %}
+            {% endif %}
+
+            {% if ai_log.final_price %}
+            <div style="display:flex;justify-content:space-between;align-items:baseline;padding:10px 0 4px;margin-top:6px;border-top:1px solid #1e293b">
+              <span style="font-size:11px;font-weight:700;color:#c084fc;text-transform:uppercase;letter-spacing:.5px">Recommended Buy</span>
+              <span style="font-size:18px;font-weight:800;color:#c084fc;font-family:monospace">${{ '{:,}'.format(ai_log.final_price) }}</span>
+            </div>
+            {% if ai_log.confidence_low and ai_log.confidence_high %}
+            <div style="text-align:right;font-size:11px;color:#64748b;font-family:monospace;margin-top:-2px">
+              range ${{ '{:,}'.format(ai_log.confidence_low) }} – ${{ '{:,}'.format(ai_log.confidence_high) }}
+            </div>
+            {% endif %}
+            {% endif %}
+
+            <div style="margin-top:10px;font-size:9px;color:#334155;text-align:right;text-transform:uppercase;letter-spacing:.4px">
+              Config v{{ ai_log.config_version }} · {{ time_ago(ai_log.created_at) }}
+            </div>
+          </div>
+          {% endif %}
+
           <div id="assess-output">
             {% if not ai_assessment %}
-            <div style="font-size:13px;color:#334155;font-style:italic">Opus reviews all photos, mileage, notes, DIA dealer history, auction comps, and market listings — then recommends a buy price.</div>
+            <div style="font-size:13px;color:#334155;font-style:italic">Gemini reviews all photos, mileage, notes, DIA dealer history, auction comps, and market listings — then applies bucket-weighted math + qualitative adjustment.</div>
             {% endif %}
           </div>
         </div>
