@@ -146,6 +146,7 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
   </a>
   <div class="header-right">
     <a href="/" class="nav-link">Dashboard</a>
+    <a href="/dealers" class="nav-link">Dealer DB</a>
     <a href="/contacts" class="nav-link">Contacts</a>
     <a href="/tesla-vin" class="nav-link">Tesla VIN</a>
     <a href="/drop" class="nav-link active">Quick Drop</a>
@@ -155,7 +156,7 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
 <!-- Content -->
 <div class="content">
   <div class="page-title">Quick Drop</div>
-  <div class="page-desc">Drag Carfax or AutoCheck screenshots here. AI reads the VIN, vehicle info, and history — then creates a bid and kicks off vAuto + assessment automatically.</div>
+  <div class="page-desc">Drag Carfax or AutoCheck screenshots <strong>or just type a VIN</strong>. AI reads everything available, creates a bid, and kicks off vAuto + assessment automatically.</div>
 
   <!-- Drop Zone -->
   <div class="drop-zone" id="dropZone">
@@ -173,20 +174,24 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
 
   <!-- Form -->
   <div class="form-section" id="formSection">
+    <div class="field">
+      <label>VIN (required if no screenshots)</label>
+      <input type="text" id="manualVin" placeholder="Type or paste 17-character VIN" maxlength="17" style="font-family:monospace;letter-spacing:1px;text-transform:uppercase">
+      <div class="hint">If you drop screenshots, AI reads VIN automatically — this field is the override / VIN-only path.</div>
+    </div>
     <div class="field-row">
       <div class="field">
         <label>Rep Name (optional)</label>
         <input type="text" id="repName" placeholder="Who's submitting this bid?">
       </div>
       <div class="field">
-        <label>Asking Price (optional)</label>
-        <input type="text" id="askingPrice" placeholder="$0">
+        <label>Mileage (optional)</label>
+        <input type="text" id="mileage" placeholder="e.g. 45,000" inputmode="numeric">
       </div>
-    </div>
-    <div class="field">
-      <label>VIN Override (optional)</label>
-      <input type="text" id="manualVin" placeholder="If AI can't read the VIN, type it here" maxlength="17" style="font-family:monospace;letter-spacing:1px;text-transform:uppercase">
-      <div class="hint">Leave blank to let AI extract it from the screenshot</div>
+      <div class="field">
+        <label>Asking Price (optional)</label>
+        <input type="text" id="askingPrice" placeholder="$0" inputmode="numeric">
+      </div>
     </div>
     <div class="field">
       <label>Notes (optional)</label>
@@ -194,7 +199,7 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
     </div>
 
     <button class="submit-btn" id="submitBtn" disabled>
-      <span id="btnText">Drop screenshots to get started</span>
+      <span id="btnText">Drop screenshots or enter a VIN</span>
     </button>
   </div>
 
@@ -341,26 +346,44 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
     });
   }
 
+  const VIN_REGEX = /^[A-HJ-NPR-Z0-9]{17}$/;
+
   function updateButton(){
-    if(files.length){
+    const vin = document.getElementById('manualVin').value.trim().toUpperCase();
+    const vinValid = VIN_REGEX.test(vin);
+
+    if(files.length && vinValid){
+      submitBtn.disabled = false;
+      btnText.textContent = 'Submit ' + files.length + ' screenshot' + (files.length > 1 ? 's' : '') + ' + VIN';
+    } else if(files.length){
       submitBtn.disabled = false;
       btnText.textContent = 'Submit ' + files.length + ' screenshot' + (files.length > 1 ? 's' : '');
+    } else if(vinValid){
+      submitBtn.disabled = false;
+      btnText.textContent = 'Create bid from VIN';
     } else {
       submitBtn.disabled = true;
-      btnText.textContent = 'Drop screenshots to get started';
+      btnText.textContent = 'Drop screenshots or enter a VIN';
     }
   }
 
+  // Re-evaluate button state when VIN is typed
+  document.getElementById('manualVin').addEventListener('input', updateButton);
+
   // --- Submit ---
   submitBtn.addEventListener('click', function(){
-    if(!files.length || submitBtn.disabled) return;
+    if(submitBtn.disabled) return;
     submitBtn.disabled = true;
 
     // Hide form, show processing
     errorMsg.classList.remove('show');
     successCard.classList.remove('show');
     processing.classList.add('show');
-    processingStep.textContent = 'Uploading ' + files.length + ' screenshot' + (files.length > 1 ? 's' : '') + '...';
+    if(files.length){
+      processingStep.textContent = 'Uploading ' + files.length + ' screenshot' + (files.length > 1 ? 's' : '') + '...';
+    } else {
+      processingStep.textContent = 'Creating bid from VIN...';
+    }
 
     const formData = new FormData();
     files.forEach(function(f, i){
@@ -370,6 +393,8 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
       formData.append('rep_name', document.getElementById('repName').value.trim());
     if(document.getElementById('askingPrice').value.trim())
       formData.append('asking_price', document.getElementById('askingPrice').value.trim());
+    if(document.getElementById('mileage').value.trim())
+      formData.append('mileage', document.getElementById('mileage').value.trim());
     if(document.getElementById('manualVin').value.trim())
       formData.append('manual_vin', document.getElementById('manualVin').value.trim());
     if(document.getElementById('notes').value.trim())
@@ -456,8 +481,10 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
     dropZone.style.display = '';
     // Keep rep name — they'll drop many in a row for the same person
     document.getElementById('askingPrice').value = '';
+    document.getElementById('mileage').value = '';
     document.getElementById('manualVin').value = '';
     document.getElementById('notes').value = '';
+    updateButton();
   });
 
 })();

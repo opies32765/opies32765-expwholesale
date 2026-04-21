@@ -15,6 +15,13 @@ app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'expwholesale2026!')
 app.permanent_session_lifetime = 86400 * 30  # 30 days
 
+# Dealer DB blueprint (partner inventory scanning + UI)
+try:
+    from dealer_db import bp as _dealer_bp
+    app.register_blueprint(_dealer_bp)
+except Exception as _e:
+    print(f'[dealer_db] blueprint not loaded: {_e}', flush=True)
+
 # ── Dashboard login ───────────────────────────────────────────────────────────
 EW_USERNAME = os.environ.get('EW_USERNAME', 'admin')
 EW_PASSWORD = os.environ.get('EW_PASSWORD', 'Sedecrem3')
@@ -3775,9 +3782,10 @@ def quick_drop_page():
 
 @app.route('/api/bid/quick-drop', methods=['POST'])
 def api_bid_quick_drop():
-    """Accept Carfax/AutoCheck screenshots, extract vehicle info, create bid."""
+    """Accept Carfax/AutoCheck screenshots OR a manual VIN (no photos required),
+    extract vehicle info, create bid."""
 
-    # Collect uploaded images
+    # Collect uploaded images (optional — VIN-only path is allowed)
     files_list = []
     saved_photos = []
     os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -3800,17 +3808,31 @@ def api_bid_quick_drop():
         saved_photos.append(f'/static/uploads/{fname}')
         i += 1
 
-    if not files_list:
-        return jsonify({'error': 'No images uploaded'}), 400
+    # Manual VIN + mileage from form — both optional, VIN is the VIN-only-path trigger
+    manual_vin = (request.form.get('manual_vin') or '').strip().upper()
+    manual_vin_valid = bool(manual_vin and len(manual_vin) == 17 and VIN_RE.match(manual_vin))
 
-    # Extract info from Carfax screenshots via Claude Vision
-    extracted = extract_carfax_multi(files_list)
+    manual_mileage_raw = (request.form.get('mileage') or '').strip()
+    manual_mileage = None
+    if manual_mileage_raw:
+        try:
+            manual_mileage = int(manual_mileage_raw.replace(',', '').replace(' ', '').replace('mi', ''))
+            if manual_mileage < 0 or manual_mileage > 2_000_000:
+                manual_mileage = None
+        except (ValueError, TypeError):
+            manual_mileage = None
+
+    # Require at least one image OR a valid manual VIN
+    if not files_list and not manual_vin_valid:
+        return jsonify({'error': 'Need at least one image or a valid 17-character VIN'}), 400
+
+    # Extract from images via Gemini (skip if VIN-only path)
+    extracted = extract_carfax_multi(files_list) if files_list else {}
 
     vin = (extracted.get('vin') or '').strip().upper()
 
-    # Allow manual VIN override from form
-    manual_vin = (request.form.get('manual_vin') or '').strip().upper()
-    if manual_vin and VIN_RE.match(manual_vin):
+    # Manual VIN always wins if valid
+    if manual_vin_valid:
         vin = manual_vin
 
     # Get NHTSA decode if we have a VIN (supplements/overrides Carfax data)
@@ -3822,7 +3844,8 @@ def api_bid_quick_drop():
     make = nhtsa.get('make') or extracted.get('make')
     model = nhtsa.get('model') or extracted.get('model')
     trim = nhtsa.get('trim') or extracted.get('trim')
-    mileage = extracted.get('mileage')
+    # Manual mileage wins over Carfax extraction when both provided
+    mileage = manual_mileage if manual_mileage is not None else extracted.get('mileage')
     color = extracted.get('color')
 
     # Form fields
