@@ -907,6 +907,12 @@ def bid_detail(bid_id):
                     ai_log['breakdown'] = json.loads(b)
                 except Exception:
                     ai_log['breakdown'] = []
+            di = ai_log.get('dealer_intel')
+            if isinstance(di, str):
+                try:
+                    ai_log['dealer_intel'] = json.loads(di)
+                except Exception:
+                    ai_log['dealer_intel'] = None
     except Exception as _aelog_err:
         print(f'ai_assessment_log read error: {_aelog_err}', flush=True)
 
@@ -1359,10 +1365,18 @@ def _run_assessment(bid_id):
         compute_baseline = None
         apply_adjustment = None
 
+    try:
+        from dealer_match import find_dealer_matches, format_for_prompt
+    except Exception as _imp_err:
+        print(f'dealer_match import failed: {_imp_err}', flush=True)
+        find_dealer_matches = None
+        format_for_prompt = None
+
     _ai_ver, _ai_cfg = (0, DEFAULT_AI_CONFIG)
     _bucket = None
     _baseline_result = None
     _ai_cap = 15.0
+    _dealer_intel = None
     if classify_bucket and compute_baseline:
         try:
             _ai_ver, _ai_cfg = get_active_ai_config()
@@ -1384,6 +1398,27 @@ def _run_assessment(bid_id):
                   flush=True)
         except Exception as _cls_err:
             print(f'hybrid classify/baseline error: {_cls_err}', flush=True)
+
+    # ── Dealer Network Intel — active + recent sales + top pitch dealers ──
+    if find_dealer_matches:
+        try:
+            _dm_db = get_db()
+            _dealer_intel = find_dealer_matches(
+                _dm_db,
+                bid.get('year'), bid.get('make'), bid.get('model'),
+                trim=bid.get('trim'),
+                config=_ai_cfg,
+            )
+            _dm_db.close()
+            _active_n = len(_dealer_intel.get('active', []))
+            _sales_n = len(_dealer_intel.get('recent_sales', []))
+            _pitch_n = len(_dealer_intel.get('top_pitch', []))
+            print(f'[ASSESS] Bid {bid_id} dealer intel: '
+                  f'{_active_n} active · {_sales_n} recent sales · {_pitch_n} pitch candidates',
+                  flush=True)
+        except Exception as _dm_err:
+            print(f'dealer intel lookup error: {_dm_err}', flush=True)
+            _dealer_intel = None
 
     # ── Build vehicle context ─────────────────────────────────────────────────
     vparts = [str(bid['year'] or ''), bid['make'] or '', bid['model'] or '', bid['trim'] or '']
@@ -1749,6 +1784,17 @@ def _run_assessment(bid_id):
         img_summary.append(f"iPacket OEM window sticker")
     img_line = "I've attached " + " and ".join(img_summary) + "." if img_summary else "No photos available."
 
+    # Inject dealer network intel (if any matches) — live signal from partner
+    # dealer inventory + sold history. Goes above segment/baseline so Gemini
+    # sees the real-market context first.
+    if _dealer_intel and format_for_prompt:
+        try:
+            _di_block = format_for_prompt(_dealer_intel)
+            if _di_block:
+                ctx += '\n\n' + _di_block
+        except Exception as _di_fmt_err:
+            print(f'dealer intel format error: {_di_fmt_err}', flush=True)
+
     # Inject bucket + baseline context (if we could compute one)
     _hybrid_mode = bool(_baseline_result and _baseline_result.get('baseline_price'))
     if _hybrid_mode:
@@ -1927,8 +1973,9 @@ Max wholesale buy price: **$X,XXX**"""
                     INSERT INTO ai_assessment_log
                         (bid_id, config_version, bucket, bucket_display, baseline_price,
                          breakdown, llm_adjustment_pct, llm_reasoning,
-                         confidence_low, confidence_high, final_price, raw_response)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         confidence_low, confidence_high, final_price, raw_response,
+                         dealer_intel)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     bid_id, _ai_ver, _bucket.get('name'), _bucket.get('display_name'),
                     _baseline_result['baseline_price'],
@@ -1939,6 +1986,7 @@ Max wholesale buy price: **$X,XXX**"""
                     applied.get('confidence_high'),
                     buy_price,
                     _json.dumps(adjustment_result),
+                    _json.dumps(_dealer_intel) if _dealer_intel else None,
                 ))
                 _db3.commit()
                 _db3.close()
@@ -3190,7 +3238,22 @@ DEFAULT_AI_CONFIG = {
     "llm_adjustment_cap_pct": 15,      # max ± percentage LLM can adjust baseline
     "confidence_range_pct": 5,         # ± range shown as confidence (e.g. ±5%)
     "llm_temperature": 0.4,
-    "llm_max_tokens": 3000
+    "llm_max_tokens": 3000,
+    # Dealer-network matching: how "like vehicles" are identified at partner
+    # dealers, and how pitch-candidates are scored.
+    "dealer_match": {
+        "year_tolerance": 2,           # ± years considered "same vehicle"
+        "recent_days": 90,             # window for "recent sales" + pattern calc
+        "min_sold_confidence": 0.70,   # sold-signal confidence threshold
+        "pitch_weights": {
+            "sold_count_multiplier":   10,  # weight of historical sales
+            "fast_turnover_bonus_max": 30,  # cap on fast-turnover bonus points
+            "active_count_multiplier":  2,  # weight of current stock signal
+        },
+        "max_active":   5,              # UI + prompt caps
+        "max_sales":   10,
+        "max_pitch":    3,
+    }
 }
 
 
@@ -3256,6 +3319,10 @@ def _ensure_ai_assessment_log_table():
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_aslog_bid
             ON ai_assessment_log(bid_id, created_at DESC)
+        """)
+        cur.execute("""
+            ALTER TABLE ai_assessment_log
+            ADD COLUMN IF NOT EXISTS dealer_intel JSONB
         """)
         db.commit()
         db.close()
@@ -3327,6 +3394,29 @@ def _validate_ai_config(cfg):
     cap = cfg.get('llm_adjustment_cap_pct')
     if cap is None or not isinstance(cap, (int, float)) or cap < 0 or cap > 100:
         return False, 'llm_adjustment_cap_pct must be 0 – 100'
+    # Optional dealer_match block — validate if present
+    dm = cfg.get('dealer_match')
+    if dm is not None:
+        if not isinstance(dm, dict):
+            return False, 'dealer_match must be an object'
+        for k, (lo, hi) in {
+            'year_tolerance': (0, 10),
+            'recent_days':    (1, 730),
+        }.items():
+            if k in dm:
+                try:
+                    v = float(dm[k])
+                    if v < lo or v > hi:
+                        return False, f'dealer_match.{k} must be {lo}–{hi}'
+                except (TypeError, ValueError):
+                    return False, f'dealer_match.{k} must be numeric'
+        if 'min_sold_confidence' in dm:
+            try:
+                v = float(dm['min_sold_confidence'])
+                if v < 0 or v > 1:
+                    return False, 'dealer_match.min_sold_confidence must be 0.00–1.00'
+            except (TypeError, ValueError):
+                return False, 'dealer_match.min_sold_confidence must be numeric'
     return True, None
 
 

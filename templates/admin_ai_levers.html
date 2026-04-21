@@ -146,6 +146,42 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
     </div>
   </div>
 
+  <!-- Dealer match settings -->
+  <div class="global-card">
+    <h3>Dealer Network Match</h3>
+    <div style="font-size:12px;color:#7a9bb5;margin-bottom:14px;line-height:1.5">How we match bids against partner dealer inventory + sales history. Tuning these changes which dealers show up as pitch candidates and how recent sales are weighted.</div>
+    <div class="global-row">
+      <label>Year tolerance (± years)</label>
+      <input type="range" id="dm-years" min="0" max="5" step="1" value="{{ (active_config.dealer_match or {}).year_tolerance if (active_config.dealer_match or {}).year_tolerance is not none else 2 }}">
+      <div class="readout" id="dm-years-readout">±{{ (active_config.dealer_match or {}).year_tolerance if (active_config.dealer_match or {}).year_tolerance is not none else 2 }} yr</div>
+    </div>
+    <div class="global-row">
+      <label>Recent-sales window (days)</label>
+      <input type="range" id="dm-days" min="14" max="365" step="1" value="{{ (active_config.dealer_match or {}).recent_days if (active_config.dealer_match or {}).recent_days is not none else 90 }}">
+      <div class="readout" id="dm-days-readout">{{ (active_config.dealer_match or {}).recent_days if (active_config.dealer_match or {}).recent_days is not none else 90 }}d</div>
+    </div>
+    <div class="global-row">
+      <label>Min sold-signal confidence</label>
+      <input type="range" id="dm-conf" min="0" max="1" step="0.05" value="{{ (active_config.dealer_match or {}).min_sold_confidence if (active_config.dealer_match or {}).min_sold_confidence is not none else 0.7 }}">
+      <div class="readout" id="dm-conf-readout">{{ (active_config.dealer_match or {}).min_sold_confidence if (active_config.dealer_match or {}).min_sold_confidence is not none else 0.7 }}</div>
+    </div>
+    <div class="global-row">
+      <label>Pitch: sold-count weight</label>
+      <input type="range" id="dm-sold-mult" min="0" max="30" step="1" value="{{ ((active_config.dealer_match or {}).pitch_weights or {}).sold_count_multiplier if ((active_config.dealer_match or {}).pitch_weights or {}).sold_count_multiplier is not none else 10 }}">
+      <div class="readout" id="dm-sold-mult-readout">×{{ ((active_config.dealer_match or {}).pitch_weights or {}).sold_count_multiplier if ((active_config.dealer_match or {}).pitch_weights or {}).sold_count_multiplier is not none else 10 }}</div>
+    </div>
+    <div class="global-row">
+      <label>Pitch: fast-turnover bonus max</label>
+      <input type="range" id="dm-fast-bonus" min="0" max="60" step="1" value="{{ ((active_config.dealer_match or {}).pitch_weights or {}).fast_turnover_bonus_max if ((active_config.dealer_match or {}).pitch_weights or {}).fast_turnover_bonus_max is not none else 30 }}">
+      <div class="readout" id="dm-fast-bonus-readout">{{ ((active_config.dealer_match or {}).pitch_weights or {}).fast_turnover_bonus_max if ((active_config.dealer_match or {}).pitch_weights or {}).fast_turnover_bonus_max is not none else 30 }}pts</div>
+    </div>
+    <div class="global-row">
+      <label>Pitch: active-count weight</label>
+      <input type="range" id="dm-active-mult" min="0" max="10" step="1" value="{{ ((active_config.dealer_match or {}).pitch_weights or {}).active_count_multiplier if ((active_config.dealer_match or {}).pitch_weights or {}).active_count_multiplier is not none else 2 }}">
+      <div class="readout" id="dm-active-mult-readout">×{{ ((active_config.dealer_match or {}).pitch_weights or {}).active_count_multiplier if ((active_config.dealer_match or {}).pitch_weights or {}).active_count_multiplier is not none else 2 }}</div>
+    </div>
+  </div>
+
   <!-- Live preview -->
   <div class="preview-section">
     <h3>Preview Impact on a Bid</h3>
@@ -331,6 +367,43 @@ document.getElementById('temp-slider').addEventListener('input', e => {
   const v = parseFloat(e.target.value);
   workingConfig.llm_temperature = v;
   document.getElementById('temp-readout').textContent = v.toFixed(2);
+});
+
+// Dealer-match settings — all feed into workingConfig.dealer_match
+function ensureDealerMatch() {
+  if (!workingConfig.dealer_match) workingConfig.dealer_match = {};
+  if (!workingConfig.dealer_match.pitch_weights) workingConfig.dealer_match.pitch_weights = {};
+  return workingConfig.dealer_match;
+}
+document.getElementById('dm-years').addEventListener('input', e => {
+  const v = parseInt(e.target.value);
+  ensureDealerMatch().year_tolerance = v;
+  document.getElementById('dm-years-readout').textContent = '±' + v + ' yr';
+});
+document.getElementById('dm-days').addEventListener('input', e => {
+  const v = parseInt(e.target.value);
+  ensureDealerMatch().recent_days = v;
+  document.getElementById('dm-days-readout').textContent = v + 'd';
+});
+document.getElementById('dm-conf').addEventListener('input', e => {
+  const v = parseFloat(e.target.value);
+  ensureDealerMatch().min_sold_confidence = v;
+  document.getElementById('dm-conf-readout').textContent = v.toFixed(2);
+});
+document.getElementById('dm-sold-mult').addEventListener('input', e => {
+  const v = parseInt(e.target.value);
+  ensureDealerMatch().pitch_weights.sold_count_multiplier = v;
+  document.getElementById('dm-sold-mult-readout').textContent = '×' + v;
+});
+document.getElementById('dm-fast-bonus').addEventListener('input', e => {
+  const v = parseInt(e.target.value);
+  ensureDealerMatch().pitch_weights.fast_turnover_bonus_max = v;
+  document.getElementById('dm-fast-bonus-readout').textContent = v + 'pts';
+});
+document.getElementById('dm-active-mult').addEventListener('input', e => {
+  const v = parseInt(e.target.value);
+  ensureDealerMatch().pitch_weights.active_count_multiplier = v;
+  document.getElementById('dm-active-mult-readout').textContent = '×' + v;
 });
 
 async function runPreview() {
