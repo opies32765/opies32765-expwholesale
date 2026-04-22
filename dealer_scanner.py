@@ -480,6 +480,15 @@ def extract_vehicle(url, html):
     if jsonld:
         out.update(jsonld)
 
+    # 1b) dealer.com inline-JSON fields (price, trim, mileage, msrp). Runs
+    #     before URL-slug parser so the hex listing-id never lands in trim,
+    #     and before any other price extractor so the $377 monthly-payment
+    #     leak doesn't take priority over real internetPrice.
+    dc = _extract_dealer_com_fields(html)
+    for k, v in dc.items():
+        if v is not None and not out.get(k):
+            out[k] = v
+
     # 2) URL slug — deterministic when structured
     slug = _parse_ymm_from_url(url)
     for k, v in (slug or {}).items():
@@ -574,12 +583,18 @@ def extract_vehicle(url, html):
         if m:
             out['year'] = int(m.group(1))
 
-    # 7) Price regex fallback
+    # 7) Price regex fallback — ONLY if the number is plausibly a retail price.
+    # Without the $2000 floor, "call for price" VDPs leak $377/mo payment
+    # estimates into the price field. Structured extractors (AAN feed,
+    # dealer.com inline JSON, JSON-LD offers.price) already cover the reliable
+    # cases; this fallback is for the rare custom platforms only.
     if not out.get('price'):
         m = PRICE_RE.search(html or '')
         if m:
             try:
-                out['price'] = int(m.group(1).replace(',', ''))
+                v = int(m.group(1).replace(',', ''))
+                if v >= 2000:
+                    out['price'] = v
             except ValueError:
                 pass
 
@@ -912,20 +927,26 @@ def _strip_html_for_text(html):
     return txt
 
 
-# ── Platform-embedded inventory-date extractor ────────────────────────
-# dealer.com exposes "inventoryDate":"MM/DD/YYYY" in an embedded JSON
-# payload (not schema.org JSON-LD). This is the dealer's AUTHORITATIVE
-# date-added-to-inventory field — more reliable than photo timestamps or
-# sitemap lastmod. Works for every dealer.com franchise site.
+# ── dealer.com embedded-JSON extractor ────────────────────────────────
+# dealer.com embeds VDP data as inline JSON throughout the page (NOT in
+# schema.org JSON-LD). All authoritative fields live there: internetPrice,
+# askingPrice, trim, inventoryDate, vin, mileage. Without this, the URL-slug
+# fallback grabs the hex listing-id as trim ("706c0904ac18269702.htm"), and
+# something on the page yields garbage prices like $377. These regexes pull
+# the named fields directly — no false positives.
 _INVENTORY_DATE_RE = re.compile(
     r'"inventoryDate"\s*:\s*"(\d{1,2})\\?/(\d{1,2})\\?/(\d{4})"', re.I)
+_DC_INTERNET_PRICE_RE = re.compile(r'"internetPrice"\s*:\s*"(\d{3,8})"')
+_DC_ASKING_PRICE_RE   = re.compile(r'"askingPrice"\s*:\s*"(\d{3,8})"')
+_DC_FINAL_PRICE_RE    = re.compile(r'"finalPrice"\s*:\s*"(\d{3,8})"')
+_DC_MSRP_RE           = re.compile(r'"msrp"\s*:\s*"(\d{3,8})"')
+_DC_TRIM_RE           = re.compile(r'"trim"\s*:\s*"([^"]{1,80})"')
+_DC_MILEAGE_RE        = re.compile(r'"odometer"\s*:\s*"(\d{1,7})"|"mileage"\s*:\s*"(\d{1,7})"')
 
 
 def _extract_inventory_date_from_html(html):
-    """Returns ISO date 'YYYY-MM-DD' or None. Currently handles dealer.com's
-    inventoryDate field; extend with additional platform-native date fields
-    as new platforms are onboarded (DealerInspire uses same field, Frazer
-    uses 'dateIn', AutoRevo embeds 'listed_date', etc.)."""
+    """Returns ISO date 'YYYY-MM-DD' or None. Handles dealer.com's
+    inventoryDate field; works for every franchise on the platform."""
     if not html:
         return None
     m = _INVENTORY_DATE_RE.search(html)
@@ -938,6 +959,52 @@ def _extract_inventory_date_from_html(html):
     except ValueError:
         pass
     return None
+
+
+def _extract_dealer_com_fields(html):
+    """Pull the authoritative dealer.com VDP fields out of the inline JSON
+    payload. Returns dict with any of {price, trim, mileage, msrp} that
+    were found — caller merges into the vehicle dict, preferring these over
+    the URL-slug fallback (which grabs hex listing-ids as trim)."""
+    if not html:
+        return {}
+    out = {}
+    # Price priority: internetPrice > askingPrice > finalPrice. Skip values
+    # under 5000 (those are often monthly payment estimates that leak through).
+    for rx in (_DC_INTERNET_PRICE_RE, _DC_ASKING_PRICE_RE, _DC_FINAL_PRICE_RE):
+        m = rx.search(html)
+        if not m:
+            continue
+        try:
+            v = int(m.group(1))
+            if v >= 5000:
+                out['price'] = v
+                break
+        except ValueError:
+            pass
+    m = _DC_MSRP_RE.search(html)
+    if m:
+        try:
+            v = int(m.group(1))
+            if v >= 5000:
+                out['msrp'] = v
+        except ValueError:
+            pass
+    m = _DC_TRIM_RE.search(html)
+    if m:
+        t = m.group(1).strip()
+        # Reject obvious junk (hex hashes, file extensions, empty)
+        if t and not t.endswith('.htm') and not re.match(r'^[0-9a-f]{16,}$', t, re.I):
+            out['trim'] = t
+    m = _DC_MILEAGE_RE.search(html)
+    if m:
+        try:
+            v = int(m.group(1) or m.group(2))
+            if 0 <= v <= 999999:
+                out['mileage'] = v
+        except (ValueError, TypeError):
+            pass
+    return out
 
 
 # ── Photo-filename timestamp extractor ─────────────────────────────────

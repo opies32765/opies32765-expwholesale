@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg2
 import psycopg2.extras
 from flask import Blueprint, Response, jsonify, render_template, request, redirect, url_for
+from markupsafe import Markup
 
 
 def _json_response(payload, status=200):
@@ -302,8 +303,11 @@ def age_source_filter(row):
 
 @bp.app_template_filter('money')
 def money_filter(v):
-    if v is None:
-        return '—'
+    """Price cell renderer. NULL / 0 / <$1000 → bold red 'NO PRICE' (dealer
+    opted for 'Call for Price' or showed a KBB reference only). We don't want
+    KBB values in our DB — those are the dealer's reference, not their ask."""
+    if v is None or (isinstance(v, (int, float)) and v < 1000):
+        return Markup('<span class="no-price">NO PRICE</span>')
     try:
         return f'${int(v):,}'
     except (ValueError, TypeError):
