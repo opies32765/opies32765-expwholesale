@@ -4416,8 +4416,8 @@ def api_accutrade_submit():
         INSERT INTO accutrade_lookups
             (bid_id, vin, guaranteed_offer, trade_in, trade_market, retail,
              market_avg, local_comps, screenshot, raw_json,
-             not_available, unavailable_reason, looked_up_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+             not_available, unavailable_reason, appraisal_url, looked_up_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         ON CONFLICT (bid_id) DO UPDATE SET
             vin=EXCLUDED.vin, guaranteed_offer=EXCLUDED.guaranteed_offer,
             trade_in=EXCLUDED.trade_in, trade_market=EXCLUDED.trade_market,
@@ -4426,6 +4426,7 @@ def api_accutrade_submit():
             raw_json=EXCLUDED.raw_json,
             not_available=EXCLUDED.not_available,
             unavailable_reason=EXCLUDED.unavailable_reason,
+            appraisal_url=COALESCE(EXCLUDED.appraisal_url, accutrade_lookups.appraisal_url),
             looked_up_at=NOW()
     """, (
         bid_id, data.get('vin', ''),
@@ -4437,6 +4438,7 @@ def api_accutrade_submit():
         json.dumps(data.get('raw', {})) if data.get('raw') else None,
         bool(data.get('not_available', False)),
         data.get('unavailable_reason'),
+        data.get('appraisal_url'),
     ))
     db.commit()
     db.close()

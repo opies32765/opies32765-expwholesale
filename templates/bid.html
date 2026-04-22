@@ -686,6 +686,17 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           {% endfor %}
         </div>
 
+        {% if accutrade_data.appraisal_url %}
+        <div style="margin-top:12px;display:flex;align-items:center;gap:8px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:6px;padding:8px 10px">
+          <span style="font-size:10px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;flex:0 0 auto">Tweak</span>
+          <a href="{{ accutrade_data.appraisal_url }}" target="_blank" rel="noopener"
+             style="font-size:11px;color:#60a5fa;text-decoration:none;font-family:monospace;word-break:break-all;line-height:1.3;flex:1"
+             title="Open this appraisal in AccuTrade to adjust odometer / options / condition, then re-run the assessment">
+            {{ accutrade_data.appraisal_url }} ↗
+          </a>
+        </div>
+        {% endif %}
+
         {% if accutrade_data.screenshot %}
         <div style="margin-top:14px;cursor:pointer;flex:1;min-height:0" onclick="openReportLightbox('{{ accutrade_data.screenshot }}')">
           <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AccuTrade Report</div>
