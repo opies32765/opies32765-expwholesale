@@ -518,10 +518,13 @@ def extract_vehicle(url, html):
         if ts:
             out['source_added_at'] = ts
 
-    # 3c) Sitemap <lastmod> as fallback when JSON-LD didn't provide a date
+    # 3c) Sitemap <lastmod> as fallback. Skip if lastmod == today's date —
+    #      WordPress sitemaps regenerate on every cache invalidation, stamping
+    #      every URL with `lastmod=today`. That bug stamped 104 TXT Charlie
+    #      cars with today's date in scan 26 before photo-ts was deployed.
     if not out.get('source_added_at'):
         lm = _SITEMAP_LASTMOD.get(url)
-        if lm:
+        if lm and not lm.startswith(datetime.now(timezone.utc).date().isoformat()):
             out['source_added_at'] = lm
 
     # 3d) VDP page text fallback — "47 days on our lot", "In stock since Jan 15",
@@ -1336,6 +1339,19 @@ class DealerScanner:
                 vehs = []
                 for u in urls:
                     c, _ff, vbody = fetch(u, self.sess)
+                    # Per-URL retry on a fresh session+IP. DataImpulse rotates
+                    # exit nodes per fresh TCP connection — using a new Session
+                    # forces a new connection, dodging a poisoned-cache IP that
+                    # the previous Session got stuck on. Only retry on transient
+                    # failures (None, 599, 5xx) — don't waste a roundtrip on
+                    # genuine 404/200-with-empty.
+                    if (c is None or c == 599 or (c and 500 <= c <= 599)) \
+                            and _CURRENT_TIER['tier'] in ('direct_proxy', 'flaresolverr_proxy'):
+                        try:
+                            fresh = _session()
+                            c, _ff, vbody = fetch(u, fresh)
+                        except Exception:
+                            pass
                     if c != 200 or not vbody:
                         fails += 1
                         continue

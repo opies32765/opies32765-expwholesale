@@ -155,6 +155,9 @@ CREATE INDEX IF NOT EXISTS idx_dss_dealer_vin ON dealer_sold_signals(dealer_id, 
 
 
 -- ── Convenience view: dealer stats for list page ─────────────────────
+-- Age buckets prefer dealer-declared source_added_at (JSON-LD datePosted /
+-- photo-filename timestamp) over our scanner-observed first_seen_at.
+-- COALESCE — when source_added_at is NULL we fall back to first_seen_at.
 CREATE OR REPLACE VIEW dealer_stats AS
 SELECT
     d.id                                         AS dealer_id,
@@ -163,18 +166,17 @@ SELECT
     COUNT(*) FILTER (WHERE i.status = 'active')                                               AS in_stock,
     COUNT(*) FILTER (WHERE i.status = 'sold')                                                  AS sold_total,
     COUNT(*) FILTER (WHERE i.status = 'active'
-                       AND i.first_seen_at >  NOW() - INTERVAL '30 days')                      AS age_under_30,
+                       AND COALESCE(i.source_added_at, i.first_seen_at) >  NOW() - INTERVAL '30 days')  AS age_under_30,
     COUNT(*) FILTER (WHERE i.status = 'active'
-                       AND i.first_seen_at <= NOW() - INTERVAL '30 days'
-                       AND i.first_seen_at >  NOW() - INTERVAL '60 days')                      AS age_30_60,
+                       AND COALESCE(i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '30 days'
+                       AND COALESCE(i.source_added_at, i.first_seen_at) >  NOW() - INTERVAL '60 days')  AS age_30_60,
     COUNT(*) FILTER (WHERE i.status = 'active'
-                       AND i.first_seen_at <= NOW() - INTERVAL '60 days'
-                       AND i.first_seen_at >  NOW() - INTERVAL '90 days')                      AS age_60_90,
+                       AND COALESCE(i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '60 days'
+                       AND COALESCE(i.source_added_at, i.first_seen_at) >  NOW() - INTERVAL '90 days')  AS age_60_90,
     COUNT(*) FILTER (WHERE i.status = 'active'
-                       AND i.first_seen_at <= NOW() - INTERVAL '90 days')                      AS age_over_90,
+                       AND COALESCE(i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '90 days')  AS age_over_90,
     COUNT(*) FILTER (WHERE i.status = 'sold'
-                       AND i.sold_at      >  COALESCE(d.last_scan_at, NOW()) - INTERVAL '7 days')
-                                                                                                AS sold_last_7d
+                       AND i.sold_at      >  COALESCE(d.last_scan_at, NOW()) - INTERVAL '7 days')       AS sold_last_7d
 FROM dealers d
 LEFT JOIN dealer_inventory i ON i.dealer_id = d.id
 GROUP BY d.id;

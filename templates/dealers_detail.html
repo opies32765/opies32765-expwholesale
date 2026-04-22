@@ -63,10 +63,14 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
 .buckets{background:#243447;border:1px solid #344f68;border-radius:12px;padding:22px;margin-bottom:20px}
 .buckets-title{font-size:13px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px}
 .bucket-bars{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
-.bucket{background:#1a2838;border-radius:8px;padding:16px;position:relative;overflow:hidden}
-.bucket-fill{position:absolute;left:0;bottom:0;width:100%;opacity:.15}
+.bucket{background:#1a2838;border-radius:8px;padding:16px;position:relative;overflow:hidden;cursor:pointer;border:1px solid transparent;transition:border-color .15s,transform .1s,box-shadow .15s;user-select:none}
+.bucket:hover{border-color:#3b82f6;transform:translateY(-1px)}
+.bucket.active{border-color:#7dd3fc;box-shadow:0 0 0 2px rgba(125,211,252,.18)}
+.bucket-fill{position:absolute;left:0;bottom:0;width:100%;opacity:.15;pointer-events:none}
 .bucket-val{font-size:30px;font-weight:800;color:#f1f5f9;position:relative}
 .bucket-lbl{font-size:12px;color:#7a9bb5;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-top:4px;position:relative}
+.bucket-clear{font-size:10px;color:#7dd3fc;text-transform:uppercase;letter-spacing:.6px;margin-top:6px;position:relative;display:none}
+.bucket.active .bucket-clear{display:block}
 .bucket-0 .bucket-fill{background:#34d399}.bucket-0 .bucket-val{color:#34d399}
 .bucket-1 .bucket-fill{background:#60a5fa}.bucket-1 .bucket-val{color:#60a5fa}
 .bucket-2 .bucket-fill{background:#fbbf24}.bucket-2 .bucket-val{color:#fbbf24}
@@ -240,25 +244,29 @@ a.veh-link:hover{text-decoration:underline}
   <div class="buckets-title">Inventory Age Buckets</div>
   {% set max_bucket = [buckets.under_30, buckets.d30_60, buckets.d60_90, buckets.over_90]|max %}
   <div class="bucket-bars">
-    <div class="bucket bucket-0">
+    <div class="bucket bucket-0" data-bucket="u30" title="Click to filter to cars under 30 days">
       <div class="bucket-fill" style="height:{{ (100 * buckets.under_30 / max_bucket) if max_bucket else 0 }}%"></div>
       <div class="bucket-val">{{ buckets.under_30 }}</div>
       <div class="bucket-lbl">&lt; 30 days</div>
+      <div class="bucket-clear">✕ clear filter</div>
     </div>
-    <div class="bucket bucket-1">
+    <div class="bucket bucket-1" data-bucket="d30_60" title="Click to filter to 30–60 day inventory">
       <div class="bucket-fill" style="height:{{ (100 * buckets.d30_60 / max_bucket) if max_bucket else 0 }}%"></div>
       <div class="bucket-val">{{ buckets.d30_60 }}</div>
       <div class="bucket-lbl">30 – 60 days</div>
+      <div class="bucket-clear">✕ clear filter</div>
     </div>
-    <div class="bucket bucket-2">
+    <div class="bucket bucket-2" data-bucket="d60_90" title="Click to filter to 60–90 day inventory (aging)">
       <div class="bucket-fill" style="height:{{ (100 * buckets.d60_90 / max_bucket) if max_bucket else 0 }}%"></div>
       <div class="bucket-val">{{ buckets.d60_90 }}</div>
       <div class="bucket-lbl">60 – 90 days</div>
+      <div class="bucket-clear">✕ clear filter</div>
     </div>
-    <div class="bucket bucket-3">
+    <div class="bucket bucket-3" data-bucket="o90" title="Click to filter to 90+ day inventory (aged — wholesale candidates)">
       <div class="bucket-fill" style="height:{{ (100 * buckets.over_90 / max_bucket) if max_bucket else 0 }}%"></div>
       <div class="bucket-val">{{ buckets.over_90 }}</div>
       <div class="bucket-lbl">90+ days</div>
+      <div class="bucket-clear">✕ clear filter</div>
     </div>
   </div>
 </div>
@@ -298,7 +306,8 @@ a.veh-link:hover{text-decoration:underline}
         </thead>
         <tbody>
         {% for v in info.rows %}
-          <tr data-search="{{ v.year or '' }} {{ make|lower }} {{ (v.model or '')|lower }} {{ (v.trim or '')|lower }} {{ (v.vin or '')|lower }} {{ (v.ext_color or '')|lower }}">
+          {% set _row_age = v|best_age_days %}
+          <tr data-age="{{ _row_age if _row_age != '—' else -1 }}" data-search="{{ v.year or '' }} {{ make|lower }} {{ (v.model or '')|lower }} {{ (v.trim or '')|lower }} {{ (v.vin or '')|lower }} {{ (v.ext_color or '')|lower }}">
             <td>
               <span class="trim-txt">{{ v.year or '' }} {{ v.model or '' }}{% if v.trim %} · {{ v.trim }}{% endif %}</span>
               {% if v.status == 'missing' %}<span class="missing-chip">missing</span>{% endif %}
@@ -474,10 +483,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 });
 
-// ─── Inventory search ────────────────────────────────────────────────
+// ─── Inventory search + bucket filter ────────────────────────────────
 const searchInput = document.getElementById('vehSearch');
 const searchMeta  = document.getElementById('searchMeta');
 const TOTAL_VEH   = {{ dealer.in_stock or 0 }};
+let activeBucket  = null;   // null | 'u30' | 'd30_60' | 'd60_90' | 'o90'
+
+const BUCKET_LABEL = {u30:'<30 days', d30_60:'30–60 days', d60_90:'60–90 days', o90:'90+ days'};
+function bucketMatches(age, bucket){
+  if(bucket === null) return true;
+  if(age < 0) return false;            // unknown age — no bucket
+  if(bucket === 'u30')    return age < 30;
+  if(bucket === 'd30_60') return age >= 30 && age < 60;
+  if(bucket === 'd60_90') return age >= 60 && age < 90;
+  if(bucket === 'o90')    return age >= 90;
+  return true;
+}
 
 function applyFilter(){
   const q = searchInput.value.trim().toLowerCase();
@@ -486,23 +507,45 @@ function applyFilter(){
     let visible = 0;
     group.querySelectorAll('tbody tr').forEach(tr => {
       const text = tr.dataset.search || '';
-      const hit = !q || text.includes(q);
+      const age  = parseInt(tr.dataset.age, 10);
+      const hitText   = !q || text.includes(q);
+      const hitBucket = bucketMatches(isNaN(age) ? -1 : age, activeBucket);
+      const hit = hitText && hitBucket;
       tr.classList.toggle('veh-hidden', !hit);
       if(hit) visible++;
     });
     totalVisible += visible;
     const cnt = group.querySelector('.visible-count');
     if(cnt) cnt.textContent = visible;
-    group.classList.toggle('make-hidden', visible === 0 && q);
-    if(q && visible > 0) group.classList.add('open');
+    group.classList.toggle('make-hidden', visible === 0 && (q || activeBucket));
+    if((q || activeBucket) && visible > 0) group.classList.add('open');
   });
-  if(q){
-    searchMeta.innerHTML = '<b>' + totalVisible + '</b> of ' + TOTAL_VEH + ' match';
+  if(q || activeBucket){
+    const parts = [];
+    if(q) parts.push('matching "' + q + '"');
+    if(activeBucket) parts.push('in ' + BUCKET_LABEL[activeBucket] + ' bucket');
+    searchMeta.innerHTML = '<b>' + totalVisible + '</b> of ' + TOTAL_VEH + ' · ' + parts.join(' · ');
   } else {
     searchMeta.textContent = TOTAL_VEH + ' vehicles';
   }
 }
 searchInput.addEventListener('input', applyFilter);
+
+// Bucket card click → toggle filter
+document.querySelectorAll('.bucket').forEach(card => {
+  card.addEventListener('click', () => {
+    const b = card.dataset.bucket;
+    if(activeBucket === b){
+      activeBucket = null;
+      card.classList.remove('active');
+    } else {
+      document.querySelectorAll('.bucket.active').forEach(el => el.classList.remove('active'));
+      activeBucket = b;
+      card.classList.add('active');
+    }
+    applyFilter();
+  });
+});
 // Debounce-free; counts are cheap
 </script>
 

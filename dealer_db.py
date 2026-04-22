@@ -236,15 +236,18 @@ def _pipeline_stats(dealer_id):
 
 
 def _age_buckets(rows):
-    now = datetime.now(timezone.utc)
+    """Bucket cars by age, preferring dealer-declared source_added_at over our
+    scanner-observed first_seen_at. Calendar-day diff in ET (dealer local)."""
+    et = timezone(timedelta(hours=-4))
+    today_et = datetime.now(et).date()
     bucket = {'under_30': 0, 'd30_60': 0, 'd60_90': 0, 'over_90': 0}
     for r in rows:
-        fs = r.get('first_seen_at')
+        fs = r.get('source_added_at') or r.get('first_seen_at')
         if not fs:
             continue
         if fs.tzinfo is None:
             fs = fs.replace(tzinfo=timezone.utc)
-        days = (now - fs).days
+        days = max(0, (today_et - fs.astimezone(et).date()).days)
         if days < 30:
             bucket['under_30'] += 1
         elif days < 60:

@@ -138,7 +138,8 @@ def find_dealer_matches(db_conn, year, make, model,
                    di.price, di.mileage, di.url, di.photo_url,
                    di.first_seen_at, di.last_seen_at,
                    di.price_drop_amount, di.price_drop_at,
-                   EXTRACT(EPOCH FROM (NOW() - di.first_seen_at)) / 86400.0 AS days_on_lot
+                   GREATEST(0, ((NOW() AT TIME ZONE 'America/New_York')::date
+                              - (di.first_seen_at AT TIME ZONE 'America/New_York')::date)::int) AS days_on_lot
             FROM dealer_inventory di
             JOIN dealers d ON di.dealer_id = d.id
             WHERE di.status = 'active'
@@ -176,7 +177,8 @@ def find_dealer_matches(db_conn, year, make, model,
                    di.year, di.make, di.model, di.trim, di.price, di.mileage,
                    dss.detected_at, dss.signal_type, dss.confidence,
                    di.first_seen_at,
-                   EXTRACT(EPOCH FROM (dss.detected_at - di.first_seen_at)) / 86400.0
+                   GREATEST(0, ((dss.detected_at AT TIME ZONE 'America/New_York')::date
+                              - (di.first_seen_at AT TIME ZONE 'America/New_York')::date)::int)
                        AS days_to_sell
             FROM dealer_sold_signals dss
             JOIN dealer_inventory di ON dss.inventory_id = di.id
