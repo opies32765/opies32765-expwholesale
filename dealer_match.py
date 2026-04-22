@@ -51,22 +51,16 @@ def _cfg(config, key, default):
 
 
 def find_dealer_matches(db_conn, year, make, model,
-                        trim=None, config=None):
+                        trim=None, trim_confidence='low', config=None):
     """Query partner dealer data for like-vehicles to the bid.
 
-    Returns {
-      'active':       [{dealer_id, dealer_name, city, state, year, make, model, trim,
-                        price, mileage, url, photo_url, days_on_lot,
-                        price_drop_amount, price_drop_days_ago}, ...],
-      'recent_sales': [{dealer_id, dealer_name, year, make, model, price,
-                        detected_at, days_to_sell}, ...],
-      'patterns':     [{dealer_id, dealer_name, sold_count, avg_days_to_sell,
-                        active_count, last_sold_at}, ...],
-      'top_pitch':    [{dealer_id, dealer_name, city, state, pitch_score,
-                        sold_count, avg_days_to_sell, active_count,
-                        reason}, ...],
-      'config_used':  {year_tolerance, recent_days, ...},
-    }
+    trim_confidence semantics:
+      - 'deterministic' / 'high' — require trim similarity (first word of bid's
+        trim must appear in the dealer_inventory trim). Prevents a base Cayenne
+        from matching against Cayenne Turbo GT.
+      - 'medium' / 'low' / None — model-only match (current legacy behavior).
+
+    Returns structure unchanged; adds 'match_strategy' to config_used for UI.
 
     Never raises: returns empty structure on any DB error.
     """
@@ -95,11 +89,50 @@ def find_dealer_matches(db_conn, year, make, model,
     y = int(year)
     y_lo, y_hi = y - year_tol, y + year_tol
 
+    # Trim-similarity gate — only applied when bid's trim_confidence is high.
+    # Extract the first significant word of the bid's trim (lowercase) to
+    # require presence in the dealer_inventory trim. Examples:
+    #   bid trim "Cayenne (base)" → key_word = "cayenne"  (too common, falls
+    #     through to model-only match — correct; base trim has no identifier)
+    #   bid trim "Cayenne Turbo GT" → key_word = "turbo"
+    #   bid trim "Carrera S (Coupe)" → key_word = "carrera" or "s"
+    # Choose the MOST DIFFERENTIATING token: skip the model name itself + common
+    # fillers. If no differentiating token remains, fall back to model match.
+    trim_gate_sql = ''
+    trim_gate_args = []
+    use_trim_gate = str(trim_confidence or '').lower() in ('deterministic', 'high')
+    match_strategy = 'model_only'
+    if use_trim_gate and trim:
+        # Strip parens, split by non-letter, drop the model name + tiny stopwords
+        import re as _re
+        cleaned = _re.sub(r'[()]', ' ', str(trim)).lower()
+        tokens = [t for t in _re.split(r'[^a-z0-9]+', cleaned) if t]
+        stop = {'coupe', 'cabriolet', 'sedan', 'suv', 'base',
+                model_u.lower(), make_u.lower()}
+        diff_tokens = [t for t in tokens if t not in stop and len(t) >= 2]
+        if diff_tokens:
+            # Match any of the differentiating tokens in dealer_inventory.trim
+            trim_gate_sql = (" AND ({})"
+                             .format(" OR ".join(
+                                 ["LOWER(COALESCE(di.trim,'')) LIKE %s"] * len(diff_tokens))))
+            trim_gate_args = [f'%{t}%' for t in diff_tokens]
+            match_strategy = f'trim_tokens:{",".join(diff_tokens)}'
+        else:
+            # Trim reduced to model+stopwords (e.g. "Cayenne (base)") →
+            # explicitly exclude dealer_inventory rows whose trim contains any
+            # premium markers (Turbo, GT, S, AMG, RS) so base doesn't match S.
+            premium_markers = ['turbo', 'gts', 'gt3', 'gt4', ' gt ',
+                               'hybrid', 'amg', ' rs ', 's e-hybrid']
+            trim_gate_sql = (" AND NOT (" + " OR ".join(
+                ["LOWER(COALESCE(di.trim,'')) LIKE %s"] * len(premium_markers)) + ")")
+            trim_gate_args = [f'%{m}%' for m in premium_markers]
+            match_strategy = 'base_trim_exclusion'
+
     try:
         cur = db_conn.cursor()
 
         # ── A. Active listings of like-vehicles at partner dealers ──────────
-        cur.execute("""
+        cur.execute(f"""
             SELECT di.id, di.dealer_id, d.name AS dealer_name, d.city, d.state,
                    di.year, di.make, di.model, di.trim,
                    di.price, di.mileage, di.url, di.photo_url,
@@ -113,9 +146,10 @@ def find_dealer_matches(db_conn, year, make, model,
               AND UPPER(di.make) = %s
               AND UPPER(di.model) = %s
               AND di.year BETWEEN %s AND %s
+              {trim_gate_sql}
             ORDER BY di.first_seen_at ASC
             LIMIT %s
-        """, (make_u, model_u, y_lo, y_hi, max_active))
+        """, tuple([make_u, model_u, y_lo, y_hi] + trim_gate_args + [max_active]))
         active_rows = []
         for r in cur.fetchall():
             d = dict(r)
@@ -137,7 +171,7 @@ def find_dealer_matches(db_conn, year, make, model,
             active_rows.append(d)
 
         # ── B. Recent sales of like-vehicles in last N days ─────────────────
-        cur.execute("""
+        cur.execute(f"""
             SELECT dss.dealer_id, d.name AS dealer_name,
                    di.year, di.make, di.model, di.trim, di.price, di.mileage,
                    dss.detected_at, dss.signal_type, dss.confidence,
@@ -153,9 +187,11 @@ def find_dealer_matches(db_conn, year, make, model,
               AND dss.detected_at > NOW() - (%s || ' days')::interval
               AND dss.confidence >= %s
               AND d.active = TRUE
+              {trim_gate_sql}
             ORDER BY dss.detected_at DESC
             LIMIT %s
-        """, (make_u, model_u, y_lo, y_hi, recent_days, min_conf, max_sales))
+        """, tuple([make_u, model_u, y_lo, y_hi, recent_days, min_conf] +
+                   trim_gate_args + [max_sales]))
         sales_rows = []
         for r in cur.fetchall():
             d = dict(r)
@@ -167,7 +203,12 @@ def find_dealer_matches(db_conn, year, make, model,
             sales_rows.append(d)
 
         # ── C. Pitch-score aggregation per dealer ───────────────────────────
-        cur.execute("""
+        # Trim gate in the CTE uses 'di' alias for both inline subqueries.
+        # The alias `dealer_inventory` in the actives CTE doesn't have 'di'
+        # prefix — need to substitute. For simplicity, only apply gate when
+        # the clause is non-empty.
+        actives_trim_gate = trim_gate_sql.replace('di.trim', 'trim')
+        cur.execute(f"""
             WITH sales AS (
               SELECT dss.dealer_id,
                      COUNT(*) AS sold_count,
@@ -181,6 +222,7 @@ def find_dealer_matches(db_conn, year, make, model,
                 AND di.year BETWEEN %s AND %s
                 AND dss.detected_at > NOW() - (%s || ' days')::interval
                 AND dss.confidence >= %s
+                {trim_gate_sql}
               GROUP BY dss.dealer_id
             ),
             actives AS (
@@ -190,6 +232,7 @@ def find_dealer_matches(db_conn, year, make, model,
                 AND UPPER(model) = %s
                 AND year BETWEEN %s AND %s
                 AND status = 'active'
+                {actives_trim_gate}
               GROUP BY dealer_id
             )
             SELECT d.id AS dealer_id, d.name AS dealer_name, d.city, d.state,
@@ -203,8 +246,10 @@ def find_dealer_matches(db_conn, year, make, model,
             LEFT JOIN actives a ON a.dealer_id = d.id
             WHERE d.active = TRUE
               AND (s.sold_count IS NOT NULL OR a.active_count IS NOT NULL)
-        """, (make_u, model_u, y_lo, y_hi, recent_days, min_conf,
-              make_u, model_u, y_lo, y_hi))
+        """, tuple([make_u, model_u, y_lo, y_hi, recent_days, min_conf] +
+                   trim_gate_args +
+                   [make_u, model_u, y_lo, y_hi] +
+                   trim_gate_args))
         pattern_rows = []
         for r in cur.fetchall():
             d = dict(r)
@@ -248,6 +293,8 @@ def find_dealer_matches(db_conn, year, make, model,
                 'recent_days': recent_days,
                 'min_sold_confidence': min_conf,
                 'pitch_weights': weights,
+                'match_strategy': match_strategy,
+                'trim_confidence': trim_confidence,
             },
         }
     except Exception as e:

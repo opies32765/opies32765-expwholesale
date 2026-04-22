@@ -167,7 +167,16 @@ def vin_check_digit_valid(vin):
     return vin[8] == expected_char
 
 def decode_vin(vin):
-    """Call NHTSA vPIC API and return dict with year/make/model/trim or empty dict."""
+    """Call NHTSA vPIC API and return decoded dict.
+
+    Returns: year, make, model, trim (primary, backward-compatible), plus
+    `trim_alternatives` (list if NHTSA gave ambiguous "A/B/C" trim), `trim_raw`
+    (original NHTSA string), `trim_ambiguous` (bool), and a bunch of extra
+    fields NHTSA populates (series, trim2, body_class, doors, drive_type,
+    engine_model, engine_cylinders, displacement_l, engine_hp, fuel_type,
+    plant_city, plant_country). Callers can use these for richer prompt
+    context when the VDS doesn't encode trim deterministically.
+    """
     if not vin or len(vin) != 17:
         return {}
     try:
@@ -178,30 +187,75 @@ def decode_vin(vin):
         if r.status_code != 200:
             return {}
         items = r.json().get('Results', [])
-        want = {'ModelYear': 'year', 'Model Year': 'year', 'Make': 'make', 'Model': 'model', 'Trim': 'trim'}
-        out = {}
-        for item in items:
-            key = want.get(item.get('Variable'))
-            val = (item.get('Value') or '').strip()
-            if key and val and val != 'null':
-                if key == 'year':
-                    try:
-                        out[key] = int(val)
-                    except ValueError:
-                        pass
-                else:
-                    # NHTSA sometimes returns ambiguous trim alternatives —
-                    # "Trim A / Trim B", "Trim A, Trim B", or "Trim A or Trim B".
-                    # Take the first (base/most-common) option so AccuTrade trim
-                    # picker and AI assessment aren't misled by the alternatives.
-                    for sep in (' / ', ', ', ' or ', '/'):
-                        if sep in val:
-                            val = val.split(sep)[0].strip()
-                            break
-                    out[key] = val
-        return out
     except Exception:
         return {}
+
+    # Map of NHTSA Variable → our output key + coerce
+    SCALAR_MAP = {
+        'Model Year': ('year', 'int'),
+        'ModelYear': ('year', 'int'),
+        'Make': ('make', 'str'),
+        'Model': ('model', 'str'),
+        'Series': ('series', 'str'),
+        'Trim2': ('trim2', 'str'),
+        'Body Class': ('body_class', 'str'),
+        'Doors': ('doors', 'int'),
+        'Drive Type': ('drive_type', 'str'),
+        'Engine Model': ('engine_model', 'str'),
+        'Engine Number of Cylinders': ('engine_cylinders', 'int'),
+        'Displacement (L)': ('displacement_l', 'float'),
+        'Engine Brake (hp) From': ('engine_hp', 'int'),
+        'Fuel Type - Primary': ('fuel_type', 'str'),
+        'Plant City': ('plant_city', 'str'),
+        'Plant Country': ('plant_country', 'str'),
+    }
+
+    out = {}
+    trim_raw = ''
+    for item in items:
+        var = item.get('Variable') or ''
+        val = (item.get('Value') or '').strip()
+        if not val or val.lower() in ('null', 'not applicable'):
+            continue
+        if var == 'Trim':
+            trim_raw = val
+            continue
+        mapping = SCALAR_MAP.get(var)
+        if not mapping:
+            continue
+        key, coerce = mapping
+        try:
+            if coerce == 'int':
+                out[key] = int(float(val))
+            elif coerce == 'float':
+                out[key] = float(val)
+            else:
+                out[key] = val
+        except (ValueError, TypeError):
+            continue
+
+    # Trim handling: NHTSA often returns ambiguous alternatives like
+    # "Base/Big Bend/Badlands/Wildtrak" when the VDS doesn't encode trim
+    # (common on Ford/GM/Chrysler). Preserve alternatives so downstream can
+    # ask Gemini to pick from photos + sticker, AND keep a single `trim`
+    # for backward compat with callers that expect a string.
+    if trim_raw:
+        out['trim_raw'] = trim_raw
+        alternatives = []
+        for sep in (' / ', ', ', ' or ', '/'):
+            if sep in trim_raw:
+                alternatives = [t.strip() for t in trim_raw.split(sep) if t.strip()]
+                break
+        if len(alternatives) >= 2:
+            out['trim'] = alternatives[0]  # backward compat — first option
+            out['trim_alternatives'] = alternatives
+            out['trim_ambiguous'] = True
+        else:
+            out['trim'] = trim_raw
+            out['trim_alternatives'] = []
+            out['trim_ambiguous'] = False
+
+    return out
 
 def dia_vin_lookup(vin):
     """Query DIA database on Contabo 1 for dealer + auction history by VIN. Fast direct DB query."""
@@ -482,6 +536,131 @@ def _google_vision_ocr(file_bytes):
     except Exception as e:
         print(f'Google Vision call failed: {e}')
         return None
+
+
+# ── iPacket canvas-OCR fallback helpers ──────────────────────────────────────
+# When iPacket renders the sticker as <canvas> (pixels, no DOM text), the
+# Trainer worker's regex returns 0 fields. These helpers OCR the screenshot
+# server-side and re-extract MSRP/base/colors/options from the text output.
+
+def _ipacket_screenshot_path(screenshot_field):
+    """Resolve the stored iPacket screenshot reference to an absolute path."""
+    if not screenshot_field:
+        return None
+    s = str(screenshot_field)
+    if s.startswith('/ipacket_reports/'):
+        return os.path.join(IPACKET_REPORTS_DIR, s[len('/ipacket_reports/'):])
+    if os.path.isabs(s):
+        return s
+    return os.path.join(IPACKET_REPORTS_DIR, os.path.basename(s))
+
+
+def _extract_sticker_options(text):
+    """Parse factory option line items from sticker text (OCR or DOM).
+    Mirrors enrich/ipacket.py _extract_options so EW + worker agree."""
+    if not text:
+        return []
+    options = []
+    seen = set()
+    skip_pat = re.compile(
+        r'^\s*('
+        r'TOTAL|SUB[-\s]?TOTAL|GRAND\s+TOTAL|'
+        r'BASE(?!\s+PRICE\s+INCLUDES)|MSRP|SUGGESTED\s+RETAIL|'
+        r'VIN|STOCK|MODEL\s+YEAR|BODY\s+TYPE|'
+        r'EXTERIOR|INTERIOR|PAINT|TRIM\s+COLOR|'
+        r'DESTINATION|DELIVERY|FREIGHT|HANDLING|GAS\s+GUZZLER|'
+        r'MPG|CITY\s+MPG|HWY\s+MPG|COMBINED\s+MPG|'
+        r'ENGINE|TRANSMISSION|DRIVE\s+TYPE|FUEL|'
+        r'WARRANTY|EPA|EMISSIONS|SAFETY|CRASH|'
+        r'STANDARD\s+FEATURES?|STANDARD\s+EQUIPMENT|'
+        r'OPTIONAL\s+EQUIPMENT$|FACTORY\s+OPTIONS?$|ADDITIONAL\s+OPTIONS?$|'
+        r'ASSEMBLED|MADE\s+IN|BUILT\s+IN|'
+        r'PARTS\s+CONTENT|LABOR\s+CONTENT|PARTS\s+AND\s+LABOR|'
+        r'COUNTRY\s+OF\s+ORIGIN|FINAL\s+ASSEMBLY'
+        r')\b',
+        re.I
+    )
+    line_pat = re.compile(
+        r'^\s*'
+        r'([A-Za-z][A-Za-z0-9\'"\-\s/&,.+()%]{3,79}?)'
+        r'\s*[.\s]{1,}\s*'
+        r'\$?\s*(\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d{3,7}(?:\.\d{2})?)'
+        r'\s*$'
+    )
+    for raw_line in text.split('\n'):
+        line = raw_line.strip()
+        if len(line) < 8 or len(line) > 160:
+            continue
+        m = line_pat.match(line)
+        if not m:
+            continue
+        name = m.group(1).strip().rstrip('.').strip()
+        if len(name) < 4:
+            continue
+        if skip_pat.match(name):
+            continue
+        alpha_chars = sum(1 for c in name if c.isalpha())
+        if alpha_chars < 4:
+            continue
+        try:
+            price = int(float(m.group(2).replace(',', '')))
+        except ValueError:
+            continue
+        if not (50 <= price <= 100_000):
+            continue
+        key = (name.upper(), price)
+        if key in seen:
+            continue
+        seen.add(key)
+        options.append({'name': name, 'price': price})
+    return options
+
+
+def _parse_sticker_text(text):
+    """Regex-extract MSRP / base / colors / options from OCR or DOM sticker text."""
+    result = {
+        'total_msrp': None, 'base_price': None,
+        'exterior_color': None, 'interior_color': None,
+        'options': [],
+    }
+    if not text or len(text) < 50:
+        return result
+
+    for pat in (r'TOTAL\s+(?:PREDICTED\s+)?PRICE\s*[:$]?\s*\$?\s*([\d,]+)',
+                r'TOTAL\s+MSRP\s*[:$]?\s*\$?\s*([\d,]+)',
+                r'(?<!BASE\s)MSRP\s*[:$]?\s*\$?\s*([\d,]+)'):
+        m = re.search(pat, text, re.I)
+        if m:
+            try:
+                v = int(m.group(1).replace(',', ''))
+                if 1000 < v < 10_000_000:
+                    result['total_msrp'] = v
+                    break
+            except ValueError:
+                pass
+
+    for pat in (r'BASE\s+SUGGESTED\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)',
+                r'BASE\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)',
+                r'BASE\s+MSRP\s*[:$]?\s*\$?\s*([\d,]+)'):
+        m = re.search(pat, text, re.I)
+        if m:
+            try:
+                v = int(m.group(1).replace(',', ''))
+                if 1000 < v < 10_000_000:
+                    result['base_price'] = v
+                    break
+            except ValueError:
+                pass
+
+    m = re.search(r'EXTERIOR(?:\s+COLOR)?[:\s]+([A-Za-z][A-Za-z\s/-]{2,40})', text, re.I)
+    if m:
+        result['exterior_color'] = m.group(1).strip().split('\n')[0].strip()
+    m = re.search(r'INTERIOR(?:\s+COLOR)?[:\s]+([A-Za-z][A-Za-z\s/-]{2,40})', text, re.I)
+    if m:
+        result['interior_color'] = m.group(1).strip().split('\n')[0].strip()
+
+    result['options'] = _extract_sticker_options(text)
+    return result
 
 
 def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
@@ -1407,6 +1586,7 @@ def _run_assessment(bid_id):
                 _dm_db,
                 bid.get('year'), bid.get('make'), bid.get('model'),
                 trim=bid.get('trim'),
+                trim_confidence=bid.get('trim_confidence') or 'low',
                 config=_ai_cfg,
             )
             _dm_db.close()
@@ -1429,6 +1609,43 @@ def _run_assessment(bid_id):
     ctx = f"VEHICLE: {vehicle_str}\nVIN: {bid['vin'] or 'N/A'}\nMileage: {mileage_str}\n"
     ctx += f"Color: {bid['color'] or 'N/A'}\nAsking price: {asking_str}\n"
     ctx += f"Notes / condition: {bid['notes'] or 'None'}\n"
+
+    # VIN decoder details — NHTSA vPIC returns ~130 fields. When the bid's
+    # trim is ambiguous (Ford/GM/Chrysler etc. don't encode trim in VDS),
+    # this block tells Gemini explicitly what the alternatives are so it can
+    # pick the right one from photos + iPacket sticker + Carfax.
+    if bid.get('vin') and len(bid['vin']) == 17:
+        try:
+            _nhtsa = decode_vin(bid['vin']) or {}
+            if _nhtsa:
+                ctx += "\nVIN DECODER DETAILS (NHTSA vPIC):\n"
+                if _nhtsa.get('trim_ambiguous'):
+                    _alts = _nhtsa.get('trim_alternatives') or []
+                    ctx += (f"  Trim candidates: {' / '.join(_alts)}\n"
+                            f"  (NHTSA cannot distinguish trim from VIN for this "
+                            f"manufacturer — determine actual trim from photos, "
+                            f"iPacket sticker, and Carfax/AutoCheck vehicle descriptions.)\n")
+                elif _nhtsa.get('trim'):
+                    ctx += f"  Trim: {_nhtsa['trim']}\n"
+                for _k, _label in [
+                    ('series', 'Series'),
+                    ('trim2', 'Trim detail'),
+                    ('body_class', 'Body class'),
+                    ('doors', 'Doors'),
+                    ('drive_type', 'Drive type'),
+                    ('engine_model', 'Engine model'),
+                    ('engine_cylinders', 'Cylinders'),
+                    ('displacement_l', 'Displacement (L)'),
+                    ('engine_hp', 'Horsepower'),
+                    ('fuel_type', 'Fuel type'),
+                    ('plant_city', 'Plant city'),
+                    ('plant_country', 'Plant country'),
+                ]:
+                    _v = _nhtsa.get(_k)
+                    if _v not in (None, '', 'null'):
+                        ctx += f"  {_label}: {_v}\n"
+        except Exception as _vin_err:
+            print(f'[ASSESS] VIN details error for bid {bid_id}: {_vin_err}')
 
     # vAuto book values section
     if vauto:
@@ -1569,6 +1786,46 @@ def _run_assessment(bid_id):
     except Exception:
         pass
 
+    # iPacket canvas-rendered sticker fallback — when DOM parsing came up empty
+    # but a screenshot exists, OCR the image. Regex-extract what we can
+    # (structured), and ALSO stash the raw OCR text for Gemini to read directly
+    # (Monroney stickers are column-laid-out; OCR interleaves labels/values
+    # in ways regex can't reliably stitch back together, but Gemini handles it).
+    if ipacket and ipacket.get('screenshot'):
+        _raw = ipacket.get('raw_json') or {}
+        if not isinstance(_raw, dict):
+            _raw = {}
+        _opts_existing = _raw.get('options') or []
+        _dom_empty = (not ipacket.get('total_msrp')) and not _opts_existing
+        if _dom_empty:
+            try:
+                _path = _ipacket_screenshot_path(ipacket['screenshot'])
+                if _path and os.path.exists(_path):
+                    with open(_path, 'rb') as _f:
+                        _img_bytes = _f.read()
+                    _ocr_text = _google_vision_ocr(_img_bytes)
+                    if _ocr_text:
+                        _parsed = _parse_sticker_text(_ocr_text)
+                        _opts = _parsed.get('options', [])
+                        print(f'[ASSESS] Bid {bid_id} iPacket canvas-OCR fallback: '
+                              f'regex MSRP=${_parsed.get("total_msrp") or 0:,} · '
+                              f'{len(_opts)} options · {len(_ocr_text)} raw chars → '
+                              f'dumping OCR text to prompt')
+                        for _k in ('total_msrp', 'base_price',
+                                   'exterior_color', 'interior_color'):
+                                if not ipacket.get(_k) and _parsed.get(_k):
+                                    ipacket[_k] = _parsed[_k]
+                        if _opts:
+                            _raw['options'] = _opts
+                        # Always stash the raw OCR (capped) so Gemini gets full
+                        # context even when regex stitching fails on Monroney
+                        # column layouts.
+                        _raw['_ocr_fallback'] = True
+                        _raw['_ocr_text'] = _ocr_text[:4000]
+                        ipacket['raw_json'] = _raw
+            except Exception as _ocr_err:
+                print(f'iPacket canvas-OCR error for bid {bid_id}: {_ocr_err}')
+
     # AccuTrade values section
     if accutrade:
         ctx += "\nACCUTRADE VALUES:\n"
@@ -1598,6 +1855,34 @@ def _run_assessment(bid_id):
             ctx += f"  Exterior: {ipacket['exterior_color']}\n"
         if ipacket.get('interior_color'):
             ctx += f"  Interior: {ipacket['interior_color']}\n"
+        # Factory option line items — structured text beats relying on vision OCR
+        # of the sticker image. Worker populates raw_json.options = [{name,price},...]
+        _raw = ipacket.get('raw_json') or {}
+        _opts = _raw.get('options') if isinstance(_raw, dict) else None
+        if _opts:
+            _opt_total = 0
+            ctx += "  Factory Options:\n"
+            for _o in _opts[:40]:  # cap to avoid context blow-out on outlier stickers
+                try:
+                    _n = str(_o.get('name', '')).strip()
+                    _p = int(_o.get('price') or 0)
+                    if _n and _p > 0:
+                        ctx += f"    - {_n}: ${_p:,}\n"
+                        _opt_total += _p
+                except (ValueError, TypeError):
+                    continue
+            if _opt_total > 0:
+                ctx += f"  Options Total (extracted): ${_opt_total:,}\n"
+        # Canvas-rendered Monroney stickers: regex can't stitch column-laid-out
+        # labels/values back together. Dump the raw OCR text so Gemini can parse
+        # it holistically (it has the image too, this is belt-and-suspenders).
+        if isinstance(_raw, dict) and _raw.get('_ocr_fallback') and _raw.get('_ocr_text'):
+            ctx += ("  Sticker (raw OCR — text order may interleave columns;\n"
+                    "    cross-reference with the iPacket screenshot image):\n")
+            for _line in str(_raw['_ocr_text']).split('\n'):
+                _ln = _line.strip()
+                if _ln:
+                    ctx += f"    {_ln}\n"
 
     # Tesla factory data section
     if tesla_data:
@@ -1837,6 +2122,30 @@ IMPORTANT — read Carfax/AutoCheck carefully and be FACTUALLY ACCURATE:
 - Quote the exact damage description from the report when possible
 - Do NOT invent facts not in the reports
 
+RECALLS ARE NEUTRAL — DO NOT DEDUCT FOR THEM:
+- Open safety recalls are repaired for FREE by any franchise dealer of that
+  brand (Ford recalls at any Ford dealer, GM at any GM dealer, etc.). They
+  are NOT a cost to the buyer and NOT a condition defect.
+- Do not mention open recalls as a negative factor in reasoning.
+- Do not apply any downward adjustment for recall count.
+- Only mention recalls if a specific recall is UNUSUALLY severe AND explicitly
+  described in the reports as "do not drive" or safety-grounding (rare).
+
+"MILEAGE INCONSISTENCY" ≠ ODOMETER ROLLBACK:
+- Carfax/AutoCheck flag any single data-entry typo (e.g. a clerk entering
+  "75,323" instead of "7,532" at a service visit) as a "Mileage Inconsistency".
+  The report itself says this is probably a "clerical error" or "typographical
+  error" — not fraud. Treat it as NEUTRAL by default.
+- Only treat as a real negative when BOTH of these are true:
+  (a) Multiple declining odometer readings across several independent reports
+      (actual rollback pattern — not a one-off typo), AND
+  (b) An odometer BRAND ("Not Actual Miles", "Exceeds Mechanical Limits") that
+      originated from a DMV TITLE RECORD — not from a one-line auction-clerk
+      flag on a single auction run.
+- If the reports explicitly say "may be a clerical error" or "could be due to
+  typographical, clerical, or rounding error" — those are the reports telling
+  you it's noise. Do not deduct for it.
+
 Return ONLY this JSON (no markdown fences, no commentary):
 {{
   "adjustment_pct": -5.0,
@@ -2034,8 +2343,107 @@ def _auto_assess(bid_id):
                 print(f'Auto-assess complete for bid {bid_id}: buy_price={result.get("buy_price")}')
             else:
                 print(f'Auto-assess failed for bid {bid_id}: {result.get("error")}')
+                _release_assessment_claim(bid_id)
     except Exception as e:
         print(f'Auto-assess error for bid {bid_id}: {e}')
+        _release_assessment_claim(bid_id)
+
+
+# ── Assessment-fire coordinator ──────────────────────────────────────────────
+# Assessment should only fire ONCE all three book-value sources (vAuto,
+# AccuTrade, iPacket) have posted — otherwise the baseline is computed from
+# ~30-40% of the intended weight and skews toward whichever sources arrived
+# first. A 90s fallback timer fires the assessment with whatever's present
+# in case a worker is dead or the VIN is ultra-rare.
+
+def _release_assessment_claim(bid_id):
+    """Reset ai_assessed_at to NULL so re-run is possible after failure."""
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("UPDATE bids SET ai_assessed_at=NULL WHERE id=%s AND ai_assessment IS NULL", (bid_id,))
+        db.commit()
+        db.close()
+    except Exception as e:
+        print(f'release_assessment_claim error: {e}', flush=True)
+
+
+def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
+    """Decide whether to fire AI assessment for a bid.
+
+    require_all=True  → needs vauto, accutrade, AND ipacket rows present.
+    require_all=False → timeout fallback; fires if vauto alone is present.
+
+    Atomic claim via UPDATE ai_assessed_at prevents double-fire across the
+    gunicorn worker pool. ai_assessment (narrative text) stays NULL until
+    _run_assessment completes, so UI polling via /api/assess-status is
+    unaffected by the claim.
+    """
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("SELECT ai_assessed_at, ai_assessment FROM bids WHERE id=%s", (bid_id,))
+        row = cur.fetchone()
+        if not row:
+            db.close()
+            return False
+        # If already claimed or assessed, bail
+        if row['ai_assessed_at'] is not None:
+            db.close()
+            return False
+
+        cur.execute("SELECT 1 FROM vauto_lookups WHERE bid_id=%s LIMIT 1", (bid_id,))
+        has_vauto = cur.fetchone() is not None
+        cur.execute("SELECT 1 FROM accutrade_lookups WHERE bid_id=%s LIMIT 1", (bid_id,))
+        has_accu = cur.fetchone() is not None
+        cur.execute("SELECT 1 FROM ipacket_lookups WHERE bid_id=%s LIMIT 1", (bid_id,))
+        has_ipkt = cur.fetchone() is not None
+
+        if require_all:
+            ready = has_vauto and has_accu and has_ipkt
+        else:
+            ready = has_vauto  # fallback: fire with what we have
+
+        if not ready:
+            print(f'assess-gate bid={bid_id} source={source} require_all={require_all} '
+                  f'vauto={has_vauto} accu={has_accu} ipkt={has_ipkt} → wait', flush=True)
+            db.close()
+            return False
+
+        # Atomic claim — only one caller wins
+        cur.execute("""
+            UPDATE bids SET ai_assessed_at=NOW()
+            WHERE id=%s AND ai_assessed_at IS NULL
+            RETURNING id
+        """, (bid_id,))
+        claimed = cur.fetchone() is not None
+        db.commit()
+        db.close()
+        if not claimed:
+            return False
+    except Exception as e:
+        print(f'_maybe_fire_assessment error bid={bid_id}: {e}', flush=True)
+        return False
+
+    print(f'assess-fire bid={bid_id} source={source} require_all={require_all} '
+          f'vauto={has_vauto} accu={has_accu} ipkt={has_ipkt}', flush=True)
+    threading.Thread(target=_auto_assess, args=(bid_id,), daemon=True).start()
+    return True
+
+
+def _schedule_assessment_fallback(bid_id, delay_sec=90):
+    """Arm a one-shot timer that fires assessment with require_all=False if
+    AccuTrade/iPacket never landed. Safe to call on every vAuto submit —
+    the gate bails if assessment already fired."""
+    try:
+        t = threading.Timer(
+            delay_sec,
+            lambda: _maybe_fire_assessment(bid_id, require_all=False, source='fallback_timer')
+        )
+        t.daemon = True
+        t.start()
+    except Exception as e:
+        print(f'schedule_fallback error bid={bid_id}: {e}', flush=True)
 
 
 @app.route('/api/bid/<int:bid_id>/assess', methods=['POST'])
@@ -3354,6 +3762,74 @@ _ensure_ai_config_table()
 _ensure_ai_assessment_log_table()
 
 
+# ── VDS unknown log (feeds future table extensions for premium brands) ──────
+def _ensure_vds_unknown_table():
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS vds_unknown (
+                id SERIAL PRIMARY KEY,
+                vin VARCHAR(17) UNIQUE NOT NULL,
+                wmi VARCHAR(3),
+                vds_slice VARCHAR(5),
+                year INTEGER,
+                make TEXT,
+                model TEXT,
+                suggested_trim TEXT,
+                resolved BOOLEAN DEFAULT FALSE,
+                first_seen_at TIMESTAMP DEFAULT NOW(),
+                last_seen_at  TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_vds_unknown_wmi ON vds_unknown(wmi, resolved)")
+        db.commit()
+        db.close()
+    except Exception as e:
+        print(f'vds_unknown ensure error: {e}', flush=True)
+
+
+_ensure_vds_unknown_table()
+
+
+# ── bids.trim_confidence column (added manually as postgres superuser) ────
+# expuser doesn't have ALTER on bids. Ran once via:
+#   sudo -u postgres psql -d expwholesale -c \
+#     "ALTER TABLE bids ADD COLUMN IF NOT EXISTS trim_confidence TEXT DEFAULT 'low';"
+
+
+# ── Precise VIN decoder wrapper — wraps decode_vin with VDS tables + auto.dev
+def decode_vin_precise_wrapper(vin):
+    """Calls vin_precise.decode_vin_precise passing our NHTSA decoder + a
+    fresh DB conn for vds_unknown logging. Returns dict with trim_confidence.
+    Caller should update bids.trim_confidence if desired."""
+    try:
+        from vin_precise import decode_vin_precise
+    except Exception as e:
+        print(f'vin_precise import failed: {e}', flush=True)
+        # Graceful fallback — wrap the NHTSA decoder in the precise-shape dict
+        b = decode_vin(vin) or {}
+        t = b.get('trim')
+        return {
+            'vin': vin, 'year': b.get('year'), 'make': b.get('make'),
+            'model': b.get('model'), 'trim': t, 'style': None,
+            'trim_confidence': 'medium' if t else 'low', 'source': 'nhtsa',
+        }
+    try:
+        _db = get_db()
+        r = decode_vin_precise(vin, nhtsa_decoder=decode_vin, db_conn=_db)
+        _db.close()
+        return r
+    except Exception as e:
+        print(f'decode_vin_precise_wrapper error: {e}', flush=True)
+        b = decode_vin(vin) or {}
+        return {
+            'vin': vin, 'year': b.get('year'), 'make': b.get('make'),
+            'model': b.get('model'), 'trim': b.get('trim'), 'style': None,
+            'trim_confidence': 'low', 'source': 'error',
+        }
+
+
 # ── AI Levers admin API ─────────────────────────────────────────────────────
 
 def _validate_ai_config(cfg):
@@ -3690,9 +4166,10 @@ def api_vauto_submit():
     db.commit()
     db.close()
 
-    # Auto-trigger AI assessment in background
-    # NOTE: _live_scan_comps disabled for now — comps feature paused
-    threading.Thread(target=_auto_assess, args=(bid_id,), daemon=True).start()
+    # Gate assessment on all three books (vAuto+AccuTrade+iPacket) — fire now
+    # if they're all present, otherwise arm a 90s fallback timer.
+    _maybe_fire_assessment(bid_id, require_all=True, source='vauto')
+    _schedule_assessment_fallback(bid_id, delay_sec=90)
 
     return jsonify({'ok': True, 'bid_id': bid_id})
 
@@ -3851,6 +4328,7 @@ def api_accutrade_submit():
     ))
     db.commit()
     db.close()
+    _maybe_fire_assessment(bid_id, require_all=True, source='accutrade')
     return jsonify({'ok': True, 'bid_id': bid_id})
 
 
@@ -3950,6 +4428,7 @@ def api_ipacket_submit():
     ))
     db.commit()
     db.close()
+    _maybe_fire_assessment(bid_id, require_all=True, source='ipacket')
     return jsonify({'ok': True, 'bid_id': bid_id})
 
 
@@ -4573,10 +5052,12 @@ def api_bid_quick_drop():
     if manual_vin_valid:
         vin = manual_vin
 
-    # Get NHTSA decode if we have a VIN (supplements/overrides Carfax data)
+    # Get precise VIN decode (VDS table → auto.dev → NHTSA cascade)
     nhtsa = {}
+    _trim_confidence = 'low'
     if vin and len(vin) == 17 and VIN_RE.match(vin):
-        nhtsa = decode_vin(vin)
+        nhtsa = decode_vin_precise_wrapper(vin) or {}
+        _trim_confidence = nhtsa.get('trim_confidence', 'low')
 
     year = nhtsa.get('year') or extracted.get('year')
     make = nhtsa.get('make') or extracted.get('make')
@@ -4649,11 +5130,11 @@ def api_bid_quick_drop():
 
     cur.execute("""
         INSERT INTO bids (contact_id, phone, vin, year, make, model, trim, mileage, color,
-                          raw_message, asking_price, notes, status)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new') RETURNING id
+                          raw_message, asking_price, notes, status, trim_confidence)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new', %s) RETURNING id
     """, (contact_id, rep_phone, vin if vin and len(vin) == 17 else None,
           year, make, model, trim, mileage, color,
-          raw_message, asking_price, full_notes))
+          raw_message, asking_price, full_notes, _trim_confidence))
     bid_id = cur.fetchone()['id']
 
     # Save photos

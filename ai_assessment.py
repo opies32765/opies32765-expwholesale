@@ -60,13 +60,18 @@ def classify_bucket(bid: dict, config: dict) -> dict:
 
         min_price = rules.get('min_asking_price')
         if min_price is not None:
-            # If asking_price unknown, use KBB/MMR/rBook as a proxy later — for
-            # now, only match if asking_price is known and >= min.
-            try:
-                if asking is None or float(asking) < float(min_price):
-                    continue
-            except (ValueError, TypeError):
-                continue
+            # If asking_price is UNKNOWN (None), treat as an acceptable pass
+            # for this rule — the other rules (makes, model_patterns) are the
+            # primary signal. This prevents a Porsche / BMW / etc. with no
+            # asking_price from falling out of highline bucket just because
+            # the client didn't type a price on the Quick Drop form.
+            if asking is not None:
+                try:
+                    if float(asking) < float(min_price):
+                        continue
+                except (ValueError, TypeError):
+                    # Asking price unparseable — treat as unknown, don't disqualify
+                    pass
 
         min_y = rules.get('min_year')
         if min_y is not None:
