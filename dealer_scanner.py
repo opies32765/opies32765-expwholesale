@@ -19,7 +19,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
 
@@ -36,7 +36,12 @@ USER_AGENT = os.environ.get('DEALER_SCANNER_UA',
 REQUEST_TIMEOUT = 20
 CRAWL_MAX_URLS = 2000          # hard cap per scan
 SOLD_CONFIDENCE_THRESHOLD = 0.6
-MISSING_SCANS_BEFORE_PROBE = 2
+# Probe the URL on the FIRST missing scan. Previously was 2 (wait 2 scans
+# before even checking URL), which meant sitemap-only dealers (WordPress)
+# needed 3 days of history before a sold ever fired — unacceptable for
+# high-turnover lots. A URL 404 or page-text "sold" is authoritative on its
+# own; combining with missing_from_scan=0.25 easily clears the 0.60 threshold.
+MISSING_SCANS_BEFORE_PROBE = 1
 COLORS_PER_SCAN = int(os.environ.get('DEALER_COLORS_PER_SCAN', '10'))  # small burst on scan; continuous worker handles the rest
 
 # VDP (vehicle detail page) hints — matching one of these + more path segments means it's a VDP
@@ -235,6 +240,12 @@ def _normalize_aan_vehicle(item, base_url):
     if img:
         photos.append(img)
 
+    # AAN's image_link includes a Unix-timestamp suffix (e.g.,
+    # "...-1533753420.jpg") that = when the dealer first uploaded the photo,
+    # which is a strong proxy for vehicle intake. Mine it here since the AAN
+    # path skips extract_vehicle (which handles this for universal dealers).
+    source_added_at = _extract_photo_timestamp(photos)
+
     out = {
         'vin': vin,
         'year': year,
@@ -250,6 +261,7 @@ def _normalize_aan_vehicle(item, base_url):
         'url': url,
         'photo_url': img,
         'photos': photos,
+        'source_added_at': source_added_at,
         # Direct signals from the API — sold/pending flags we can trust.
         '_aan_sold': sold_raw == 'sold',
         '_aan_pending': pending,
@@ -260,9 +272,70 @@ def _normalize_aan_vehicle(item, base_url):
     return out
 
 
+# ── Dealer.com platform extractor ───────────────────────────────────────
+# EW only sources pre-owned inventory — /new-inventory/ and /new/ VDPs are
+# excluded at both the list-page and VDP-regex level so we don't waste a
+# FlareSolverr fetch on new vehicles we can't wholesale.
+DEALERCOM_LIST_PATHS = (
+    '/used-inventory/index.htm',
+    '/certified-inventory/index.htm',
+    '/pre-owned-inventory/index.htm',
+    '/certified-pre-owned-inventory/index.htm',
+    '/featured-vehicles/index.htm',
+)
+DEALERCOM_VDP_RE = re.compile(
+    r'href=["\']([^"\']*/(?:used|certified|preowned|pre-owned)/[^"\']+\.htm)["\']',
+    re.I,
+)
+
+
+def discover_via_dealer_com(base_url, sess, max_pages_per_list=10, per_page=24):
+    """Dealer.com-specific VDP discovery.
+
+    Sitemap on dealer.com only exposes list pages, not per-VDP URLs. This walks
+    /new-inventory, /used-inventory, /certified-inventory, /pre-owned-inventory,
+    and /featured-vehicles — paginating via ?start=N — and extracts VDP URLs
+    matching /new/, /used/, /certified/, or /preowned/ paths ending in .htm.
+
+    Fetches go through whatever tier the scanner set (usually FlareSolverr for
+    dealer.com because Akamai blocks plain curl).
+    """
+    found = set()
+    netloc = urlparse(base_url).netloc.lower().lstrip('www.')
+
+    for path in DEALERCOM_LIST_PATHS:
+        prev_count = -1
+        for page_idx in range(max_pages_per_list):
+            start = page_idx * per_page
+            url = urljoin(base_url, path)
+            if start:
+                url += f'?start={start}'
+            code, _f, body = fetch(url, sess)
+            if code != 200 or not body:
+                break
+            page_hits = set()
+            for m in DEALERCOM_VDP_RE.finditer(body):
+                link = urljoin(base_url, m.group(1)).split('#', 1)[0]
+                if urlparse(link).netloc.lower().lstrip('www.') != netloc:
+                    continue
+                page_hits.add(link)
+            if not page_hits:
+                break  # empty page — past the last pagination slot
+            new_count = len(found | page_hits)
+            if new_count == prev_count:
+                break  # this page added nothing — duplicate / cycled
+            found |= page_hits
+            prev_count = new_count
+            if len(found) >= CRAWL_MAX_URLS:
+                return sorted(found)[:CRAWL_MAX_URLS]
+    return sorted(found)
+
+
 # ── URL discovery ────────────────────────────────────────────────────────
 def discover_via_sitemap(base_url, sess):
-    """Pull inventory URLs from sitemap(s). Returns list of URLs (deduped)."""
+    """Pull inventory URLs from sitemap(s). Returns list of URLs (deduped).
+    Side effect: populates _SITEMAP_LASTMOD[url] with the <lastmod> value per URL
+    so extract_vehicle can fall back to it if JSON-LD has no datePosted."""
     found = set()
     sitemap_urls = [
         urljoin(base_url, '/sitemap.xml'),
@@ -291,14 +364,26 @@ def discover_via_sitemap(base_url, sess):
                     if loc.text:
                         queue.append(loc.text.strip())
             else:
-                for loc in root.findall('.//loc'):
-                    if loc.text:
-                        u = loc.text.strip()
-                        if _looks_like_vehicle_url(u):
-                            found.add(u)
+                for url_el in root.findall('.//url'):
+                    loc_el = url_el.find('loc')
+                    if loc_el is None or not loc_el.text:
+                        continue
+                    u = loc_el.text.strip()
+                    if not _looks_like_vehicle_url(u):
+                        continue
+                    found.add(u)
+                    lastmod_el = url_el.find('lastmod')
+                    if lastmod_el is not None and lastmod_el.text:
+                        _SITEMAP_LASTMOD[u] = lastmod_el.text.strip()
         except ET.ParseError:
             continue
     return sorted(found)
+
+
+# Per-scan cache of sitemap <lastmod> values — feeds extract_vehicle when the
+# dealer's JSON-LD doesn't include a datePosted. Cleared at start of each scan
+# via DealerScanner.run() → _SITEMAP_LASTMOD.clear().
+_SITEMAP_LASTMOD = {}
 
 
 def discover_via_crawl(base_url, sess, max_pages=15):
@@ -413,6 +498,38 @@ def extract_vehicle(url, html):
         for k, v in parsed.items():
             if v and not out.get(k):
                 out[k] = v
+
+    # 3b) Photo-filename timestamps — most reliable signal for dealers whose
+    #      JSON-LD is stale-reset (TXT Charlie / WordPress auto-regen) or
+    #      absent (Marino / AAN). Photo upload time ≈ vehicle-intake time.
+    #      Free to parse — no image download needed.
+    if not out.get('source_added_at'):
+        photo_pool = list(out.get('photos') or [])
+        if out.get('photo_url') and out['photo_url'] not in photo_pool:
+            photo_pool.append(out['photo_url'])
+        for m in re.finditer(r'https?://[^\s"\'<>]+\.(?:jpe?g|webp|png)',
+                             (html or ''), re.I):
+            u = m.group(0)
+            if u not in photo_pool:
+                photo_pool.append(u)
+            if len(photo_pool) > 30:
+                break
+        ts = _extract_photo_timestamp(photo_pool)
+        if ts:
+            out['source_added_at'] = ts
+
+    # 3c) Sitemap <lastmod> as fallback when JSON-LD didn't provide a date
+    if not out.get('source_added_at'):
+        lm = _SITEMAP_LASTMOD.get(url)
+        if lm:
+            out['source_added_at'] = lm
+
+    # 3d) VDP page text fallback — "47 days on our lot", "In stock since Jan 15",
+    #      "Listed 3 weeks ago", etc. Only runs when we still have no timestamp.
+    if not out.get('source_added_at'):
+        ts = _extract_days_on_lot_from_text(html)
+        if ts:
+            out['source_added_at'] = ts
 
     # 4) OpenGraph photo + HTML gallery fallback
     og_image = _meta(html, 'og:image')
@@ -676,7 +793,235 @@ def _parse_vehicle_node(node):
     elif isinstance(img, str):
         v['photo_url'] = img
         v['photos'] = [img]
+    # Source-added timestamp — dealer's own "date added to inventory" field.
+    # Check JSON-LD's datePosted / datePublished / dateAdded in that order.
+    # Returned as ISO string; upsert_vehicle parses to TIMESTAMPTZ.
+    for k in ('datePosted', 'datePublished', 'dateAdded', 'dateCreated'):
+        val = node.get(k)
+        if val and isinstance(val, str) and len(val) >= 10:
+            v['source_added_at'] = val
+            break
     return v if v else None
+
+
+# ── VDP page-text date extractor ────────────────────────────────────────
+# Patterns in priority order — first match wins.
+# Anchored to specific phrases to avoid matching "30 days warranty" etc.
+_DAYS_ON_LOT_RE = re.compile(
+    r'(?P<n>\d{1,4})\s*(?:days?|d)\s+'
+    r'(?:on\s+(?:our\s+|the\s+)?lot|in\s+(?:our\s+)?(?:stock|inventory)|on\s+(?:our\s+)?market)',
+    re.I,
+)
+_WEEKS_ON_LOT_RE = re.compile(
+    r'(?P<n>\d{1,3})\s*(?:weeks?|wks?)\s+(?:on\s+(?:our\s+|the\s+)?lot|in\s+(?:our\s+)?(?:stock|inventory))',
+    re.I,
+)
+_LISTED_DAYS_AGO_RE = re.compile(
+    r'(?:listed|posted|added|arrived|in\s+stock)\s+(?P<n>\d{1,4})\s*(?:days?|d)\s+ago',
+    re.I,
+)
+_LISTED_WEEKS_AGO_RE = re.compile(
+    r'(?:listed|posted|added|arrived|in\s+stock)\s+(?P<n>\d{1,3})\s*(?:weeks?|wks?)\s+ago',
+    re.I,
+)
+# "In stock since Jan 15, 2026" / "Added on 01/15/2026" / "Arrived 2026-01-15"
+_DATE_AFTER_KW_RE = re.compile(
+    r'(?:in[- ]stock\s+since|available\s+since|added\s+on|added|listed\s+on|listed|posted\s+on|posted'
+    r'|arrived\s+on|arrived|stock\s+date|date\s+added|date\s+listed|date\s+posted)'
+    r'[\s:]*[:\-]?\s*'
+    r'(?P<d>'
+      r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}'                           # 01/15/2026 or 1-15-26
+      r'|\d{4}-\d{2}-\d{2}'                                       # 2026-01-15
+      r'|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+\d{2,4}'  # Jan 15, 2026
+      r'|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{2,4}'    # 15 Jan 2026
+    r')',
+    re.I,
+)
+
+_MONTH_MAP = {
+    'jan': 1, 'january': 1, 'feb': 2, 'february': 2, 'mar': 3, 'march': 3,
+    'apr': 4, 'april': 4, 'may': 5, 'jun': 6, 'june': 6,
+    'jul': 7, 'july': 7, 'aug': 8, 'august': 8, 'sep': 9, 'sept': 9, 'september': 9,
+    'oct': 10, 'october': 10, 'nov': 11, 'november': 11, 'dec': 12, 'december': 12,
+}
+
+
+def _parse_human_date(s):
+    """Parse common US date formats into 'YYYY-MM-DD' or None.
+    Handles: 01/15/2026 · 1-15-26 · 2026-01-15 · Jan 15, 2026 · 15 Jan 2026"""
+    if not s:
+        return None
+    s = s.strip().lower()
+    # ISO
+    m = re.match(r'^(\d{4})-(\d{1,2})-(\d{1,2})$', s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            return f'{y:04d}-{mo:02d}-{d:02d}'
+    # MM/DD/YY or MM/DD/YYYY or MM-DD-YY
+    m = re.match(r'^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$', s)
+    if m:
+        mo, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if y < 100:
+            y += 2000 if y < 70 else 1900
+        if 1 <= mo <= 12 and 1 <= d <= 31 and 1990 <= y <= 2100:
+            return f'{y:04d}-{mo:02d}-{d:02d}'
+    # Month name first: Jan 15, 2026
+    m = re.match(r'^([a-z]+)\s+(\d{1,2}),?\s+(\d{2,4})$', s)
+    if m:
+        mo = _MONTH_MAP.get(m.group(1))
+        if mo:
+            d, y = int(m.group(2)), int(m.group(3))
+            if y < 100:
+                y += 2000 if y < 70 else 1900
+            if 1 <= d <= 31 and 1990 <= y <= 2100:
+                return f'{y:04d}-{mo:02d}-{d:02d}'
+    # Day first: 15 Jan 2026
+    m = re.match(r'^(\d{1,2})\s+([a-z]+)\s+(\d{2,4})$', s)
+    if m:
+        mo = _MONTH_MAP.get(m.group(2))
+        if mo:
+            d, y = int(m.group(1)), int(m.group(3))
+            if y < 100:
+                y += 2000 if y < 70 else 1900
+            if 1 <= d <= 31 and 1990 <= y <= 2100:
+                return f'{y:04d}-{mo:02d}-{d:02d}'
+    return None
+
+
+def _strip_html_for_text(html):
+    """Strip tags + collapse whitespace. Used only for date-mining so we don't
+    parse the full document — rough is fine."""
+    if not html:
+        return ''
+    txt = re.sub(r'<script[\s\S]*?</script>', ' ', html, flags=re.I)
+    txt = re.sub(r'<style[\s\S]*?</style>', ' ', txt, flags=re.I)
+    txt = re.sub(r'<[^>]+>', ' ', txt)
+    txt = re.sub(r'\s+', ' ', txt)
+    return txt
+
+
+# ── Photo-filename timestamp extractor ─────────────────────────────────
+# Dealers stamp upload timestamps into image filenames in two common ways.
+# We mine these because (a) EXIF is usually stripped by image optimizers and
+# (b) the upload time is a much better proxy for "vehicle intake" than any
+# other public signal we've seen.
+_PHOTO_UNIX_TS_RE = re.compile(r'[-_](?P<ts>1[0-9]{9}|2[0-4][0-9]{8})(?:[.-]|$)')
+_PHOTO_YMD_HMS_RE = re.compile(r'(?<!\d)(?P<d>(?:19|20)\d{12})(?!\d)')   # YYYYMMDDHHMMSS
+_PHOTO_YMD_RE     = re.compile(r'(?<!\d)(?P<d>(?:19|20)\d{6})(?!\d)')    # YYYYMMDD
+
+
+def _extract_photo_timestamp(photo_urls):
+    """Recover the earliest 'photo upload' timestamp across all photo URLs.
+    Patterns (tested against every URL):
+      1. Unix epoch: `-1533753420.jpg` → 2018-08-08      [Marino / AAN]
+      2. YYYYMMDDHHMMSS: `-20260421214046.jpg` → Apr 21  [TXT Charlie / WordPress]
+      3. YYYYMMDD: `-20260421.jpg` → Apr 21              [some dealerinspire themes]
+    Returns ISO date string (YYYY-MM-DD) of the earliest parse, or None.
+    We pick the EARLIEST because dealers re-upload photos for touch-ups but
+    the first upload is closest to 'when they took the car in'."""
+    if not photo_urls:
+        return None
+    candidates = []
+    now_ts = datetime.now(timezone.utc).timestamp()
+    floor_ts = datetime(2005, 1, 1, tzinfo=timezone.utc).timestamp()
+    for url in photo_urls:
+        if not url or not isinstance(url, str):
+            continue
+        # 1) Unix epoch
+        for m in _PHOTO_UNIX_TS_RE.finditer(url):
+            try:
+                ts = int(m.group('ts'))
+                if floor_ts <= ts <= now_ts:
+                    candidates.append(datetime.fromtimestamp(ts, tz=timezone.utc))
+            except (ValueError, OSError):
+                pass
+        # 2) YYYYMMDDHHMMSS
+        for m in _PHOTO_YMD_HMS_RE.finditer(url):
+            s = m.group('d')
+            try:
+                dt = datetime.strptime(s, '%Y%m%d%H%M%S').replace(tzinfo=timezone.utc)
+                if floor_ts <= dt.timestamp() <= now_ts + 86400:
+                    candidates.append(dt)
+            except ValueError:
+                pass
+        # 3) Plain YYYYMMDD — only consider if the two above didn't find anything
+        #    (avoid double-counting when a YYYYMMDDHHMMSS also contains YYYYMMDD).
+        if not _PHOTO_UNIX_TS_RE.search(url) and not _PHOTO_YMD_HMS_RE.search(url):
+            for m in _PHOTO_YMD_RE.finditer(url):
+                s = m.group('d')
+                try:
+                    dt = datetime.strptime(s, '%Y%m%d').replace(tzinfo=timezone.utc)
+                    if floor_ts <= dt.timestamp() <= now_ts + 86400:
+                        candidates.append(dt)
+                except ValueError:
+                    pass
+    if not candidates:
+        return None
+    return min(candidates).date().isoformat()
+
+
+def _extract_days_on_lot_from_text(html):
+    """Try to find a dealer-declared listing age in the visible VDP text.
+    Returns ISO timestamp string (YYYY-MM-DD) or None. Order of preference:
+      1. Explicit 'X days on (our) lot / in stock' → NOW() - X days
+      2. 'X weeks on lot' → NOW() - X*7 days
+      3. 'Listed X days ago' / 'Posted X weeks ago' → same math
+      4. 'In stock since <date>' / 'Added on <date>' / 'Stock date: <date>'
+    Returns None on ambiguity — we'd rather fall through to first_seen_at
+    than stamp a wrong date."""
+    if not html:
+        return None
+    text = _strip_html_for_text(html)
+    today = datetime.now(timezone.utc).date()
+
+    m = _DAYS_ON_LOT_RE.search(text)
+    if m:
+        try:
+            n = int(m.group('n'))
+            if 0 <= n <= 3000:  # 8+ years sanity cap
+                d = today - timedelta(days=n)
+                return d.isoformat()
+        except ValueError:
+            pass
+
+    m = _WEEKS_ON_LOT_RE.search(text)
+    if m:
+        try:
+            n = int(m.group('n'))
+            if 0 <= n <= 400:
+                d = today - timedelta(days=n * 7)
+                return d.isoformat()
+        except ValueError:
+            pass
+
+    m = _LISTED_DAYS_AGO_RE.search(text)
+    if m:
+        try:
+            n = int(m.group('n'))
+            if 0 <= n <= 3000:
+                d = today - timedelta(days=n)
+                return d.isoformat()
+        except ValueError:
+            pass
+
+    m = _LISTED_WEEKS_AGO_RE.search(text)
+    if m:
+        try:
+            n = int(m.group('n'))
+            if 0 <= n <= 400:
+                d = today - timedelta(days=n * 7)
+                return d.isoformat()
+        except ValueError:
+            pass
+
+    m = _DATE_AFTER_KW_RE.search(text)
+    if m:
+        parsed = _parse_human_date(m.group('d'))
+        if parsed:
+            return parsed
+
+    return None
 
 
 def _meta(html, prop):
@@ -726,20 +1071,42 @@ def _extract_photos_from_html(html, base_url):
 
 # ── Sold detection ───────────────────────────────────────────────────────
 def probe_sold_signals(url, sess):
-    """Returns a list of signal dicts: [{type, detail, confidence}]."""
+    """Returns a list of signal dicts: [{type, detail, confidence}].
+    Two-tier probe: try the active fetch tier first (free), fall back to
+    direct_proxy (residential IP, ~$0.001) if the server IP gets a transient
+    error OR a 599 redirect-to-internal (e.g., Hostinger/LiteSpeed cache poison
+    that hides a real 404 behind a cached 302). Without this, TXT Charlie's
+    genuinely-sold VDPs came back as 599 → no sold signal fired."""
     signals = []
     if not url:
         return signals
     code, final_url, body = fetch(url, sess)
+    # Retry through residential proxy if our server IP can't see the truth.
+    if code is None or code == 599 or (code and 500 <= code <= 599):
+        try:
+            code2, final_url2, body2 = dealer_fetchers.fetch_direct_proxy(url, sess)
+            if code2 is not None and code2 != 599:
+                code, final_url, body = code2, final_url2, body2
+        except Exception:
+            pass
     if code in (404, 410):
         signals.append({'type': 'url_404', 'detail': f'HTTP {code}', 'confidence': 0.75})
         return signals
     if code is None:
-        # transient error — don't infer sold, let next scan retry
+        # Still transient even through proxy — let next scan retry
         return signals
     if final_url and final_url != url:
-        # redirect — check if final looks like sold/inventory landing page
+        # Redirect — check if final looks like sold/inventory/404 landing page.
+        # Many WordPress dealers (TXT Charlie / Hostinger) redirect sold VDPs
+        # to a custom 404 page that returns HTTP 200 — a "soft 404." We treat
+        # those redirects as strong sold signal (0.75) since the dealer
+        # explicitly removed the listing.
         fp = urlparse(final_url).path.lower()
+        if any(k in fp for k in ('page-404', '/404', 'not-found', 'notfound',
+                                  'inventory-removed', 'no-longer-available')):
+            signals.append({'type': 'url_404', 'detail': f'soft-404 redirect → {final_url}',
+                            'confidence': 0.75})
+            return signals
         if any(k in fp for k in ('sold', 'unavailable', 'inventory', 'search')):
             signals.append({'type': 'url_redirect_sold',
                             'detail': f'{url} -> {final_url}',
@@ -817,6 +1184,7 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
                 photo_url    = COALESCE(%s, photo_url),
                 photos       = COALESCE(%s::jsonb, photos),
                 raw          = %s::jsonb,
+                source_added_at = COALESCE(source_added_at, %s::timestamptz),
                 last_seen_at = NOW(),
                 missing_scans = 0,
                 status       = CASE WHEN status IN ('missing','active') THEN 'active' ELSE status END,
@@ -830,7 +1198,8 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
             last_price, price_drop, price_drop_at,
             new_price, new_price,
             url or None, veh.get('photo_url'), photos_json,
-            raw_json, row['id'],
+            raw_json, veh.get('source_added_at'),
+            row['id'],
         ))
         cur.execute('''INSERT INTO dealer_inventory_history
                          (dealer_id, inventory_id, vin, url, price, mileage, scan_id)
@@ -843,14 +1212,14 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
         cur.execute('''
             INSERT INTO dealer_inventory
                 (dealer_id, vin, year, make, model, trim, ext_color, mileage,
-                 price, url, photo_url, photos, raw)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                 price, url, photo_url, photos, raw, source_added_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::timestamptz)
             RETURNING id
         ''', (
             dealer_id, vin or '', veh.get('year'), veh.get('make'),
             veh.get('model'), veh.get('trim'), veh.get('ext_color'),
             veh.get('mileage'), veh.get('price'), url, veh.get('photo_url'),
-            photos_json, raw_json,
+            photos_json, raw_json, veh.get('source_added_at'),
         ))
         inv_id = cur.fetchone()['id']
         cur.execute('''INSERT INTO dealer_inventory_history
@@ -893,6 +1262,9 @@ class DealerScanner:
     # ─── run ───
     def run(self):
         started = time.time()
+        # Per-scan sitemap-lastmod cache — cleared so stale values from a
+        # previous dealer's scan don't bleed into this one.
+        _SITEMAP_LASTMOD.clear()
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute('''INSERT INTO dealer_scans (dealer_id, status)
                            VALUES (%s, 'running') RETURNING id''', (self.dealer_id,))
@@ -920,8 +1292,13 @@ class DealerScanner:
                 return stats
             platform, method = detect_platform(body or '')
             stats['platform_detected'] = platform
-            # Choose the default tier for this platform (may escalate below)
-            picked = dealer_fetchers.tier_for_platform(platform)
+            # Choose the default tier for this platform (may escalate below).
+            # Dealer-level `preferred_tier` overrides the platform default — used
+            # for hosts with IP-reputation issues (e.g., TXT Charlie's Hostinger
+            # LiteSpeed cache poisons our Contabo IP, serving 302→127.0.0.1 on
+            # random VDPs; pinning to direct_proxy routes via residential IP).
+            picked = (self.dealer.get('preferred_tier') or '').strip() \
+                     or dealer_fetchers.tier_for_platform(platform)
             if picked != _CURRENT_TIER['tier']:
                 _CURRENT_TIER['tier'] = picked
             stats['tier'] = _CURRENT_TIER['tier']
@@ -942,9 +1319,18 @@ class DealerScanner:
             # 3. Universal path: discover + per-VDP extract, with one escalation if
             #    the first pass gets suspiciously low results or high fetch-fail rate.
             def _scan_pass():
-                urls = discover_via_sitemap(self.base_url, self.sess)
-                if len(urls) < 5:
-                    urls = list(set(urls) | set(discover_via_crawl(self.base_url, self.sess)))
+                # Platform-specific discovery first (dealer.com uses /new/, /used/
+                # VDP URL patterns; sitemap only lists category index pages).
+                if platform == 'dealer.com':
+                    urls = discover_via_dealer_com(self.base_url, self.sess)
+                    if len(urls) < 5:
+                        urls = list(set(urls) | set(
+                            discover_via_sitemap(self.base_url, self.sess)))
+                else:
+                    urls = discover_via_sitemap(self.base_url, self.sess)
+                    if len(urls) < 5:
+                        urls = list(set(urls) | set(
+                            discover_via_crawl(self.base_url, self.sess)))
                 urls = urls[:CRAWL_MAX_URLS]
                 fails = 0
                 vehs = []
@@ -961,18 +1347,32 @@ class DealerScanner:
             urls, vehicles, fetch_fail = _scan_pass()
             total_urls = len(urls)
 
-            # Auto-escalate if this tier found essentially nothing
-            should_escalate = (
-                (total_urls >= 10 and len(vehicles) == 0) or
-                (total_urls >= 20 and fetch_fail / max(total_urls, 1) > 0.40)
-            )
-            if should_escalate and dealer_fetchers.flaresolverr_healthy():
+            # Auto-escalate through EVERY remaining tier if this tier found
+            # essentially nothing. `total_urls < 10` covers the case where the
+            # sitemap itself is being blocked / 302'd (TXT Charlie's LiteSpeed
+            # cache poison) — we never got URLs to fetch. We keep climbing:
+            # direct → flaresolverr → direct_proxy → flaresolverr_proxy.
+            # The Hostinger cache poison is IP-specific; routing via DataImpulse
+            # gets us a clean 200 OK where our server IP gets 302→127.0.0.1.
+            # Threshold lowered from 0.40 → 0.20 because IP-cache poisoning
+            # often partials: TXT Charlie scan 26 had 29% per-VDP fail rate
+            # (49/168), missed escalating, falsely marked 51 cars missing.
+            def _needs_escalation():
+                return (
+                    len(vehicles) == 0 or
+                    (total_urls >= 20 and fetch_fail / max(total_urls, 1) > 0.20)
+                )
+            while _needs_escalation():
                 nxt = dealer_fetchers.next_tier(_CURRENT_TIER['tier'])
-                if nxt:
-                    _CURRENT_TIER['tier'] = nxt
-                    stats['tier'] = nxt
-                    urls, vehicles, fetch_fail = _scan_pass()
-                    total_urls = len(urls)
+                if not nxt:
+                    break
+                # flaresolverr-family tiers require the container healthy
+                if 'flaresolverr' in nxt and not dealer_fetchers.flaresolverr_healthy():
+                    break
+                _CURRENT_TIER['tier'] = nxt
+                stats['tier'] = nxt
+                urls, vehicles, fetch_fail = _scan_pass()
+                total_urls = len(urls)
 
             stats['vehicles_found'] = len(vehicles)
 
@@ -984,6 +1384,30 @@ class DealerScanner:
                 self._update_dealer(platform, method, scan_id, stats['error'][:200], stats['tier'])
                 self._finalize(scan_id, stats, started)
                 return stats
+
+            # Baseline sanity guard: zero vehicles found but dealer was healthy
+            # yesterday = entry point (sitemap/homepage) is broken. Skip reconcile.
+            # Caught TXT Charlie scan 13 (2026-04-22) that flipped 155 cars to
+            # missing after a 4-second empty-sitemap fetch slipped past the
+            # fetch-failure guard (which requires total_urls>=20 to trigger).
+            if stats['vehicles_found'] == 0:
+                with get_conn() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) AS n FROM dealer_inventory "
+                        "WHERE dealer_id=%s AND status='active'",
+                        (self.dealer_id,)
+                    )
+                    row = cur.fetchone()
+                    prior_active = (row['n'] if isinstance(row, dict) else row[0]) if row else 0
+                if prior_active >= 20:
+                    stats['status'] = 'blocked'
+                    stats['error'] = (
+                        f'zero vehicles found but {prior_active} were active — '
+                        f'entry point likely broken, scan aborted, inventory preserved'
+                    )
+                    self._update_dealer(platform, method, scan_id, stats['error'][:200], stats['tier'])
+                    self._finalize(scan_id, stats, started)
+                    return stats
 
             # 4. Upsert + reconcile + color detect
             scanned_vins, scanned_urls = set(), set()

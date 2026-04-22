@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS dealers (
     phone           TEXT,
     notes           TEXT,
     active          BOOLEAN DEFAULT TRUE,
+    preferred_tier  TEXT,                     -- pin a scrape tier per-dealer (e.g. 'direct_proxy' for hosts with IP-reputation issues). NULL = auto by platform.
     last_scan_at    TIMESTAMPTZ,
     last_scan_status TEXT,                   -- ok | blocked | error:<msg>
     last_scan_id    BIGINT,                  -- points at dealer_scans row

@@ -315,8 +315,12 @@ a.veh-link:hover{text-decoration:underline}
               {% endif %}
             </td>
             <td class="num">
-              {% set age = v.first_seen_at|age_days %}
-              <span class="age-txt {% if age|int >= 90 %}stale{% elif age|int >= 60 %}aged{% endif %}">{{ age }}d</span>
+              {% set age = v|best_age_days %}
+              {% set src = v|age_source %}
+              <span class="age-txt {% if age|int >= 90 %}stale{% elif age|int >= 60 %}aged{% endif %}"
+                    title="{% if src == 'dealer' %}Days on lot — from dealer's own timestamp ({{ v.source_added_at }}){% else %}Days since our scanner first saw it ({{ v.first_seen_at }}){% endif %}">
+                {{ age }}d{% if src == 'dealer' %}<span style="color:#7dd3fc;font-size:9px;margin-left:2px" title="Dealer-declared">•</span>{% endif %}
+              </span>
             </td>
             <td>{% if v.url %}<a class="veh-link" href="{{ v.url }}" target="_blank" rel="noopener">↗</a>{% endif %}</td>
           </tr>
@@ -355,7 +359,10 @@ a.veh-link:hover{text-decoration:underline}
       <tbody>
       {% for v in sold %}
         <tr>
-          <td class="trim-txt">{{ v.year or '' }} {{ v.make or '' }} {{ v.model or '' }} {{ v.trim or '' }}</td>
+          <td class="trim-txt">
+            {% if v.url %}<a href="{{ v.url }}" target="_blank" rel="noopener" style="color:#7dd3fc;text-decoration:none" title="Open original listing to verify">{{ v.year or '' }} {{ v.make or '' }} {{ v.model or '' }} {{ v.trim or '' }} <span style="opacity:0.7;font-size:10px">↗</span></a>
+            {% else %}{{ v.year or '' }} {{ v.make or '' }} {{ v.model or '' }} {{ v.trim or '' }}{% endif %}
+          </td>
           <td class="color-txt">{{ v.ext_color or '—' }}</td>
           <td><span class="vin">{{ v.vin or '—' }}</span></td>
           <td class="num price-txt">{{ v.price|money }}</td>

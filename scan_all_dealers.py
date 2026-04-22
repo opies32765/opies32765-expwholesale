@@ -10,11 +10,63 @@ Usage:
     venv/bin/python scan_all_dealers.py --dealer-id 1,2   # specific subset
 """
 import argparse
+import os
 import sys
 import time
 from datetime import datetime
 
+import requests
+
 import dealer_scanner
+
+# Reuse Orlando AI Solutions Telegram bot (@OrlandoAISolutionsBOT → Oscar's chat).
+# Tokens live in /opt/orlando-chatbot/.env on Contabo 2; we read once at startup
+# so the cron run is self-contained without needing systemd env additions.
+TG_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN') or '8639130743:AAHobws_MAaShpjxaHC0kXMuHZwbebtuYFM'
+TG_CHAT  = os.environ.get('TELEGRAM_CHAT_ID')   or '7985611488'
+
+
+def tg_send(text):
+    """Fire-and-forget Telegram notification. Never raises — we don't want a TG
+    glitch to break the scan run."""
+    if not (TG_TOKEN and TG_CHAT):
+        return
+    try:
+        requests.post(
+            f'https://api.telegram.org/bot{TG_TOKEN}/sendMessage',
+            json={'chat_id': TG_CHAT, 'text': text, 'parse_mode': 'HTML',
+                  'disable_web_page_preview': True},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def _status_emoji(status):
+    return {'ok': '🌅', 'blocked': '🚧', 'error': '🛑'}.get(status, '❔')
+
+
+def _scan_summary_line(name, stats):
+    """One-line dealer summary for the Telegram digest."""
+    status = stats.get('status', '?')
+    em = _status_emoji(status)
+    found = stats.get('vehicles_found', 0)
+    new = stats.get('new_count', 0)
+    sold = stats.get('sold_count', 0)
+    missing = stats.get('missing_count', 0)
+    drops = stats.get('price_drop_count', 0)
+    tier = stats.get('tier', '?')
+    if status == 'ok':
+        bits = [f'<b>{name}</b>', f'{found} found']
+        if new:     bits.append(f'+{new} new')
+        if sold:    bits.append(f'{sold} sold')
+        if missing: bits.append(f'{missing} missing')
+        if drops:   bits.append(f'{drops} price-drop')
+        return f'{em} ' + ' · '.join(bits)
+    if status == 'blocked':
+        err = (stats.get('error') or 'blocked').strip()[:140]
+        return f'{em} <b>{name}</b> · BLOCKED via {tier} — inventory preserved\n   <i>{err}</i>'
+    return f'{em} <b>{name}</b> · {status.upper()} ({tier}) — {(stats.get("error") or "")[:140]}'
 
 
 def main():
@@ -37,6 +89,7 @@ def main():
     totals = {'new': 0, 'sold': 0, 'missing': 0, 'colors': 0,
               'price_drops': 0, 'ok': 0, 'blocked': 0, 'error': 0}
     started = time.time()
+    summary_lines = []
 
     for d in dealers:
         d_start = time.time()
@@ -58,9 +111,11 @@ def main():
                   flush=True)
             if stats.get('error'):
                 print(f'  error: {stats["error"]}', flush=True)
+            summary_lines.append(_scan_summary_line(d['name'], stats))
         except Exception as e:
             totals['error'] += 1
             print(f'  EXCEPTION: {type(e).__name__}: {e}', flush=True)
+            summary_lines.append(f'🛑 <b>{d["name"]}</b> · EXCEPTION: {type(e).__name__}')
 
     elapsed = int(time.time() - started)
     print(f'\n[{datetime.now().isoformat(timespec="seconds")}] scan_all complete in {elapsed}s',
@@ -69,6 +124,18 @@ def main():
           f' drops={totals["price_drops"]} colors={totals["colors"]}', flush=True)
     print(f'  outcomes: ok={totals.get("ok",0)} blocked={totals.get("blocked",0)}'
           f' error={totals.get("error",0)}', flush=True)
+
+    # Telegram digest — one line per dealer + a totals footer.
+    if summary_lines:
+        digest = ['🌅 <b>EW Dealer Scan</b> · ' + datetime.now().strftime('%a %b %d, %I:%M %p ET')]
+        digest.extend(summary_lines)
+        digest.append('')
+        digest.append(
+            f'<i>Σ {totals["ok"]} ok · {totals["blocked"]} blocked · {totals["error"]} err'
+            f' · +{totals["new"]} new · {totals["sold"]} sold · {totals["missing"]} missing'
+            f' · {totals["price_drops"]} drops · {elapsed}s</i>'
+        )
+        tg_send('\n'.join(digest))
 
 
 if __name__ == '__main__':

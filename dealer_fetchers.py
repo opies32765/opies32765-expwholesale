@@ -127,7 +127,15 @@ def fetch_direct_proxy(url, sess, method='GET'):
 
 
 # ── Router ──────────────────────────────────────────────────────────────
-TIER_ORDER = ('direct', 'flaresolverr', 'flaresolverr_proxy')
+# Escalation chain (cheapest/fastest → most expensive/slowest):
+#   direct              → our Contabo IP, plain HTTP
+#   flaresolverr        → Contabo IP, headless Chromium (defeats JS challenges)
+#   flaresolverr_proxy  → residential IP via FlareSolverr (defeats IP-reputation + JS)
+#   direct_proxy        → residential IP, plain HTTP (defeats IP-reputation ONLY,
+#                         but ~10× faster than flaresolverr_proxy — ideal when the
+#                         site is merely cache-poisoning our server IP, e.g.,
+#                         TXT Charlie's Hostinger/LiteSpeed 302 → 127.0.0.1)
+TIER_ORDER = ('direct', 'flaresolverr', 'direct_proxy', 'flaresolverr_proxy')
 
 _FETCHERS = {
     'direct': fetch_direct,

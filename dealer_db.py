@@ -262,8 +262,39 @@ def age_days_filter(fs):
         return '—'
     if hasattr(fs, 'tzinfo') and fs.tzinfo is None:
         fs = fs.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
-    return (now - fs).days
+    # Calendar-day diff in ET (dealer local). Seen today = 0, yesterday = 1.
+    # Using (now - fs).days truncates to full 24h windows, so a car first seen
+    # yesterday afternoon would show "0 d" until 24h elapsed — wrong mental model.
+    et = timezone(timedelta(hours=-4))  # EDT; swap to -5 in winter if it matters
+    return max(0, (datetime.now(et).date() - fs.astimezone(et).date()).days)
+
+
+@bp.app_template_filter('best_age_days')
+def best_age_days_filter(row):
+    """Prefer dealer-declared source_added_at (JSON-LD datePosted / sitemap
+    <lastmod>) over our scanner-observed first_seen_at. Gives accurate 'days on
+    lot' even for dealers we just onboarded with cars that are already weeks old."""
+    if not row:
+        return '—'
+    # Accept dict-like rows OR plain datetimes (back-compat when callers pass fs directly)
+    if hasattr(row, 'get'):
+        fs = row.get('source_added_at') or row.get('first_seen_at')
+    else:
+        fs = row
+    return age_days_filter(fs)
+
+
+@bp.app_template_filter('age_source')
+def age_source_filter(row):
+    """Label hint so the UI can show whether the age comes from the dealer's
+    own timestamp or our first-seen. Returns 'dealer' | 'scan' | ''."""
+    if not row or not hasattr(row, 'get'):
+        return ''
+    if row.get('source_added_at'):
+        return 'dealer'
+    if row.get('first_seen_at'):
+        return 'scan'
+    return ''
 
 
 @bp.app_template_filter('money')
