@@ -50,6 +50,10 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
 
 /* Bid # */
 .bid-num{font-size:15px;font-weight:700;color:#7a9bb5;font-family:monospace}
+.bid-time{font-size:12px;color:#5a7a96;margin-top:3px;white-space:nowrap}
+
+/* Whole row clickable */
+tbody tr{cursor:pointer}
 
 /* Passed row */
 tr.status-passed td{background:rgba(239,68,68,.06)}
@@ -219,14 +223,13 @@ tr:last-child td{border-bottom:none}
         <th>Bid</th>
         <th>Photos</th>
         <th>Status</th>
-        <th>Received</th>
         <th></th>
       </tr>
     </thead>
     <tbody>
       {% for bid in bids %}
       <tr data-id="{{ bid.id }}" data-created="{{ bid.created_at.isoformat() if bid.created_at else '' }}" data-unread="{{ '1' if bid.has_unread else '0' }}" class="status-{{ bid.status }}">
-        <td><div class="bid-num">{% if bid.has_unread %}<span class="unread-star" title="Unread message">&#9733;</span>{% endif %}#{{ bid.id }}</div></td>
+        <td><div class="bid-num">{% if bid.has_unread %}<span class="unread-star" title="Unread message">&#9733;</span>{% endif %}#{{ bid.id }}</div><div class="bid-time">{{ time_ago(bid.created_at) }}</div></td>
         <td>
           {% if bid.phone.startswith('field:') %}
             <div class="contact-name">{{ bid.contact_name or 'Field Rep' }}</div>
@@ -275,7 +278,6 @@ tr:last-child td{border-bottom:none}
           {% else %}—{% endif %}
         </td>
         <td><span class="badge badge-{{ bid.status }}">{{ bid.status.replace('_',' ') }}</span></td>
-        <td class="time-col">{{ time_ago(bid.created_at) }}</td>
         <td><a href="/bid/{{ bid.id }}" class="btn-view">View →</a></td>
       </tr>
       {% endfor %}
@@ -377,8 +379,8 @@ function renderRow(b, pc) {
   const aiPrice  = b.ai_price    ? `<div style="font-size:15px;font-weight:700;color:#a78bfa">$${Math.round(b.ai_price).toLocaleString()}</div>` : '—';
   const bidSent  = b.bid_amount  ? `<div style="font-size:15px;font-weight:700;color:#34d399">$${Math.round(b.bid_amount).toLocaleString()}</div>` : '—';
   const star = b.has_unread ? '<span class="unread-star" title="Unread message">&#9733;</span>' : '';
-  return `<tr data-id="${b.id}" class="${rowClass}" data-unread="${b.has_unread?1:0}">
-    <td><div class="bid-num">${star}#${b.id}</div></td>
+  return `<tr data-id="${b.id}" data-created="${b.created_at||''}" class="${rowClass}" data-unread="${b.has_unread?1:0}">
+    <td><div class="bid-num">${star}#${b.id}</div><div class="bid-time">${timeAgo(b.created_at)}</div></td>
     <td>${contactCell}</td>
     <td>${vehicle}</td>
     <td><div class="msg-preview">${stripFieldMeta(b.raw_message)}</div></td>
@@ -387,7 +389,6 @@ function renderRow(b, pc) {
     <td>${bidSent}</td>
     <td>${photos}</td>
     <td>${statusBadge(b.status)}</td>
-    <td class="time-col">${timeAgo(b.created_at)}</td>
     <td><a href="/bid/${b.id}" class="btn-view">View →</a></td>
   </tr>`;
 }
@@ -520,15 +521,25 @@ async function pollActiveReps() {
 }
 pollActiveReps();
 setInterval(pollActiveReps, 10000);
-// Update timestamps every minute
+// Update timestamps every minute (now under bid# instead of a separate column)
 setInterval(() => {
-  document.querySelectorAll('.time-col').forEach(el => {
+  document.querySelectorAll('.bid-time').forEach(el => {
     const row = el.closest('tr');
     if (!row) return;
     const bid = row.dataset.created;
     if (bid) el.textContent = timeAgo(bid);
   });
 }, 60000);
+
+// Whole-row click → open bid detail. Skips clicks on interactive children
+// (buttons, links, stars) so middle-click-on-View still opens new tab.
+document.querySelector('tbody')?.addEventListener('click', (e) => {
+  if (e.target.closest('a, button, input, select, .unread-star')) return;
+  const row = e.target.closest('tr[data-id]');
+  if (row && row.dataset.id) {
+    window.location.href = `/bid/${row.dataset.id}`;
+  }
+});
 </script>
 </body>
 </html>

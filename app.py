@@ -2202,6 +2202,24 @@ RECALLS ARE NEUTRAL — DO NOT DEDUCT FOR THEM:
   typographical, clerical, or rounding error" — those are the reports telling
   you it's noise. Do not deduct for it.
 
+PRIOR OWNER COUNT IS NEUTRAL FOR WHOLESALE:
+- We are pricing WHOLESALE BUY, not retail sale. Retail buyers prefer 1-2
+  owner cars; that preference is NOT our pricing concern.
+- "Owner count" on Carfax/AutoCheck includes fleet registrations, lease
+  returns, dealer-to-dealer transfers, and short-term commercial
+  registrations — not just retail consumer owners. A 2021 vehicle with
+  4 listed owners has commonly just passed through lease-return → auction →
+  dealer → auction → dealer networks, which is normal wholesale flow.
+- Do NOT apply a downward adjustment for owner count alone.
+- Do NOT mention "N owners on a YYYY-year-old vehicle" as a negative factor.
+- The ONLY time owner history matters is when paired with specific red flags:
+  (a) Lemon-law buyback branded on the title, OR
+  (b) An unusually short ownership period (<60 days) suggesting a problematic
+      flip due to undisclosed defects, OR
+  (c) Gaps in ownership suggesting theft recovery, flood history, or salvage
+      reconstruction. These show up as separate title brands — rely on those,
+      not the raw owner count.
+
 Return ONLY this JSON (no markdown fences, no commentary):
 {{
   "adjustment_pct": -5.0,
