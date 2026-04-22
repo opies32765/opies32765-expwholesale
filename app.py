@@ -1669,6 +1669,62 @@ def _run_assessment(bid_id):
         if title:
             ctx += f"  Title Status: {title}\n"
 
+        # vAuto "Like Vehicles" auction comps — actual sold transactions.
+        # Strongest single pricing signal: real hammer prices on similar cars
+        # at similar miles in recent weeks. Render as table + compute the
+        # mileage-banded median so Gemini has a direct market-median anchor.
+        _comps = vauto.get('vauto_comps') or []
+        if _comps and isinstance(_comps, list):
+            # Find comps within ±20k miles of the bid (tighter market signal)
+            _bid_miles = None
+            try:
+                _bid_miles = int(bid.get('mileage') or 0) or None
+            except (ValueError, TypeError):
+                pass
+            _banded = []
+            if _bid_miles:
+                for c in _comps:
+                    try:
+                        _m = int(c.get('odometer') or 0)
+                        if _m and abs(_m - _bid_miles) <= 20000:
+                            _banded.append(c)
+                    except (ValueError, TypeError):
+                        continue
+
+            ctx += f"\nvAUTO LIKE-VEHICLE AUCTION COMPS ({len(_comps)} recent sales):\n"
+            for c in _comps[:12]:
+                try:
+                    _p = int(c.get('sale_price') or 0)
+                    _m = int(c.get('odometer') or 0)
+                    _d = c.get('date_sold') or '?'
+                    _cn = c.get('condition')
+                    _et = c.get('engine_trans') or ''
+                    _col = c.get('color') or ''
+                    _auc = c.get('auction') or ''
+                    _line = (f"  {_d} — ${_p:,} — {_m:,} mi · cond {_cn} · "
+                             f"{_et} · {_col} · {_auc}")
+                    ctx += _line + "\n"
+                except (ValueError, TypeError):
+                    continue
+
+            # Summary stats + mileage-banded median
+            try:
+                _prices = sorted(int(c.get('sale_price') or 0)
+                                 for c in _comps if c.get('sale_price'))
+                if _prices:
+                    _med = _prices[len(_prices)//2]
+                    _mean = sum(_prices) // len(_prices)
+                    ctx += (f"  → All-comps median ${_med:,} · "
+                            f"mean ${_mean:,} · range ${_prices[0]:,}-${_prices[-1]:,}\n")
+                if _banded and _bid_miles:
+                    _bp = sorted(int(c.get('sale_price') or 0)
+                                 for c in _banded if c.get('sale_price'))
+                    _bmed = _bp[len(_bp)//2]
+                    ctx += (f"  → Within ±20k miles of bid ({_bid_miles:,} mi): "
+                            f"{len(_banded)} comps, median ${_bmed:,}\n")
+            except Exception:
+                pass
+
     # Market check
     mc = bid.get('market_check') or {}
     if mc:
