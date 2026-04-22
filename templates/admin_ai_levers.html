@@ -37,6 +37,27 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
 .bucket-desc{font-size:11px;color:#7a9bb5;line-height:1.4}
 .bucket-rules{background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:8px 10px;font-size:11px;color:#94a3b8;font-family:monospace;line-height:1.5;word-break:break-word;max-height:100px;overflow-y:auto}
 
+/* Editable rules panel */
+.rules-editor{background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.rules-editor-head{font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-bottom:2px}
+.rule-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:28px}
+.rule-row-label{font-size:10px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.6px;min-width:70px;flex:0 0 auto}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:3px 7px;background:#1e3a5f;border:1px solid rgba(59,130,246,.35);border-radius:4px;font-size:11px;color:#93c5fd;font-family:monospace;font-weight:600;letter-spacing:.3px}
+.chip.warn{background:rgba(251,191,36,.1);border-color:rgba(251,191,36,.3);color:#fbbf24}
+.chip.warn::after{content:'⚠';margin-left:2px;font-size:10px}
+.chip-x{cursor:pointer;color:#64748b;font-weight:700;font-size:13px;line-height:1;padding:0 1px}
+.chip-x:hover{color:#ef4444}
+.chip-input{background:transparent;border:1px dashed #334155;border-radius:4px;padding:3px 7px;font-size:11px;color:#e2e8f0;font-family:monospace;font-weight:600;min-width:100px;max-width:160px;letter-spacing:.3px}
+.chip-input::placeholder{color:#475569;font-style:italic}
+.chip-input:focus{outline:none;border-color:#3b82f6;border-style:solid;background:#0b1220}
+.rule-num{background:#0b1220;border:1px solid #1e293b;border-radius:4px;padding:3px 6px;font-size:11px;color:#e2e8f0;font-family:monospace;width:80px;text-align:right}
+.rule-num:focus{outline:none;border-color:#3b82f6}
+.rule-toggle{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#a8c0d6;cursor:pointer;user-select:none}
+.rule-toggle input{cursor:pointer;accent-color:#3b82f6}
+.rule-toggle input:disabled{cursor:not-allowed;opacity:.4}
+.rule-toggle input:disabled + span{opacity:.4}
+.rule-sep{color:#475569;font-size:11px;padding:0 2px}
+
 .weight-row{display:flex;align-items:center;gap:10px}
 .weight-label{flex:1;font-size:12px;color:#a8c0d6;font-family:monospace}
 .weight-slider{flex:1;height:4px;background:#1e293b;border-radius:2px;-webkit-appearance:none;appearance:none;outline:none}
@@ -275,46 +296,212 @@ let workingConfig = JSON.parse(JSON.stringify(INITIAL_CONFIG));
 function renderBuckets() {
   const grid = document.getElementById('buckets-grid');
   grid.innerHTML = '';
+  const lastIdx = workingConfig.buckets.length - 1;
+
   workingConfig.buckets.forEach((bucket, bIdx) => {
+    if (!bucket.rules) bucket.rules = {};
+    const rules = bucket.rules;
+    const isLast = bIdx === lastIdx;
+
     const card = document.createElement('div');
     card.className = 'bucket-card';
     card.dataset.idx = bIdx;
 
-    const rulesStr = JSON.stringify(bucket.rules || {}, null, 0).slice(0, 400);
-
     card.innerHTML = `
       <div class="bucket-head">
         <div>
-          <div class="bucket-title">${bucket.display_name || bucket.name}</div>
-          <div class="bucket-desc">${bucket.description || ''}</div>
+          <div class="bucket-title">${escapeHtml(bucket.display_name || bucket.name)}</div>
+          <div class="bucket-desc">${escapeHtml(bucket.description || '')}</div>
         </div>
         <div class="bucket-sum" data-idx="${bIdx}">--</div>
       </div>
-      <div class="bucket-rules">${rulesStr}</div>
+      <div class="rules-editor">
+        <div class="rules-editor-head">Classification rules</div>
+        <div class="rule-row" data-field="makes">
+          <span class="rule-row-label">Makes</span>
+        </div>
+        <div class="rule-row" data-field="model_patterns">
+          <span class="rule-row-label">Models</span>
+        </div>
+        <div class="rule-row">
+          <span class="rule-row-label">Min asking</span>
+          <input type="number" class="rule-num" data-field="min_asking_price" placeholder="—"
+                 value="${rules.min_asking_price ?? ''}" min="0" step="500">
+          <span class="rule-row-label" style="margin-left:12px">Year range</span>
+          <input type="number" class="rule-num" data-field="min_year" placeholder="min"
+                 value="${rules.min_year ?? ''}" min="1900" max="2100" style="width:70px">
+          <span class="rule-sep">–</span>
+          <input type="number" class="rule-num" data-field="max_year" placeholder="max"
+                 value="${rules.max_year ?? ''}" min="1900" max="2100" style="width:70px">
+        </div>
+        <div class="rule-row">
+          <label class="rule-toggle" title="${isLast ? 'Required on the last bucket — matches anything' : 'Only the last bucket can be the catch-all'}">
+            <input type="checkbox" data-field="catch_all" ${rules.catch_all ? 'checked' : ''} ${isLast ? '' : 'disabled'}>
+            <span>Catch-all (matches any vehicle)</span>
+          </label>
+        </div>
+      </div>
       <div class="weights-container"></div>
     `;
 
+    // Render chips for makes and model_patterns
+    renderChips(card, bIdx, 'makes', rules.makes || []);
+    renderChips(card, bIdx, 'model_patterns', rules.model_patterns || []);
+
+    // Render weight sliders
     const weightsEl = card.querySelector('.weights-container');
     for (const [src, w] of Object.entries(bucket.weights || {})) {
-      const pct = Math.round(w * 1000) / 10;  // one decimal
+      const pct = Math.round(w * 1000) / 10;
       const row = document.createElement('div');
       row.className = 'weight-row';
       const label = WEIGHT_LABELS[src] || src;
       row.innerHTML = `
-        <span class="weight-label">${label}</span>
+        <span class="weight-label">${escapeHtml(label)}</span>
         <input type="range" class="weight-slider" min="0" max="100" step="1" value="${pct}" data-bucket="${bIdx}" data-src="${src}">
         <input type="number" class="weight-input" min="0" max="100" step="0.5" value="${pct}" data-bucket="${bIdx}" data-src="${src}">
       `;
       weightsEl.appendChild(row);
     }
+
     grid.appendChild(card);
   });
 
-  // Wire up change listeners
+  // Wire up listeners
   document.querySelectorAll('.weight-slider, .weight-input').forEach(el => {
     el.addEventListener('input', onWeightChange);
   });
+  document.querySelectorAll('.rule-num').forEach(el => {
+    el.addEventListener('input', onRuleNumChange);
+  });
+  document.querySelectorAll('[data-field="catch_all"]').forEach(el => {
+    el.addEventListener('change', onCatchAllChange);
+  });
   updateAllSums();
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, c => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+  ));
+}
+
+// ─── Chip (tag-list) editing ───────────────────────────────────────────
+function renderChips(card, bIdx, field, values) {
+  const row = card.querySelector(`.rule-row[data-field="${field}"]`);
+  // Remove any previously-rendered chips/inputs, keep the label
+  Array.from(row.children).forEach(n => {
+    if (!n.classList.contains('rule-row-label')) n.remove();
+  });
+
+  // Build the "uppercase make in earlier bucket" set for conflict detection
+  const earlierMakes = new Set();
+  if (field === 'makes') {
+    for (let i = 0; i < bIdx; i++) {
+      const otherRules = workingConfig.buckets[i].rules || {};
+      const otherMakes = otherRules.makes || [];
+      if ((otherRules.catch_all) || (otherRules.makes || []).length === 0) {
+        // earlier bucket is catch_all or has no makes rule — it'd match first regardless
+        // but only flag if it's NOT filtered by other rules; simplest: skip conflict logic here
+      }
+      otherMakes.forEach(m => earlierMakes.add(String(m).toUpperCase()));
+    }
+  }
+
+  values.forEach((v, vIdx) => {
+    const chip = document.createElement('span');
+    const upper = String(v).toUpperCase();
+    const isConflict = field === 'makes' && earlierMakes.has(upper);
+    chip.className = 'chip' + (isConflict ? ' warn' : '');
+    if (isConflict) {
+      chip.title = 'Also in an earlier bucket — only the first match fires, so this one never runs.';
+    }
+    chip.innerHTML = `${escapeHtml(v)} <span class="chip-x" data-bucket="${bIdx}" data-field="${field}" data-idx="${vIdx}">×</span>`;
+    row.appendChild(chip);
+  });
+
+  const input = document.createElement('input');
+  input.className = 'chip-input';
+  input.dataset.bucket = bIdx;
+  input.dataset.field = field;
+  input.placeholder = field === 'makes' ? '+ add make' : '+ add substring';
+  input.addEventListener('keydown', onChipInputKey);
+  input.addEventListener('blur', onChipInputBlur);
+  row.appendChild(input);
+
+  // Remove-chip listeners (delegation would be cleaner but this works per re-render)
+  row.querySelectorAll('.chip-x').forEach(x => {
+    x.addEventListener('click', onChipRemove);
+  });
+}
+
+function onChipInputKey(e) {
+  if (e.key === 'Enter' || e.key === ',') {
+    e.preventDefault();
+    commitChipInput(e.target);
+  } else if (e.key === 'Backspace' && !e.target.value) {
+    // Backspace on empty input removes the last chip
+    const bIdx = +e.target.dataset.bucket;
+    const field = e.target.dataset.field;
+    const arr = workingConfig.buckets[bIdx].rules[field];
+    if (Array.isArray(arr) && arr.length) {
+      arr.pop();
+      renderBuckets();
+    }
+  }
+}
+
+function onChipInputBlur(e) {
+  if (e.target.value.trim()) commitChipInput(e.target);
+}
+
+function commitChipInput(input) {
+  const raw = (input.value || '').trim();
+  if (!raw) return;
+  const bIdx = +input.dataset.bucket;
+  const field = input.dataset.field;
+  const bucket = workingConfig.buckets[bIdx];
+  if (!bucket.rules[field]) bucket.rules[field] = [];
+  // Normalize: uppercase for makes (matches classify_bucket); keep model_patterns as-is
+  const val = field === 'makes' ? raw.toUpperCase() : raw;
+  if (!bucket.rules[field].some(v => String(v).toUpperCase() === val.toUpperCase())) {
+    bucket.rules[field].push(val);
+  }
+  input.value = '';
+  renderBuckets();
+  // Refocus the same input after re-render
+  const newInput = document.querySelector(
+    `.chip-input[data-bucket="${bIdx}"][data-field="${field}"]`
+  );
+  if (newInput) newInput.focus();
+}
+
+function onChipRemove(e) {
+  const bIdx = +e.target.dataset.bucket;
+  const field = e.target.dataset.field;
+  const idx = +e.target.dataset.idx;
+  const arr = workingConfig.buckets[bIdx].rules[field];
+  if (Array.isArray(arr)) {
+    arr.splice(idx, 1);
+    if (arr.length === 0) delete workingConfig.buckets[bIdx].rules[field];
+  }
+  renderBuckets();
+}
+
+function onRuleNumChange(e) {
+  const bIdx = +e.target.closest('.bucket-card').dataset.idx;
+  const field = e.target.dataset.field;
+  const raw = e.target.value;
+  if (raw === '' || raw === null) {
+    delete workingConfig.buckets[bIdx].rules[field];
+  } else {
+    const n = Number(raw);
+    if (Number.isFinite(n)) workingConfig.buckets[bIdx].rules[field] = n;
+  }
+}
+
+function onCatchAllChange(e) {
+  const bIdx = +e.target.closest('.bucket-card').dataset.idx;
+  workingConfig.buckets[bIdx].rules.catch_all = !!e.target.checked;
 }
 
 function onWeightChange(e) {
