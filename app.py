@@ -2028,6 +2028,7 @@ def _run_assessment(bid_id):
 
     # ── Load Carfax/AutoCheck: OCR to TEXT (avoids Gemini hallucinating details) ─
     report_count = 0
+    max_history_odometer = 0   # highest mileage reading we've seen in Carfax/AutoCheck
     if vauto:
         for report_field, label in [('carfax_screenshot', 'CARFAX REPORT'), ('autocheck_screenshot', 'AUTOCHECK REPORT')]:
             report_path = vauto.get(report_field)
@@ -2049,6 +2050,16 @@ def _run_assessment(bid_id):
                         clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
                         ctx += f"\n--- {label} (OCR text) ---\n{clean_text}\n"
                         report_count += 1
+                        # Track the highest odometer reading in the OCR text so
+                        # we can flag rollback / listing-understatement after
+                        # both reports are processed.
+                        for mm in re.finditer(r'(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(?:mi|miles)\b', clean_text, re.I):
+                            try:
+                                n = int(mm.group(1).replace(',', ''))
+                                if 100 <= n <= 999_999 and n > max_history_odometer:
+                                    max_history_odometer = n
+                            except ValueError:
+                                pass
                     else:
                         # Fallback to image if OCR fails
                         content.append({'type': 'text', 'text': f'\n--- {label} (screenshot fallback) ---'})
@@ -2061,31 +2072,50 @@ def _run_assessment(bid_id):
             except Exception as e:
                 print(f'assess report load error ({label}): {e}')
 
-    # ── Load AccuTrade screenshot ───────────────────────────────────────────
+    # ── Odometer sanity check (after Carfax + AutoCheck OCR) ───────────────
+    # Compare the highest odometer reading seen in history-report OCR vs. the
+    # listing mileage. If history > listing by >1,000 mi, flag it. Common
+    # causes ordered by severity: rollback (fraud), stale listing (dealer
+    # hasn't updated since servicing), or reporting error. Gemini sees the
+    # numbers in ctx already, but an explicit callout affects its adjustment.
+    _listing_mi = 0
+    try:
+        _listing_mi = int(bid.get('mileage') or 0)
+    except (TypeError, ValueError):
+        _listing_mi = 0
+    _odo_flag = None
+    if max_history_odometer and _listing_mi and max_history_odometer > _listing_mi + 1000:
+        _odo_gap = max_history_odometer - _listing_mi
+        _odo_flag = {
+            'listing_mileage': _listing_mi,
+            'max_history_mileage': max_history_odometer,
+            'gap_miles': _odo_gap,
+        }
+        ctx += (
+            f"\n\n⚠️ ODOMETER DISCREPANCY FLAG\n"
+            f"Carfax/AutoCheck history contains a recorded odometer reading of "
+            f"{max_history_odometer:,} mi, but the current listing reports "
+            f"only {_listing_mi:,} mi — a gap of {_odo_gap:,} miles where "
+            f"history EXCEEDS the listing. Possible causes, ordered by severity:\n"
+            f"  1. Odometer rollback (fraud) — highest risk, material to pricing.\n"
+            f"  2. Stale listing — dealer hasn't updated the odometer since a "
+            f"recent servicing or drive event.\n"
+            f"  3. Reporting error on the history-report side.\n"
+            f"Mark the vehicle down UNLESS the history entries all pre-date "
+            f"the listing's posting date (in which case it's #2 — stale).\n"
+        )
+
+    # ── AccuTrade screenshot — INTENTIONALLY NOT SENT AS IMAGE ──────────────
+    # The AccuTrade UI displays a condition-selector panel on every appraisal
+    # with labels like "BAD VHR / FRAME DAMAGE / Unknown" whether or not those
+    # conditions apply. Gemini mis-reads the label "FRAME DAMAGE" as a fact,
+    # causing hallucinated damage claims and double-digit price haircuts on
+    # clean vehicles (observed bid 165 / 2023 CHEVROLET TAHOE, 2026-04-22).
+    # The actual AccuTrade book values are already injected earlier as clean
+    # numeric text (see "ACCUTRADE VALUES:" block in ctx). The screenshot
+    # adds no quantitative signal Gemini can rely on. Keeping the variable
+    # defined for downstream template parity, but always 0.
     accutrade_report = 0
-    if accutrade and accutrade.get('screenshot'):
-        report_path = accutrade['screenshot']
-        try:
-            if report_path.startswith('/accutrade_reports/'):
-                full_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), report_path.lstrip('/'))
-            else:
-                full_path = report_path
-            if os.path.exists(full_path) and os.path.getsize(full_path) > 1024:
-                with open(full_path, 'rb') as f:
-                    img_bytes = f.read()
-                try:
-                    img_bytes, media_type = resize_for_claude(img_bytes)
-                except Exception:
-                    media_type = 'image/png'
-                content.append({'type': 'text', 'text': '\n--- ACCUTRADE APPRAISAL (screenshot) ---'})
-                content.append({'type': 'image', 'source': {
-                    'type': 'base64', 'media_type': media_type,
-                    'data': base64.standard_b64encode(img_bytes).decode()
-                }})
-                accutrade_report = 1
-                ctx += "\nACCUTRADE APPRAISAL: screenshot attached below\n"
-        except Exception as e:
-            print(f'assess AccuTrade screenshot error: {e}')
 
     # ── Load iPacket sticker screenshot ──────────────────────────────────────
     ipacket_report = 0
@@ -2368,7 +2398,15 @@ Max wholesale buy price: **$X,XXX**"""
                     applied.get('confidence_low'),
                     applied.get('confidence_high'),
                     buy_price,
-                    _json.dumps(adjustment_result),
+                    # Attach any server-detected flags alongside the raw LLM
+                    # payload so bid detail / audit views can surface them
+                    # without re-scanning OCR text.
+                    _json.dumps({
+                        **(adjustment_result if isinstance(adjustment_result, dict) else {}),
+                        '_server_flags': (
+                            {'odometer_discrepancy': _odo_flag} if _odo_flag else None
+                        ),
+                    }),
                     _json.dumps(_dealer_intel) if _dealer_intel else None,
                 ))
                 _db3.commit()
