@@ -499,6 +499,14 @@ def extract_vehicle(url, html):
             if v and not out.get(k):
                 out[k] = v
 
+    # 3a2) Platform-embedded dates — dealer.com's "inventoryDate" field.
+    #       Runs before photo-ts because this is the dealer's own declared
+    #       date-on-lot, which is more authoritative than photo upload time.
+    if not out.get('source_added_at'):
+        ts = _extract_inventory_date_from_html(html)
+        if ts:
+            out['source_added_at'] = ts
+
     # 3b) Photo-filename timestamps — most reliable signal for dealers whose
     #      JSON-LD is stale-reset (TXT Charlie / WordPress auto-regen) or
     #      absent (Marino / AAN). Photo upload time ≈ vehicle-intake time.
@@ -902,6 +910,34 @@ def _strip_html_for_text(html):
     txt = re.sub(r'<[^>]+>', ' ', txt)
     txt = re.sub(r'\s+', ' ', txt)
     return txt
+
+
+# ── Platform-embedded inventory-date extractor ────────────────────────
+# dealer.com exposes "inventoryDate":"MM/DD/YYYY" in an embedded JSON
+# payload (not schema.org JSON-LD). This is the dealer's AUTHORITATIVE
+# date-added-to-inventory field — more reliable than photo timestamps or
+# sitemap lastmod. Works for every dealer.com franchise site.
+_INVENTORY_DATE_RE = re.compile(
+    r'"inventoryDate"\s*:\s*"(\d{1,2})\\?/(\d{1,2})\\?/(\d{4})"', re.I)
+
+
+def _extract_inventory_date_from_html(html):
+    """Returns ISO date 'YYYY-MM-DD' or None. Currently handles dealer.com's
+    inventoryDate field; extend with additional platform-native date fields
+    as new platforms are onboarded (DealerInspire uses same field, Frazer
+    uses 'dateIn', AutoRevo embeds 'listed_date', etc.)."""
+    if not html:
+        return None
+    m = _INVENTORY_DATE_RE.search(html)
+    if not m:
+        return None
+    try:
+        mo, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31 and 1990 <= y <= 2100:
+            return f'{y:04d}-{mo:02d}-{d:02d}'
+    except ValueError:
+        pass
+    return None
 
 
 # ── Photo-filename timestamp extractor ─────────────────────────────────
