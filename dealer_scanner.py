@@ -68,7 +68,19 @@ NON_VEHICLE_HINTS = (
     '/schedule-service', '/sitemap', '/wp-admin', '/wp-json',
     '/author/', '/tag/', '/category/', '/feed',
 )
+# Real VINs always contain at least one letter (manufacturer code + model year
+# code are alphabetic). The earlier regex `[A-HJ-NPR-Z0-9]{17}` accepted pure-
+# digit 17-char strings, which let Unix timestamps (e.g., 17769403640177593 =
+# 2026-04-23) and other inline-JSON numerics get captured as VINs. That broke
+# dedup on TXT Charlie scan 33 (60 fake-VIN duplicate rows). Lookahead
+# `(?=[^\b]*[A-HJ-NPR-Z])` would be cleaner but Python's re doesn't support
+# that — instead we capture and validate post-match with `_is_valid_vin`.
 VIN_RE = re.compile(r'\b([A-HJ-NPR-Z0-9]{17})\b')
+
+
+def _is_valid_vin(s):
+    """A real VIN has at least one letter (manufacturer + model-year codes)."""
+    return bool(s) and len(s) == 17 and any(c.isalpha() for c in s)
 PRICE_RE = re.compile(r'\$\s?([\d,]{3,7})')
 MILES_RE = re.compile(r'([\d,]{1,7})\s*(?:mi|miles|mil\.|km)\b', re.I)
 YEAR_RE = re.compile(r'\b(19[89]\d|20[0-3]\d)\b')
@@ -571,11 +583,19 @@ def extract_vehicle(url, html):
             if not out.get('photo_url') and merged:
                 out['photo_url'] = merged[0]
 
-    # 5) VIN from URL / page text if JSON-LD missed it
+    # 5) VIN from URL / page text if JSON-LD missed it. Validate that the
+    # capture actually looks like a VIN (must have a letter) — bare digit
+    # runs of 17 chars are inline timestamps, not VINs. First scan VIN-ish
+    # candidates and pick the first one that passes _is_valid_vin.
     if not out.get('vin'):
-        m = VIN_RE.search(url) or VIN_RE.search(html or '')
-        if m:
-            out['vin'] = m.group(1)
+        for src in (url, html or ''):
+            for m in VIN_RE.finditer(src):
+                cand = m.group(1)
+                if _is_valid_vin(cand):
+                    out['vin'] = cand
+                    break
+            if out.get('vin'):
+                break
 
     # 6) Year fallback
     if not out.get('year'):

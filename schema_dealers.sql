@@ -76,6 +76,23 @@ CREATE TABLE IF NOT EXISTS dealer_inventory (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_dealer_inventory_dedup
     ON dealer_inventory(dealer_id, COALESCE(NULLIF(vin, ''), url));
 
+-- VIN sanity guard: real VINs always contain at least one letter
+-- (manufacturer + model-year codes are alphabetic). Without this, inline-JSON
+-- numerics (Unix timestamps, photo IDs, listing-IDs) get captured by the
+-- universal HTML extractor's `[A-HJ-NPR-Z0-9]{17}` regex and create phantom
+-- duplicate inventory rows. TXT Charlie scan 33 (2026-04-23) inserted 60 such
+-- rows before this guard was added — see git history for the cleanup.
+DO $$ BEGIN
+    BEGIN
+        ALTER TABLE dealer_inventory
+            ADD CONSTRAINT vin_has_letter_when_present
+            CHECK (vin = '' OR vin IS NULL OR vin ~ '[A-Za-z]');
+    EXCEPTION WHEN duplicate_object THEN
+        -- already added — fine, this script is rerunnable
+        NULL;
+    END;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_dealer_inventory_dealer_status
     ON dealer_inventory(dealer_id, status);
 CREATE INDEX IF NOT EXISTS idx_dealer_inventory_dealer_make_model
