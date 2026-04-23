@@ -91,6 +91,72 @@ def dealer_detail(dealer_id):
                            sold=sold, scans=scans, pipeline=pipeline)
 
 
+# ── Cross-dealer aggregated lists (dashboard stat-card drill-ins) ────────
+_BUCKET_FILTERS = {
+    '30_60': (
+        "COALESCE(i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '30 days' "
+        "AND COALESCE(i.source_added_at, i.first_seen_at) > NOW() - INTERVAL '60 days'",
+        '30–60 days on lot',
+    ),
+    '60_90': (
+        "COALESCE(i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '60 days' "
+        "AND COALESCE(i.source_added_at, i.first_seen_at) > NOW() - INTERVAL '90 days'",
+        '60–90 days on lot',
+    ),
+    '90_plus': (
+        "COALESCE(i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '90 days'",
+        '90+ days on lot — wholesale candidates',
+    ),
+}
+
+
+@bp.route('/dealers/aged/<bucket>')
+def dealers_aged(bucket):
+    """Cross-dealer list of aged vehicles in one bucket, oldest first.
+    Aggregates every active partner dealer. Auto-includes future onboards."""
+    if bucket not in _BUCKET_FILTERS:
+        return 'Unknown bucket', 404
+    where_age, title = _BUCKET_FILTERS[bucket]
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT i.id, i.dealer_id, d.name AS dealer_name,
+                   i.year, i.make, i.model, i.trim, i.vin, i.ext_color,
+                   i.mileage, i.price, i.url, i.photo_url,
+                   i.source_added_at, i.first_seen_at,
+                   i.price_drop_amount, i.price_drop_at, i.last_price
+            FROM dealer_inventory i
+            JOIN dealers d ON d.id = i.dealer_id
+            WHERE i.status = 'active' AND d.active AND ({where_age})
+            ORDER BY COALESCE(i.source_added_at, i.first_seen_at) ASC
+        """)
+        rows = cur.fetchall()
+    return render_template('dealers_cross_list.html',
+                           rows=rows, title=title, bucket=bucket, mode='aged')
+
+
+@bp.route('/dealers/price-drops')
+def dealers_price_drops():
+    """Cross-dealer list of every currently-active car with a price drop
+    flagged at any point in its lifetime. Biggest drop first."""
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT i.id, i.dealer_id, d.name AS dealer_name,
+                   i.year, i.make, i.model, i.trim, i.vin, i.ext_color,
+                   i.mileage, i.price, i.url, i.photo_url,
+                   i.source_added_at, i.first_seen_at,
+                   i.price_drop_amount, i.price_drop_at, i.last_price
+            FROM dealer_inventory i
+            JOIN dealers d ON d.id = i.dealer_id
+            WHERE i.status = 'active' AND d.active
+              AND i.price_drop_amount IS NOT NULL
+            ORDER BY i.price_drop_amount DESC
+        """)
+        rows = cur.fetchall()
+    return render_template('dealers_cross_list.html',
+                           rows=rows, title='Active cars with price drops',
+                           bucket='price_drops', mode='drops')
+
+
 # ── APIs ─────────────────────────────────────────────────────────────────
 _scan_threads = {}           # dealer_id -> Thread
 _scan_lock = threading.Lock()

@@ -944,6 +944,29 @@ def dashboard():
     cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE phone LIKE 'field:%'")
     stats['field'] = int(cur.fetchone()['cnt'])
 
+    # Cross-dealer aged-inventory + price-drop counts (for the 4 dashboard
+    # cards that drill into /dealers/aged/<bucket> + /dealers/price-drops).
+    # Pulls from the dealer_stats view (auto-aggregates across all active
+    # partner dealers — Marino, TXT Charlie, Napletons, and any future add).
+    try:
+        cur.execute("""
+            SELECT COALESCE(SUM(age_30_60),0) AS a30_60,
+                   COALESCE(SUM(age_60_90),0) AS a60_90,
+                   COALESCE(SUM(age_over_90),0) AS a90_plus
+            FROM dealer_stats WHERE active
+        """)
+        r = cur.fetchone()
+        stats['aged_30_60'] = int(r['a30_60'] or 0)
+        stats['aged_60_90'] = int(r['a60_90'] or 0)
+        stats['aged_90_plus'] = int(r['a90_plus'] or 0)
+        cur.execute("""
+            SELECT COUNT(*) AS cnt FROM dealer_inventory
+            WHERE status='active' AND price_drop_amount IS NOT NULL
+        """)
+        stats['price_drops'] = int(cur.fetchone()['cnt'])
+    except Exception:
+        stats['aged_30_60'] = stats['aged_60_90'] = stats['aged_90_plus'] = stats['price_drops'] = 0
+
     status_filter = request.args.get('status', 'all')
     rep_filter = request.args.get('rep', 'all')
 
@@ -2644,6 +2667,27 @@ def api_bids():
         stats[f'today_{r["status"]}'] = int(r['cnt'])
     cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE phone LIKE 'field:%'")
     stats['field'] = int(cur.fetchone()['cnt'])
+
+    # Cross-dealer aged + price-drop counts — same as dashboard route, polled
+    # every few seconds so the 4 cards stay fresh as scans complete.
+    try:
+        cur.execute("""
+            SELECT COALESCE(SUM(age_30_60),0) AS a30_60,
+                   COALESCE(SUM(age_60_90),0) AS a60_90,
+                   COALESCE(SUM(age_over_90),0) AS a90_plus
+            FROM dealer_stats WHERE active
+        """)
+        r = cur.fetchone()
+        stats['aged_30_60'] = int(r['a30_60'] or 0)
+        stats['aged_60_90'] = int(r['a60_90'] or 0)
+        stats['aged_90_plus'] = int(r['a90_plus'] or 0)
+        cur.execute("""
+            SELECT COUNT(*) AS cnt FROM dealer_inventory
+            WHERE status='active' AND price_drop_amount IS NOT NULL
+        """)
+        stats['price_drops'] = int(cur.fetchone()['cnt'])
+    except Exception:
+        stats['aged_30_60'] = stats['aged_60_90'] = stats['aged_90_plus'] = stats['price_drops'] = 0
 
     conditions, params = [], []
     if status_filter == 'today':

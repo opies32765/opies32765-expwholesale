@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ title }} — Experience Wholesale</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:100vh}
+.top-bar{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 24px;display:flex;justify-content:space-between;align-items:center}
+.top-bar .back{color:#94a3b8;text-decoration:none;font-size:13px;font-weight:600}
+.top-bar .back:hover{color:#f1f5f9}
+.top-bar .brand{color:#f1f5f9;font-size:15px;font-weight:700;letter-spacing:.3px}
+.header{padding:22px 24px;background:#243447;border-bottom:1px solid #344f68}
+.title{font-size:22px;font-weight:800;color:#f1f5f9;letter-spacing:-.3px}
+.subtitle{font-size:13px;color:#7a9bb5;margin-top:4px;font-weight:500}
+.meta-bar{display:flex;gap:18px;margin-top:12px;flex-wrap:wrap}
+.meta-chip{background:#1a2838;border:1px solid #344f68;border-radius:999px;padding:6px 14px;font-size:13px;color:#c4d6e8}
+.meta-chip b{color:#f1f5f9;font-weight:800;margin-right:3px}
+.content{padding:20px 24px 60px}
+table.veh{width:100%;border-collapse:collapse;background:#243447;border:1px solid #344f68;border-radius:12px;overflow:hidden}
+table.veh thead th{background:#1a2838;color:#7a9bb5;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;padding:12px 14px;text-align:left;border-bottom:1px solid #344f68}
+table.veh thead th.num{text-align:right}
+table.veh tbody tr{border-bottom:1px solid #2c3e55;cursor:pointer;transition:background .15s}
+table.veh tbody tr:hover{background:#2a3c52}
+table.veh tbody tr:last-child{border-bottom:none}
+table.veh td{padding:12px 14px;font-size:13px;vertical-align:middle}
+table.veh td.num{text-align:right;font-family:ui-monospace,monospace}
+.dealer-name{color:#7dd3fc;font-size:12px;font-weight:600;text-decoration:none}
+.dealer-name:hover{text-decoration:underline;color:#bae6fd}
+.trim-txt{color:#f1f5f9;font-weight:600}
+.trim-txt .trim-sub{color:#94a3b8;font-weight:500;font-size:12px}
+.color-txt{color:#c4d6e8}
+.vin{font-family:ui-monospace,monospace;font-size:11px;color:#94a3b8}
+.miles-txt,.price-txt{color:#f1f5f9;font-weight:700}
+.no-price{color:#ef4444;font-weight:800;font-size:11px;letter-spacing:.8px;background:rgba(239,68,68,.12);padding:2px 7px;border-radius:4px;border:1px solid rgba(239,68,68,.35);text-transform:uppercase}
+.age-txt{color:#4ade80;font-weight:700}
+.age-txt.aged{color:#fbbf24}
+.age-txt.stale{color:#f87171}
+.dot-src{color:#7dd3fc;font-size:9px;margin-left:2px}
+.drop-chip{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:5px;font-size:11px;font-weight:700;background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.25)}
+.drop-blank{color:#344f68}
+.veh-link{color:#7dd3fc;text-decoration:none;font-size:14px}
+.veh-link:hover{color:#bae6fd}
+.empty{background:#243447;border:1px dashed #344f68;border-radius:12px;padding:60px 20px;text-align:center;color:#7a9bb5;margin-top:12px}
+</style>
+</head>
+<body>
+<div class="top-bar">
+  <a href="/" class="back">← Back to dashboard</a>
+  <div class="brand">Experience Wholesale</div>
+</div>
+
+<div class="header">
+  <div class="title">{{ title }}</div>
+  <div class="subtitle">Aggregated across all partner dealers — auto-updates as new dealers are onboarded</div>
+  <div class="meta-bar">
+    <span class="meta-chip"><b>{{ rows|length }}</b> vehicle{{ '' if rows|length == 1 else 's' }}</span>
+    {% set dealers = rows|map(attribute='dealer_name')|unique|list %}
+    <span class="meta-chip"><b>{{ dealers|length }}</b> dealer{{ '' if dealers|length == 1 else 's' }}</span>
+    {% if mode == 'drops' %}
+      {% set total_drop = rows|sum(attribute='price_drop_amount') %}
+      <span class="meta-chip"><b>${{ '{:,}'.format(total_drop|int) }}</b> total dropped</span>
+    {% endif %}
+  </div>
+</div>
+
+<div class="content">
+  {% if rows %}
+  <table class="veh">
+    <thead>
+      <tr>
+        <th>Dealer</th>
+        <th>Year · Make · Model · Trim</th>
+        <th>Color</th>
+        <th>VIN</th>
+        <th class="num">Miles</th>
+        <th class="num">Price</th>
+        <th class="num">Days on lot</th>
+        <th class="num">{% if mode == 'drops' %}Price Drop{% else %}Drop{% endif %}</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for v in rows %}
+      {% set age = v|best_age_days %}
+      {% set src = v|age_source %}
+      <tr onclick="if(event.target.tagName !== 'A') window.open('{{ v.url }}', '_blank')">
+        <td>
+          <a href="/dealers/{{ v.dealer_id }}" class="dealer-name" onclick="event.stopPropagation()">{{ v.dealer_name }}</a>
+        </td>
+        <td>
+          <span class="trim-txt">{{ v.year or '' }} {{ v.make or '' }} {{ v.model or '' }}</span>
+          {% if v.trim %}<span class="trim-sub"> · {{ v.trim }}</span>{% endif %}
+        </td>
+        <td class="color-txt">{{ v.ext_color or '—' }}</td>
+        <td><span class="vin">{{ v.vin or '—' }}</span></td>
+        <td class="num miles-txt">{% if v.mileage %}{{ '{:,}'.format(v.mileage) }}{% else %}—{% endif %}</td>
+        <td class="num">
+          {% if v.price and v.price >= 1000 %}
+            <span class="price-txt">${{ '{:,}'.format(v.price|int) }}</span>
+          {% else %}
+            <span class="no-price">NO PRICE</span>
+          {% endif %}
+        </td>
+        <td class="num">
+          <span class="age-txt {% if age|int >= 90 %}stale{% elif age|int >= 60 %}aged{% endif %}"
+                title="{% if src == 'dealer' %}From dealer's own timestamp ({{ v.source_added_at }}){% else %}Scanner-observed since {{ v.first_seen_at }}{% endif %}">
+            {{ age }}d{% if src == 'dealer' %}<span class="dot-src">•</span>{% endif %}
+          </span>
+        </td>
+        <td class="num">
+          {% if v.price_drop_amount %}
+            <span class="drop-chip" title="Dropped {{ v.price_drop_at }}{% if v.last_price %} (was ${{ '{:,}'.format(v.last_price|int) }}){% endif %}">−${{ '{:,}'.format(v.price_drop_amount|int) }}</span>
+          {% else %}
+            <span class="drop-blank">—</span>
+          {% endif %}
+        </td>
+        <td>{% if v.url %}<a class="veh-link" href="{{ v.url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()">↗</a>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">No vehicles match right now. Check back after the next scan.</div>
+  {% endif %}
+</div>
+</body>
+</html>

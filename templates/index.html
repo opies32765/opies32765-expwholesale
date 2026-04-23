@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>EW Buy Center</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -185,6 +188,27 @@ tr:last-child td{border-bottom:none}
     <div class="stat-num" id="stat-today-passed" style="color:#fca5a5">{{ stats.today_passed or 0 }}</div>
     <div class="stat-label">Passed</div>
   </div>
+
+  <div class="stat-divider"></div>
+
+  <!-- Cross-dealer aged-inventory + price-drop cards. Click → aggregated list
+       across every partner dealer (auto-includes future onboards). -->
+  <div class="stat-item" style="cursor:pointer" onclick="window.location='/dealers/aged/30_60'" title="Active cars 30-60 days on lot across all partner dealers">
+    <div class="stat-num" id="stat-aged-30-60" style="color:#60a5fa">{{ stats.aged_30_60 or 0 }}</div>
+    <div class="stat-label">30–60d</div>
+  </div>
+  <div class="stat-item" style="cursor:pointer" onclick="window.location='/dealers/aged/60_90'" title="Active cars 60-90 days on lot across all partner dealers">
+    <div class="stat-num" id="stat-aged-60-90" style="color:#fbbf24">{{ stats.aged_60_90 or 0 }}</div>
+    <div class="stat-label">60–90d</div>
+  </div>
+  <div class="stat-item" style="cursor:pointer" onclick="window.location='/dealers/aged/90_plus'" title="Active cars 90+ days on lot — wholesale candidates">
+    <div class="stat-num" id="stat-aged-90-plus" style="color:#f87171">{{ stats.aged_90_plus or 0 }}</div>
+    <div class="stat-label">90+d</div>
+  </div>
+  <div class="stat-item" style="cursor:pointer" onclick="window.location='/dealers/price-drops'" title="Active cars with any price drop">
+    <div class="stat-num" id="stat-price-drops" style="color:#34d399">{{ stats.price_drops or 0 }}</div>
+    <div class="stat-label">Price Drops</div>
+  </div>
 </div>
 
 <div class="filters">
@@ -363,11 +387,24 @@ function stripFieldMeta(msg) {
 }
 
 let _vautoDone = new Set();
+// Badge stays yellow until BOTH: (1) vAuto lookup complete AND (2) the bid is
+// at least SCAN_SETTLE_SECONDS old. The age buffer ensures the rest of the
+// scan pipeline (AccuTrade, iPacket, photo fetch) finishes before we flip
+// to green. Chosen over a pure "vauto_done" signal because vAuto often
+// returns before the other lookups, making the badge turn green prematurely.
+const SCAN_SETTLE_SECONDS = 120;
+function bidAgeSeconds(created) {
+  if (!created) return 0;
+  const t = Date.parse(created);
+  if (isNaN(t)) return 0;
+  return Math.max(0, (Date.now() - t) / 1000);
+}
 function renderRow(b, pc) {
   const vehicleDesc = (b.year||b.make||b.mileage) ? `<div class="vehicle-desc">${b.year||''} ${b.make||''} ${b.model||''}${b.mileage ? (b.year||b.make?' · ':'')+b.mileage.toLocaleString()+' mi':''}</div>` : '';
-  const vaBadge = b.vin ? (_vautoDone.has(b.id)
-    ? '<span title="vAuto complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>'
-    : '<span title="vAuto pending" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px;animation:pulse 2s infinite">vA</span>'
+  const vaScanDone = _vautoDone.has(b.id) && bidAgeSeconds(b.created_at) >= SCAN_SETTLE_SECONDS;
+  const vaBadge = b.vin ? (vaScanDone
+    ? '<span title="Scan complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>'
+    : '<span title="Scanning…" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px;animation:pulse 2s infinite">vA</span>'
   ) : '';
   const vehicle = b.vin ? `<div class="vehicle-vin">${b.vin}${vaBadge}</div>${vehicleDesc}` : '<div class="no-vin">No VIN extracted</div>';
   const photos = (pc||0) > 0 ? `<span class="photo-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>${pc}</span>` : '—';
@@ -401,6 +438,10 @@ function updateStats(s) {
   _s('stat-today-bid_sent', s.today_bid_sent);
   _s('stat-today-bought', s.today_bought);
   _s('stat-today-passed', s.today_passed);
+  _s('stat-aged-30-60', s.aged_30_60);
+  _s('stat-aged-60-90', s.aged_60_90);
+  _s('stat-aged-90-plus', s.aged_90_plus);
+  _s('stat-price-drops', s.price_drops);
   ['new','reviewing','bid_sent','bought','passed','total','field','today'].forEach(k => {
     const el = document.querySelector(`.filter-count[data-status="${k}"]`);
     if (el) el.textContent = s[k]||0;
