@@ -1260,20 +1260,39 @@ def sold_confidence(signals):
 
 # ── Upsert ───────────────────────────────────────────────────────────────
 def upsert_vehicle(cur, dealer_id, scan_id, veh):
-    """Insert or merge a vehicle row; returns (inventory_id, is_new, price_drop_amount)."""
+    """Insert or merge a vehicle row; returns (inventory_id, is_new, price_drop_amount).
+
+    Lookup ladder — prevents duplicate rows when one scan has VIN and the next
+    doesn't (or vice versa). Bug this guards against: TXT Charlie scan 33 got
+    partial HTML for 51 cars → no VIN extracted → dedup key fell back to URL →
+    INSERT inserted new orphan rows shadowing the real-VIN rows that already
+    existed with the same URL.
+        1. If incoming VIN set, try VIN match first (strongest key)
+        2. If no VIN match (or no VIN incoming), try URL match — this catches
+           cases where our row HAS a VIN but incoming doesn't (or when VIN
+           from one scan differs from another by case/formatting)
+    """
     vin = (veh.get('vin') or '').strip().upper()
     url = veh.get('url') or ''
-    key_val = vin if vin else url
-    if not key_val:
+    if not (vin or url):
         return (None, False, None)
 
-    # Look up existing row
-    cur.execute('''
-        SELECT id, price, status, first_seen_at, missing_scans
-        FROM dealer_inventory
-        WHERE dealer_id = %s AND COALESCE(NULLIF(vin, ''), url) = %s
-    ''', (dealer_id, key_val))
-    row = cur.fetchone()
+    row = None
+    if vin:
+        cur.execute(
+            "SELECT id, price, status, first_seen_at, missing_scans "
+            "FROM dealer_inventory WHERE dealer_id=%s AND UPPER(vin)=%s",
+            (dealer_id, vin)
+        )
+        row = cur.fetchone()
+    if not row and url:
+        cur.execute(
+            "SELECT id, price, status, first_seen_at, missing_scans "
+            "FROM dealer_inventory WHERE dealer_id=%s AND url=%s "
+            "ORDER BY (vin <> '' AND vin IS NOT NULL) DESC, id ASC LIMIT 1",
+            (dealer_id, url)
+        )
+        row = cur.fetchone()
 
     photos_json = _json.dumps(veh['photos']) if isinstance(veh.get('photos'), list) else None
     raw_json = _json.dumps(veh, default=str)
