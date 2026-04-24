@@ -197,6 +197,7 @@ a.veh-link:hover{text-decoration:underline}
   </div>
   <div class="dealer-head-actions">
     <button class="btn btn-primary" id="scanBtn" onclick="runScan()">↻ Scan Now</button>
+    <a href="/admin/partner/{{ dealer.dealer_id }}/config" class="btn">Partner Portal</a>
     <a href="/dealers" class="btn">← All Dealers</a>
   </div>
 </div>
@@ -233,7 +234,9 @@ a.veh-link:hover{text-decoration:underline}
         {{ pipeline.color_remaining }} remaining · <b style="color:#34d399">+{{ pipeline.colors_last_24h }}</b> in last 24h ({{ pipeline.scans_last_24h }} scans)
       </div>
     </div>
-    <div class="pipe-row">
+    <div class="pipe-row" style="cursor:pointer"
+         onclick="window.location='/dealers/price-drops?dealer_id={{ dealer.dealer_id }}'"
+         title="Click to see {{ dealer.name }}'s cars with price drops">
       <div class="label">Price Drops Flagged</div>
       <div class="count" style="color:#fbbf24">{{ pipeline.with_drops }}</div>
       <div class="pipe-bar"><div class="pipe-bar-fill fill-yellow" style="width:{{ (100 * pipeline.with_drops / pipeline.total_active) if pipeline.total_active else 0 }}%"></div></div>
@@ -328,8 +331,8 @@ a.veh-link:hover{text-decoration:underline}
               {% set age = v|best_age_days %}
               {% set src = v|age_source %}
               <span class="age-txt {% if age|int >= 90 %}stale{% elif age|int >= 60 %}aged{% endif %}"
-                    title="{% if src == 'dealer' %}Days on lot — from dealer's own timestamp ({{ v.source_added_at }}){% else %}Days since our scanner first saw it ({{ v.first_seen_at }}){% endif %}">
-                {{ age }}d{% if src == 'dealer' %}<span style="color:#7dd3fc;font-size:9px;margin-left:2px" title="Dealer-declared">•</span>{% endif %}
+                    title="{% if src == 'vauto' %}vAuto-verified via Cox crawler: {{ v.verified_days_on_lot }}d at {{ v.verified_at.strftime('%Y-%m-%d') if v.verified_at else '?' }}{% elif src == 'dealer' %}Days on lot — from dealer's own timestamp ({{ v.source_added_at }}){% else %}Days since our scanner first saw it ({{ v.first_seen_at }}){% endif %}">
+                {{ age }}d{% if src == 'vauto' %}<span style="color:#22c55e;font-size:11px;margin-left:2px;font-weight:700" title="vAuto verified">&#10003;</span>{% elif src == 'dealer' %}<span style="color:#7dd3fc;font-size:9px;margin-left:2px" title="Dealer-declared">&bull;</span>{% endif %}
               </span>
             </td>
             <td>{% if v.url %}<a class="veh-link" href="{{ v.url }}" target="_blank" rel="noopener">↗</a>{% endif %}</td>

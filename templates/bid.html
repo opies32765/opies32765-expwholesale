@@ -301,14 +301,60 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
     </div>
     <div class="photos-scroll" id="photos-scroll">
       {% for photo in photos %}
-      <div class="photo-thumb{% if loop.index > max_visible %} photo-hidden{% endif %}" onclick="openLightbox('{{ photo.url }}')">
-        <img src="{{ photo.url|thumb_url('strip') }}" alt="Vehicle photo" loading="lazy">
+      <div class="photo-thumb{% if loop.index > max_visible %} photo-hidden{% endif %}{% if not photo.include_in_share %} photo-excluded{% endif %}"
+           id="photo-tile-{{ photo.id }}"
+           onclick="openLightbox('{{ photo.url|thumb_url('full') }}')"
+           style="position:relative">
+        <img src="{{ photo.url|thumb_url('strip') }}" alt="Vehicle photo" loading="lazy" referrerpolicy="no-referrer">
+        <label onclick="event.stopPropagation()"
+               style="position:absolute;bottom:4px;left:4px;right:4px;background:rgba(0,0,0,.75);color:#fff;padding:4px 6px;border-radius:5px;font-size:11px;font-weight:600;display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none">
+          <input type="checkbox"
+                 class="share-check"
+                 {% if photo.include_in_share %}checked{% endif %}
+                 onchange="setPhotoShare({{ photo.id }}, this.checked)"
+                 style="margin:0;cursor:pointer;width:14px;height:14px">
+          Include on share
+        </label>
       </div>
       {% endfor %}
       {% if extra > 0 %}
       <div class="photo-more" id="photo-more-btn" onclick="toggleAllPhotos()">+{{ extra }}</div>
       {% endif %}
     </div>
+    <style>
+      .photo-excluded img { opacity: .35; filter: grayscale(0.8); }
+      .photo-excluded label { background: rgba(127,29,29,.85) !important; }
+    </style>
+    <script>
+      // Explicit set (not toggle) — the checkbox.checked value IS the desired
+      // end state. POSTs the target value directly so multiple clicks can't
+      // leave the DB and UI out of sync.
+      function setPhotoShare(photoId, wantInclude) {
+        const tile = document.getElementById('photo-tile-' + photoId);
+        // Optimistic UI
+        if (wantInclude) tile.classList.remove('photo-excluded');
+        else tile.classList.add('photo-excluded');
+        fetch('/api/bid-photo/' + photoId + '/set-share', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({include: wantInclude})
+        })
+          .then(r => {
+            if (!r.ok) throw new Error('auth or server');
+            return r.json();
+          })
+          .then(d => {
+            if (!d.ok) throw new Error(d.error || 'unknown');
+            // Sync with server truth in case of race
+            if (d.include_in_share) tile.classList.remove('photo-excluded');
+            else tile.classList.add('photo-excluded');
+          })
+          .catch(e => {
+            alert('Could not save. You may need to log back in. Reloading…');
+            location.reload();
+          });
+      }
+    </script>
   </div>
   {% endif %}
 
@@ -602,6 +648,17 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           {% endfor %}
         </div>
 
+        {% if vauto_data.appraisal_url and vauto_data.appraisal_url.startswith('http') %}
+        <div style="margin-top:12px;display:flex;align-items:center;gap:8px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:6px;padding:8px 10px">
+          <span style="font-size:10px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;flex:0 0 auto">Saved vAuto</span>
+          <a href="{{ vauto_data.appraisal_url }}" target="_blank" rel="noopener"
+             style="font-size:11px;color:#60a5fa;text-decoration:none;font-family:monospace;word-break:break-all;line-height:1.3;flex:1"
+             title="Open the saved vAuto appraisal">
+            {{ vauto_data.appraisal_url }} ↗
+          </a>
+        </div>
+        {% endif %}
+
         <!-- Carfax / AutoCheck screenshots -->
         {% if vauto_data.carfax_screenshot or vauto_data.autocheck_screenshot %}
         <div style="margin-top:14px;display:flex;gap:8px;flex:1">
@@ -688,11 +745,15 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
         {% if accutrade_data.appraisal_url %}
         <div style="margin-top:12px;display:flex;align-items:center;gap:8px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:6px;padding:8px 10px">
-          <span style="font-size:10px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;flex:0 0 auto">Tweak</span>
-          <a href="{{ accutrade_data.appraisal_url }}" target="_blank" rel="noopener"
+          {# Strip ?backUrl=... query param — it points at an older AccuTrade
+             UI path (/report/active) and was causing post-login redirects
+             to land on the dashboard instead of the appraisal. #}
+          {% set clean_at_url = accutrade_data.appraisal_url.split('?')[0] %}
+          <span style="font-size:10px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;flex:0 0 auto">Saved AccuTrade</span>
+          <a href="{{ clean_at_url }}" target="_blank" rel="noopener"
              style="font-size:11px;color:#60a5fa;text-decoration:none;font-family:monospace;word-break:break-all;line-height:1.3;flex:1"
-             title="Open this appraisal in AccuTrade to adjust odometer / options / condition, then re-run the assessment">
-            {{ accutrade_data.appraisal_url }} ↗
+             title="Open the saved AccuTrade appraisal to adjust odometer / options / condition, then re-run the assessment">
+            {{ clean_at_url }} ↗
           </a>
         </div>
         {% endif %}
@@ -734,7 +795,8 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
               <label>Bid Amount</label>
               <div class="bid-amount-input">
                 <span>$</span>
-                <input type="number" id="bid-amount" placeholder="0" step="100" oninput="autofillBidText(this.value)">
+                <input type="text" id="bid-amount" inputmode="numeric" placeholder="0"
+                       oninput="var d=this.value.replace(/[^0-9]/g,'');this.value=d?parseInt(d,10).toLocaleString('en-US'):'';autofillBidText(d);">
               </div>
             </div>
             <textarea class="reply-textarea" id="reply-text" placeholder="We're in at $XX,XXX. Let me know if you want to move forward."></textarea>
@@ -1032,7 +1094,9 @@ function autofillBidText(val) {
 async function sendReply(action) {
   const isPass = action === 'pass';
   const message = document.getElementById(isPass ? 'pass-text' : 'reply-text').value.trim();
-  const bidAmount = isPass ? null : parseFloat(document.getElementById('bid-amount').value) || null;
+  // Strip commas before parse — input is now comma-formatted text, not type=number.
+  const bidAmount = isPass ? null :
+    (parseFloat((document.getElementById('bid-amount').value || '').replace(/,/g, '')) || null);
   if (!message) { toast('Enter a message first', false); return; }
   const r = await fetch(`/api/bid/${BID_ID}/reply`, {
     method:'POST', headers:{'Content-Type':'application/json'},

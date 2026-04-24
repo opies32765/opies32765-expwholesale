@@ -1301,13 +1301,25 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
         # UPDATE — COALESCE smart merge: don't overwrite existing fields with NULL
         old_price = row.get('price')
         new_price = veh.get('price')
-        price_drop = None
-        price_drop_at = None
-        last_price = old_price
-        if (new_price is not None and old_price is not None
-                and new_price < old_price):
+        existing_drop = row.get('price_drop_amount')
+        existing_drop_at = row.get('price_drop_at')
+        # Only rotate last_price when the ask actually changed — otherwise we
+        # lose the "price before the drop" meaning (old bug: every scan
+        # overwrote it with current price).
+        price_changed = (new_price is not None and old_price is not None
+                         and new_price != old_price)
+        last_price = old_price if price_changed else row.get('last_price')
+        price_drop = existing_drop
+        price_drop_at = existing_drop_at
+        if price_changed and new_price < old_price:
+            # Fresh drop — overwrite any prior drop with the new delta
             price_drop = old_price - new_price
             price_drop_at = now_utc()
+        elif price_changed and new_price >= old_price:
+            # Price went UP — clear the stale drop flag. A car whose asking
+            # price just rose back above prior lows isn't "discounted" anymore.
+            price_drop = None
+            price_drop_at = None
 
         cur.execute('''
             UPDATE dealer_inventory SET
@@ -1320,8 +1332,12 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
                 mileage      = COALESCE(%s, mileage),
                 price        = COALESCE(%s, price),
                 last_price   = %s,
-                price_drop_amount = COALESCE(%s, price_drop_amount),
-                price_drop_at = COALESCE(%s, price_drop_at),
+                -- No COALESCE on price_drop* — NULL means "no active drop
+                -- right now" (price rose back above its prior low). Scanner
+                -- logic above sets these to None when the car is no longer
+                -- actually discounted.
+                price_drop_amount = %s,
+                price_drop_at = %s,
                 last_price_change_at = CASE
                     WHEN %s IS NOT NULL AND %s IS DISTINCT FROM price THEN NOW()
                     ELSE last_price_change_at END,

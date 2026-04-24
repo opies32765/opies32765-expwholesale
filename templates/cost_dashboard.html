@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cost Analysis — Experience Wholesale</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Inter', system-ui, sans-serif; background: #0b0f19; color: #e2e8f0;
+         font-size: 14px; line-height: 1.5; padding-bottom: 60px; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 28px 24px; }
+
+  header { display: flex; align-items: center; justify-content: space-between;
+           padding-bottom: 20px; border-bottom: 1px solid #1e293b; margin-bottom: 24px; flex-wrap: wrap; gap: 16px; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-mark { width: 38px; height: 38px; border-radius: 10px; background: linear-gradient(135deg,#3b82f6,#1d4ed8);
+                display:flex; align-items:center; justify-content:center; color:#fff; font-weight:800; font-size:16px; }
+  h1 { font-size: 22px; font-weight: 700; color: #f1f5f9; }
+  .sub { font-size: 12px; color: #64748b; margin-top: 2px; }
+  .head-actions { display: flex; gap: 10px; }
+  .btn { padding: 9px 16px; border-radius: 8px; font-size: 13px; font-weight: 600;
+         text-decoration: none; cursor: pointer; border: 1px solid #1e293b; background: #111827;
+         color: #e2e8f0; display:inline-flex; align-items:center; gap:6px; }
+  .btn:hover { border-color: #334155; color: #f1f5f9; }
+  .btn-primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+  .btn-primary:hover { background: #2563eb; border-color: #2563eb; color: #fff; }
+
+  .card-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 24px; }
+  .kv { background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 16px 18px; }
+  .kv-label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: .6px; font-weight: 600; }
+  .kv-value { font-size: 20px; font-weight: 700; color: #f1f5f9; margin-top: 6px; }
+  .kv-sub { font-size: 11px; color: #475569; margin-top: 2px; }
+  .kv-value.accent { color: #60a5fa; }
+  .kv-value.green { color: #34d399; }
+  .kv-value.red { color: #f87171; }
+
+  section { margin-bottom: 32px; }
+  h2 { font-size: 16px; font-weight: 700; color: #f1f5f9; margin-bottom: 4px; letter-spacing: .2px; }
+  .lede { color: #64748b; font-size: 13px; margin-bottom: 14px; }
+
+  table { width: 100%; border-collapse: collapse; background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; overflow: hidden; }
+  th { background: #111827; color: #94a3b8; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px;
+       text-align: left; padding: 10px 12px; border-bottom: 1px solid #1e293b; }
+  td { padding: 12px; border-bottom: 1px solid #1e293b; vertical-align: top; font-size: 13px; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(59,130,246,.04); }
+  td.num { font-variant-numeric: tabular-nums; font-weight: 600; color: #e2e8f0; }
+  .muted { color: #64748b; font-size: 12px; }
+  .service-name { font-weight: 600; color: #f1f5f9; }
+  .service-unit { color: #94a3b8; font-family: 'SF Mono', 'Menlo', monospace; font-size: 11.5px; }
+
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .pill-live { background: rgba(52,211,153,.14); color: #34d399; }
+  .pill-killed { background: rgba(248,113,113,.14); color: #f87171; }
+  .pill-free { background: rgba(59,130,246,.14); color: #60a5fa; }
+
+  .scenario { background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 16px 18px; margin-bottom: 12px; }
+  .scenario-header { display:flex; justify-content: space-between; align-items:center; margin-bottom: 8px; }
+  .scenario-label { font-weight: 700; color: #f1f5f9; font-size: 14px; }
+  .scenario-cost { font-weight: 700; color: #60a5fa; font-variant-numeric: tabular-nums; }
+  .scenario-detail { color: #94a3b8; font-size: 12.5px; }
+
+  .recos li { margin-bottom: 10px; color: #cbd5e1; }
+  .recos li strong { color: #f1f5f9; }
+
+  .footer-note { color: #475569; font-size: 12px; text-align: center; margin-top: 32px; padding-top: 20px; border-top: 1px solid #1e293b; }
+
+  @media (max-width: 900px) {
+    .card-row { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 600px) {
+    .card-row { grid-template-columns: 1fr; }
+    table { font-size: 12px; }
+    td { padding: 8px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="brand">
+    <div class="brand-mark">EW</div>
+    <div>
+      <h1>Cost Analysis</h1>
+      <div class="sub">Experience Wholesale · generated {{ generated_at.strftime('%Y-%m-%d %H:%M') }}</div>
+    </div>
+  </div>
+  <div class="head-actions">
+    <a href="/" class="btn">← Dashboard</a>
+  </div>
+</header>
+
+<!-- Executive summary cards -->
+<div class="card-row">
+  <div class="kv">
+    <div class="kv-label">Current run rate</div>
+    <div class="kv-value accent">${{ totals.steady_lo }}–${{ totals.steady_hi }}<span style="font-size:12px;color:#64748b"> / mo</span></div>
+    <div class="kv-sub">3 active partner dealers</div>
+  </div>
+  <div class="kv">
+    <div class="kv-label">At 10× scale</div>
+    <div class="kv-value accent">$300–$750<span style="font-size:12px;color:#64748b"> / mo</span></div>
+    <div class="kv-sub">30 dealers · 150 bids/day</div>
+  </div>
+  <div class="kv">
+    <div class="kv-label">Actual spend to date</div>
+    <div class="kv-value">${{ '{:,}'.format(totals.hist_hi) }}</div>
+  </div>
+  <div class="kv">
+    <div class="kv-label">Biggest cost lever</div>
+    <div class="kv-value green">AI model tier</div>
+    <div class="kv-sub">Gemini Pro vs Opus = ~50× swing</div>
+  </div>
+</div>
+
+<!-- Actual spend breakdown -->
+<section>
+  <h2>Actual spend to date</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Service</th>
+        <th style="width:18%" class="num">Actual</th>
+        <th style="width:56%">Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in services|sort(attribute='historical_high', reverse=true) %}
+      {% if s.historical_high > 0 %}
+      <tr>
+        <td><b>{{ s.name }}</b></td>
+        <td class="num">${{ '{:,}'.format(s.historical_high) }}</td>
+        <td style="font-size:13px;color:#94a3b8">{{ s.unit }}</td>
+      </tr>
+      {% endif %}
+      {% endfor %}
+      {% for e in historical_extras %}
+      <tr>
+        <td><b>{{ e.name }}</b></td>
+        <td class="num">${{ '{:,}'.format(e.historical_high) }}</td>
+        <td style="font-size:13px;color:#94a3b8">{{ e.unit }}</td>
+      </tr>
+      {% endfor %}
+      <tr style="background:rgba(34,197,94,.05)">
+        <td><b>TOTAL</b></td>
+        <td class="num"><b>${{ '{:,}'.format(totals.hist_hi) }}</b></td>
+        <td></td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Services table -->
+<section>
+  <h2>Services in use</h2>
+  <div class="lede">Every external API, proxy, or hosted service the EW platform depends on.</div>
+  <table>
+    <div class="lede" style="margin-bottom:14px;padding:10px 14px;background:rgba(37,99,235,.08);border-left:3px solid #2563eb;border-radius:4px">
+      <b style="color:#60a5fa">At scale</b> column projects monthly cost at
+      <b>100 bids/day</b> + <b>1 new dealer/day (avg 50 cars)</b>.
+    </div>
+    <thead>
+      <tr>
+        <th style="width: 18%">Service</th>
+        <th style="width: 36%">Purpose</th>
+        <th style="width: 20%">Pricing</th>
+        <th style="width: 13%" class="num">Monthly today</th>
+        <th style="width: 13%" class="num">At scale</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in services %}
+      <tr>
+        <td>
+          <div class="service-name">{{ s.name }}</div>
+          {% if s.steady_low == 0 and s.steady_high == 0 %}<span class="pill pill-free">free / fixed</span>
+          {% else %}<span class="pill pill-live">in use</span>{% endif %}
+        </td>
+        <td class="muted">{{ s.purpose }}</td>
+        <td class="service-unit">{{ s.unit }}</td>
+        <td class="num">
+          {% if s.steady_low == 0 and s.steady_high == 0 %}—
+          {% elif s.steady_low == s.steady_high %}${{ s.steady_low }}/mo
+          {% else %}${{ s.steady_low }}–${{ s.steady_high }}/mo{% endif %}
+        </td>
+        <td class="num" style="color:#60a5fa;font-weight:700">
+          {% if s.scaled_mo %}${{ s.scaled_mo }}/mo
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      <tr style="background:rgba(37,99,235,.05)">
+        <td><b>TOTAL</b></td>
+        <td></td>
+        <td></td>
+        <td class="num"><b>${{ totals.steady_lo }}–${{ totals.steady_hi }}/mo</b></td>
+        <td class="num" style="color:#60a5fa"><b>${{ totals.scaled_mo }}/mo</b></td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- Full stack cost per bid -->
+<section>
+  <h2>Full-stack cost per bid (everything the app consumes)</h2>
+  <div class="lede">A single bid coming into EW fires more than just the AI assessment below — it triggers OCR on VIN + odometer, multiple lightweight Gemini Flash calls, Carfax/AutoCheck pulls, sometimes a Tesla API lookup, plus SMS/email. Breakdown below shows all of it.</div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:30%">Service fired per bid</th>
+        <th>What it does</th>
+        <th style="width:14%" class="num">Per bid</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>Google Cloud Vision (OCR)</b></td>
+        <td class="muted">~4 calls per bid: VIN plate, odometer, color plate, sometimes license plate.</td>
+        <td class="num">$0.006</td>
+      </tr>
+      <tr>
+        <td><b>Gemini 2.5 Flash (fast path)</b></td>
+        <td class="muted">~3–5 lightweight calls: VIN handwriting fallback, color check, Carfax/AutoCheck text extraction.</td>
+        <td class="num">$0.005</td>
+      </tr>
+      <tr>
+        <td><b>Gemini 2.5 Pro (main assessment)</b></td>
+        <td class="muted">The big one — full buy-price recommendation using all photos, books, comps, Carfax.</td>
+        <td class="num">$0.046</td>
+      </tr>
+      <tr>
+        <td><b>Tesla Fleet API</b></td>
+        <td class="muted">Only ~10% of bids are Tesla; cached per VIN. Average across all bids.</td>
+        <td class="num">$0.010</td>
+      </tr>
+      <tr>
+        <td><b>Twilio (SMS)</b></td>
+        <td class="muted">Inbound bid intake + outbound bid response = 2 messages per typical bid.</td>
+        <td class="num">$0.016</td>
+      </tr>
+      <tr>
+        <td><b>Resend (Email)</b></td>
+        <td class="muted">Bid-response alerts under 3K/mo free tier.</td>
+        <td class="num">$0.000</td>
+      </tr>
+      <tr style="background:rgba(34,197,94,.08)">
+        <td><b>TOTAL per bid</b></td>
+        <td class="muted"><b>Everything a single bid consumes across the stack</b></td>
+        <td class="num" style="color:#34d399"><b>~$0.083</b></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:16px">
+    <div class="kv" style="padding:16px 18px">
+      <div class="kv-label">1,000 bids / month</div>
+      <div class="kv-value" style="color:#34d399">~$83/mo</div>
+      <div class="kv-sub">~33 bids/day</div>
+    </div>
+    <div class="kv" style="padding:16px 18px">
+      <div class="kv-label">3,000 bids / month</div>
+      <div class="kv-value" style="color:#34d399">~$249/mo</div>
+      <div class="kv-sub">100 bids/day — matches the "At scale" column</div>
+    </div>
+    <div class="kv" style="padding:16px 18px">
+      <div class="kv-label">If Pro → Opus</div>
+      <div class="kv-value" style="color:#f87171">+$441/mo per 1,000</div>
+      <div class="kv-sub">Swap current Gemini Pro for Claude Opus 4.7 on the main assessment</div>
+    </div>
+  </div>
+</section>
+
+
+<!-- Live deployment -->
+<section>
+  <h2>Live deployment path</h2>
+  <div class="lede">Where the platform runs today and what handover looks like.</div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:14px">
+    <div class="kv" style="padding:18px 20px">
+      <div class="kv-label">Primary server</div>
+      <div class="kv-value" style="font-size:17px;line-height:1.4">New Contabo VPS <br>OR migrate to client-provided server</div>
+      <div class="kv-sub" style="margin-top:8px">Hosts the EW Flask app, Postgres, Nginx/SSL, FlareSolverr, cron scanners. Either we spin up a fresh Contabo box in the client's name (~$50/mo) or we migrate the stack to a server they already own. One-time migration: roughly half a day of work.</div>
+    </div>
+    <div class="kv" style="padding:18px 20px">
+      <div class="kv-label">Backup / failover server</div>
+      <div class="kv-value" style="font-size:17px;line-height:1.4">Second VPS, cold standby</div>
+      <div class="kv-sub" style="margin-top:8px">Identical configuration, hourly DB snapshot replication. If the primary server dies, DNS flips and EW is back online in minutes. ~$50/mo parked in standby.</div>
+    </div>
+  </div>
+
+  <h3 style="margin:26px 0 10px;font-size:16px;color:#e2e8f0">Local mini-servers (Beelinks)</h3>
+  <div class="lede" style="margin-bottom:12px">Small residential-IP boxes running on the client's local network. Required because vAuto (Cox) binds sessions to residential IPs and rejects datacenter traffic. One-time cost each, no monthly fee beyond electricity.</div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:30%">Mini-server role</th>
+        <th>Purpose</th>
+        <th style="width:18%" class="num">Hardware cost</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>vAuto verifier + new-dealer onboard</b></td>
+        <td class="muted">Runs the days-on-lot rBook verification for every car across every active partner dealer. Automatically picks up new cars nightly and processes any newly-added dealer the next morning. One Chrome session, one Cox login, residential IP.</td>
+        <td class="num">~$300</td>
+      </tr>
+      <tr>
+        <td><b>Bid-listing background worker (A)</b></td>
+        <td class="muted">Processes incoming bids as they land in the EW dashboard: fires the Gemini assessment, pulls Carfax/AutoCheck via vAuto, grabs AccuTrade + iPacket screenshots, runs OCR fallbacks. Handles live bid traffic.</td>
+        <td class="num">~$300</td>
+      </tr>
+      <tr>
+        <td><b>Bid-listing background worker (B) — redundant</b></td>
+        <td class="muted">Second identical worker as a hot partner to worker A. Load-balances bid processing during peak hours; takes over automatically if A fails. Also provides capacity headroom as dealer count + bid volume grow.</td>
+        <td class="num">~$300</td>
+      </tr>
+      <tr style="background:rgba(34,197,94,.05)">
+        <td><b>TOTAL local mini-servers</b></td>
+        <td></td>
+        <td class="num"><b>~$900 one-time</b></td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="lede" style="margin-top:12px;font-size:13px;color:#64748b">
+    All three Beelinks are one-time hardware purchases. No recurring fees. Run Ubuntu + systemd services, auto-recover on reboot, no daily touch required after initial Okta login.
+  </div>
+</section>
+
+<div class="footer-note">
+  All figures are planning estimates, not audited spend.
+</div>
+
+</div>
+</body>
+</html>

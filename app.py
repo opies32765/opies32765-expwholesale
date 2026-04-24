@@ -14,6 +14,11 @@ from twilio.rest import Client as TwilioClient
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'expwholesale2026!')
 app.permanent_session_lifetime = 86400 * 30  # 30 days
+# Auto-reload templates on filesystem change so template-only edits don't
+# require a gunicorn restart. Jinja bytecode-caches by default in prod;
+# this flips it to check mtime every request. Negligible perf cost.
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.jinja_env.auto_reload = True
 
 # Dealer DB blueprint (partner inventory scanning + UI)
 try:
@@ -22,17 +27,33 @@ try:
 except Exception as _e:
     print(f'[dealer_db] blueprint not loaded: {_e}', flush=True)
 
+# Partner portal blueprint (self-service dashboard for partner dealers)
+try:
+    from partner_portal import bp as _partner_bp
+    app.register_blueprint(_partner_bp)
+except Exception as _e:
+    print(f'[partner_portal] blueprint not loaded: {_e}', flush=True)
+
+# Cost analysis dashboard (admin-only — /admin/costs)
+try:
+    from cost_dashboard import bp as _cost_bp
+    app.register_blueprint(_cost_bp)
+except Exception as _e:
+    print(f'[cost_dashboard] blueprint not loaded: {_e}', flush=True)
+
 # ── Dashboard login ───────────────────────────────────────────────────────────
 EW_USERNAME = os.environ.get('EW_USERNAME', 'admin')
 EW_PASSWORD = os.environ.get('EW_PASSWORD', 'Sedecrem3')
 
 # Paths that don't require login
 _PUBLIC_PREFIXES = (
-    '/login', '/mobile', '/webhook/', '/static/', '/thumb',
+    '/login', '/mobile', '/webhook/', '/static/', '/thumb', '/p/',
     '/vauto_reports/', '/service-worker', '/privacy', '/terms',
     '/api/mobile-submit', '/api/rep-bids', '/api/register-rep',
     '/api/vauto/', '/api/accutrade/', '/accutrade_reports/',
     '/api/ipacket/', '/ipacket_reports/',
+    '/api/dealer/vauto_verify', '/api/dealer/vauto_verify_queue',
+    '/partner/',  # partner portal (own auth layer: partner_user_id session key)
     '/api/bid/external', '/api/push-subscribe',
     '/api/push-unsubscribe', '/api/vapid-public-key',
     '/.well-known/', '/api/tesla-vin/', '/share/',
@@ -66,7 +87,9 @@ def require_login():
 def login():
     error = None
     if request.method == 'POST':
-        if (request.form.get('username') == EW_USERNAME and
+        # Case-insensitive username compare (admin / Admin / ADMIN all work).
+        # Password stays strict.
+        if ((request.form.get('username') or '').lower() == EW_USERNAME.lower() and
                 request.form.get('password') == EW_PASSWORD):
             session.permanent = True
             session['logged_in'] = True
@@ -990,7 +1013,8 @@ def dashboard():
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     q = """
-        SELECT b.*, c.name as contact_name, c.company as contact_company
+        SELECT b.*, c.name as contact_name, c.company as contact_company,
+               c.role as contact_role
         FROM bids b LEFT JOIN contacts c ON b.contact_id = c.id
         {where}
         ORDER BY b.created_at DESC LIMIT 200
@@ -1277,6 +1301,14 @@ def send_reply(bid_id):
 
     db.commit()
     db.close()
+
+    # Partner-portal bids: fire off an email to the partner dealer user(s)
+    # so they know EW has responded. Safe no-op for non-partner bids.
+    try:
+        from partner_portal import notify_partner_of_ew_response
+        notify_partner_of_ew_response(bid_id)
+    except Exception as _e:
+        print(f'[partner notify] skipped for bid {bid_id}: {_e}', flush=True)
 
     # Attempt SMS after DB is committed — failure doesn't affect the response
     sms_sent = send_sms(bid['phone'], message)
@@ -2706,7 +2738,7 @@ def api_bids():
         SELECT b.id, b.phone, b.vin, b.year, b.make, b.model, b.mileage,
                b.raw_message, b.status, b.created_at, b.bid_amount, b.ai_price, b.asking_price,
                b.has_unread,
-               c.name as contact_name, c.company as contact_company
+               c.name as contact_name, c.company as contact_company, c.role as contact_role
         FROM bids b LEFT JOIN contacts c ON b.contact_id = c.id
         {where}
         ORDER BY b.created_at DESC LIMIT 200
@@ -2728,6 +2760,7 @@ def api_bids():
             'created_at': r['created_at'].isoformat() if r['created_at'] else None,
             'contact_name': r['contact_name'],
             'contact_company': r['contact_company'],
+            'contact_role': r.get('contact_role'),
             'asking_price': float(r['asking_price']) if r['asking_price'] else None,
             'ai_price': float(r['ai_price']) if r['ai_price'] else None,
             'bid_amount': float(r['bid_amount']) if r['bid_amount'] else None,
@@ -3544,112 +3577,10 @@ def _live_scan_comps(bid_id):
         print(f"  [LiveScan] error for bid #{bid_id}: {e}")
 
 
-SCRAPFLY_KEY = os.environ.get('SCRAPFLY_API_KEY', 'scp-live-e6c86de6355844f79af1d49495f0bdef')
-
-
-def verify_comp(url):
-    """Check comp URL via ScrapFly (JS rendering) for price + mileage, with plain fallback."""
-    if not url:
-        return {'status': 'no_url'}
-    try:
-        # Try ScrapFly first for JS-rendered content (gets mileage)
-        try:
-            sf = requests.get('https://api.scrapfly.io/scrape', params={
-                'key': SCRAPFLY_KEY,
-                'url': url,
-                'render_js': 'true',
-                'rendering_wait': 8000,
-                'auto_scroll': 'true',
-            }, timeout=45)
-            sf_data = sf.json().get('result', {})
-            if sf_data.get('status_code') == 200:
-                r_text = sf_data.get('content', '')
-                r_status = 200
-                r_url = sf_data.get('url', url)
-                r_history = []
-            else:
-                raise Exception(f"ScrapFly status {sf_data.get('status_code')}")
-        except Exception:
-            # Fallback to plain requests
-            r = requests.get(url, timeout=10, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }, allow_redirects=True)
-            r_text = r.text
-            r_status = r.status_code
-            r_url = r.url
-            r_history = r.history
-
-        if r_status == 404:
-            return {'status': 'gone'}
-        if r_status == 429 or r_status == 403:
-            return {'status': 'active', 'live_price': None, 'live_mileage': None}
-        if r_status != 200:
-            return {'status': 'error', 'code': r_status}
-
-        text = r_text.lower()
-
-        # Check if redirected to homepage (car removed)
-        if len(r_history) > 0 and ('inventory' not in r_url.lower() and 'vehicle' not in r_url.lower() and 'vin' not in r_url.lower()):
-            return {'status': 'gone'}
-
-        # Check for sold indicators
-        sold_phrases = ['this vehicle has been sold', 'this vehicle has sold',
-                        'no longer available', 'vehicle sold', 'has sold',
-                        'this listing has ended', 'sorry, this vehicle', 'has been removed',
-                        'vehicle is no longer', 'already been sold', 'is no longer available',
-                        'vehicle not found', 'listing not found']
-        for phrase in sold_phrases:
-            if phrase in text:
-                return {'status': 'sold'}
-
-        import re as _re
-        from collections import Counter
-
-        # Extract price — most frequently occurring reasonable dollar amount
-        all_prices = _re.findall(r'\$\s?([\d,]{5,10})', r_text)
-        all_prices += _re.findall(r'"price"\s*:\s*"?([\d,]{5,10})', r_text, _re.IGNORECASE)
-        all_prices += _re.findall(r'data-price[=:"\']+\s*([\d,]{5,10})', r_text, _re.IGNORECASE)
-        parsed_prices = []
-        for p in all_prices:
-            try:
-                val = int(p.replace(',', ''))
-                if 2000 < val < 500000:
-                    parsed_prices.append(val)
-            except ValueError:
-                pass
-        price = Counter(parsed_prices).most_common(1)[0][0] if parsed_prices else None
-
-        # Extract mileage — multiple patterns
-        mileage = None
-        mile_patterns = [
-            _re.compile(r'[Mm]ileage[:\s]+(\d[\d,]*)', _re.IGNORECASE),       # Mileage: 35103
-            _re.compile(r'[Oo]dometer[:\s]+(\d[\d,]*)', _re.IGNORECASE),       # Odometer: 35103
-            _re.compile(r'([\d,]+)\s*(?:mi\b|miles)', _re.IGNORECASE),         # 35,103 mi
-            _re.compile(r'"mileage"[:\s]*"?(\d[\d,]*)', _re.IGNORECASE),       # "mileage":"35103"
-            _re.compile(r'data-mileage[="\s]+(\d[\d,]*)', _re.IGNORECASE),     # data-mileage="35103"
-        ]
-        # Search both raw HTML and stripped visible text
-        import re as _re2
-        visible = _re2.sub(r'<[^>]+>', ' ', r_text)
-        for search_text in [r_text, visible]:
-            for pat in mile_patterns:
-                match = pat.search(search_text)
-                if match:
-                    try:
-                        m = int(match.group(1).replace(',', ''))
-                        if 100 < m < 500000:
-                            mileage = m
-                            break
-                    except ValueError:
-                        pass
-            if mileage:
-                break
-
-        return {'status': 'active', 'live_price': price, 'live_mileage': mileage}
-    except requests.Timeout:
-        return {'status': 'timeout'}
-    except Exception:
-        return {'status': 'error'}
+# ScrapFly removed 2026-04-23 — service killed after $1,127 runaway overage.
+# verify_comp() was the only caller and had no live references anywhere, so
+# the whole function was deleted with the service. If live comp verification
+# comes back as a need, rebuild against FlareSolverr + DataImpulse instead.
 os.makedirs(VAUTO_REPORTS_DIR, exist_ok=True)
 os.makedirs(ACCUTRADE_REPORTS_DIR, exist_ok=True)
 os.makedirs(IPACKET_REPORTS_DIR, exist_ok=True)
@@ -4283,6 +4214,97 @@ def api_vauto_pending():
     return jsonify({'pending': [dict(r) for r in rows]})
 
 
+@app.route('/api/vauto/find_click_target', methods=['POST'])
+def api_vauto_find_click_target():
+    """Given a screenshot of the vAuto Appraisals list (filtered to one
+    VIN), ask Gemini Vision for the pixel coordinates of the clickable
+    Make/Model link. Used by the Beelink verifier when ExtJS grids
+    render rows on Canvas (DOM is blind)."""
+    image = request.files.get('image')
+    vin = (request.form.get('vin') or '').strip().upper()
+    label = (request.form.get('label') or '').strip()  # e.g. "2021 Porsche Taycan"
+    if not image or not vin:
+        return jsonify({'error': 'image and vin required'}), 400
+    img_bytes = image.read()
+    if not img_bytes:
+        return jsonify({'error': 'empty image'}), 400
+    prompt = (
+        "You are looking at a screenshot of a vAuto Appraisals list page. "
+        f"The list is filtered to a specific vehicle with VIN {vin}"
+        + (f" (a {label})" if label else "")
+        + ". One or more rows will show this VIN. The clickable link for "
+        "each row is the Make/Model text (shown in blue, e.g. '2024 BMW "
+        "X5 xDrive40i') in the second column.\n"
+        "Return ONLY a JSON object — no prose, no markdown fence — with:\n"
+        '  {"found": true, "x": <int>, "y": <int>, "label": "<clicked text>"}\n'
+        "where x,y are the pixel coordinates (origin top-left) of the "
+        "CENTER of the TOPMOST (most recent) Make/Model link for this VIN.\n"
+        'If no matching row exists, return: {"found": false}'
+    )
+    text = gemini_call(prompt, image_bytes=img_bytes, mime='image/png',
+                       model='gemini-2.5-flash', max_tokens=200, temperature=0.1)
+    if not text:
+        return jsonify({'error': 'gemini call failed'}), 502
+    raw = text.strip()
+    if raw.startswith('```'):
+        raw = raw.strip('`').lstrip('json').strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception as e:
+        return jsonify({'error': f'parse failed: {e}', 'raw': raw[:200]}), 502
+    return jsonify(parsed)
+
+
+@app.route('/api/vauto/url_capture_result', methods=['POST'])
+def api_vauto_url_capture_result():
+    """Beelink posts back the captured permalink for a saved vAuto appraisal.
+    Accepts {bid_id, vin, appraisal_url}. If appraisal_url is missing/empty,
+    marks the row as attempted (by setting a non-null sentinel that the
+    queue endpoint filters on) — prevents re-polling forever."""
+    data = request.json or {}
+    bid_id = data.get('bid_id')
+    url = (data.get('appraisal_url') or '').strip()
+    if not bid_id:
+        return jsonify({'error': 'bid_id required'}), 400
+    db = get_db()
+    cur = db.cursor()
+    if url:
+        cur.execute("UPDATE vauto_lookups SET appraisal_url=%s WHERE bid_id=%s",
+                    (url, bid_id))
+    else:
+        # Mark the attempt so the queue endpoint stops returning it.
+        cur.execute("UPDATE vauto_lookups SET appraisal_url='__not_found__' "
+                    "WHERE bid_id=%s AND appraisal_url IS NULL", (bid_id,))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'url': url or None})
+
+
+@app.route('/api/vauto/url_capture_queue')
+def api_vauto_url_capture_queue():
+    """Return recent vAuto lookups missing an appraisal_url.
+    Beelink verifier polls this and fills in the permalink by walking
+    the Appraisals list on vAuto."""
+    limit = request.args.get('limit', 10, type=int)
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT vl.bid_id, vl.vin, vl.looked_up_at,
+               b.year, b.make, b.model
+        FROM vauto_lookups vl
+        LEFT JOIN bids b ON b.id = vl.bid_id
+        WHERE vl.appraisal_url IS NULL
+          AND vl.looked_up_at > NOW() - INTERVAL '2 hours'
+        ORDER BY vl.looked_up_at DESC
+        LIMIT %s
+    """, (limit,))
+    # Note: rows where the Beelink tried and failed are stored with the
+    # '__not_found__' sentinel — they're excluded by IS NULL above.
+    rows = cur.fetchall()
+    db.close()
+    return jsonify({'queue': [dict(r) for r in rows]})
+
+
 @app.route('/api/vauto/submit', methods=['POST'])
 def api_vauto_submit():
     """Accept vAuto lookup results from worker."""
@@ -4299,8 +4321,9 @@ def api_vauto_submit():
         INSERT INTO vauto_lookups
             (bid_id, vin, rbook, black_book, mmr, kbb, kbb_com, jd_power,
              title_status, price_rank, adj_pct_market,
-             carfax_screenshot, autocheck_screenshot, raw_json, looked_up_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+             carfax_screenshot, autocheck_screenshot, raw_json, appraisal_url,
+             looked_up_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         ON CONFLICT (bid_id) DO UPDATE SET
             vin=EXCLUDED.vin, rbook=EXCLUDED.rbook, black_book=EXCLUDED.black_book,
             mmr=EXCLUDED.mmr, kbb=EXCLUDED.kbb, kbb_com=EXCLUDED.kbb_com,
@@ -4308,7 +4331,9 @@ def api_vauto_submit():
             price_rank=EXCLUDED.price_rank, adj_pct_market=EXCLUDED.adj_pct_market,
             carfax_screenshot=EXCLUDED.carfax_screenshot,
             autocheck_screenshot=EXCLUDED.autocheck_screenshot,
-            raw_json=EXCLUDED.raw_json, looked_up_at=NOW()
+            raw_json=EXCLUDED.raw_json,
+            appraisal_url=COALESCE(EXCLUDED.appraisal_url, vauto_lookups.appraisal_url),
+            looked_up_at=NOW()
     """, (
         bid_id, vin,
         data.get('rbook'), data.get('wholesale_avg'), data.get('mmr_val'),
@@ -4316,6 +4341,7 @@ def api_vauto_submit():
         data.get('title_status'), data.get('price_rank'), data.get('adj_pct_market'),
         data.get('carfax_screenshot'), data.get('autocheck_screenshot'),
         json.dumps(data.get('raw', {})) if data.get('raw') else None,
+        data.get('appraisal_url'),
     ))
     # Clear priority flag now that we have the data
     cur.execute("UPDATE bids SET vauto_priority=FALSE WHERE id=%s", (bid_id,))
@@ -4401,6 +4427,64 @@ def thumb():
         except Exception:
             return 'Resize failed', 500
 
+    resp = send_from_directory(THUMB_CACHE_DIR, f'{cache_key}.jpg', mimetype='image/jpeg')
+    resp.headers['Cache-Control'] = 'public, max-age=604800, immutable'
+    return resp
+
+
+@app.route('/p/<int:photo_id>/<size>')
+def opaque_photo(photo_id, size):
+    """Serve a bid photo by opaque DB id — NO source URL in the request.
+    Used on the public share page so viewers can't see which dealer owns
+    the car by inspecting the URL (e.g., txtcharlie.com). The image itself
+    is re-encoded through PIL which strips EXIF/metadata for free. Content
+    of the photo is unchanged; only the identifying URL is hidden."""
+    if size not in THUMB_SIZES:
+        return 'Bad size', 400
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT url FROM bid_photos WHERE id = %s", (photo_id,))
+    row = cur.fetchone()
+    db.close()
+    if not row:
+        return 'Not found', 404
+    # Hand off to the existing /thumb logic by synthesizing a request-local
+    # call. Simpler: duplicate the tiny core.
+    import hashlib
+    from io import BytesIO
+    from PIL import Image, ImageOps
+    src = row['url']
+    max_w, max_h = THUMB_SIZES[size]
+    # Separate cache namespace from /thumb. The /p/ route strips EXIF via
+    # PIL re-encode and serves no source URL in request path, preserving
+    # dealer anonymity on the share page.
+    cache_key = hashlib.sha1(f'public|{src}|{size}'.encode()).hexdigest()
+    cache_path = os.path.join(THUMB_CACHE_DIR, f'{cache_key}.jpg')
+    if not os.path.exists(cache_path):
+        raw = None
+        try:
+            if src.startswith('/static/uploads/'):
+                local = os.path.join(os.path.dirname(os.path.abspath(__file__)), src.lstrip('/'))
+                if os.path.exists(local):
+                    with open(local, 'rb') as f: raw = f.read()
+            elif src.startswith('http'):
+                import urllib.request
+                req = urllib.request.Request(src, headers={'User-Agent': 'EW-Thumb/1.0'})
+                with urllib.request.urlopen(req, timeout=15) as r: raw = r.read()
+        except Exception:
+            pass
+        if not raw:
+            return 'Source fetch failed', 404
+        try:
+            img = Image.open(BytesIO(raw))
+            img = ImageOps.exif_transpose(img)
+            if img.mode not in ('RGB', 'L'):
+                img = img.convert('RGB')
+            img.thumbnail((max_w, max_h), Image.LANCZOS)
+            # JPEG save strips EXIF/metadata automatically (no exif= arg).
+            img.save(cache_path, 'JPEG', quality=80, optimize=True)
+        except Exception:
+            return 'Resize failed', 500
     resp = send_from_directory(THUMB_CACHE_DIR, f'{cache_key}.jpg', mimetype='image/jpeg')
     resp.headers['Cache-Control'] = 'public, max-age=604800, immutable'
     return resp
@@ -5681,6 +5765,45 @@ def api_bid_share(bid_id):
     return jsonify(result)
 
 
+@app.route('/api/bid-photo/<int:photo_id>/set-share', methods=['POST'])
+def set_photo_share(photo_id):
+    """Admin sets whether a specific bid_photo is included in the public
+    share page. Body: {include: true|false}. Explicit-value API — safer
+    than toggle because repeated clicks can't drift the UI and DB apart."""
+    data = request.get_json(silent=True) or {}
+    want = bool(data.get('include'))
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE bid_photos SET include_in_share = %s
+        WHERE id = %s
+        RETURNING id, include_in_share
+    """, (want, photo_id))
+    row = cur.fetchone()
+    db.commit()
+    db.close()
+    if not row:
+        return jsonify({'error': 'not_found'}), 404
+    return jsonify({'ok': True, 'id': row['id'], 'include_in_share': row['include_in_share']})
+
+
+@app.route('/api/bid-photo/<int:photo_id>/toggle-share', methods=['POST'])
+def toggle_photo_share(photo_id):
+    """Legacy toggle endpoint — kept for any older UI code still calling it."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE bid_photos SET include_in_share = NOT include_in_share
+        WHERE id = %s RETURNING id, include_in_share
+    """, (photo_id,))
+    row = cur.fetchone()
+    db.commit()
+    db.close()
+    if not row:
+        return jsonify({'error': 'not_found'}), 404
+    return jsonify({'ok': True, 'id': row['id'], 'include_in_share': row['include_in_share']})
+
+
 @app.route('/share/<token>')
 def share_page(token):
     """Public share page — no login required."""
@@ -5696,7 +5819,14 @@ def share_page(token):
         db.close()
         return 'Not found', 404
 
-    cur.execute("SELECT url FROM bid_photos WHERE bid_id = %s ORDER BY id", (bid['id'],))
+    # Share page shows only photos the admin has marked for inclusion
+    # (toggle lives on the admin bid-detail page). include_in_share
+    # defaults to TRUE so existing bids aren't accidentally emptied.
+    cur.execute("""
+        SELECT id, url FROM bid_photos
+        WHERE bid_id = %s AND include_in_share = TRUE
+        ORDER BY id
+    """, (bid['id'],))
     photos = cur.fetchall()
 
     cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid['id'],))

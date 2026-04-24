@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ dealer.name }} — Aged Inventory Portal</title>
+<style>
+  :root{--bg:#0f172a;--panel:#1e293b;--mute:#94a3b8;--text:#e2e8f0;
+        --line:#334155;--accent:#2563eb;--good:#22c55e;--warn:#f59e0b;--bad:#ef4444}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text)}
+  body{font-size:16px}
+  header{padding:24px 32px;background:var(--panel);display:flex;
+    justify-content:space-between;align-items:center;border-bottom:1px solid var(--line)}
+  header h1{margin:0;font-size:24px;font-weight:700}
+  header .sub{color:var(--mute);font-size:14px;margin-top:4px}
+  header a{color:#7dd3fc;font-size:15px;text-decoration:none;margin-left:20px}
+  main{max-width:1500px;margin:0 auto;padding:28px 32px}
+  .flash{padding:14px 18px;background:#1e3a8a;color:#dbeafe;border-radius:8px;font-size:15px;margin-bottom:18px}
+  .intro{background:var(--panel);padding:20px 24px;border-radius:10px;margin-bottom:24px;font-size:15px;color:var(--mute);line-height:1.6}
+  .intro strong{color:var(--text)}
+  .empty{text-align:center;padding:80px 20px;color:var(--mute);background:var(--panel);border-radius:10px;font-size:16px}
+  .empty h2{font-size:22px}
+  table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:10px;overflow:hidden}
+  thead th{background:#0f172a;padding:14px 14px;text-align:left;font-size:13px;font-weight:700;
+    text-transform:uppercase;letter-spacing:.6px;color:var(--mute);border-bottom:1px solid var(--line)}
+  tbody td{padding:18px 14px;font-size:15px;border-bottom:1px solid var(--line);vertical-align:middle}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:rgba(37,99,235,.06)}
+  .car-ymmt{font-weight:700;font-size:17px;margin-bottom:4px}
+  .car-ymmt a{color:#7dd3fc;text-decoration:none}
+  .car-ymmt a:hover{text-decoration:underline}
+  .car-meta{color:var(--mute);font-size:13px}
+  .age{font-weight:800;font-size:22px}
+  .age.stale{color:var(--bad)}
+  .age.aged{color:var(--warn)}
+  .age-src{display:block;font-size:11px;color:var(--mute);margin-top:2px}
+  .price-you{font-size:18px;font-weight:700}
+  input[type=text],input[type=number]{width:140px;padding:10px 12px;border:1px solid var(--line);
+    background:var(--bg);color:var(--text);border-radius:6px;font-size:16px;font-weight:600}
+  textarea{width:100%;min-height:60px;padding:10px 12px;border:1px solid var(--line);
+    background:var(--bg);color:var(--text);border-radius:6px;font-size:14px;resize:vertical;font-family:inherit;line-height:1.4}
+  .check{transform:scale(1.8)}
+  .status-chip{display:inline-block;padding:5px 12px;border-radius:12px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+  .status-open{background:#1e3a8a;color:#dbeafe}
+  .status-responded{background:#166534;color:#bbf7d0}
+  .status-waiting{background:#422006;color:#fde68a}
+  .bid-thread{font-size:13px;color:var(--mute);margin-top:6px;line-height:1.4}
+  .msg-ew{color:#7dd3fc;font-weight:600}
+  .submit-bar{position:sticky;bottom:0;background:var(--panel);padding:20px 24px;margin-top:24px;
+    border-top:2px solid var(--accent);border-radius:10px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 -4px 12px rgba(0,0,0,.4)}
+  .submit-bar button{padding:16px 36px;background:var(--good);color:#0f172a;border:0;
+    border-radius:8px;font-weight:800;font-size:17px;cursor:pointer}
+  .submit-bar button:disabled{opacity:.4;cursor:not-allowed}
+  .sel-count{color:var(--mute);font-size:15px}
+  .sel-count b{color:var(--text);font-size:22px;margin-right:4px}
+  .bucket-legend{display:flex;gap:20px;font-size:14px;color:var(--mute);margin-bottom:20px;flex-wrap:wrap}
+  .bucket-legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:7px;vertical-align:middle}
+  .bucket-legend .e30::before{background:#7dd3fc}
+  .bucket-legend .e60::before{background:var(--warn)}
+  .bucket-legend .e90::before{background:var(--bad)}
+  .bucket-legend .edrop::before{background:#a78bfa}
+</style>
+</head>
+<body>
+{% if viewing_as_admin %}
+<div style="background:#7c2d12;color:#fed7aa;padding:10px 28px;text-align:center;font-size:14px;font-weight:600;border-bottom:2px solid #ea580c">
+  🔒 Viewing {{ dealer.name }}'s portal as admin —
+  <a href="{{ url_for('partner.exit_view_as', slug=slug) }}" style="color:#fff;text-decoration:underline;font-weight:700">exit &amp; return to EW admin</a>
+</div>
+{% endif %}
+<header>
+  <div>
+    <h1>{{ dealer.name }} — Aged Inventory</h1>
+    <div class="sub">Signed in as {{ user.email }}{% if viewing_as_admin %} (admin view){% endif %}</div>
+  </div>
+  <div>
+    <a href="{{ url_for('partner.settings_page', slug=slug) }}">Settings</a>
+    <a href="{{ url_for('partner.logout', slug=slug) }}">Sign out</a>
+    <span style="font-size:10px;color:#475569;margin-left:12px" title="build">v4</span>
+  </div>
+</header>
+<main>
+  {% with msgs = get_flashed_messages(with_categories=true) %}
+    {% for cat, m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}
+  {% endwith %}
+
+  <div class="intro">
+    Below are cars from your inventory that Experience Wholesale has identified as
+    <strong>aging</strong>. Check the ones you'd like us to bid, enter the price
+    you want, add a note if you have specifics, then hit <strong>Submit</strong>.
+    Our team will respond directly in this dashboard and you'll get an
+    <strong>email or text</strong> based on your
+    <a href="{{ url_for('partner.settings_page', slug=slug) }}" style="color:#7dd3fc">settings</a>.
+    <br><br>
+    <strong>Bookmark this page:</strong>
+    <code style="padding:4px 8px;background:#0f172a;border-radius:4px;user-select:all;font-size:12px">{{ request.host_url }}partner/{{ slug }}</code>
+  </div>
+
+  <div class="bucket-legend">
+    {% if enabled_buckets.get('30_60') %}<span class="e30">30–60 days</span>{% endif %}
+    {% if enabled_buckets.get('60_90') %}<span class="e60">60–90 days</span>{% endif %}
+    {% if enabled_buckets.get('90_plus') %}<span class="e90">90+ days</span>{% endif %}
+    {% if enabled_buckets.get('price_drop') %}<span class="edrop">Price drop</span>{% endif %}
+  </div>
+
+  {% if not rows %}
+    <div class="empty">
+      <h2 style="margin:0 0 8px;">You're clean.</h2>
+      <p>No cars currently hit any of your enabled age or price-drop thresholds. Come back after the next daily digest.</p>
+    </div>
+  {% else %}
+  <form method="post" action="{{ url_for('partner.submit_requests', slug=slug) }}" id="bidForm">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:36px">#</th>
+          <th style="width:30px"></th>
+          <th>Vehicle</th>
+          <th>Miles</th>
+          <th>Our Ask</th>
+          <th>Age</th>
+          <th style="width:130px">Your price</th>
+          <th style="width:240px">Your message</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for v in rows %}
+          {% set age = v|best_age_days %}
+          {% set src = v|age_source %}
+          {% set req = already_requested_vins.get(v.vin) %}
+          <tr>
+            <td><span style="display:inline-block;min-width:28px;padding:4px 10px;background:#2563eb;color:#fff;border-radius:14px;font-size:15px;font-weight:800;text-align:center">{{ loop.index }}</span></td>
+            <td>
+              {% if req %}
+                <span title="Already submitted">–</span>
+              {% else %}
+                <input class="check" type="checkbox" name="select_{{ v.id }}">
+              {% endif %}
+            </td>
+            <td>
+              <div class="car-ymmt">
+                {% if v.url %}<a href="{{ v.url }}" target="_blank" rel="noopener">{{ v.year }} {{ v.make }} {{ v.model }} {{ v.trim or '' }}</a>
+                {% else %}{{ v.year }} {{ v.make }} {{ v.model }} {{ v.trim or '' }}{% endif %}
+              </div>
+              <div class="car-meta">
+                VIN <span style="font-family:ui-monospace,monospace">{{ v.vin }}</span>
+                {% if v.ext_color %} · {{ v.ext_color }}{% endif %}
+              </div>
+            </td>
+            <td>{{ v.mileage|miles if v.mileage else '—' }}</td>
+            <td>{{ v.price|money if v.price else '—' }}
+              {% if v.price_drop_amount %}
+                <div class="car-meta" style="color:#a78bfa">↓ ${{ '{:,.0f}'.format(v.price_drop_amount) }}</div>
+              {% endif %}
+            </td>
+            <td>
+              <span class="age {% if age|int >= 90 %}stale{% elif age|int >= 60 %}aged{% endif %}">
+                {{ age }}d
+              </span>
+              {% if src == 'vauto' %}<span class="age-src" style="color:#22c55e">&#10003;verified</span>
+              {% elif src == 'dealer' %}<span class="age-src">dealer</span>{% endif %}
+            </td>
+            <td>
+              {% if req %}
+                <span class="price-you">${{ '{:,.0f}'.format(req.target_price) if req.target_price else '—' }}</span>
+              {% else %}
+                <input type="text" name="price_{{ v.id }}" inputmode="numeric" placeholder="e.g. 25,000"
+       oninput="var d=this.value.replace(/[^0-9]/g,'');this.value=d?parseInt(d,10).toLocaleString('en-US'):'';">
+              {% endif %}
+            </td>
+            <td>
+              {% if req %}
+                <div class="bid-thread">
+                  {% if req.partner_message %}<em>You said:</em> {{ req.partner_message }}<br>{% endif %}
+                  {% if req.ew_counter %}<span class="msg-ew"><em>EW offer:</em> ${{ '{:,.0f}'.format(req.ew_counter) }}</span>{% endif %}
+                  {% if req.ew_message %}<br><span class="msg-ew">{{ req.ew_message }}</span>{% endif %}
+                  {% if not req.partner_message and not req.ew_counter and not req.ew_message %}<em>Awaiting EW response…</em>{% endif %}
+                </div>
+                {% if req.ew_counter or req.ew_message %}
+                  <div class="counter-form" data-pbr-id="{{ req.get('pbr_id', '') }}"
+                       style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+                    <input type="text" class="counter-price" inputmode="numeric" placeholder="Counter $"
+                           style="width:120px;font-size:14px"
+                           oninput="var d=this.value.replace(/[^0-9]/g,'');this.value=d?parseInt(d,10).toLocaleString('en-US'):'';">
+                    <input type="text" class="counter-msg" placeholder="Reply…" style="flex:1;min-width:120px;font-size:14px;width:auto">
+                    <button type="button" onclick="sendCounter(this.parentElement)"
+                            style="padding:6px 14px;background:#2563eb;color:#fff;border:0;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer">Respond</button>
+                  </div>
+                {% endif %}
+              {% else %}
+                <textarea name="message_{{ v.id }}" placeholder="Optional note…"></textarea>
+              {% endif %}
+            </td>
+            <td>
+              {% if req %}
+                {% if req.ew_counter or req.ew_message %}
+                  <span class="status-chip status-responded">EW Replied</span>
+                {% else %}
+                  <span class="status-chip status-waiting">Awaiting EW</span>
+                {% endif %}
+                {% if req.bid_id %}<div style="font-size:18px;color:#fbbf24;margin-top:12px;font-family:ui-monospace,monospace;font-weight:800;letter-spacing:.5px">Bid #{{ req.bid_id }}</div>{% endif %}
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="submit-bar">
+      <div class="sel-count">
+        <b id="selCount">0</b> car<span id="selS">s</span> selected
+      </div>
+      <button type="submit" id="submitBtn" disabled>Submit bid request</button>
+    </div>
+  </form>
+  {% endif %}
+</main>
+
+<script>
+// Live count of checked rows + enable/disable submit
+const form = document.getElementById('bidForm');
+if (form) {
+  const countEl = document.getElementById('selCount');
+  const sEl = document.getElementById('selS');
+  const btn = document.getElementById('submitBtn');
+  function recount() {
+    const n = form.querySelectorAll('input[type=checkbox]:checked').length;
+    countEl.textContent = n;
+    sEl.textContent = n === 1 ? '' : 's';
+    btn.disabled = n === 0;
+  }
+  form.addEventListener('change', (e) => { if (e.target.type === 'checkbox') recount(); });
+  recount();
+
+  // Block submit unless every checked row has a numeric price. Highlight
+  // the missing ones in red so the dealer sees exactly what to fill in.
+  form.addEventListener('submit', (e) => {
+    const checked = form.querySelectorAll('input[type=checkbox]:checked');
+    let missing = [];
+    checked.forEach(cb => {
+      const id = cb.name.replace('select_', '');
+      const priceInput = form.querySelector('input[name="price_' + id + '"]');
+      const raw = (priceInput && priceInput.value || '').replace(/[^0-9]/g, '');
+      if (!raw || parseInt(raw, 10) <= 0) {
+        missing.push(priceInput);
+      }
+    });
+    if (missing.length) {
+      e.preventDefault();
+      missing.forEach(inp => {
+        inp.style.borderColor = '#ef4444';
+        inp.style.background = 'rgba(239,68,68,.08)';
+      });
+      missing[0].scrollIntoView({block:'center', behavior:'smooth'});
+      missing[0].focus();
+      alert('Enter a price for every car you have selected (' + missing.length +
+            ' missing). Price is required before we can respond with an offer.');
+    }
+  });
+  // Clear the red highlight when the dealer starts typing a price
+  form.querySelectorAll('input[name^="price_"]').forEach(inp => {
+    inp.addEventListener('focus', () => {
+      inp.style.borderColor = '';
+      inp.style.background = '';
+    });
+  });
+
+  // Auto-format price inputs with commas as they type.
+  // Strips everything non-digit, then re-inserts thousands separators.
+  // Keeps the caret at the end (simple approach — users re-typing in the
+  // middle is rare for small amounts). Backend already strips commas/$
+  // so the submitted value is always parseable.
+  form.querySelectorAll('input[name^="price_"]').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const digits = inp.value.replace(/[^0-9]/g, '');
+      inp.value = digits ? parseInt(digits, 10).toLocaleString('en-US') : '';
+    });
+  });
+}
+
+// ── Counter submission ──────────────────────────────────────────────────
+// Takes the wrapper <div class="counter-form"> (not a form — nested <form>
+// isn't valid HTML, so we gather fields manually by class).
+function sendCounter(wrapper) {
+  // Hard dedupe — ignore every call after the first until page reloads.
+  if (wrapper.dataset.submitting === '1') return;
+  wrapper.dataset.submitting = '1';
+  const btn = wrapper.querySelector('button');
+  const price = (wrapper.querySelector('.counter-price').value || '').trim();
+  const msg   = (wrapper.querySelector('.counter-msg').value || '').trim();
+  if (!price && !msg) {
+    wrapper.dataset.submitting = '';
+    alert('Enter a price or a message before submitting.');
+    return;
+  }
+  btn.disabled = true; btn.textContent = 'Sending…';
+  const fd = new FormData();
+  fd.append('pbr_id', wrapper.dataset.pbrId || '');
+  fd.append('counter_price', price);
+  fd.append('counter_message', msg);
+  fetch('{{ url_for("partner.counter_offer", slug=slug) }}', {method:'POST', body: fd})
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) { btn.textContent = 'Sent!'; setTimeout(()=>location.reload(), 800); }
+      else {
+        wrapper.dataset.submitting = '';
+        btn.textContent = 'Respond'; btn.disabled = false;
+        alert('Counter failed: ' + (d.error || 'unknown'));
+      }
+    })
+    .catch(e => {
+      wrapper.dataset.submitting = '';
+      btn.textContent = 'Respond'; btn.disabled = false;
+    });
+}
+
+// ── Poll for new EW responses every 30s: chime + gold star ──────────────
+let lastUnreadIds = new Set();
+function chime() {
+  // Simple in-browser tone — no audio file dependency. Two-note "ding dong".
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const playTone = (freq, start, dur) => {
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, ctx.currentTime + start);
+      g.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + start + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + start + dur);
+      o.start(ctx.currentTime + start); o.stop(ctx.currentTime + start + dur);
+    };
+    playTone(880, 0, 0.35);
+    playTone(660, 0.25, 0.45);
+  } catch(e) {}
+}
+function flashGoldStar() {
+  // Floating gold star in the corner for 4 seconds
+  let s = document.getElementById('goldStar');
+  if (!s) {
+    s = document.createElement('div');
+    s.id = 'goldStar';
+    s.innerHTML = '&#9733; New EW Response';
+    s.style.cssText = 'position:fixed;top:30px;right:30px;background:#fbbf24;color:#1e293b;' +
+      'padding:14px 20px;border-radius:10px;font-size:17px;font-weight:800;' +
+      'box-shadow:0 10px 30px rgba(251,191,36,.5);z-index:9999;' +
+      'animation:pulse 0.6s ease-in-out infinite alternate';
+    document.body.appendChild(s);
+    const style = document.createElement('style');
+    style.textContent = '@keyframes pulse{from{transform:scale(1)}to{transform:scale(1.07)}}';
+    document.head.appendChild(style);
+  }
+  s.style.display = 'block';
+  setTimeout(() => { if (s) s.style.display = 'none'; }, 4500);
+}
+
+// Toast for "new inventory entered a bucket" — different from EW-replied gold star
+function showInventoryToast(delta) {
+  let t = document.getElementById('invToast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'invToast';
+    t.style.cssText = 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%);' +
+      'background:#2563eb;color:#fff;padding:14px 24px;border-radius:10px;' +
+      'font-size:15px;font-weight:700;box-shadow:0 10px 30px rgba(37,99,235,.5);' +
+      'z-index:9998;cursor:pointer';
+    t.onclick = () => location.reload();
+    document.body.appendChild(t);
+  }
+  const n = Math.abs(delta);
+  const word = n === 1 ? 'car' : 'cars';
+  t.innerHTML = (delta > 0
+    ? '+' + delta + ' new ' + word + ' added'
+    : n + ' ' + word + ' removed (sold or delisted)') + ' — click to refresh';
+  t.style.display = 'block';
+}
+
+let baselineCarCount = {{ rows|length }};
+
+// Initial load: capture baseline so we only chime on *new* responses
+fetch('{{ url_for("partner.poll_unread", slug=slug) }}').then(r=>r.json()).then(d => {
+  if (d.responses) lastUnreadIds = new Set(d.responses.map(r => r.pbr_id));
+  if (typeof d.total_displayable === 'number') baselineCarCount = d.total_displayable;
+  // Mark everything as seen on first load so we don't chime on the existing ones
+  fetch('{{ url_for("partner.mark_seen", slug=slug) }}', {method:'POST'});
+});
+
+setInterval(() => {
+  fetch('{{ url_for("partner.poll_unread", slug=slug) }}')
+    .then(r => r.json())
+    .then(d => {
+      if (!d.responses) return;
+      const currentIds = new Set(d.responses.map(r => r.pbr_id));
+      // Any id NOT in lastUnreadIds is new
+      const hasNew = [...currentIds].some(id => !lastUnreadIds.has(id));
+      if (hasNew) {
+        chime();
+        flashGoldStar();
+        // Reload after a moment so the dashboard reflects the new EW offer
+        setTimeout(() => location.reload(), 1500);
+      }
+      lastUnreadIds = currentIds;
+
+      // Inventory change detection — bucket shift during the day
+      if (typeof d.total_displayable === 'number'
+          && d.total_displayable !== baselineCarCount) {
+        const delta = d.total_displayable - baselineCarCount;
+        showInventoryToast(delta);
+        // Don't auto-update baseline — keep showing toast until user clicks
+        // to refresh, so they know something changed.
+      }
+    })
+    .catch(()=>{});
+}, 15000);
+</script>
+</body>
+</html>

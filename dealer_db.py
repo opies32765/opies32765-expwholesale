@@ -91,20 +91,28 @@ def dealer_detail(dealer_id):
                            sold=sold, scans=scans, pipeline=pipeline)
 
 
+# Effective first-seen: prefer vAuto-verified crawler data (most accurate -
+# catches photo-reupload scams), fall back to dealer-declared source_added_at,
+# then our scanner's first_seen_at. Used by bucket filters + ORDER BYs so
+# aged-stock cards reflect reality as verification rolls in.
+EFFECTIVE_FS = ("COALESCE("
+                "i.verified_at - (i.verified_days_on_lot || ' days')::interval, "
+                "i.source_added_at, i.first_seen_at)")
+
 # ── Cross-dealer aggregated lists (dashboard stat-card drill-ins) ────────
 _BUCKET_FILTERS = {
     '30_60': (
-        "COALESCE(i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '30 days' "
-        "AND COALESCE(i.source_added_at, i.first_seen_at) > NOW() - INTERVAL '60 days'",
+        f"{EFFECTIVE_FS} <= NOW() - INTERVAL '30 days' "
+        f"AND {EFFECTIVE_FS} > NOW() - INTERVAL '60 days'",
         '30–60 days on lot',
     ),
     '60_90': (
-        "COALESCE(i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '60 days' "
-        "AND COALESCE(i.source_added_at, i.first_seen_at) > NOW() - INTERVAL '90 days'",
+        f"{EFFECTIVE_FS} <= NOW() - INTERVAL '60 days' "
+        f"AND {EFFECTIVE_FS} > NOW() - INTERVAL '90 days'",
         '60–90 days on lot',
     ),
     '90_plus': (
-        "COALESCE(i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '90 days'",
+        f"{EFFECTIVE_FS} <= NOW() - INTERVAL '90 days'",
         '90+ days on lot — wholesale candidates',
     ),
 }
@@ -123,37 +131,272 @@ def dealers_aged(bucket):
                    i.year, i.make, i.model, i.trim, i.vin, i.ext_color,
                    i.mileage, i.price, i.url, i.photo_url,
                    i.source_added_at, i.first_seen_at,
+                   i.verified_at, i.verified_days_on_lot,
                    i.price_drop_amount, i.price_drop_at, i.last_price
             FROM dealer_inventory i
             JOIN dealers d ON d.id = i.dealer_id
             WHERE i.status = 'active' AND d.active AND ({where_age})
-            ORDER BY COALESCE(i.source_added_at, i.first_seen_at) ASC
+            ORDER BY {EFFECTIVE_FS} ASC
         """)
         rows = cur.fetchall()
     return render_template('dealers_cross_list.html',
                            rows=rows, title=title, bucket=bucket, mode='aged')
 
 
-@bp.route('/dealers/price-drops')
-def dealers_price_drops():
-    """Cross-dealer list of every currently-active car with a price drop
-    flagged at any point in its lifetime. Biggest drop first."""
+# ── vAuto rBook verification endpoints (Beelink worker calls these) ─────
+# Worker polls /api/dealer/vauto_verify_queue → gets list of VINs needing
+# verification → runs vAuto appraisal → extracts the (parens) days-on-market
+# → POSTs {vin, days_on_market, market_price, market_odometer} back here.
+
+
+@bp.route('/api/dealer/vauto_verify_queue', methods=['GET'])
+def api_vauto_verify_queue():
+    """Return active VINs needing vAuto verification.
+    Prefers never-verified (verified_at NULL) first, then oldest verification.
+    Query params: dealer_id (int, optional — defaults to all active dealers),
+                  limit (int, default 5), min_age_hours (default 72)."""
+    try:
+        dealer_id = request.args.get('dealer_id', type=int)
+        limit = min(int(request.args.get('limit', 5)), 50)
+        min_age_hours = int(request.args.get('min_age_hours', 72))
+    except (ValueError, TypeError):
+        return jsonify({'error': 'bad params'}), 400
+
+    where_dealer = 'AND i.dealer_id = %s' if dealer_id else ''
+    params = [min_age_hours]
+    if dealer_id:
+        params.append(dealer_id)
+    params.append(limit)
+
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT i.id, i.dealer_id, d.name AS dealer_name,
+                   i.vin, i.year, i.make, i.model, i.trim, i.mileage,
+                   i.source_added_at::date AS source_added_at,
+                   i.verified_at, i.verified_days_on_lot,
+                   COALESCE(d.vauto_seller_hints, ARRAY[]::text[]) AS vauto_seller_hints
+            FROM dealer_inventory i
+            JOIN dealers d ON d.id = i.dealer_id
+            WHERE i.status = 'active' AND d.active
+              AND i.vin IS NOT NULL AND i.vin <> '' AND LENGTH(i.vin) = 17
+              -- Skip obvious fake/padded VINs (pre-1981 classics padded with
+              -- leading zeros to hit the 17-char constraint). vAuto rBook
+              -- has no data for these and the verifier hangs waiting.
+              AND i.vin NOT LIKE '000%%'
+              AND (i.year IS NULL OR i.year >= 1981)
+              -- Retry logic: never-verified first, then real vAuto rows
+              -- past the min_age window. Skip markers (no_rbook_data,
+              -- appraisal_failed) don't re-queue — we already tried and
+              -- vAuto has nothing for these rare exotics.
+              AND (i.verified_at IS NULL
+                   OR (i.verified_source = 'vauto_rbook'
+                       AND i.verified_at < NOW() - (%s || ' hours')::interval))
+              {where_dealer}
+            ORDER BY i.verified_at NULLS FIRST, i.first_seen_at ASC
+            LIMIT %s
+        """, tuple(params))
+        return _json_response({'queue': [dict(r) for r in cur.fetchall()]})
+
+
+@bp.route('/api/dealer/vauto_verify', methods=['POST'])
+def api_vauto_verify():
+    """Worker POSTs verified days-on-market data here.
+    Body: {vin, days_on_market, market_price?, market_odometer?, notes?}"""
+    data = request.get_json(silent=True) or {}
+    vin = (data.get('vin') or '').strip().upper()
+    days = data.get('days_on_market')
+    if not vin or len(vin) != 17:
+        return jsonify({'error': 'invalid_vin'}), 400
+    if days is None:
+        # Allow negative-result submissions — records that we tried but vAuto had no data
+        days = None
+    else:
+        try:
+            days = int(days)
+            if days < 0 or days > 3000:
+                return jsonify({'error': 'days_out_of_range'}), 400
+        except (ValueError, TypeError):
+            return jsonify({'error': 'days_not_int'}), 400
+
+    # Distinguish real verified days vs skip markers coming in with days=0
+    # and a note like 'no_rbook_data' or 'appraisal_failed:XYZ' from the
+    # worker. The source column is what UI/queries check to ignore skips.
+    notes = (data.get('notes') or '').strip()
+    if days == 0 and notes:
+        source = notes[:64]  # e.g. 'no_rbook_data', 'appraisal_failed:...'
+        days_val = None      # don't let a 0 look like "just listed"
+    else:
+        source = 'vauto_rbook'
+        days_val = days
+
     with _db() as conn, conn.cursor() as cur:
         cur.execute("""
+            UPDATE dealer_inventory
+               SET verified_days_on_lot = %s,
+                   verified_at = NOW(),
+                   verified_source = %s,
+                   updated_at = NOW()
+             WHERE vin = %s AND status = 'active'
+             RETURNING id, dealer_id
+        """, (days_val, source, vin))
+        rows = cur.fetchall()
+        conn.commit()
+
+    if not rows:
+        return jsonify({'ok': False, 'reason': 'vin_not_active'}), 200
+    return jsonify({'ok': True, 'rows_updated': len(rows),
+                    'vin': vin, 'days_on_market': days})
+
+
+@bp.route('/dealers/search')
+def dealers_search():
+    """Cross-dealer vehicle search. GET params (all optional):
+       year_from, year_to, make, model, trim, color, vin,
+       miles_max, price_min, price_max,
+       dealer_id (repeat for multiple), status (default 'active'),
+       min_age, max_age, has_drop (0/1), has_verified_age (0/1)."""
+    q = request.args
+    parts = []
+    params = []
+
+    status = q.get('status') or 'active'
+    if status != 'any':
+        parts.append("i.status = %s"); params.append(status)
+
+    if q.get('year_from'):
+        try:
+            parts.append("i.year >= %s"); params.append(int(q['year_from']))
+        except ValueError:
+            pass
+    if q.get('year_to'):
+        try:
+            parts.append("i.year <= %s"); params.append(int(q['year_to']))
+        except ValueError:
+            pass
+
+    if q.get('make'):
+        parts.append("LOWER(i.make) = LOWER(%s)"); params.append(q['make'].strip())
+    if q.get('model'):
+        parts.append("LOWER(i.model) LIKE LOWER(%s)"); params.append(f"%{q['model'].strip()}%")
+    if q.get('trim'):
+        parts.append("LOWER(COALESCE(i.trim,'')) LIKE LOWER(%s)")
+        params.append(f"%{q['trim'].strip()}%")
+    if q.get('color'):
+        parts.append("LOWER(COALESCE(i.ext_color,'')) LIKE LOWER(%s)")
+        params.append(f"%{q['color'].strip()}%")
+    if q.get('vin'):
+        parts.append("UPPER(COALESCE(i.vin,'')) LIKE UPPER(%s)")
+        params.append(f"%{q['vin'].strip()}%")
+
+    if q.get('miles_max'):
+        try:
+            parts.append("i.mileage <= %s"); params.append(int(q['miles_max']))
+        except ValueError:
+            pass
+    if q.get('price_min'):
+        try:
+            parts.append("i.price >= %s"); params.append(int(q['price_min']))
+        except ValueError:
+            pass
+    if q.get('price_max'):
+        try:
+            parts.append("i.price <= %s"); params.append(int(q['price_max']))
+        except ValueError:
+            pass
+
+    # Dealer multi-select (repeat param or comma-separated)
+    dealer_ids = q.getlist('dealer_id') or []
+    if dealer_ids:
+        try:
+            ids = [int(d) for d in dealer_ids if d]
+            if ids:
+                parts.append(f"i.dealer_id IN ({','.join(['%s']*len(ids))})")
+                params.extend(ids)
+        except ValueError:
+            pass
+
+    # Age filters use EFFECTIVE_FS (vAuto-verified > dealer > scanner)
+    if q.get('min_age'):
+        try:
+            parts.append(f"{EFFECTIVE_FS} <= NOW() - (%s || ' days')::interval")
+            params.append(str(int(q['min_age'])))
+        except ValueError:
+            pass
+    if q.get('max_age'):
+        try:
+            parts.append(f"{EFFECTIVE_FS} > NOW() - (%s || ' days')::interval")
+            params.append(str(int(q['max_age'])))
+        except ValueError:
+            pass
+
+    if q.get('has_drop') == '1':
+        parts.append("i.price_drop_amount IS NOT NULL")
+    if q.get('has_verified_age') == '1':
+        parts.append("i.verified_source = 'vauto_rbook'")
+
+    where = "d.active = TRUE AND " + " AND ".join(parts) if parts else "d.active = TRUE"
+
+    with _db() as conn, conn.cursor() as cur:
+        # Pull dealers + makes once for the form dropdowns
+        cur.execute("SELECT id, name FROM dealers WHERE active = TRUE ORDER BY name")
+        dealers_all = cur.fetchall()
+        cur.execute("SELECT DISTINCT make FROM dealer_inventory "
+                    "WHERE make IS NOT NULL AND make <> '' ORDER BY make")
+        makes_all = [r['make'] for r in cur.fetchall()]
+
+        # Only run the results query if at least one filter beyond active is set
+        rows = []
+        if parts:
+            cur.execute(f"""
+                SELECT i.id, i.dealer_id, d.name AS dealer_name,
+                       i.year, i.make, i.model, i.trim, i.vin, i.ext_color,
+                       i.mileage, i.price, i.url, i.photo_url, i.status,
+                       i.source_added_at, i.first_seen_at,
+                       i.verified_at, i.verified_days_on_lot,
+                       i.price_drop_amount, i.price_drop_at, i.last_price
+                FROM dealer_inventory i
+                JOIN dealers d ON d.id = i.dealer_id
+                WHERE {where}
+                ORDER BY {EFFECTIVE_FS} ASC
+                LIMIT 500
+            """, tuple(params))
+            rows = cur.fetchall()
+
+    return render_template('dealers_search.html',
+                           rows=rows, q=q,
+                           dealers_all=dealers_all, makes_all=makes_all,
+                           selected_dealer_ids=set(int(d) for d in dealer_ids if d.isdigit()))
+
+
+@bp.route('/dealers/price-drops')
+def dealers_price_drops():
+    """Active cars with a price drop flagged. Accepts ?dealer_id=N to scope
+    to one partner (used by the per-dealer pipeline card click)."""
+    dealer_id = request.args.get('dealer_id', type=int)
+    params = []
+    where = "i.status = 'active' AND d.active AND i.price_drop_amount IS NOT NULL"
+    if dealer_id:
+        where += " AND i.dealer_id = %s"
+        params.append(dealer_id)
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(f"""
             SELECT i.id, i.dealer_id, d.name AS dealer_name,
                    i.year, i.make, i.model, i.trim, i.vin, i.ext_color,
                    i.mileage, i.price, i.url, i.photo_url,
                    i.source_added_at, i.first_seen_at,
+                   i.verified_at, i.verified_days_on_lot,
                    i.price_drop_amount, i.price_drop_at, i.last_price
             FROM dealer_inventory i
             JOIN dealers d ON d.id = i.dealer_id
-            WHERE i.status = 'active' AND d.active
-              AND i.price_drop_amount IS NOT NULL
+            WHERE {where}
             ORDER BY i.price_drop_amount DESC
-        """)
+        """, tuple(params))
         rows = cur.fetchall()
+        title = 'Active cars with price drops'
+        if dealer_id and rows:
+            title = f'{rows[0]["dealer_name"]} — cars with price drops'
     return render_template('dealers_cross_list.html',
-                           rows=rows, title='Active cars with price drops',
+                           rows=rows, title=title,
                            bucket='price_drops', mode='drops')
 
 
@@ -303,18 +546,26 @@ def _pipeline_stats(dealer_id):
 
 
 def _age_buckets(rows):
-    """Bucket cars by age, preferring dealer-declared source_added_at over our
-    scanner-observed first_seen_at. Calendar-day diff in ET (dealer local)."""
+    """Bucket cars by age. Precedence: vAuto-verified > dealer source_added_at
+    > scanner first_seen_at. Calendar-day diff in ET (dealer local)."""
     et = timezone(timedelta(hours=-4))
     today_et = datetime.now(et).date()
     bucket = {'under_30': 0, 'd30_60': 0, 'd60_90': 0, 'over_90': 0}
     for r in rows:
-        fs = r.get('source_added_at') or r.get('first_seen_at')
-        if not fs:
-            continue
-        if fs.tzinfo is None:
-            fs = fs.replace(tzinfo=timezone.utc)
-        days = max(0, (today_et - fs.astimezone(et).date()).days)
+        vd = r.get('verified_days_on_lot')
+        va = r.get('verified_at')
+        if vd is not None and va is not None:
+            if va.tzinfo is None:
+                va = va.replace(tzinfo=timezone.utc)
+            elapsed = max(0, (today_et - va.astimezone(et).date()).days)
+            days = max(0, int(vd) + elapsed)
+        else:
+            fs = r.get('source_added_at') or r.get('first_seen_at')
+            if not fs:
+                continue
+            if fs.tzinfo is None:
+                fs = fs.replace(tzinfo=timezone.utc)
+            days = max(0, (today_et - fs.astimezone(et).date()).days)
         if days < 30:
             bucket['under_30'] += 1
         elif days < 60:
@@ -341,13 +592,23 @@ def age_days_filter(fs):
 
 @bp.app_template_filter('best_age_days')
 def best_age_days_filter(row):
-    """Prefer dealer-declared source_added_at (JSON-LD datePosted / sitemap
-    <lastmod>) over our scanner-observed first_seen_at. Gives accurate 'days on
-    lot' even for dealers we just onboarded with cars that are already weeks old."""
+    """Age source precedence (most-trusted first):
+    1. vAuto-verified: verified_days_on_lot + days_since_verification
+       (catches photo-reupload scams — Cox crawler first-seen-anywhere)
+    2. Dealer-declared source_added_at (JSON-LD datePosted / sitemap <lastmod>)
+    3. Our scanner's first_seen_at"""
     if not row:
         return '—'
     # Accept dict-like rows OR plain datetimes (back-compat when callers pass fs directly)
     if hasattr(row, 'get'):
+        vd = row.get('verified_days_on_lot')
+        va = row.get('verified_at')
+        if vd is not None and va is not None:
+            if hasattr(va, 'tzinfo') and va.tzinfo is None:
+                va = va.replace(tzinfo=timezone.utc)
+            et = timezone(timedelta(hours=-4))
+            elapsed = (datetime.now(et).date() - va.astimezone(et).date()).days
+            return max(0, int(vd) + max(0, elapsed))
         fs = row.get('source_added_at') or row.get('first_seen_at')
     else:
         fs = row
@@ -356,10 +617,12 @@ def best_age_days_filter(row):
 
 @bp.app_template_filter('age_source')
 def age_source_filter(row):
-    """Label hint so the UI can show whether the age comes from the dealer's
-    own timestamp or our first-seen. Returns 'dealer' | 'scan' | ''."""
+    """Label hint so the UI can show where the age came from.
+    Returns 'vauto' | 'dealer' | 'scan' | ''."""
     if not row or not hasattr(row, 'get'):
         return ''
+    if row.get('verified_at') and row.get('verified_days_on_lot') is not None:
+        return 'vauto'
     if row.get('source_added_at'):
         return 'dealer'
     if row.get('first_seen_at'):

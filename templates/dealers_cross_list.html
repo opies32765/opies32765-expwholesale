@@ -109,8 +109,8 @@ table.veh td.num{text-align:right;font-family:ui-monospace,monospace}
         </td>
         <td class="num">
           <span class="age-txt {% if age|int >= 90 %}stale{% elif age|int >= 60 %}aged{% endif %}"
-                title="{% if src == 'dealer' %}From dealer's own timestamp ({{ v.source_added_at }}){% else %}Scanner-observed since {{ v.first_seen_at }}{% endif %}">
-            {{ age }}d{% if src == 'dealer' %}<span class="dot-src">•</span>{% endif %}
+                title="{% if src == 'vauto' %}vAuto-verified: {{ v.verified_days_on_lot }}d at {{ v.verified_at.strftime('%Y-%m-%d') if v.verified_at else '?' }} (Cox crawler first-seen-anywhere){% elif src == 'dealer' %}From dealer's own timestamp ({{ v.source_added_at }}){% else %}Scanner-observed since {{ v.first_seen_at }}{% endif %}">
+            {{ age }}d{% if src == 'vauto' %}<span class="dot-src" style="color:#22c55e">&#10003;</span>{% elif src == 'dealer' %}<span class="dot-src">&bull;</span>{% endif %}
           </span>
         </td>
         <td class="num">

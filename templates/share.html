@@ -10,7 +10,7 @@
 <meta property="og:title" content="{{ ymm ~ (' ' ~ bid.trim if bid.trim else '') if ymm else 'Vehicle Details' }}">
 <meta property="og:description" content="{{ (bid.mileage|int|string ~ ' mi' if bid.mileage else '') }}{{ (' | ' ~ bid.color if bid.color else '') }}{{ ' | VIN: ' ~ bid.vin if bid.vin else '' }}">
 {% if photos %}
-<meta property="og:image" content="{{ 'https://experience-wholesale.net' ~ photos[0].url if photos[0].url.startswith('/') else photos[0].url }}">
+<meta property="og:image" content="https://experience-wholesale.net/p/{{ photos[0].id }}/full">
 {% endif %}
 <meta property="og:type" content="website">
 
@@ -91,9 +91,14 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:
   <!-- Photos -->
   {% if photos %}
   <div class="photo-gallery">
+    {# Opaque photo IDs — /p/<id>/<size> hides the source dealer URL so
+       viewers can't tell which dealer owns the car. Server looks up the
+       real URL from bid_photos by ID, re-encodes through PIL (strips EXIF),
+       and serves from disk cache. Zero URL leakage. #}
     <img class="photo-main" id="mainPhoto"
-         src="{{ photos[0].url if not photos[0].url.startswith('/static') else '/thumb?size=full&url=' ~ photos[0].url }}"
+         src="/p/{{ photos[0].id }}/full"
          alt="Vehicle photo"
+         referrerpolicy="no-referrer"
          onclick="openLightbox(this.src)">
     {% if photos|length > 1 %}
     <div class="photo-counter" id="photoCounter">1 / {{ photos|length }}</div>
@@ -102,8 +107,9 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:
   {% if photos|length > 1 %}
   <div class="photo-thumbs" id="thumbStrip">
     {% for p in photos %}
-    <img src="{{ p.url if not p.url.startswith('/static') else '/thumb?size=mobile&url=' ~ p.url }}"
-         data-full="{{ p.url if not p.url.startswith('/static') else '/thumb?size=full&url=' ~ p.url }}"
+    <img src="/p/{{ p.id }}/mobile"
+         data-full="/p/{{ p.id }}/full"
+         referrerpolicy="no-referrer"
          class="{{ 'active' if loop.index0 == 0 else '' }}"
          data-idx="{{ loop.index0 }}">
     {% endfor %}
@@ -205,11 +211,14 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:
     </div>
     {% endif %}
 
-    <!-- AccuTrade Screenshot -->
-    {% if accutrade and accutrade.screenshot %}
+    {# AccuTrade removed from share page 2026-04-24 — kept in EW admin bid
+       detail, but not shared externally with prospective buyers. #}
+
+    <!-- iPacket Window Sticker / OEM info -->
+    {% if ipacket and ipacket.screenshot %}
     <div class="report-card">
-      <div class="report-label">AccuTrade Appraisal</div>
-      <img class="report-img" src="{{ accutrade.screenshot }}" alt="AccuTrade Appraisal" onclick="openLightbox(this.src)">
+      <div class="report-label">iPacket Window Sticker</div>
+      <img class="report-img" src="{{ ipacket.screenshot }}" alt="iPacket Window Sticker" referrerpolicy="no-referrer" onclick="openLightbox(this.src)">
     </div>
     {% endif %}
 
