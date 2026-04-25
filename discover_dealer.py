@@ -49,6 +49,152 @@ def db_conn():
     return psycopg2.connect(DB_URL)
 
 
+# ─── Deterministic auto-detection (NEXT_DATA / NUXT / Apollo) ────────────
+# Tries to build a scrape_config WITHOUT calling the AI. Handles ~90% of
+# modern SPA dealer sites (Next.js especially) for free.
+VEHICLE_FIELD_HINTS = {
+    "vin":      ["vin", "VIN", "vehicleVin", "stockVin"],
+    "year":     ["year", "modelYear", "vehicleYear"],
+    "make":     ["make", "manufacturer", "brand", "vehicleMake"],
+    "model":    ["model", "carName", "modelName", "vehicleModel"],
+    "trim":     ["trim", "trimLevel", "engine"],
+    "price":    ["price", "priceUsd", "salesPrice", "askingPrice", "msrp"],
+    "miles":    ["miles", "mileage", "odometer", "vehicleMileage"],
+    "stock_number":   ["stock", "stockNumber", "stockId"],
+    "exterior_color": ["exteriorColor", "extColor", "color"],
+    "interior_color": ["interiorColor", "intColor", "trimColor"],
+}
+
+
+def _walk_for_vehicle_arrays(obj, path="$", depth=0, max_depth=10, found=None):
+    """Walk a JSON tree, collect arrays whose first element looks like a vehicle."""
+    if found is None:
+        found = []
+    if depth > max_depth:
+        return found
+    if isinstance(obj, list) and obj and isinstance(obj[0], dict):
+        first = obj[0]
+        keys = set(first.keys())
+        score = 0
+        if any(h in keys for h in VEHICLE_FIELD_HINTS["vin"]):
+            score += 10  # VIN is the killer signal
+        if any(h in keys for h in VEHICLE_FIELD_HINTS["year"]):  score += 1
+        if any(h in keys for h in VEHICLE_FIELD_HINTS["make"]):  score += 1
+        if any(h in keys for h in VEHICLE_FIELD_HINTS["model"]): score += 1
+        if any(h in keys for h in VEHICLE_FIELD_HINTS["price"]): score += 1
+        if score >= 8:
+            found.append({"score": score, "count": len(obj),
+                          "path": path + "[*]", "sample_keys": list(keys)[:25],
+                          "sample": first})
+        # Don't recurse into the array — first hit wins for this branch
+        return found
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            _walk_for_vehicle_arrays(v, f"{path}.{k}", depth + 1, max_depth, found)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj[:3]):
+            _walk_for_vehicle_arrays(v, f"{path}[{i}]", depth + 1, max_depth, found)
+    return found
+
+
+def _build_field_map(sample):
+    """Given a sample vehicle dict, build a fields map by matching common
+    field-name synonyms. Returns dict suitable for scrape_config.extraction.fields."""
+    fields = {}
+    for our_name, hints in VEHICLE_FIELD_HINTS.items():
+        for h in hints:
+            if h in sample:
+                fields[our_name] = h
+                break
+    # Handle nested model object e.g. {"model": {"name": "SF90"}}
+    if "model" in fields:
+        m = sample.get(fields["model"])
+        if isinstance(m, dict):
+            for k in ("name", "displayName", "label"):
+                if k in m:
+                    fields["model"] = f"{fields['model']}.{k}"
+                    break
+    return fields
+
+
+def auto_detect_from_html(html, dealer_url):
+    """Try to build a scrape_config from a static HTML fetch by inspecting
+    __NEXT_DATA__, __NUXT_DATA__, or Apollo state. Returns (config, info_str)
+    or (None, reason)."""
+    if not html:
+        return None, "empty html"
+    sources = []
+    nd = re.search(r'<script[^>]*id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', html, re.DOTALL)
+    if nd:
+        try:
+            sources.append(("next_data", "$", json.loads(nd.group(1))))
+        except Exception:
+            pass
+    nu = re.search(r'<script[^>]*id=["\']__NUXT_DATA__["\'][^>]*>(.*?)</script>', html, re.DOTALL)
+    if nu:
+        try:
+            sources.append(("next_data", "$", json.loads(nu.group(1))))  # reuse next_data extractor
+        except Exception:
+            pass
+    apollo = re.search(r'window\.__APOLLO_STATE__\s*=\s*(\{.*?\});', html, re.DOTALL)
+    if apollo:
+        try:
+            sources.append(("next_data", "$", json.loads(apollo.group(1))))
+        except Exception:
+            pass
+
+    if not sources:
+        return None, "no embedded SPA state found (no NEXT_DATA / NUXT / Apollo)"
+
+    # Walk each source for vehicle-shaped arrays
+    best = None
+    for src_type, root_path, data in sources:
+        candidates = _walk_for_vehicle_arrays(data)
+        for c in candidates:
+            if best is None or c["score"] > best["score"] or \
+               (c["score"] == best["score"] and c["count"] > best["count"]):
+                best = {**c, "src_type": src_type}
+
+    if not best:
+        return None, "found embedded JSON but no vehicle-shaped arrays inside"
+
+    fields = _build_field_map(best["sample"])
+    if "vin" not in fields:
+        return None, f"detected array at {best['path']} but no VIN field"
+
+    # Detect single-brand sites — if every URL contains a brand name and
+    # samples don't have a "make" field, hardcode the make.
+    if "make" not in fields:
+        for brand in ("Ferrari", "Porsche", "Lamborghini", "Bentley", "Rolls-Royce",
+                      "Maserati", "Aston Martin", "McLaren", "BMW", "Mercedes-Benz",
+                      "Audi", "Lexus"):
+            if brand.lower() in dealer_url.lower():
+                fields["make"] = {"literal": brand}
+                break
+
+    config = {
+        "version": 1,
+        "fetch_strategy": "static",
+        "inventory_source": {
+            "type": best["src_type"],
+            "url_template": "{base}",
+            "method": "GET",
+            "pagination": {"type": "none"}
+        },
+        "extraction": {
+            "list_path": best["path"],
+            "fields": fields,
+        },
+        "confidence": "high" if best["score"] >= 12 else "medium",
+        "discovered_by": "deterministic_next_data",
+        "discovered_at": datetime.now().isoformat(),
+        "notes": f"auto-detected from embedded SPA state. "
+                 f"score={best['score']}, count={best['count']}, "
+                 f"path={best['path']}, sample_keys={best['sample_keys'][:10]}",
+    }
+    return config, f"auto-detected {best['count']} vehicles at {best['path']} (score {best['score']})"
+
+
 # ─── HTTP fetch tool exposed to the model ─────────────────────────────────
 def _strip_html(html):
     """Aggressively strip HTML to save tokens. Drops <script>, <style>, <svg>,
@@ -407,7 +553,48 @@ def run_discovery(dealer_id, force=False):
 
     print(f"\n=== discovering dealer #{dealer_id} {dealer['name']} ===")
     print(f"URL: {dealer['url']}")
+    started = time.time()
 
+    # ── STAGE 1: deterministic auto-detect (free) ──
+    print("  [stage 1] trying deterministic NEXT_DATA / NUXT / Apollo detection...")
+    try:
+        page = fetch_url(dealer["url"], max_bytes=2_000_000)  # bigger fetch for raw HTML
+        if isinstance(page, dict) and "body" in page:
+            # The fetch_url helper strips HTML — we need raw for SPA state extraction.
+            # Re-fetch raw without stripping just for auto-detect.
+            raw = requests.get(dealer["url"], headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120",
+                "Accept-Language": "en-US,en;q=0.5",
+            }, timeout=20).text
+            cfg, info = auto_detect_from_html(raw, dealer["url"])
+            if cfg:
+                print(f"  [stage 1] ✓ {info}")
+                cur.execute("""
+                    UPDATE dealers SET
+                      scrape_config=%s, scrape_config_version=COALESCE(scrape_config_version,0)+1,
+                      scrape_config_at=NOW(),
+                      platform=COALESCE(platform, 'ai-generated'),
+                      scrape_method=COALESCE(scrape_method, 'config-driven')
+                    WHERE id=%s
+                """, (json.dumps(cfg), dealer_id))
+                cur.execute("""
+                    INSERT INTO dealer_discovery_runs
+                      (dealer_id, model, finished_at, status, config_produced, cost_usd)
+                    VALUES (%s, 'deterministic', NOW(), 'ok', %s, 0)
+                """, (dealer_id, json.dumps(cfg)))
+                conn.commit()
+                conn.close()
+                print(f"  done in {round(time.time()-started, 1)}s ($0.00)")
+                return True
+            else:
+                print(f"  [stage 1] miss: {info}")
+        else:
+            print(f"  [stage 1] miss: fetch failed")
+    except Exception as e:
+        print(f"  [stage 1] error: {e}")
+
+    # ── STAGE 2: AI fallback (Opus) ──
+    print("  [stage 2] falling back to Opus 4.7 agent...")
     cur.execute(
         "INSERT INTO dealer_discovery_runs (dealer_id, model) VALUES (%s, %s) RETURNING id",
         (dealer_id, MODEL),
@@ -415,7 +602,6 @@ def run_discovery(dealer_id, force=False):
     run_id = cur.fetchone()["id"]
     conn.commit()
 
-    started = time.time()
     result = discover(dealer_id, dealer["name"], dealer["url"])
     elapsed = round(time.time() - started, 1)
 

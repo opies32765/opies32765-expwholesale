@@ -1452,11 +1452,30 @@ class DealerScanner:
                 self._finalize(scan_id, stats, started)
                 return stats
             platform, method = detect_platform(body or '')
-            # If the dealer has a stored scrape_config (from discover_dealer.py
-            # or hand-written), use it — auto-detect doesn't know about it.
+            # If the dealer has a stored scrape_config, prefer it.
             if self.dealer.get('scrape_config'):
                 platform = 'ai-generated'
                 method = 'config-driven'
+            # Auto-spawn AI discovery when no fingerprint matched ('custom').
+            # Skipped if a discovery already failed today (don't burn $4 every
+            # hour on a stuck dealer).
+            elif platform == 'custom':
+                already_tried = self._discovery_tried_today()
+                if not already_tried:
+                    print(f'  no platform fingerprint matched — spawning AI discovery agent', flush=True)
+                    if self._auto_discover():
+                        # Reload dealer row to pick up the new scrape_config
+                        with get_conn() as cn, cn.cursor() as cu:
+                            cu.execute('SELECT * FROM dealers WHERE id=%s', (self.dealer_id,))
+                            self.dealer = dict(cu.fetchone())
+                        if self.dealer.get('scrape_config'):
+                            platform = 'ai-generated'
+                            method = 'config-driven'
+                            print(f'  AI discovery succeeded — proceeding with config-driven extraction', flush=True)
+                        else:
+                            print(f'  AI discovery returned no config — falling back to universal path', flush=True)
+                else:
+                    print(f'  skipping AI discovery (already attempted today)', flush=True)
             stats['platform_detected'] = platform
             # Choose the default tier for this platform (may escalate below).
             # Dealer-level `preferred_tier` overrides the platform default — used
@@ -1815,6 +1834,29 @@ class DealerScanner:
                                 (r['id'],))
                 conn.commit()
         return count
+
+    def _discovery_tried_today(self):
+        """Did we already attempt AI discovery on this dealer in the last 24h?
+        Avoids re-burning Opus credits on a stuck dealer every scan cycle."""
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute('''
+                SELECT COUNT(*) AS n FROM dealer_discovery_runs
+                WHERE dealer_id=%s AND started_at > NOW() - INTERVAL '24 hours'
+            ''', (self.dealer_id,))
+            row = cur.fetchone()
+            return (row['n'] if row else 0) > 0
+
+    def _auto_discover(self):
+        """Spawn discover_dealer.py for this dealer in-process. Returns True
+        if a config was successfully written."""
+        try:
+            import discover_dealer
+            ok = discover_dealer.run_discovery(self.dealer_id, force=False)
+            return bool(ok)
+        except Exception as e:
+            print(f'  AI discovery exception: {e}', flush=True)
+            traceback.print_exc()
+            return False
 
     def _update_dealer(self, platform, method, scan_id, status, tier=None):
         # scrape_method combines the extractor (api/jsonld/sitemap) with the fetch
