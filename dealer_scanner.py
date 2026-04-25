@@ -1452,6 +1452,11 @@ class DealerScanner:
                 self._finalize(scan_id, stats, started)
                 return stats
             platform, method = detect_platform(body or '')
+            # If the dealer has a stored scrape_config (from discover_dealer.py
+            # or hand-written), use it — auto-detect doesn't know about it.
+            if self.dealer.get('scrape_config'):
+                platform = 'ai-generated'
+                method = 'config-driven'
             stats['platform_detected'] = platform
             # Choose the default tier for this platform (may escalate below).
             # Dealer-level `preferred_tier` overrides the platform default — used
@@ -1476,6 +1481,30 @@ class DealerScanner:
                     return stats
                 # AAN detected but /api/cars didn't cooperate — fall through to
                 # universal extraction on the same tier.
+
+            # AI-generated config-driven extraction (Ferrari, novel platforms).
+            # Reads dealers.scrape_config JSONB produced by discover_dealer.py
+            # and runs config_driven_extractor.fetch_inventory against it.
+            if platform == 'ai-generated':
+                cfg = self.dealer.get('scrape_config')
+                if cfg:
+                    try:
+                        from config_driven_extractor import fetch_inventory as _cfg_fetch
+                        vehs = _cfg_fetch(cfg, self.base_url, sess=self.sess)
+                        if vehs:
+                            print(f'  config-driven extractor returned {len(vehs)} vehicles', flush=True)
+                            self._process_aan(scan_id, vehs, stats)  # reuse same upsert flow (no AAN-specific flags)
+                            stats['colors_detected'] = self._detect_colors()
+                            self._update_dealer(platform, 'config-driven', scan_id, 'ok', stats['tier'])
+                            stats['status'] = 'ok'
+                            self._finalize(scan_id, stats, started)
+                            return stats
+                        else:
+                            print(f'  config-driven extractor returned 0 vehicles — config may need re-discovery', flush=True)
+                    except Exception as e:
+                        print(f'  config-driven extractor error: {e}', flush=True)
+                        traceback.print_exc()
+                # Fall through to universal path if config missing or extraction empty.
 
             # 3. Universal path: discover + per-VDP extract, with one escalation if
             #    the first pass gets suspiciously low results or high fetch-fail rate.
