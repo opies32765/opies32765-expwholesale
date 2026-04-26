@@ -1352,15 +1352,28 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
         last_price = old_price if price_changed else row.get('last_price')
         price_drop = existing_drop
         price_drop_at = existing_drop_at
-        if price_changed and new_price < old_price:
-            # Fresh drop — overwrite any prior drop with the new delta
-            price_drop = old_price - new_price
-            price_drop_at = now_utc()
-        elif price_changed and new_price >= old_price:
-            # Price went UP — clear the stale drop flag. A car whose asking
-            # price just rose back above prior lows isn't "discounted" anymore.
-            price_drop = None
-            price_drop_at = None
+        # Sticky price-drop semantics (2026-04-26): once a drop is recorded,
+        # it persists for the lifetime of the row. Status changes (sold,
+        # missing) do NOT clear it; price rises do NOT clear it. The dashboard
+        # treats price drops as a running tally of dealer pricing activity.
+        #
+        # Sanity gate: only record drops that look like real price moves —
+        # a parser error or stale CMS placeholder once produced "$1.9M drops"
+        # on a $19,999 row when the prior scrape misread the price as the
+        # MSRP. Reject anything outside the plausible band: either price
+        # below $1k, drop more than 25% of the higher price, or drop > $100k.
+        if (price_changed and new_price < old_price
+                and old_price >= 1000 and new_price >= 1000):
+            this_drop = old_price - new_price
+            drop_pct = this_drop * 100.0 / old_price
+            if drop_pct <= 25.0 and this_drop <= 100000:
+                # Replace existing drop only if this new drop is larger — that
+                # way price_drop_amount tracks the biggest peak-to-trough swing
+                # the car has ever shown, not just the latest scan-over-scan delta.
+                if existing_drop is None or this_drop > existing_drop:
+                    price_drop = this_drop
+                    price_drop_at = now_utc()
+        # Else (price rose / unchanged / out of sanity band): keep existing drop.
 
         cur.execute('''
             UPDATE dealer_inventory SET

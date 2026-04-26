@@ -3,7 +3,7 @@
   "short_name": "EW Field",
   "description": "Experience Wholesale — Vehicle submission & bid tracking for field reps",
   "start_url": "/mobile",
-  "scope": "/",
+  "scope": "/mobile",
   "display": "standalone",
   "orientation": "portrait",
   "theme_color": "#0b0f19",

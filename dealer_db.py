@@ -49,12 +49,14 @@ def dealers_list():
                        FROM dealer_stats''')
         totals = cur.fetchone() or {'total': 0, 'scanned_24h': 0,
                                      'total_stock': 0, 'sold_7d': 0}
-        # Active price drops across all partner dealers — refreshes on every
-        # scan (smart-merge clears price_drop_amount when price rises back).
+        # Active cars whose price has dropped scan-over-scan. Sold/missing
+        # cars are excluded — drops only matter for cars you can still buy.
+        # Sticky for the row's active life: once detected, persists until
+        # the car flips out of active (then it falls off the count).
         cur.execute('''SELECT COUNT(*) AS cnt
                        FROM dealer_inventory i
                        JOIN dealers d ON d.id = i.dealer_id
-                       WHERE i.status='active' AND d.active
+                       WHERE i.status = 'active' AND d.active
                          AND i.price_drop_amount IS NOT NULL''')
         totals['price_drops'] = (cur.fetchone() or {'cnt': 0})['cnt'] or 0
     return render_template('dealers_list.html', dealers=dealers, totals=totals)
@@ -378,8 +380,9 @@ def dealers_search():
 
 @bp.route('/dealers/price-drops')
 def dealers_price_drops():
-    """Active cars with a price drop flagged. Accepts ?dealer_id=N to scope
-    to one partner (used by the per-dealer pipeline card click)."""
+    """Active cars where the price has dropped scan-over-scan. Sold/missing
+    excluded — drops are only actionable on cars still buyable.
+    Accepts ?dealer_id=N to scope to one partner."""
     dealer_id = request.args.get('dealer_id', type=int)
     params = []
     where = "i.status = 'active' AND d.active AND i.price_drop_amount IS NOT NULL"
@@ -397,7 +400,7 @@ def dealers_price_drops():
             FROM dealer_inventory i
             JOIN dealers d ON d.id = i.dealer_id
             WHERE {where}
-            ORDER BY i.price_drop_amount DESC
+            ORDER BY i.price_drop_at DESC NULLS LAST, i.price_drop_amount DESC
         """, tuple(params))
         rows = cur.fetchall()
         title = 'Active cars with price drops'

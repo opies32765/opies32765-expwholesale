@@ -34,6 +34,14 @@ self.addEventListener('fetch', event => {
     return;
   }
 
+  // Partner portal + admin pages must never be intercepted or cached by
+  // this service worker. The SW is installed for the field-rep /mobile
+  // PWA and should not hijack dealer-facing or admin URLs.
+  if (url.pathname.startsWith('/partner/')
+      || url.pathname.startsWith('/admin/partner/')) {
+    return;
+  }
+
   event.respondWith(
     fetch(event.request)
       .then(response => {

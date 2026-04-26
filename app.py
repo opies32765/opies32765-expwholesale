@@ -984,9 +984,14 @@ def dashboard():
         stats['aged_30_60'] = int(r['a30_60'] or 0)
         stats['aged_60_90'] = int(r['a60_90'] or 0)
         stats['aged_90_plus'] = int(r['a90_plus'] or 0)
+        # Active cars with a price drop observed scan-over-scan. Sold/missing
+        # excluded — drops only matter for cars you can still buy. Sticky
+        # for the row's active life: persists until status flips out of active.
         cur.execute("""
-            SELECT COUNT(*) AS cnt FROM dealer_inventory
-            WHERE status='active' AND price_drop_amount IS NOT NULL
+            SELECT COUNT(*) AS cnt FROM dealer_inventory i
+            JOIN dealers d ON d.id = i.dealer_id
+            WHERE i.status='active' AND d.active
+              AND i.price_drop_amount IS NOT NULL
         """)
         stats['price_drops'] = int(cur.fetchone()['cnt'])
     except Exception:
@@ -2715,9 +2720,14 @@ def api_bids():
         stats['aged_30_60'] = int(r['a30_60'] or 0)
         stats['aged_60_90'] = int(r['a60_90'] or 0)
         stats['aged_90_plus'] = int(r['a90_plus'] or 0)
+        # Active cars with a price drop observed scan-over-scan. Sold/missing
+        # excluded — drops only matter for cars you can still buy. Sticky
+        # for the row's active life: persists until status flips out of active.
         cur.execute("""
-            SELECT COUNT(*) AS cnt FROM dealer_inventory
-            WHERE status='active' AND price_drop_amount IS NOT NULL
+            SELECT COUNT(*) AS cnt FROM dealer_inventory i
+            JOIN dealers d ON d.id = i.dealer_id
+            WHERE i.status='active' AND d.active
+              AND i.price_drop_amount IS NOT NULL
         """)
         stats['price_drops'] = int(cur.fetchone()['cnt'])
     except Exception:
