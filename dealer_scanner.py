@@ -343,6 +343,40 @@ def discover_via_dealer_com(base_url, sess, max_pages_per_list=10, per_page=24):
     return sorted(found)
 
 
+# ── DealerInspire (Cox) platform ─────────────────────────────────────────
+# DealerInspire WordPress sites expose a single inventory_sitemap endpoint
+# that returns every VDP URL on the lot in one HTML response. Confirmed on
+# ferrarifl.com: /dealer-inspire-inventory/inventory_sitemap → 156 unique
+# /inventory/<slug>-<vin>/ URLs in a 47KB body. Slugs are prefixed
+# `new-`, `pre-owned-`, or `certified-pre-owned-`. EW only sources used,
+# so we filter to the latter two.
+DEALER_INSPIRE_SITEMAP = '/dealer-inspire-inventory/inventory_sitemap'
+DEALER_INSPIRE_VDP_RE = re.compile(
+    r'https?://[^/\s"\'<>]+/inventory/(?:pre-owned|certified-pre-owned)[^"\'<>\s)]*',
+    re.I,
+)
+
+
+def discover_via_dealer_inspire(base_url, sess):
+    """DealerInspire-specific VDP discovery via the inventory_sitemap endpoint.
+
+    One FlareSolverr fetch returns the full lot. Filters out new vehicles
+    (slug prefix `new-`) — EW only sources pre-owned + certified-pre-owned.
+    """
+    netloc = urlparse(base_url).netloc.lower().lstrip('www.')
+    url = urljoin(base_url, DEALER_INSPIRE_SITEMAP)
+    code, _f, body = fetch(url, sess)
+    if code != 200 or not body:
+        return []
+    found = set()
+    for m in DEALER_INSPIRE_VDP_RE.finditer(body):
+        link = m.group(0).split('#', 1)[0].rstrip(',.;')
+        if urlparse(link).netloc.lower().lstrip('www.') != netloc:
+            continue
+        found.add(link)
+    return sorted(found)[:CRAWL_MAX_URLS]
+
+
 # ── URL discovery ────────────────────────────────────────────────────────
 def discover_via_sitemap(base_url, sess):
     """Pull inventory URLs from sitemap(s). Returns list of URLs (deduped).
@@ -1274,6 +1308,13 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
     """
     vin = (veh.get('vin') or '').strip().upper()
     url = veh.get('url') or ''
+    # Pre-1981 vehicles (vintage Ferrari 308 GTSi `035851`, 1957 Cadillac
+    # `00000005762072039`, etc.) carry placeholder all-digit "VINs" that
+    # violate the `vin_has_letter_when_present` CHECK constraint and would
+    # abort the whole scan transaction. Strip non-VIN strings so the row
+    # still inserts (URL dedup handles uniqueness for VIN-less rows).
+    if vin and not _is_valid_vin(vin):
+        vin = ''
     if not (vin or url):
         return (None, False, None)
 
@@ -1532,6 +1573,11 @@ class DealerScanner:
                 # VDP URL patterns; sitemap only lists category index pages).
                 if platform == 'dealer.com':
                     urls = discover_via_dealer_com(self.base_url, self.sess)
+                    if len(urls) < 5:
+                        urls = list(set(urls) | set(
+                            discover_via_sitemap(self.base_url, self.sess)))
+                elif platform == 'dealerinspire':
+                    urls = discover_via_dealer_inspire(self.base_url, self.sess)
                     if len(urls) < 5:
                         urls = list(set(urls) | set(
                             discover_via_sitemap(self.base_url, self.sess)))

@@ -49,6 +49,14 @@ def dealers_list():
                        FROM dealer_stats''')
         totals = cur.fetchone() or {'total': 0, 'scanned_24h': 0,
                                      'total_stock': 0, 'sold_7d': 0}
+        # Active price drops across all partner dealers — refreshes on every
+        # scan (smart-merge clears price_drop_amount when price rises back).
+        cur.execute('''SELECT COUNT(*) AS cnt
+                       FROM dealer_inventory i
+                       JOIN dealers d ON d.id = i.dealer_id
+                       WHERE i.status='active' AND d.active
+                         AND i.price_drop_amount IS NOT NULL''')
+        totals['price_drops'] = (cur.fetchone() or {'cnt': 0})['cnt'] or 0
     return render_template('dealers_list.html', dealers=dealers, totals=totals)
 
 
