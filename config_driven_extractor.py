@@ -296,7 +296,32 @@ def fetch_inventory(config, dealer_url, sess=None, max_vehicles=None):
         if max_vehicles and len(vehicles) >= max_vehicles:
             break
 
-    return vehicles
+    # ─── Normalise extractor keys → DB column names ──────────────────────
+    # The config calls fields by their human-friendly names (miles,
+    # exterior_color, interior_color). The DealerScanner upsert path uses
+    # the actual DB column names. Map them once here so every config can
+    # use the readable names without each caller re-renaming.
+    KEY_MAP = {
+        'miles':           'mileage',
+        'exterior_color':  'ext_color',
+        'interior_color':  'int_color',
+    }
+    normalized = []
+    for v in vehicles:
+        if not v:
+            continue
+        nv = {}
+        for k, val in v.items():
+            nv[KEY_MAP.get(k, k)] = val
+        # photos[] is a list; the upsert also wants a single primary photo_url.
+        # Prefer config-supplied photo_url if present; otherwise lift the first
+        # entry from photos[].
+        if not nv.get('photo_url'):
+            ph = nv.get('photos')
+            if isinstance(ph, list) and ph:
+                nv['photo_url'] = ph[0]
+        normalized.append(nv)
+    return normalized
 
 
 def _enumerate_pages(url_template, pagination, dealer_url):

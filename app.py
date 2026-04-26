@@ -53,6 +53,8 @@ _PUBLIC_PREFIXES = (
     '/api/vauto/', '/api/accutrade/', '/accutrade_reports/',
     '/api/ipacket/', '/ipacket_reports/',
     '/api/dealer/vauto_verify', '/api/dealer/vauto_verify_queue',
+    '/api/dealer/beelink_scrape_queue', '/api/dealer/beelink_scrape_result',
+    '/api/dealer/info/',
     '/partner/',  # partner portal (own auth layer: partner_user_id session key)
     '/api/bid/external', '/api/push-subscribe',
     '/api/push-unsubscribe', '/api/vapid-public-key',
@@ -4278,6 +4280,122 @@ def api_vauto_url_capture_result():
     db.commit()
     db.close()
     return jsonify({'ok': True, 'url': url or None})
+
+
+@app.route('/api/dealer/beelink_scrape_queue')
+def api_beelink_scrape_queue():
+    """Dealers needing browser-based scraping (e.g., Ferrari preowned with
+    AWS WAF). Beelink polls this and runs undetected_chromedriver locally."""
+    limit = request.args.get('limit', 5, type=int)
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT id, name, url, scrape_config
+        FROM dealers
+        WHERE active=true
+          AND scrape_config IS NOT NULL
+          AND scrape_config->>'fetch_strategy' = 'beelink_chrome'
+          AND (last_scan_at IS NULL OR last_scan_at < NOW() - INTERVAL '4 hours')
+        ORDER BY last_scan_at NULLS FIRST
+        LIMIT %s
+    """, (limit,))
+    rows = cur.fetchall()
+    db.close()
+    return jsonify({'queue': [dict(r) for r in rows]})
+
+
+@app.route('/api/dealer/info/<int:dealer_id>')
+def api_dealer_info(dealer_id):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT id, name, url, scrape_config, platform FROM dealers WHERE id=%s", (dealer_id,))
+    row = cur.fetchone()
+    db.close()
+    if not row:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify(dict(row))
+
+
+@app.route('/api/dealer/beelink_scrape_result', methods=['POST'])
+def api_beelink_scrape_result():
+    """Receive vehicles scraped by Beelink, upsert into dealer_inventory,
+    reconcile missing VINs as sold."""
+    data = request.json or {}
+    dealer_id = data.get('dealer_id')
+    vehicles = data.get('vehicles') or []
+    status = data.get('status', 'ok')
+    error = data.get('error')
+    if not dealer_id:
+        return jsonify({'error': 'dealer_id required'}), 400
+    db = get_db()
+    cur = db.cursor()
+    # Open scan record
+    cur.execute("INSERT INTO dealer_scans (dealer_id, status) VALUES (%s, 'running') RETURNING id",
+                (dealer_id,))
+    scan_id = cur.fetchone()['id']
+    db.commit()
+
+    # Reuse upsert_vehicle from dealer_scanner
+    try:
+        from dealer_scanner import upsert_vehicle
+    except Exception as e:
+        return jsonify({'error': f'cannot import upsert_vehicle: {e}'}), 500
+
+    import re as _re
+    VIN_VALID = _re.compile(r'^[A-HJ-NPR-Z0-9]{17}$')
+    new_count = 0
+    drop_count = 0
+    scanned_vins = set()
+    for v in vehicles:
+        vin = (v.get('vin') or '').upper().strip()
+        if not VIN_VALID.match(vin):
+            continue
+        # Each upsert in its own savepoint so a single bad row doesn't abort
+        # the whole transaction.
+        cur.execute("SAVEPOINT sp_upsert")
+        try:
+            inv_id, is_new, drop = upsert_vehicle(cur, dealer_id, scan_id, v)
+            cur.execute("RELEASE SAVEPOINT sp_upsert")
+        except Exception as e:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_upsert")
+            print(f'  [beelink_result] upsert error vin={vin}: {e}', flush=True)
+            continue
+        if inv_id:
+            scanned_vins.add(vin)
+            if is_new:
+                new_count += 1
+            if drop:
+                drop_count += 1
+
+    # Reconcile: any active VIN we had that wasn't in this scrape → missing/sold
+    cur.execute("""
+        SELECT id, vin FROM dealer_inventory
+        WHERE dealer_id=%s AND status IN ('active','missing')
+    """, (dealer_id,))
+    rows = cur.fetchall()
+    sold_count = 0
+    missing_count = 0
+    for r in rows:
+        if (r['vin'] or '').upper() in scanned_vins:
+            continue
+        cur.execute("""UPDATE dealer_inventory
+                       SET status='missing', missing_scans=COALESCE(missing_scans,0)+1
+                       WHERE id=%s""", (r['id'],))
+        missing_count += 1
+
+    cur.execute("""UPDATE dealers SET last_scan_at=NOW(), last_scan_status=%s,
+                                       last_scan_id=%s, scrape_method='beelink-chrome'
+                   WHERE id=%s""", (status, scan_id, dealer_id))
+    cur.execute("""UPDATE dealer_scans SET status=%s, finished_at=NOW(),
+                                            error_message=%s, vehicles_found=%s,
+                                            new_count=%s
+                   WHERE id=%s""",
+                (status, error, len(scanned_vins), new_count, scan_id))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'scan_id': scan_id, 'inserted': len(scanned_vins),
+                    'new': new_count, 'price_drops': drop_count,
+                    'missing': missing_count})
 
 
 @app.route('/api/vauto/url_capture_queue')

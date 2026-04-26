@@ -132,14 +132,24 @@ def find_dealer_matches(db_conn, year, make, model,
         cur = db_conn.cursor()
 
         # ── A. Active listings of like-vehicles at partner dealers ──────────
+        # Age precedence (most-trusted first):
+        #   1) vAuto-verified: verified_days_on_lot + days_since_verification
+        #      (Cox crawler catches photo-reupload scams - e.g., TXT Charlie
+        #      BMW M5 scanner=2d but vAuto=120d)
+        #   2) Dealer-declared source_added_at (JSON-LD datePosted / sitemap)
+        #   3) Our scanner's first_seen_at (fallback)
+        effective_fs = ("COALESCE("
+                        "di.verified_at - (di.verified_days_on_lot || ' days')::interval, "
+                        "di.source_added_at, di.first_seen_at)")
         cur.execute(f"""
             SELECT di.id, di.dealer_id, d.name AS dealer_name, d.city, d.state,
                    di.year, di.make, di.model, di.trim,
                    di.price, di.mileage, di.url, di.photo_url,
                    di.first_seen_at, di.last_seen_at,
+                   di.source_added_at, di.verified_at, di.verified_days_on_lot,
                    di.price_drop_amount, di.price_drop_at,
                    GREATEST(0, ((NOW() AT TIME ZONE 'America/New_York')::date
-                              - (di.first_seen_at AT TIME ZONE 'America/New_York')::date)::int) AS days_on_lot
+                              - ({effective_fs} AT TIME ZONE 'America/New_York')::date)::int) AS days_on_lot
             FROM dealer_inventory di
             JOIN dealers d ON di.dealer_id = d.id
             WHERE di.status = 'active'
@@ -148,7 +158,7 @@ def find_dealer_matches(db_conn, year, make, model,
               AND UPPER(di.model) = %s
               AND di.year BETWEEN %s AND %s
               {trim_gate_sql}
-            ORDER BY di.first_seen_at ASC
+            ORDER BY {effective_fs} ASC
             LIMIT %s
         """, tuple([make_u, model_u, y_lo, y_hi] + trim_gate_args + [max_active]))
         active_rows = []
