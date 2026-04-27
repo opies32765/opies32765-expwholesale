@@ -321,7 +321,24 @@ def fetch_inventory(config, dealer_url, sess=None, max_vehicles=None):
             if isinstance(ph, list) and ph:
                 nv['photo_url'] = ph[0]
         normalized.append(nv)
-    return normalized
+
+    # Dedup by (vin, url) keeping FIRST occurrence — config-driven JSONPath
+    # results from paginated APIs can include the same VIN twice if pages
+    # overlap, or via "related vehicles" panels. Without dedup, the upsert
+    # loop runs twice on the same VIN and the second pass clobbers the first
+    # (Ferrari 400i / Ford GT cross-merge incident, 2026-04-27).
+    seen = set()
+    deduped = []
+    for v in normalized:
+        key = (v.get('vin') or '', v.get('url') or '')
+        if key == ('', ''):
+            deduped.append(v)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(v)
+    return deduped
 
 
 def _enumerate_pages(url_template, pagination, dealer_url):

@@ -19,6 +19,7 @@ import os
 import re
 import sys
 import time
+import traceback
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
@@ -1359,6 +1360,22 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
         new_price = veh.get('price')
         existing_drop = row.get('price_drop_amount')
         existing_drop_at = row.get('price_drop_at')
+        # Symmetric price-move sanity gate (2026-04-27). Reject impossibly
+        # large price moves in EITHER direction. Without this, a cross-merge
+        # bug (Ford GT MK IV merging into Ferrari 400i, 2026-04-27) made the
+        # 400i's $229k price jump to $1,999,900 (773% rise) and the upsert
+        # accepted it. A real ask price doesn't move >25% AND >$100k in a
+        # single scan-over-scan delta. If it does, the new price is suspect —
+        # most likely cross-contamination, parser error, or stale data —
+        # so we keep the existing price untouched until the next scan
+        # produces a sane reading.
+        if (new_price is not None and old_price is not None
+                and new_price > 0 and old_price > 0):
+            move = abs(new_price - old_price)
+            move_pct = move * 100.0 / max(old_price, new_price)
+            if move_pct > 25.0 and move > 100000:
+                # Reject this scan's price; preserve existing
+                new_price = old_price
         # Only rotate last_price when the ask actually changed — otherwise we
         # lose the "price before the drop" meaning (old bug: every scan
         # overwrote it with current price).

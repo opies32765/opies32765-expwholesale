@@ -491,15 +491,64 @@ def dealer_json(dealer_id):
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 def _trigger_scan(dealer_id):
+    """Spawn a scan thread for dealer_id. Cross-process-safe via a Postgres
+    advisory lock — gunicorn runs N workers each with its own thread dict,
+    so the in-process `_scan_lock` alone could let two workers spawn parallel
+    scanners on a double-click. The advisory lock is held by whichever
+    backend connection acquires it; if another worker tries while the scan
+    is in flight, `pg_try_advisory_lock` returns false and we bail out.
+    Lock key uses 0x5CA0_0000 + dealer_id for namespace separation."""
+    LOCK_NS = 0x5CA00000
+
     with _scan_lock:
         t = _scan_threads.get(dealer_id)
         if t and t.is_alive():
             return False
 
+        # Pre-flight check: don't start if another worker is already running
+        # this dealer's scan. Atomic via Postgres.
+        try:
+            with _db() as conn, conn.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_NS + dealer_id,))
+                got = cur.fetchone()
+                got = got[0] if not isinstance(got, dict) else got.get('pg_try_advisory_lock')
+                if not got:
+                    print(f'[dealer_db] scan {dealer_id} skipped — '
+                          f'advisory lock held by another worker', flush=True)
+                    return False
+                # Release immediately; the worker thread will re-acquire
+                # for the duration of its scan.
+                cur.execute("SELECT pg_advisory_unlock(%s)", (LOCK_NS + dealer_id,))
+                conn.commit()
+        except Exception as e:
+            print(f'[dealer_db] advisory-lock probe failed: {e}', flush=True)
+            # Fall through — better to allow a double-scan than to never scan
+
         def _run():
             try:
-                scanner = dealer_scanner.DealerScanner.from_dealer_id(dealer_id)
-                scanner.run()
+                # Hold the advisory lock for the lifetime of this scan thread.
+                # Connection close releases it automatically (no pg_advisory_unlock
+                # needed — session-level locks die with the session).
+                with _db() as conn, conn.cursor() as cur:
+                    cur.execute("SELECT pg_try_advisory_lock(%s)",
+                                (LOCK_NS + dealer_id,))
+                    got = cur.fetchone()
+                    got = got[0] if not isinstance(got, dict) else got.get('pg_try_advisory_lock')
+                    if not got:
+                        print(f'[dealer_db] scan {dealer_id} aborted — '
+                              f'lock raced with another worker', flush=True)
+                        return
+                    conn.commit()
+                    try:
+                        scanner = dealer_scanner.DealerScanner.from_dealer_id(dealer_id)
+                        scanner.run()
+                    finally:
+                        try:
+                            cur.execute("SELECT pg_advisory_unlock(%s)",
+                                        (LOCK_NS + dealer_id,))
+                            conn.commit()
+                        except Exception:
+                            pass
             except Exception as e:
                 print(f'[dealer_db] scan {dealer_id} failed: {e}', flush=True)
 
