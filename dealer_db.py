@@ -161,19 +161,29 @@ def dealers_aged(bucket):
 
 @bp.route('/api/dealer/vauto_verify_queue', methods=['GET'])
 def api_vauto_verify_queue():
-    """Return active VINs needing vAuto verification.
-    Prefers never-verified (verified_at NULL) first, then oldest verification.
+    """Return active VINs that have NEVER been verified by vAuto.
+
+    NEW-ONLY semantics (2026-04-27): once a vehicle is verified, its
+    `verified_days_on_lot` is frozen as a snapshot and never re-checked.
+    Reasoning: the dashboard's `EFFECTIVE_FS` formula computes a frozen
+    anchor (`verified_at - verified_days_on_lot days`) that yields the
+    correct current days-on-lot every page load via NOW() math, so the
+    stored value never goes stale. This means the Beelink verifier runs
+    in bursts after each scan brings new VINs in, then idles — instead of
+    constantly cycling through stale re-verifies. Tradeoff: if a dealer
+    pulls + re-lists a car (which would reset its vAuto days), we miss it
+    until that vehicle is removed and re-added by the scanner.
+
     Query params: dealer_id (int, optional — defaults to all active dealers),
-                  limit (int, default 5), min_age_hours (default 72)."""
+                  limit (int, default 5)."""
     try:
         dealer_id = request.args.get('dealer_id', type=int)
         limit = min(int(request.args.get('limit', 5)), 50)
-        min_age_hours = int(request.args.get('min_age_hours', 72))
     except (ValueError, TypeError):
         return jsonify({'error': 'bad params'}), 400
 
     where_dealer = 'AND i.dealer_id = %s' if dealer_id else ''
-    params = [min_age_hours]
+    params = []
     if dealer_id:
         params.append(dealer_id)
     params.append(limit)
@@ -194,15 +204,13 @@ def api_vauto_verify_queue():
               -- has no data for these and the verifier hangs waiting.
               AND i.vin NOT LIKE '000%%'
               AND (i.year IS NULL OR i.year >= 1981)
-              -- Retry logic: never-verified first, then real vAuto rows
-              -- past the min_age window. Skip markers (no_rbook_data,
-              -- appraisal_failed) don't re-queue — we already tried and
-              -- vAuto has nothing for these rare exotics.
-              AND (i.verified_at IS NULL
-                   OR (i.verified_source = 'vauto_rbook'
-                       AND i.verified_at < NOW() - (%s || ' hours')::interval))
+              -- New-only: only ever pick up never-verified rows. Skip markers
+              -- (no_rbook_data, appraisal_failed) already cleared via
+              -- verified_at being set with a non-null verified_source —
+              -- they don't re-queue.
+              AND i.verified_at IS NULL
               {where_dealer}
-            ORDER BY i.verified_at NULLS FIRST, i.first_seen_at ASC
+            ORDER BY i.first_seen_at ASC
             LIMIT %s
         """, tuple(params))
         return _json_response({'queue': [dict(r) for r in cur.fetchall()]})
