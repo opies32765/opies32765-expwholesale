@@ -797,6 +797,30 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
               </div>
             </div>
             <textarea class="reply-textarea" id="reply-text" placeholder="We're in at $XX,XXX. Let me know if you want to move forward."></textarea>
+
+            {% if partner_info %}
+            <div style="margin-top:10px;padding:10px 12px;background:rgba(167,139,250,.06);border:1px solid rgba(167,139,250,.18);border-radius:7px">
+              <div style="font-size:10px;font-weight:700;color:#a78bfa;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">
+                Notify {{ partner_info.dealer_name }} via:
+              </div>
+              <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:#cbd5e1">
+                <label style="display:flex;align-items:center;gap:6px;cursor:not-allowed;opacity:.85" title="Always sent — the dealer's partner dashboard is the canonical record">
+                  <input type="checkbox" id="notify-dashboard" checked disabled> Dashboard
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;{% if not partner_info.sms_ok %}opacity:.4;cursor:not-allowed{% else %}cursor:pointer{% endif %}"
+                       title="{% if not partner_info.sms_ok %}Dealer has not opted into SMS{% else %}SMS to {{ partner_info.sms_phones }}{% endif %}">
+                  <input type="checkbox" id="notify-text" {% if not partner_info.sms_ok %}disabled{% endif %}> Text
+                  {% if not partner_info.sms_ok %}<span style="font-size:10px;color:#64748b">(not opted in)</span>{% endif %}
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;{% if not partner_info.email_ok %}opacity:.4;cursor:not-allowed{% else %}cursor:pointer{% endif %}"
+                       title="{% if not partner_info.email_ok %}Dealer has email alerts disabled{% else %}Email to {{ partner_info.emails }}{% endif %}">
+                  <input type="checkbox" id="notify-email" {% if not partner_info.email_ok %}disabled{% endif %}> Email
+                  {% if not partner_info.email_ok %}<span style="font-size:10px;color:#64748b">(disabled)</span>{% endif %}
+                </label>
+              </div>
+            </div>
+            {% endif %}
+
             <button class="btn-send-bid" onclick="sendReply('bid')">Send Bid</button>
           </div>
           <div id="pass-section" style="display:none">
@@ -1095,9 +1119,13 @@ async function sendReply(action) {
   const bidAmount = isPass ? null :
     (parseFloat((document.getElementById('bid-amount').value || '').replace(/,/g, '')) || null);
   if (!message) { toast('Enter a message first', false); return; }
+  // Channel selection (only present when bid is bound for a partner dealer)
+  const notifyText = !!document.getElementById('notify-text')?.checked;
+  const notifyEmail = !!document.getElementById('notify-email')?.checked;
   const r = await fetch(`/api/bid/${BID_ID}/reply`, {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({message, action, bid_amount: bidAmount})
+    body: JSON.stringify({message, action, bid_amount: bidAmount,
+                          notify_text: notifyText, notify_email: notifyEmail})
   });
   const d = await r.json();
   if (d.success) {

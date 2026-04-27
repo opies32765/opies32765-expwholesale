@@ -259,6 +259,10 @@ tr:last-child td{border-bottom:none}
           {% if bid.phone.startswith('field:') %}
             <div class="contact-name">{{ bid.contact_name or 'Field Rep' }}</div>
             <div><span class="badge-field">{{ bid.contact_role or 'Field Rep' }}</span></div>
+          {% elif bid.phone == 'sys:db_push' %}
+            <div class="contact-name" style="color:#a78bfa">EW Search</div>
+            {% if bid.partner_dealer_name %}<div class="contact-company" style="color:#94a3b8;font-size:11px">{{ bid.partner_dealer_name }}</div>{% endif %}
+            <div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3);border-radius:3px;font-size:9px;font-weight:700;color:#a78bfa;letter-spacing:.4px;text-transform:uppercase">Dealer DB</span></div>
           {% else %}
             <div class="contact-name">{{ bid.contact_name or bid.phone }}</div>
             {% if bid.contact_name %}<div class="contact-phone">{{ bid.phone }}</div>{% endif %}

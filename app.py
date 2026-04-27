@@ -1152,6 +1152,32 @@ def bid_detail(bid_id):
         print(f'ai_assessment_log read error: {_aelog_err}', flush=True)
 
     db.close()
+    # Partner-dealer info (only if this bid is bound for a partner dealer —
+    # either via direct dealer_db push or via partner-portal submission).
+    # Drives the channel-selection UI on Send Bid (#32).
+    partner_info = None
+    pd_id = bid.get('partner_dealer_id')
+    if not pd_id and bid.get('partner_request_id'):
+        # Look up via partner_bid_requests
+        cur.execute("""SELECT pu.dealer_id FROM partner_bid_requests pbr
+                       JOIN partner_users pu ON pu.id = pbr.partner_user_id
+                       WHERE pbr.id = %s""", (bid['partner_request_id'],))
+        r = cur.fetchone()
+        if r:
+            pd_id = r['dealer_id']
+    if pd_id:
+        cur.execute("""SELECT d.id AS dealer_id, d.name AS dealer_name,
+                              MAX(CASE WHEN pu.sms_opt_in AND pu.sms_verified_at IS NOT NULL
+                                       THEN 1 ELSE 0 END) AS sms_ok,
+                              MAX(CASE WHEN pu.email_bid_alerts THEN 1 ELSE 0 END) AS email_ok,
+                              STRING_AGG(DISTINCT pu.phone, ', ') FILTER (WHERE pu.sms_opt_in AND pu.sms_verified_at IS NOT NULL) AS sms_phones,
+                              STRING_AGG(DISTINCT pu.email, ', ') FILTER (WHERE pu.email_bid_alerts) AS emails
+                       FROM dealers d
+                       LEFT JOIN partner_users pu ON pu.dealer_id = d.id
+                       WHERE d.id = %s
+                       GROUP BY d.id, d.name""", (pd_id,))
+        partner_info = cur.fetchone()
+
     return render_template('bid.html', bid=bid, photos=photos,
                            messages=messages, valuations=valuations,
                            vauto_data=vauto_data,
@@ -1160,6 +1186,7 @@ def bid_detail(bid_id):
                            tesla_data=tesla_data,
                            ai_assessment=bid.get('ai_assessment'),
                            ai_log=ai_log,
+                           partner_info=partner_info,
                            time_ago=time_ago)
 
 
@@ -1311,11 +1338,16 @@ def send_reply(bid_id):
     db.commit()
     db.close()
 
-    # Partner-portal bids: fire off an email to the partner dealer user(s)
-    # so they know EW has responded. Safe no-op for non-partner bids.
+    # Partner-dealer bids: notify via the channels the client picked on the
+    # Send Bid UI (#32). Dashboard notification is always on; text/email are
+    # opt-in per dealer + opt-in per click. Safe no-op for non-partner bids.
+    notify_text = bool(data.get('notify_text'))
+    notify_email = bool(data.get('notify_email'))
     try:
         from partner_portal import notify_partner_of_ew_response
-        notify_partner_of_ew_response(bid_id)
+        notify_partner_of_ew_response(bid_id,
+                                       send_email=notify_email,
+                                       send_text=notify_text)
     except Exception as _e:
         print(f'[partner notify] skipped for bid {bid_id}: {_e}', flush=True)
 

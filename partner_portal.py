@@ -655,31 +655,53 @@ def _tg_alert(text: str) -> None:
 
 
 # ── Notify partner on EW response (called from app.py bid-response route) ─
-def notify_partner_of_ew_response(bid_id: int):
+def notify_partner_of_ew_response(bid_id: int, send_email: bool = False, send_text: bool = False):
     """Called from the EW bid-response endpoint after bid_amount / bid_response
-    is saved. Sends an email to the partner user(s) if this bid came from the
-    portal. Safe to call even on non-partner bids (no-op)."""
+    is saved. Notifies partner user(s) via the channels the EW client picked
+    on the Send Bid UI.
+
+    Channel resolution:
+      - Dashboard: always implicit (the partner's portal page is the canonical
+        record; if a partner_bid_requests row exists it'll show there
+        automatically, and EW back-bids appear in the same view since they
+        share contact_id via _ensure_partner_contact).
+      - send_email: client-checkbox + dealer's email_bid_alerts opt-in
+        (BOTH must be true to send).
+      - send_text:  client-checkbox + dealer's sms_opt_in + sms_verified_at
+        (legal requirement — verified opt-in before any SMS).
+
+    Works for both partner-portal bids (via partner_request_id) AND EW-pushed
+    back-bids from Dealer DB Search (via partner_dealer_id directly on bids).
+    Safe no-op for non-partner bids (no dealer found, returns silently).
+    """
     try:
         with _db() as conn, conn.cursor() as cur:
+            # Resolve dealer_id from either partner_request_id (legacy partner-
+            # portal bids) or partner_dealer_id (new dealer-DB-push bids).
             cur.execute("""
                 SELECT b.id, b.bid_amount, b.bid_response, b.vin, b.year, b.make,
-                       b.model, b.trim, pbr.id AS pbr_id, pbr.dealer_id,
-                       d.name AS dealer_name
+                       b.model, b.trim, b.partner_request_id, b.partner_dealer_id,
+                       COALESCE(b.partner_dealer_id,
+                                (SELECT pbr.dealer_id FROM partner_bid_requests pbr
+                                  WHERE pbr.id = b.partner_request_id)) AS dealer_id
                 FROM bids b
-                JOIN partner_bid_requests pbr ON pbr.id = b.partner_request_id
-                JOIN dealers d ON d.id = pbr.dealer_id
                 WHERE b.id = %s
             """, (bid_id,))
             b = cur.fetchone()
-            if not b:
+            if not b or not b.get('dealer_id'):
                 return
+            cur.execute("SELECT name FROM dealers WHERE id = %s", (b['dealer_id'],))
+            d = cur.fetchone()
+            if not d:
+                return
+            dealer_name = d['name']
             import re
-            slug = re.sub(r'[^a-z0-9]+', '', b['dealer_name'].lower())[:32]
+            slug = re.sub(r'[^a-z0-9]+', '', dealer_name.lower())[:32]
             portal_url = f"{PORTAL_BASE}/partner/{slug}"
             car = f"{b['year'] or ''} {b['make'] or ''} {b['model'] or ''}".strip()
 
             cur.execute("""
-                SELECT email, full_name, phone, sms_opt_in, email_bid_alerts
+                SELECT email, full_name, phone, sms_opt_in, sms_verified_at, email_bid_alerts
                 FROM partner_users
                 WHERE dealer_id = %s AND password_hash IS NOT NULL
             """, (b['dealer_id'],))
@@ -690,8 +712,8 @@ def notify_partner_of_ew_response(bid_id: int):
                 msg_line = (f'<p style="background:#f1f5f9;padding:12px 14px;'
                             f'border-radius:6px;margin:12px 0">{b["bid_response"]}</p>') \
                            if b['bid_response'] else ''
-                # Email alerts (opt-out via settings — default on)
-                if u.get('email_bid_alerts'):
+                # Email — only if client requested AND user opted in
+                if send_email and u.get('email_bid_alerts'):
                     _send_email(u['email'],
                         f'Bid update: {car} (VIN {b["vin"][-6:] if b["vin"] else "—"})',
                         f'<p>Hi{(" " + u["full_name"]) if u["full_name"] else ""},</p>'
@@ -704,8 +726,8 @@ def notify_partner_of_ew_response(bid_id: int):
                         f'Open your dashboard</a></p>'
                         f'<p style="font-size:12px;color:#64748b">You can counter, accept, '
                         f'or decline from the portal.</p>')
-                # SMS if opted in
-                if u.get('sms_opt_in') and u.get('phone'):
+                # SMS — only if client requested AND user opted in AND verified
+                if send_text and u.get('sms_opt_in') and u.get('sms_verified_at') and u.get('phone'):
                     sms_body_parts = [f'EW responded on your {car}']
                     if b['bid_amount']:
                         sms_body_parts.append(f'Offer: ${int(float(b["bid_amount"])):,}')
