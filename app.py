@@ -1151,14 +1151,12 @@ def bid_detail(bid_id):
     except Exception as _aelog_err:
         print(f'ai_assessment_log read error: {_aelog_err}', flush=True)
 
-    db.close()
     # Partner-dealer info (only if this bid is bound for a partner dealer —
     # either via direct dealer_db push or via partner-portal submission).
-    # Drives the channel-selection UI on Send Bid (#32).
+    # Drives the channel-selection UI on Send Bid (#32). Run BEFORE db.close().
     partner_info = None
     pd_id = bid.get('partner_dealer_id')
     if not pd_id and bid.get('partner_request_id'):
-        # Look up via partner_bid_requests
         cur.execute("""SELECT pu.dealer_id FROM partner_bid_requests pbr
                        JOIN partner_users pu ON pu.id = pbr.partner_user_id
                        WHERE pbr.id = %s""", (bid['partner_request_id'],))
@@ -1177,6 +1175,8 @@ def bid_detail(bid_id):
                        WHERE d.id = %s
                        GROUP BY d.id, d.name""", (pd_id,))
         partner_info = cur.fetchone()
+
+    db.close()
 
     return render_template('bid.html', bid=bid, photos=photos,
                            messages=messages, valuations=valuations,
