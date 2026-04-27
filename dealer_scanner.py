@@ -432,10 +432,18 @@ _DI_ALGOLIA_RE = re.compile(
 )
 
 
-def _dealer_inspire_algolia_config(base_url, sess):
+def _dealer_inspire_algolia_config(base_url, sess, cached_cfg=None):
     """Pull Algolia appId/apiKey/inventoryIndex from any DealerInspire page.
     Returns dict or None. The settings object is identical site-wide so the
     homepage works fine — no need to hit a heavy listing page.
+
+    `cached_cfg`: previously-discovered cfg from `dealers.scrape_config.algolia`.
+    If supplied and complete, returned as-is — FlareSolverr is skipped entirely.
+    The Algolia keys are public/browser-callable and rotate rarely, so a cached
+    copy stays valid for months. This is the path that makes the fast-path
+    100% reliable post-discovery (FlareSolverr is non-deterministic against
+    Cloudflare-fronted sites — same call returned 700KB then empty body 15min
+    later on 2026-04-27).
 
     Fetches via plain FlareSolverr (no proxy, no tier honoring). The Algolia
     keys embedded in the HTML are public/browser-callable, so we don't need
@@ -444,6 +452,13 @@ def _dealer_inspire_algolia_config(base_url, sess):
     on Ferrari Fort Lauderdale — using plain FlareSolverr here gets the JS
     challenge solved without paying the proxy reliability tax.
     """
+    if cached_cfg and cached_cfg.get('app_id') and cached_cfg.get('api_key') and cached_cfg.get('index'):
+        return {
+            'app_id': cached_cfg['app_id'],
+            'api_key': cached_cfg['api_key'],
+            'index': cached_cfg['index'],
+        }
+
     body = None
     try:
         # NOTE: spec called for a 10s timeout, but plain FlareSolverr on
@@ -488,16 +503,20 @@ def _dealer_inspire_algolia_config(base_url, sess):
     }
 
 
-def fetch_dealer_inspire_inventory(base_url, sess):
+def fetch_dealer_inspire_inventory(base_url, sess, cached_cfg=None):
     """DealerInspire fast-path inventory fetch via Algolia.
 
-    Returns a list of normalized vehicle dicts (same shape as
-    fetch_aan_inventory), or None if Algolia config can't be resolved.
+    Returns `(vehicles, cfg)` on success — cfg is the resolved Algolia
+    config the caller can persist to `dealers.scrape_config.algolia` so
+    future scans skip the FlareSolverr config-extraction step.
+    Returns `(None, None)` if Algolia config can't be resolved or the
+    Algolia API errors out.
+
     Filters out 'New' type — EW only sources pre-owned/certified-pre-owned.
     """
-    cfg = _dealer_inspire_algolia_config(base_url, sess)
+    cfg = _dealer_inspire_algolia_config(base_url, sess, cached_cfg=cached_cfg)
     if not cfg:
-        return None
+        return None, None
 
     algolia_url = f"https://{cfg['app_id']}-dsn.algolia.net/1/indexes/{cfg['index']}/query"
     headers = {
@@ -511,10 +530,10 @@ def fetch_dealer_inspire_inventory(base_url, sess):
         # public search key is meant to be browser-callable, no Cloudflare.
         r = requests.post(algolia_url, headers=headers, data=payload, timeout=30)
         if r.status_code != 200:
-            return None
+            return None, None
         data = r.json()
     except Exception:
-        return None
+        return None, None
 
     hits = data.get('hits') or []
     vehicles = []
@@ -522,7 +541,7 @@ def fetch_dealer_inspire_inventory(base_url, sess):
         v = _normalize_dealer_inspire_vehicle(h, base_url)
         if v:
             vehicles.append(v)
-    return vehicles
+    return vehicles, cfg
 
 
 def _normalize_dealer_inspire_vehicle(item, base_url):
@@ -1764,9 +1783,27 @@ class DealerScanner:
             # universal-VDP machinery below.
             if self.dealer.get('platform') == 'dealerinspire':
                 stats['platform_detected'] = 'dealerinspire'
-                di = fetch_dealer_inspire_inventory(self.base_url, self.sess)
+                # Pull cached Algolia keys from scrape_config.algolia so the
+                # FlareSolverr config-extraction step is skipped on every scan
+                # after the first successful discovery. The keys are public
+                # browser tokens that rotate rarely; caching makes this path
+                # 100% reliable instead of dependent on FlareSolverr's flaky
+                # behavior against Cloudflare-fronted sites.
+                cached_algolia = (self.dealer.get('scrape_config') or {}).get('algolia') \
+                    if isinstance(self.dealer.get('scrape_config'), dict) else None
+                if cached_algolia:
+                    print(f'  using cached algolia config (app_id={cached_algolia.get("app_id")})', flush=True)
+                di, resolved_cfg = fetch_dealer_inspire_inventory(
+                    self.base_url, self.sess, cached_cfg=cached_algolia)
                 if di is not None:
                     print(f'  dealerinspire algolia returned {len(di)} vehicles', flush=True)
+                    # Persist newly-discovered cfg to dealers.scrape_config.algolia
+                    # so subsequent scans skip FlareSolverr entirely. Idempotent
+                    # — re-writes the same JSON if the cfg hadn't changed, which
+                    # is fine and cheaper than diffing.
+                    if resolved_cfg and resolved_cfg != cached_algolia:
+                        self._persist_algolia_cfg(resolved_cfg)
+                        print(f'  cached algolia config to scrape_config (app_id={resolved_cfg.get("app_id")})', flush=True)
                     self._process_aan(scan_id, di, stats)
                     stats['colors_detected'] = self._detect_colors()
                     self._update_dealer('dealerinspire', 'algolia', scan_id, 'ok', stats['tier'])
@@ -2215,6 +2252,28 @@ class DealerScanner:
             print(f'  AI discovery exception: {e}', flush=True)
             traceback.print_exc()
             return False
+
+    def _persist_algolia_cfg(self, cfg):
+        """Merge the resolved Algolia config into dealers.scrape_config under
+        the `algolia` key. Uses Postgres jsonb concat (`||`) so any existing
+        keys (e.g. the AI-discovery Next.js scrape config for Ferrari) are
+        preserved. COALESCE handles the NULL scrape_config case — `NULL || x`
+        returns NULL in jsonb arithmetic, which would silently drop the cfg.
+        """
+        payload = _json.dumps({'algolia': cfg})
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute('''UPDATE dealers
+                            SET scrape_config = COALESCE(scrape_config, '{}'::jsonb) || %s::jsonb,
+                                updated_at = NOW()
+                           WHERE id = %s''',
+                        (payload, self.dealer_id))
+            conn.commit()
+        # Update the in-memory dealer dict so the rest of the scan sees the
+        # merged config (matters if anything downstream re-reads scrape_config).
+        existing = self.dealer.get('scrape_config') or {}
+        if isinstance(existing, dict):
+            existing['algolia'] = cfg
+            self.dealer['scrape_config'] = existing
 
     def _update_dealer(self, platform, method, scan_id, status, tier=None):
         # scrape_method combines the extractor (api/jsonld/sitemap) with the fetch
