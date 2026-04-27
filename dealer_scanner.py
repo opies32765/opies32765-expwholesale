@@ -1318,17 +1318,23 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
     if not (vin or url):
         return (None, False, None)
 
+    # Lookup must include price_drop_amount + price_drop_at + last_price so
+    # the smart-merge logic below can read existing values and preserve them
+    # when nothing changed. Without these columns, `existing_drop` resolves
+    # to None on every upsert and the UPDATE wipes every drop on every scan.
     row = None
     if vin:
         cur.execute(
-            "SELECT id, price, status, first_seen_at, missing_scans "
+            "SELECT id, price, status, first_seen_at, missing_scans, "
+            "price_drop_amount, price_drop_at, last_price "
             "FROM dealer_inventory WHERE dealer_id=%s AND UPPER(vin)=%s",
             (dealer_id, vin)
         )
         row = cur.fetchone()
     if not row and url:
         cur.execute(
-            "SELECT id, price, status, first_seen_at, missing_scans "
+            "SELECT id, price, status, first_seen_at, missing_scans, "
+            "price_drop_amount, price_drop_at, last_price "
             "FROM dealer_inventory WHERE dealer_id=%s AND url=%s "
             "ORDER BY (vin <> '' AND vin IS NOT NULL) DESC, id ASC LIMIT 1",
             (dealer_id, url)
