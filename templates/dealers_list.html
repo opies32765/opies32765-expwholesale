@@ -181,7 +181,7 @@ tr:last-child td{border-bottom:none}
 </div>
 
 <div class="modal-overlay" id="addModal">
-  <div class="modal">
+  <div class="modal" style="width:500px;max-width:96vw">
     <h3>Add Dealer</h3>
     <label>Dealer Name</label>
     <input type="text" id="newName" placeholder="Park Avenue Motorcars" autofocus>
@@ -189,6 +189,26 @@ tr:last-child td{border-bottom:none}
     <input type="text" id="newUrl" placeholder="https://example.com">
     <label>Notes (optional)</label>
     <textarea id="newNotes" placeholder="High-line indie, expect trades weekly"></textarea>
+
+    <div style="margin:18px 0 8px;padding-top:14px;border-top:1px solid #344f68">
+      <div style="font-size:12px;font-weight:700;color:#a78bfa;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Partner Portal Account (optional)</div>
+      <div style="font-size:12px;color:#7a9bb5;line-height:1.5">If you fill in a contact email, the dealer gets a partner-dashboard account auto-provisioned with login credentials emailed to them — no activation code needed.</div>
+    </div>
+    <label>Contact Name</label>
+    <input type="text" id="newContactName" placeholder="John Smith">
+    <label>Contact Email</label>
+    <input type="email" id="newContactEmail" placeholder="john@parkavemotorcars.com">
+    <label>Contact Phone (optional, for SMS bid alerts)</label>
+    <input type="tel" id="newContactPhone" placeholder="+19545551234">
+    <div style="display:flex;gap:18px;margin-top:12px;flex-wrap:wrap">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#cbd5e1;cursor:pointer">
+        <input type="checkbox" id="newEmailAlerts" checked> Email bid alerts
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#cbd5e1;cursor:pointer" title="Requires phone number — sends Twilio SMS for bid alerts. Dealer can opt out anytime via reply STOP.">
+        <input type="checkbox" id="newSmsOptIn"> SMS bid alerts
+      </label>
+    </div>
+
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeAdd()">Cancel</button>
       <button class="btn btn-primary" id="addBtn" onclick="submitAdd()">Add + Scan</button>
@@ -205,16 +225,37 @@ async function submitAdd(){
   const name = document.getElementById('newName').value.trim();
   const url  = document.getElementById('newUrl').value.trim();
   const notes = document.getElementById('newNotes').value.trim();
+  const contact_full_name = document.getElementById('newContactName').value.trim();
+  const contact_email = document.getElementById('newContactEmail').value.trim();
+  const contact_phone = document.getElementById('newContactPhone').value.trim();
+  const email_bid_alerts = document.getElementById('newEmailAlerts').checked;
+  const sms_opt_in = document.getElementById('newSmsOptIn').checked;
   if(!name || !url){alert('Name + URL required');return}
+  if(sms_opt_in && !contact_phone){alert('Phone number required for SMS alerts');return}
   const btn = document.getElementById('addBtn');
   btn.disabled = true; btn.textContent = 'Adding…';
   try{
     const r = await fetch('/api/dealer/create',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name,url,notes})
+      body: JSON.stringify({name,url,notes,
+                            contact_full_name, contact_email, contact_phone,
+                            email_bid_alerts, sms_opt_in})
     });
     const data = await r.json();
-    if(data.dealer_id){window.location = '/dealers/' + data.dealer_id}
+    if(data.dealer_id){
+      // Surface the partner-account welcome status so admin knows to follow up if email failed
+      const pa = data.partner_account;
+      if (pa) {
+        if (pa.success) {
+          // Brief in-modal confirmation, then redirect
+          btn.textContent = 'Created — sending welcome email…';
+        } else if (pa.error) {
+          alert('Dealer created, but partner account had an issue:\n' + pa.error +
+                '\n\nDealer dashboard will load — you can fix in Settings.');
+        }
+      }
+      window.location = '/dealers/' + data.dealer_id;
+    }
     else{alert(data.error || 'Failed to add'); btn.disabled=false; btn.textContent='Add + Scan'}
   }catch(e){
     alert('Error: '+e.message); btn.disabled=false; btn.textContent='Add + Scan';

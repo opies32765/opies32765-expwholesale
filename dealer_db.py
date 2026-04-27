@@ -493,22 +493,53 @@ def create_dealer():
     url = (data.get('url') or '').strip().rstrip('/')
     name = (data.get('name') or '').strip()
     notes = (data.get('notes') or '').strip() or None
+    contact_email = (data.get('contact_email') or '').strip()
+    contact_phone = (data.get('contact_phone') or '').strip()
+    contact_full_name = (data.get('contact_full_name') or '').strip() or None
+    sms_opt_in = bool(data.get('sms_opt_in')) and bool(contact_phone)
+    email_bid_alerts = bool(data.get('email_bid_alerts', True))
     if not url or not name:
         return jsonify({'error': 'url and name required'}), 400
     if not url.startswith('http'):
         url = 'https://' + url
 
     with _db() as conn, conn.cursor() as cur:
-        cur.execute('''INSERT INTO dealers (name, url, notes)
-                       VALUES (%s, %s, %s)
-                       ON CONFLICT (url) DO UPDATE SET name = EXCLUDED.name
+        cur.execute('''INSERT INTO dealers (name, url, notes, phone)
+                       VALUES (%s, %s, %s, %s)
+                       ON CONFLICT (url) DO UPDATE SET
+                         name = EXCLUDED.name,
+                         phone = COALESCE(EXCLUDED.phone, dealers.phone)
                        RETURNING id''',
-                    (name, url, notes))
+                    (name, url, notes, contact_phone or None))
         dealer_id = cur.fetchone()['id']
         conn.commit()
 
+    # Pre-provision the partner-portal account when contact email is provided.
+    # No activation code, no magic link — single welcome email with credentials.
+    # Dealer can log in immediately and start receiving bid notifications.
+    welcome_result = None
+    if contact_email:
+        try:
+            from partner_portal import create_welcome_account
+            welcome_result = create_welcome_account(
+                dealer_id=dealer_id,
+                email=contact_email,
+                phone=contact_phone or None,
+                sms_opt_in=sms_opt_in,
+                email_bid_alerts=email_bid_alerts,
+                full_name=contact_full_name,
+            )
+        except Exception as e:
+            print(f'[create_dealer] welcome-account failed for dealer {dealer_id}: {e}',
+                  flush=True)
+            welcome_result = {'success': False, 'error': str(e)}
+
     _trigger_scan(dealer_id)
-    return jsonify({'dealer_id': dealer_id, 'scan_started': True})
+    return jsonify({
+        'dealer_id': dealer_id,
+        'scan_started': True,
+        'partner_account': welcome_result,
+    })
 
 
 @bp.route('/api/dealer/<int:dealer_id>/scan', methods=['POST'])

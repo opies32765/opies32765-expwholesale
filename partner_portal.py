@@ -107,6 +107,82 @@ def _send_email(to_addr: str, subject: str, html: str) -> bool:
         return False
 
 
+# ── Welcome onboarding (no activation code) ─────────────────────────────
+def create_welcome_account(dealer_id: int, email: str, phone: str = None,
+                           sms_opt_in: bool = False, email_bid_alerts: bool = True,
+                           full_name: str = None) -> dict:
+    """Pre-provision a partner_user account when EW adds a dealer to the DB.
+    Skips the magic-link / activation-code dance — directly creates an
+    activated account with a random password and emails it. Dealer logs in
+    with email + that password and changes it whenever they want.
+
+    Returns {'success': bool, 'password': str|None, 'error': str|None}.
+    Per task #33 — onboarding shouldn't require dealer-side action before
+    they can receive their first bid.
+    """
+    if not email or '@' not in email:
+        return {'success': False, 'error': 'valid email required', 'password': None}
+
+    raw_pw = secrets.token_urlsafe(9)  # ~12 chars, URL-safe, no ambiguous chars
+    pw_hash = _hash_password(raw_pw)
+
+    try:
+        with _db() as conn, conn.cursor() as cur:
+            # Skip if a partner_user already exists for this email
+            cur.execute("SELECT id, dealer_id FROM partner_users WHERE LOWER(email) = LOWER(%s)",
+                        (email,))
+            existing = cur.fetchone()
+            if existing:
+                return {'success': False,
+                        'error': f'partner account already exists for {email} (dealer #{existing["dealer_id"]})',
+                        'password': None}
+
+            cur.execute('''INSERT INTO partner_users
+                             (dealer_id, email, full_name, phone,
+                              password_hash, sms_opt_in, email_bid_alerts,
+                              invite_token, invite_used_at, created_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, NOW(), NOW())
+                           RETURNING id''',
+                        (dealer_id, email.strip().lower(), full_name,
+                         (phone or '').strip() or None,
+                         pw_hash, bool(sms_opt_in), bool(email_bid_alerts)))
+            user_id = cur.fetchone()['id']
+            conn.commit()
+
+            # Build dashboard URL
+            cur.execute("SELECT name FROM dealers WHERE id = %s", (dealer_id,))
+            d = cur.fetchone()
+            slug = _slug_for_dealer(dealer_id, cur)
+            portal_url = f"{PORTAL_BASE}/partner/{slug}"
+            dealer_name = d['name'] if d else 'your dashboard'
+
+            # Send welcome email — single message, has everything
+            html = (
+                f'<p>Hi{(" " + full_name) if full_name else ""},</p>'
+                f'<p>Experience Wholesale has set up a partner dashboard for '
+                f'<strong>{dealer_name}</strong>. You can log in any time to see '
+                f'bid offers on your inventory and respond directly.</p>'
+                f'<p style="margin:18px 0;padding:14px 16px;background:#f1f5f9;border-radius:8px">'
+                f'<strong>Dashboard:</strong> '
+                f'<a href="{portal_url}" style="color:#2563eb">{portal_url}</a><br>'
+                f'<strong>Login:</strong> {email}<br>'
+                f'<strong>Password:</strong> <code style="background:#fff;padding:2px 6px;'
+                f'border-radius:3px;font-family:monospace">{raw_pw}</code>'
+                f'</p>'
+                f'<p>Change this password from your dashboard once you log in.</p>'
+                f'<p>You\'ll start receiving bid notifications here when EW makes offers '
+                f'on cars in your inventory.</p>'
+                f'<p style="font-size:12px;color:#64748b">No further action needed on your '
+                f'end — this account is already active.</p>'
+            )
+            sent = _send_email(email, f'Your Experience Wholesale partner dashboard', html)
+
+        return {'success': True, 'password': raw_pw, 'user_id': user_id, 'email_sent': sent}
+    except Exception as e:
+        print(f'[create_welcome_account] failed for dealer {dealer_id}: {e}', flush=True)
+        return {'success': False, 'error': str(e), 'password': None}
+
+
 # ── Auth helpers ──────────────────────────────────────────────────────────
 def _slug_for_dealer(dealer_id: int, cur) -> str:
     """Return the portal slug for a dealer. Prefers the dedicated
