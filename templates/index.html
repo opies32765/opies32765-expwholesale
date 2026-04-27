@@ -417,8 +417,16 @@ function renderRow(b, pc) {
   ) : '';
   const vehicle = b.vin ? `<div class="vehicle-vin">${b.vin}${vaBadge}</div>${vehicleDesc}` : '<div class="no-vin">No VIN extracted</div>';
   const photos = (pc||0) > 0 ? `<span class="photo-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>${pc}</span>` : '—';
+  // Three contact-cell shapes:
+  //  - is_field: traveling rep (badge: "Field Rep")
+  //  - is_db_push: bid created from Dealer DB Search (label: "EW Search" + dealer name)
+  //  - default: real customer (name/company/phone)
   const contactCell = b.is_field
     ? `<div class="contact-name">${b.contact_name||'Field Rep'}</div><div><span class="badge-field">${b.contact_role||'Field Rep'}</span></div>`
+    : b.is_db_push
+    ? `<div class="contact-name" style="color:#a78bfa">EW Search</div>`
+      + (b.partner_dealer_name ? `<div class="contact-company" style="color:#94a3b8;font-size:11px">${b.partner_dealer_name}</div>` : '')
+      + `<div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3);border-radius:3px;font-size:9px;font-weight:700;color:#a78bfa;letter-spacing:.4px;text-transform:uppercase">Dealer DB</span></div>`
     : `<div class="contact-name">${b.contact_name||b.phone}</div>${b.contact_name?`<div class="contact-phone">${b.phone}</div>`:''}${b.contact_company?`<div class="contact-company">${b.contact_company}</div>`:''}`;
   const rowClass = ['status-'+b.status, b.is_new ? 'row-new' : ''].filter(Boolean).join(' ');
   const askPrice = b.asking_price ? `<div style="font-size:15px;font-weight:700;color:#94a3b8">$${Math.round(b.asking_price).toLocaleString()}</div>` : '—';

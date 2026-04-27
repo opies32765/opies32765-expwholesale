@@ -1021,8 +1021,10 @@ def dashboard():
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     q = """
         SELECT b.*, c.name as contact_name, c.company as contact_company,
-               c.role as contact_role
-        FROM bids b LEFT JOIN contacts c ON b.contact_id = c.id
+               c.role as contact_role, d.name as partner_dealer_name
+        FROM bids b
+        LEFT JOIN contacts c ON b.contact_id = c.id
+        LEFT JOIN dealers d ON b.partner_dealer_id = d.id
         {where}
         ORDER BY b.created_at DESC LIMIT 200
     """
@@ -2749,9 +2751,12 @@ def api_bids():
     q = """
         SELECT b.id, b.phone, b.vin, b.year, b.make, b.model, b.mileage,
                b.raw_message, b.status, b.created_at, b.bid_amount, b.ai_price, b.asking_price,
-               b.has_unread,
-               c.name as contact_name, c.company as contact_company, c.role as contact_role
-        FROM bids b LEFT JOIN contacts c ON b.contact_id = c.id
+               b.has_unread, b.partner_dealer_id,
+               c.name as contact_name, c.company as contact_company, c.role as contact_role,
+               d.name as partner_dealer_name
+        FROM bids b
+        LEFT JOIN contacts c ON b.contact_id = c.id
+        LEFT JOIN dealers d ON b.partner_dealer_id = d.id
         {where}
         ORDER BY b.created_at DESC LIMIT 200
     """
@@ -2777,6 +2782,9 @@ def api_bids():
             'ai_price': float(r['ai_price']) if r['ai_price'] else None,
             'bid_amount': float(r['bid_amount']) if r['bid_amount'] else None,
             'is_field': r['phone'].startswith('field:'),
+            'is_db_push': r['phone'] == 'sys:db_push',
+            'partner_dealer_id': r.get('partner_dealer_id'),
+            'partner_dealer_name': r.get('partner_dealer_name'),
             'is_new': r['id'] > since_id,
             'has_unread': bool(r.get('has_unread'))
         })
