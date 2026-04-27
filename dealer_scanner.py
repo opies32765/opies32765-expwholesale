@@ -290,6 +290,19 @@ def _normalize_aan_vehicle(item, base_url):
     if year_raw and str(year_raw).isdigit():
         year = int(year_raw)
 
+    # AAN trim cleanup. Multi-location chains (e.g. Marshall Goldman) stuff
+    # marketing copy into the trim field as "<real-trim> -<sales pitch>".
+    # Examples: "GT3 -Full Matte PPF, Carbon Roof", "-Daytona Seats, Low Miles".
+    # Pattern is always SPACE+DASH as the separator, never a legit trim hyphen
+    # (Marino verified to have zero ' -' trims; hyphenated badges like
+    # "Mercedes-Maybach" live in `make`, not `trim`). Strip from ' -' onward.
+    raw_trim = (item.get('trim') or '').strip()
+    if ' -' in raw_trim:
+        raw_trim = raw_trim.split(' -', 1)[0].strip()
+    elif raw_trim.startswith('-'):
+        # Trim was pure marketing copy with no real trim prefix — drop it.
+        raw_trim = ''
+
     photos = []
     img = item.get('image_link')
     if img:
@@ -306,7 +319,7 @@ def _normalize_aan_vehicle(item, base_url):
         'year': year,
         'make': (item.get('make') or '').strip() or None,
         'model': (item.get('model') or '').strip() or None,
-        'trim': (item.get('trim') or '').strip() or None,
+        'trim': raw_trim or None,
         'ext_color': (item.get('ext_color') or '').strip() or None,
         'int_color': (item.get('int_color') or '').strip() or None,
         'body_style': (item.get('body') or '').strip() or None,
@@ -317,6 +330,11 @@ def _normalize_aan_vehicle(item, base_url):
         'photo_url': img,
         'photos': photos,
         'source_added_at': source_added_at,
+        # Multi-location AAN dealers (e.g. Marshall Goldman: Cleveland/Beverly
+        # Hills/Maryland/Newport Beach) tag each vehicle with its store. Single
+        # source of truth for per-store dashboards if we later split the chain
+        # into separate dealer cards.
+        'location': (item.get('location') or '').strip() or None,
         # Direct signals from the API — sold/pending flags we can trust.
         '_aan_sold': sold_raw == 'sold',
         '_aan_pending': pending,
@@ -2088,6 +2106,14 @@ class DealerScanner:
 
             # Mark any existing VIN that the feed says is sold
             for vin in sold_vins:
+                # Some AAN dealers (e.g. Marshall Goldman, multi-location chains)
+                # leave stale 'Sold' records alongside the same VIN's current
+                # active listing in /api/cars. If we see this VIN as active in
+                # the same scan, trust active — the dealer is currently selling
+                # it. Otherwise we'd insta-mark a freshly-imported active car
+                # as sold from the dealer's own historical pollution.
+                if vin in scanned_vins:
+                    continue
                 cur.execute('''SELECT id FROM dealer_inventory
                                WHERE dealer_id=%s AND vin=%s''',
                             (self.dealer_id, vin))
