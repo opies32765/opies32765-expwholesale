@@ -143,7 +143,7 @@ tr:last-child td{border-bottom:none}
   </thead>
   <tbody>
   {% for d in dealers %}
-    <tr onclick="window.location='/dealers/{{ d.dealer_id }}'">
+    <tr onclick="window.location='/dealers/{{ d.dealer_id }}'" data-dealer-id="{{ d.dealer_id }}">
       <td>
         <div class="dealer-name">{{ d.name }}</div>
         <div class="dealer-url">{{ d.url }}</div>
@@ -152,7 +152,7 @@ tr:last-child td{border-bottom:none}
         <span class="platform-badge {% if not d.platform %}unknown{% endif %}">{{ d.platform or 'unknown' }}</span>
         <div class="scrape-method">{{ d.scrape_method or '—' }}</div>
       </td>
-      <td class="last-scan">
+      <td class="last-scan" id="last-scan-{{ d.dealer_id }}">
         <div>{{ d.last_scan_at|time_ago }}</div>
         <div class="{% if d.last_scan_status == 'ok' %}status-ok{% elif d.last_scan_status and 'error' in d.last_scan_status %}status-err{% endif %}">
           {{ d.last_scan_status or '—' }}
@@ -228,6 +228,43 @@ document.getElementById('search').addEventListener('input',e=>{
     tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none';
   });
 });
+
+// Live scan progress: every 5s, poll scan-status for any dealer whose
+// row currently shows status 'running'. Replace the last-scan cell with
+// a progress bar showing urls_fetched / urls_total. When the scan finishes
+// (status flips off 'running'), reload the row's last-scan cell to show
+// the final result. Only polls dealers whose last_status is 'running' to
+// avoid hammering the API for every dealer on every tick.
+async function pollScanProgress() {
+  const cells = document.querySelectorAll('[id^="last-scan-"]');
+  for (const cell of cells) {
+    const id = cell.id.replace('last-scan-', '');
+    if (!cell.textContent.toLowerCase().includes('running')
+        && !cell.dataset.polling) continue;
+    try {
+      const r = await fetch(`/api/dealer/${id}/scan-status`);
+      const d = await r.json();
+      const s = d.scan;
+      if (s && (s.status === 'running' || d.running)) {
+        cell.dataset.polling = '1';
+        const total = s.urls_total || 0;
+        const done = s.urls_fetched || 0;
+        const pct = total ? Math.round(100 * done / total) : 0;
+        cell.innerHTML = `
+          <div style="font-size:12px;color:#fbbf24;font-weight:600">scanning…</div>
+          <div style="font-size:11px;color:#94a3b8">${done}/${total || '?'} ${total ? `(${pct}%)` : ''}</div>
+          <div style="height:3px;background:#1a2838;border-radius:2px;margin-top:4px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:#fbbf24;transition:width .3s"></div>
+          </div>`;
+      } else if (cell.dataset.polling) {
+        // Just finished — hard refresh to pull updated last_scan_at + counts
+        location.reload();
+      }
+    } catch (e) {}
+  }
+}
+setInterval(pollScanProgress, 5000);
+pollScanProgress();
 </script>
 </body>
 </html>

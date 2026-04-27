@@ -1606,9 +1606,21 @@ class DealerScanner:
                         urls = list(set(urls) | set(
                             discover_via_crawl(self.base_url, self.sess)))
                 urls = urls[:CRAWL_MAX_URLS]
+                # Live progress: stamp urls_total now (after discovery) and
+                # bump urls_fetched every 5 VDPs so the dashboard can show
+                # a real progress bar while the scan runs. Cheap UPDATE,
+                # negligible vs the FlareSolverr fetch latency dominating.
+                try:
+                    with get_conn() as _pconn, _pconn.cursor() as _pcur:
+                        _pcur.execute(
+                            "UPDATE dealer_scans SET urls_total = %s, urls_fetched = 0 WHERE id = %s",
+                            (len(urls), scan_id))
+                        _pconn.commit()
+                except Exception:
+                    pass  # progress tracking is best-effort, never fail the scan
                 fails = 0
                 vehs = []
-                for u in urls:
+                for idx, u in enumerate(urls):
                     c, _ff, vbody = fetch(u, self.sess)
                     # Per-URL retry on a fresh session+IP. DataImpulse rotates
                     # exit nodes per fresh TCP connection — using a new Session
@@ -1625,10 +1637,20 @@ class DealerScanner:
                             pass
                     if c != 200 or not vbody:
                         fails += 1
-                        continue
-                    veh = extract_vehicle(u, vbody)
-                    if veh:
-                        vehs.append(veh)
+                    else:
+                        veh = extract_vehicle(u, vbody)
+                        if veh:
+                            vehs.append(veh)
+                    # Progress checkpoint every 5 VDPs (or on the last one)
+                    if (idx + 1) % 5 == 0 or (idx + 1) == len(urls):
+                        try:
+                            with get_conn() as _pconn, _pconn.cursor() as _pcur:
+                                _pcur.execute(
+                                    "UPDATE dealer_scans SET urls_fetched = %s WHERE id = %s",
+                                    (idx + 1, scan_id))
+                                _pconn.commit()
+                        except Exception:
+                            pass
                 return urls, vehs, fails
 
             urls, vehicles, fetch_fail = _scan_pass()
