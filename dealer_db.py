@@ -77,11 +77,11 @@ def dealer_detail(dealer_id):
                     (dealer_id,))
         active = cur.fetchall()
 
-        cur.execute('''SELECT * FROM dealer_inventory
-                       WHERE dealer_id = %s AND status = 'sold'
-                       ORDER BY sold_at DESC NULLS LAST LIMIT 500''',
-                    (dealer_id,))
-        sold = cur.fetchall()
+        # Sold cars are lazy-loaded — see /api/dealer/<id>/sold below.
+        # Skipping the inline fetch saves ~30-100ms on dealers with deep
+        # sold history (Ferrari has 500+ sold rows). Just need the count
+        # for the collapsed-section badge, which we already get from
+        # _pipeline_stats(dealer_id) below.
 
         cur.execute('''SELECT * FROM dealer_scans
                        WHERE dealer_id = %s
@@ -96,9 +96,79 @@ def dealer_detail(dealer_id):
     # Pipeline coverage (for the visibility card)
     pipeline = _pipeline_stats(dealer_id)
 
+    # Partner-account state — drives the "Set up Partner Account" button
+    # visibility on the dealer detail page (only show if no account exists yet).
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute('''SELECT id, email, full_name, phone,
+                              sms_opt_in, email_bid_alerts, last_login_at
+                       FROM partner_users
+                       WHERE dealer_id = %s
+                       ORDER BY id LIMIT 1''', (dealer_id,))
+        partner_account = cur.fetchone()
+
     return render_template('dealers_detail.html',
                            dealer=dealer, tree=tree, buckets=buckets,
-                           sold=sold, scans=scans, pipeline=pipeline)
+                           scans=scans, pipeline=pipeline,
+                           partner_account=partner_account)
+
+
+@bp.route('/api/dealer/<int:dealer_id>/sold')
+def api_dealer_sold(dealer_id):
+    """Return sold inventory rows for a dealer. Lazy-loaded by the dealer
+    detail page when the user expands the Sold section — keeps the initial
+    page render fast on dealers with deep sold history."""
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute('''SELECT id, year, make, model, trim, ext_color, vin,
+                              price, sold_at, sold_confidence, sold_signals, url
+                       FROM dealer_inventory
+                       WHERE dealer_id = %s AND status = 'sold'
+                       ORDER BY sold_at DESC NULLS LAST LIMIT 500''',
+                    (dealer_id,))
+        rows = cur.fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get('sold_at'):
+            d['sold_at'] = d['sold_at'].isoformat()
+        if d.get('price') is not None:
+            d['price'] = int(d['price'])
+        out.append(d)
+    return jsonify({'sold': out})
+
+
+@bp.route('/api/dealer/<int:dealer_id>/setup_partner', methods=['POST'])
+def setup_partner_account(dealer_id):
+    """Provision a partner-portal account for an EXISTING dealer.
+    Same logic as the inline path in /api/dealer/create, but reachable
+    independently from the dealer detail page so admins can onboard a
+    dealer's contact later without re-adding the dealer."""
+    data = request.get_json(silent=True) or request.form
+    email = (data.get('contact_email') or '').strip()
+    phone = (data.get('contact_phone') or '').strip()
+    full_name = (data.get('contact_full_name') or '').strip() or None
+    sms_opt_in = bool(data.get('sms_opt_in')) and bool(phone)
+    email_bid_alerts = bool(data.get('email_bid_alerts', True))
+
+    if not email or '@' not in email:
+        return jsonify({'success': False, 'error': 'valid email required'}), 400
+
+    # Update dealer's phone too if we got one and dealer doesn't have one
+    if phone:
+        with _db() as conn, conn.cursor() as cur:
+            cur.execute('UPDATE dealers SET phone = COALESCE(phone, %s) WHERE id = %s',
+                        (phone, dealer_id))
+            conn.commit()
+
+    from partner_portal import create_welcome_account
+    result = create_welcome_account(
+        dealer_id=dealer_id,
+        email=email,
+        phone=phone or None,
+        sms_opt_in=sms_opt_in,
+        email_bid_alerts=email_bid_alerts,
+        full_name=full_name,
+    )
+    return jsonify(result)
 
 
 # Effective first-seen: prefer vAuto-verified crawler data (most accurate -

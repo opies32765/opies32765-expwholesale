@@ -183,7 +183,11 @@
           </td>
           <td class="num">{{ v.mileage|miles if v.mileage else '—' }}</td>
           <td class="num">
-            {{ v.price|money if v.price else '—' }}
+            {% if v.price %}
+              {{ v.price|money }}
+            {% else %}
+              <span style="color:#94a3b8;font-size:12px;font-style:italic">Call for Price</span>
+            {% endif %}
           </td>
           <td class="num">
             {% if v.price_drop_amount %}

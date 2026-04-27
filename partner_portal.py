@@ -177,6 +177,21 @@ def create_welcome_account(dealer_id: int, email: str, phone: str = None,
             )
             sent = _send_email(email, f'Your Experience Wholesale partner dashboard', html)
 
+        # Fire-and-forget Telegram alert to Oscar so he knows the dealer is
+        # onboarded and can follow up if the email doesn't land. Same pattern
+        # we use for TXT Charlie / inbound partner activity.
+        _tg_alert(
+            f"<b>🤝 New partner dashboard set up</b>\n"
+            f"Dealer: {dealer_name}\n"
+            f"Contact: {full_name or email}\n"
+            f"Email: {email}\n"
+            f"Phone: {phone or '(none)'}\n"
+            f"SMS opt-in: {'yes' if sms_opt_in else 'no'}\n"
+            f"Email opt-in: {'yes' if email_bid_alerts else 'no'}\n"
+            f"Dashboard: {portal_url}\n"
+            f"Welcome email: {'sent ✓' if sent else 'FAILED — check Resend logs'}"
+        )
+
         return {'success': True, 'password': raw_pw, 'user_id': user_id, 'email_sent': sent}
     except Exception as e:
         print(f'[create_welcome_account] failed for dealer {dealer_id}: {e}', flush=True)

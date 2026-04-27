@@ -223,7 +223,49 @@ def fetch_aan_inventory(base_url, sess):
         v = _normalize_aan_vehicle(item, base_url)
         if v:
             vehicles.append(v)
+
+    # Title-tag price fallback. AAN's /api/cars is occasionally inconsistent —
+    # some vehicles come back with price=null or 0 even though the VDP shows
+    # the price. The VDP <title> always contains "For Sale ($XXX,XXX)", so
+    # for any active vehicle missing a price, fetch the VDP and parse it out.
+    # Only triggers for available vehicles with a URL — sold/pending skipped.
+    for v in vehicles:
+        if v.get('price'):
+            continue
+        if v.get('_aan_sold') or v.get('_aan_pending') or v.get('_aan_coming_soon'):
+            continue
+        url = v.get('url')
+        if not url:
+            continue
+        try:
+            code, _f, body = fetch(url, sess)
+            if code != 200 or not body:
+                continue
+            recovered = _aan_price_from_title(body)
+            if recovered:
+                v['price'] = recovered
+                print(f'  [aan] price recovered from title: {v.get("vin") or url[-30:]} → ${recovered:,}', flush=True)
+        except Exception:
+            continue
+
     return vehicles
+
+
+def _aan_price_from_title(html):
+    """Parse the AAN VDP <title> tag for a price. Marino-style format:
+        <title>Used 2017 Ferrari California T For Sale ($134,900) | ...</title>
+    Returns int price or None."""
+    m = re.search(r'<title[^>]*>([^<]+)</title>', html, re.I)
+    if not m:
+        return None
+    title = m.group(1)
+    pm = re.search(r'\(\s*\$\s*([\d,]+)\s*\)', title)
+    if not pm:
+        return None
+    try:
+        return int(pm.group(1).replace(',', ''))
+    except ValueError:
+        return None
 
 
 def _normalize_aan_vehicle(item, base_url):
@@ -376,6 +418,179 @@ def discover_via_dealer_inspire(base_url, sess):
             continue
         found.add(link)
     return sorted(found)[:CRAWL_MAX_URLS]
+
+
+# ── DealerInspire Algolia fast path ──────────────────────────────────────
+# DealerInspire sites embed an Algolia public search key in every page (the
+# `mvnAlgSettings` JS object). Algolia's inventory index has every vehicle
+# with full metadata (VIN, price, miles, photos, days_in_stock, etc.) and
+# returns the entire lot in a single ~3 second request. Replaces 60-minute
+# per-VDP scans for sites with 100+ vehicles.
+_DI_ALGOLIA_RE = re.compile(
+    r'mvnAlgSettings\s*=\s*(\{[^;]+?\})\s*;',
+    re.S,
+)
+
+
+def _dealer_inspire_algolia_config(base_url, sess):
+    """Pull Algolia appId/apiKey/inventoryIndex from any DealerInspire page.
+    Returns dict or None. The settings object is identical site-wide so the
+    homepage works fine — no need to hit a heavy listing page.
+
+    Fetches via plain FlareSolverr (no proxy, no tier honoring). The Algolia
+    keys embedded in the HTML are public/browser-callable, so we don't need
+    residential IP rotation just to read them. The DealerInspire-default tier
+    is `flaresolverr_proxy`, which has been observed returning empty bodies
+    on Ferrari Fort Lauderdale — using plain FlareSolverr here gets the JS
+    challenge solved without paying the proxy reliability tax.
+    """
+    body = None
+    try:
+        # NOTE: spec called for a 10s timeout, but plain FlareSolverr on
+        # Cloudflare-fronted sites (e.g. ferrarifl.com) consistently takes
+        # 25-98s to solve the JS challenge — 10s would make the fast path
+        # never succeed. 120s mirrors fetch_flaresolverr (90s) plus margin.
+        # The maxTimeout in the payload is FlareSolverr's internal cap; the
+        # outer requests timeout is the HTTP transport cap. Both must be
+        # generous or the fast path bails before Cloudflare returns.
+        resp = requests.post(
+            dealer_fetchers.FLARESOLVERR_URL,
+            json={
+                'cmd': 'request.get',
+                'url': base_url,
+                'maxTimeout': 60000,
+            },
+            timeout=120,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if data.get('status') != 'ok':
+            return None
+        body = ((data.get('solution') or {}).get('response') or '')
+    except Exception:
+        return None
+    if not body or len(body) < 200:
+        return None
+    m = _DI_ALGOLIA_RE.search(body)
+    if not m:
+        return None
+    try:
+        cfg = _json.loads(m.group(1))
+    except Exception:
+        return None
+    if not (cfg.get('appId') and cfg.get('apiKeySearch') and cfg.get('inventoryIndex')):
+        return None
+    return {
+        'app_id': cfg['appId'],
+        'api_key': cfg['apiKeySearch'],
+        'index': cfg['inventoryIndex'],
+    }
+
+
+def fetch_dealer_inspire_inventory(base_url, sess):
+    """DealerInspire fast-path inventory fetch via Algolia.
+
+    Returns a list of normalized vehicle dicts (same shape as
+    fetch_aan_inventory), or None if Algolia config can't be resolved.
+    Filters out 'New' type — EW only sources pre-owned/certified-pre-owned.
+    """
+    cfg = _dealer_inspire_algolia_config(base_url, sess)
+    if not cfg:
+        return None
+
+    algolia_url = f"https://{cfg['app_id']}-dsn.algolia.net/1/indexes/{cfg['index']}/query"
+    headers = {
+        'X-Algolia-Application-Id': cfg['app_id'],
+        'X-Algolia-API-Key': cfg['api_key'],
+        'Content-Type': 'application/json',
+    }
+    payload = _json.dumps({'params': 'hitsPerPage=1000&page=0'})
+    try:
+        # Direct Algolia call — bypass FlareSolverr/proxy entirely. Algolia's
+        # public search key is meant to be browser-callable, no Cloudflare.
+        r = requests.post(algolia_url, headers=headers, data=payload, timeout=30)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+    except Exception:
+        return None
+
+    hits = data.get('hits') or []
+    vehicles = []
+    for h in hits:
+        v = _normalize_dealer_inspire_vehicle(h, base_url)
+        if v:
+            vehicles.append(v)
+    return vehicles
+
+
+def _normalize_dealer_inspire_vehicle(item, base_url):
+    """Convert one Algolia hit to our internal vehicle dict (same shape as
+    AAN's _normalize_aan_vehicle so _process_aan can swallow it directly)."""
+    vtype = (item.get('type') or '').strip()
+    # EW only sources pre-owned + certified — drop everything else.
+    if vtype.lower() in ('new', 'demo', 'loaner', 'courtesy'):
+        return None
+
+    vin = (item.get('vin') or '').strip().upper()
+    url = item.get('link') or None
+
+    def _int_or_none(raw):
+        if raw in (None, '', '0', 0):
+            return None
+        try:
+            return int(str(raw).replace(',', '').replace('$', '').strip())
+        except (ValueError, TypeError):
+            return None
+
+    year = item.get('year')
+    if isinstance(year, str) and year.isdigit():
+        year = int(year)
+    elif not isinstance(year, int):
+        year = None
+
+    thumb = item.get('thumbnail') or None
+    photos = [thumb] if thumb else []
+
+    # Dealer-declared days-on-lot. Algolia's `date_in_stock` is MM/DD/YYYY.
+    # We populate source_added_at directly so age buckets reflect truth from
+    # the dealer's DMS, not our first_seen_at scan timestamp.
+    source_added_at = None
+    dis = item.get('date_in_stock') or ''
+    if dis:
+        try:
+            from datetime import datetime as _dt
+            source_added_at = _dt.strptime(dis.strip(), '%m/%d/%Y').replace(
+                tzinfo=timezone.utc).isoformat()
+        except Exception:
+            pass
+
+    out = {
+        'vin': vin,
+        'year': year,
+        'make': (item.get('make') or '').strip() or None,
+        'model': (item.get('model') or '').strip() or None,
+        'trim': (item.get('trim') or '').strip() or None,
+        'ext_color': (item.get('ext_color') or '').strip() or None,
+        'int_color': (item.get('int_color') or '').strip() or None,
+        'body_style': (item.get('body') or '').strip() or None,
+        'stock_number': (item.get('stock') or item.get('stock_no') or '').strip() or None,
+        'mileage': _int_or_none(item.get('miles')),
+        'price': _int_or_none(item.get('our_price')),
+        'msrp': _int_or_none(item.get('msrp')),
+        'url': url,
+        'photo_url': thumb,
+        'photos': photos,
+        'source_added_at': source_added_at,
+        # Reuse AAN flags so the downstream upsert path is unchanged.
+        '_aan_sold': False,
+        '_aan_pending': False,
+        '_aan_coming_soon': False,
+    }
+    if not (out.get('vin') or out.get('make') or out.get('year')):
+        return None
+    return out
 
 
 # ── URL discovery ────────────────────────────────────────────────────────
@@ -1538,6 +1753,31 @@ class DealerScanner:
                 self._finalize(scan_id, stats, started)
                 return stats
             platform, method = detect_platform(body or '')
+
+            # DealerInspire Algolia fast-path — runs before any other
+            # branching. Gated on the dealer's STORED platform column
+            # (set during initial onboarding/discovery), not the live
+            # homepage fingerprint, because the static homepage HTML
+            # sometimes omits the 'dealerinspire' literal even though
+            # the listing pages embed Algolia config. If Algolia answers,
+            # we're done in ~3 seconds and skip the entire scrape_config /
+            # universal-VDP machinery below.
+            if self.dealer.get('platform') == 'dealerinspire':
+                stats['platform_detected'] = 'dealerinspire'
+                di = fetch_dealer_inspire_inventory(self.base_url, self.sess)
+                if di is not None:
+                    print(f'  dealerinspire algolia returned {len(di)} vehicles', flush=True)
+                    self._process_aan(scan_id, di, stats)
+                    stats['colors_detected'] = self._detect_colors()
+                    self._update_dealer('dealerinspire', 'algolia', scan_id, 'ok', stats['tier'])
+                    stats['status'] = 'ok'
+                    self._finalize(scan_id, stats, started)
+                    return stats
+                # Algolia failed (config not in homepage HTML, or API down) —
+                # fall through to the legacy universal path so the dealer
+                # still gets a scan attempt.
+                print('  dealerinspire algolia path failed — falling back to universal', flush=True)
+
             # If the dealer has a stored scrape_config, prefer it.
             if self.dealer.get('scrape_config'):
                 platform = 'ai-generated'
@@ -1586,6 +1826,11 @@ class DealerScanner:
                     return stats
                 # AAN detected but /api/cars didn't cooperate — fall through to
                 # universal extraction on the same tier.
+
+            # NOTE: dealerinspire Algolia fast path lives above (gated on
+            # the dealer's stored platform). It runs before scrape_config /
+            # ai-generated branching so a single HTTP call replaces the
+            # 100+ FlareSolverr VDP fetches that the universal path needs.
 
             # AI-generated config-driven extraction (Ferrari, novel platforms).
             # Reads dealers.scrape_config JSONB produced by discover_dealer.py

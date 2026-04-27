@@ -197,10 +197,77 @@ a.veh-link:hover{text-decoration:underline}
   </div>
   <div class="dealer-head-actions">
     <button class="btn btn-primary" id="scanBtn" onclick="runScan()">↻ Scan Now</button>
-    <a href="/admin/partner/{{ dealer.dealer_id }}/config" class="btn">Partner Portal</a>
+    {% if not partner_account %}
+      <button class="btn" style="background:#a78bfa;color:#fff;border-color:#a78bfa" onclick="openPartnerSetup()">+ Set Up Partner Account</button>
+    {% else %}
+      <a href="/admin/partner/{{ dealer.dealer_id }}/config" class="btn" title="Partner: {{ partner_account.email }}">Partner Portal ✓</a>
+    {% endif %}
     <a href="/dealers" class="btn">← All Dealers</a>
   </div>
 </div>
+
+{# Partner-account setup modal — only relevant when no account exists yet. #}
+{% if not partner_account %}
+<div class="modal-overlay" id="partnerSetupModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:center;justify-content:center">
+  <div class="modal" style="background:#243447;border:1px solid #344f68;border-radius:12px;padding:28px;width:480px;max-width:92vw">
+    <h3 style="font-size:18px;font-weight:700;color:#f1f5f9;margin:0 0 6px">Set Up Partner Account</h3>
+    <div style="font-size:12px;color:#7a9bb5;margin-bottom:18px">{{ dealer.name }} — they'll get a single email with login credentials, no activation step.</div>
+    <label style="display:block;font-size:11px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.6px;margin:14px 0 5px">Contact Name</label>
+    <input type="text" id="psContactName" style="width:100%;padding:10px 12px;background:#1a2838;border:1px solid #344f68;border-radius:8px;color:#e2e8f0;font-size:14px" placeholder="John Smith">
+    <label style="display:block;font-size:11px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.6px;margin:14px 0 5px">Contact Email</label>
+    <input type="email" id="psContactEmail" style="width:100%;padding:10px 12px;background:#1a2838;border:1px solid #344f68;border-radius:8px;color:#e2e8f0;font-size:14px" placeholder="contact@dealer.com" autofocus>
+    <label style="display:block;font-size:11px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.6px;margin:14px 0 5px">Contact Phone (optional, for SMS bid alerts)</label>
+    <input type="tel" id="psContactPhone" style="width:100%;padding:10px 12px;background:#1a2838;border:1px solid #344f68;border-radius:8px;color:#e2e8f0;font-size:14px" placeholder="+15613240006">
+    <div style="display:flex;gap:18px;margin-top:14px;flex-wrap:wrap">
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#cbd5e1;cursor:pointer">
+        <input type="checkbox" id="psEmailAlerts" checked> Email bid alerts
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#cbd5e1;cursor:pointer">
+        <input type="checkbox" id="psSmsOptIn"> SMS bid alerts
+      </label>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:22px">
+      <button class="btn" onclick="closePartnerSetup()">Cancel</button>
+      <button class="btn btn-primary" id="psSubmitBtn" onclick="submitPartnerSetup()">Send Login Email</button>
+    </div>
+  </div>
+</div>
+<script>
+function openPartnerSetup(){document.getElementById('partnerSetupModal').style.display='flex';document.getElementById('psContactEmail').focus()}
+function closePartnerSetup(){document.getElementById('partnerSetupModal').style.display='none'}
+async function submitPartnerSetup(){
+  const email = document.getElementById('psContactEmail').value.trim();
+  const phone = document.getElementById('psContactPhone').value.trim();
+  const name  = document.getElementById('psContactName').value.trim();
+  const sms   = document.getElementById('psSmsOptIn').checked;
+  const emailAlerts = document.getElementById('psEmailAlerts').checked;
+  if (!email || !email.includes('@')) { alert('Valid email required'); return; }
+  if (sms && !phone) { alert('Phone number required for SMS alerts'); return; }
+  const btn = document.getElementById('psSubmitBtn');
+  btn.disabled = true; btn.textContent = 'Sending…';
+  try {
+    const r = await fetch('/api/dealer/{{ dealer.dealer_id }}/setup_partner', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({contact_email: email, contact_phone: phone,
+                            contact_full_name: name,
+                            sms_opt_in: sms, email_bid_alerts: emailAlerts})
+    });
+    const d = await r.json();
+    if (d.success) {
+      alert('Partner account created. Login email sent to ' + email +
+            (d.email_sent ? '' : '\n\n(Email send failed — check Resend / spam.)'));
+      location.reload();
+    } else {
+      alert('Failed: ' + (d.error || 'unknown'));
+      btn.disabled = false; btn.textContent = 'Send Login Email';
+    }
+  } catch (e) {
+    alert('Network error: ' + e.message);
+    btn.disabled = false; btn.textContent = 'Send Login Email';
+  }
+}
+</script>
+{% endif %}
 
 <div class="pipeline">
   <div class="pipeline-head">
@@ -350,14 +417,15 @@ a.veh-link:hover{text-decoration:underline}
 </div>
 {% endif %}
 
-<div class="sold-box">
-  <div class="sold-head" onclick="this.parentElement.classList.toggle('open')">
+<div class="sold-box" id="sold-box" data-loaded="0" data-dealer-id="{{ dealer.dealer_id }}">
+  <div class="sold-head" onclick="toggleSoldBox(this.parentElement)">
     <div class="sold-title"><span class="tree-caret">▶</span>Sold · Detected</div>
-    <span class="sold-count">{{ sold|length }}</span>
+    <span class="sold-count">{{ pipeline.sold_total or 0 }}</span>
   </div>
   <div class="sold-body">
-    {% if sold %}
-    <table class="veh" style="margin-top:12px">
+    <div id="sold-loading" style="padding:30px;text-align:center;color:#7a9bb5">Loading sold history…</div>
+    <div id="sold-empty" style="display:none;padding:30px;text-align:center;color:#7a9bb5">No sold detections yet.</div>
+    <table id="sold-table" class="veh" style="display:none;margin-top:12px">
       <thead>
         <tr>
           <th>Year · Make · Model · Trim</th>
@@ -369,32 +437,70 @@ a.veh-link:hover{text-decoration:underline}
           <th>Signals</th>
         </tr>
       </thead>
-      <tbody>
-      {% for v in sold %}
-        <tr>
-          <td class="trim-txt">
-            {% if v.url %}<a href="{{ v.url }}" target="_blank" rel="noopener" style="color:#7dd3fc;text-decoration:none" title="Open original listing to verify">{{ v.year or '' }} {{ v.make or '' }} {{ v.model or '' }} {{ v.trim or '' }} <span style="opacity:0.7;font-size:10px">↗</span></a>
-            {% else %}{{ v.year or '' }} {{ v.make or '' }} {{ v.model or '' }} {{ v.trim or '' }}{% endif %}
-          </td>
-          <td class="color-txt">{{ v.ext_color or '—' }}</td>
-          <td><span class="vin">{{ v.vin or '—' }}</span></td>
-          <td class="num price-txt">{{ v.price|money }}</td>
-          <td class="num age-txt">{{ v.sold_at|time_ago }}</td>
-          <td class="num">{{ '%.0f'|format((v.sold_confidence or 0) * 100) }}%</td>
-          <td style="font-size:11px;color:#7a9bb5">
-            {% if v.sold_signals %}
-              {% for s in v.sold_signals %}{{ s.type }}{% if not loop.last %}, {% endif %}{% endfor %}
-            {% endif %}
-          </td>
-        </tr>
-      {% endfor %}
-      </tbody>
+      <tbody id="sold-tbody"></tbody>
     </table>
-    {% else %}
-    <div style="padding:30px;text-align:center;color:#7a9bb5">No sold detections yet.</div>
-    {% endif %}
   </div>
 </div>
+<script>
+function toggleSoldBox(box) {
+  box.classList.toggle('open');
+  if (box.classList.contains('open') && box.dataset.loaded === '0') {
+    box.dataset.loaded = '1';
+    loadSoldRows(box.dataset.dealerId);
+  }
+}
+function fmtMoney(n) {
+  if (n === null || n === undefined) return '—';
+  return '$' + Math.round(n).toLocaleString();
+}
+function fmtTimeAgo(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const sec = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+  if (sec < 86400) return Math.floor(sec/3600) + 'h ago';
+  if (sec < 86400*30) return Math.floor(sec/86400) + 'd ago';
+  return Math.floor(sec/86400/30) + 'mo ago';
+}
+function escHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+async function loadSoldRows(dealerId) {
+  try {
+    const r = await fetch('/api/dealer/' + dealerId + '/sold');
+    const data = await r.json();
+    const rows = data.sold || [];
+    document.getElementById('sold-loading').style.display = 'none';
+    if (!rows.length) {
+      document.getElementById('sold-empty').style.display = 'block';
+      return;
+    }
+    const tbody = document.getElementById('sold-tbody');
+    tbody.innerHTML = rows.map(v => {
+      const ymmt = [v.year, v.make, v.model, v.trim].filter(x => x).map(escHtml).join(' ');
+      const link = v.url
+        ? `<a href="${escHtml(v.url)}" target="_blank" rel="noopener" style="color:#7dd3fc;text-decoration:none" title="Open original listing to verify">${ymmt} <span style="opacity:0.7;font-size:10px">↗</span></a>`
+        : ymmt;
+      const sigs = (v.sold_signals || []).map(s => escHtml(s.type)).join(', ');
+      const conf = Math.round((v.sold_confidence || 0) * 100);
+      return `<tr>
+        <td class="trim-txt">${link}</td>
+        <td class="color-txt">${escHtml(v.ext_color || '—')}</td>
+        <td><span class="vin">${escHtml(v.vin || '—')}</span></td>
+        <td class="num price-txt">${fmtMoney(v.price)}</td>
+        <td class="num age-txt">${fmtTimeAgo(v.sold_at)}</td>
+        <td class="num">${conf}%</td>
+        <td style="font-size:11px;color:#7a9bb5">${sigs}</td>
+      </tr>`;
+    }).join('');
+    document.getElementById('sold-table').style.display = '';
+  } catch (e) {
+    document.getElementById('sold-loading').textContent = 'Failed to load sold history.';
+  }
+}
+</script>
 
 {% if scans %}
 <div class="scans-list">
