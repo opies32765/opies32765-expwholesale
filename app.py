@@ -4657,6 +4657,25 @@ def api_accutrade_pending():
     return jsonify({'pending': [dict(r) for r in rows]})
 
 
+def _normalize_accutrade_url(url):
+    """AccuTrade returns URLs like /appraisal/N?backUrl=%252Freport%252Factive
+    where backUrl points at the landing page (/report/active). When a user
+    clicks the saved URL without a session, AccuTrade redirects to login,
+    then post-login routes to backUrl — landing the user on the active list
+    instead of the appraisal. Normalize here at intake so the saved URL has
+    backUrl pointing at the appraisal itself; post-login redirects always
+    land on the appraisal regardless of which mechanism AccuTrade uses.
+    Server-side normalization avoids touching the Trainer worker code."""
+    if not url or '/appraisal/' not in url:
+        return url
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        return f"{p.scheme}://{p.netloc}{p.path}?backUrl={p.path}"
+    except Exception:
+        return url
+
+
 @app.route('/api/accutrade/submit', methods=['POST'])
 def api_accutrade_submit():
     """Accept AccuTrade lookup results from worker."""
@@ -4694,7 +4713,7 @@ def api_accutrade_submit():
         json.dumps(data.get('raw', {})) if data.get('raw') else None,
         bool(data.get('not_available', False)),
         data.get('unavailable_reason'),
-        data.get('appraisal_url'),
+        _normalize_accutrade_url(data.get('appraisal_url')),
     ))
     db.commit()
     db.close()
