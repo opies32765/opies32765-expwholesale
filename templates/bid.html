@@ -649,12 +649,11 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
 
         {% if vauto_data.appraisal_url and vauto_data.appraisal_url.startswith('http') %}
-        <div style="margin-top:12px;display:flex;align-items:center;gap:8px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:6px;padding:8px 10px">
-          <span style="font-size:10px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;flex:0 0 auto">Saved vAuto</span>
+        <div style="margin-top:12px;text-align:center">
           <a href="{{ vauto_data.appraisal_url }}" target="_blank" rel="noopener"
-             style="font-size:11px;color:#60a5fa;text-decoration:none;font-family:monospace;word-break:break-all;line-height:1.3;flex:1"
+             style="display:inline-block;padding:9px 18px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.35);border-radius:6px;color:#60a5fa;text-decoration:none;font-size:13px;font-weight:600;letter-spacing:.2px"
              title="Open the saved vAuto appraisal">
-            {{ vauto_data.appraisal_url }} ↗
+            Saved vAuto on {{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }} ↗
           </a>
         </div>
         {% endif %}
@@ -744,16 +743,14 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
 
         {% if accutrade_data.appraisal_url %}
-        <div style="margin-top:12px;display:flex;align-items:center;gap:8px;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:6px;padding:8px 10px">
-          {# Strip ?backUrl=... query param — it points at an older AccuTrade
-             UI path (/report/active) and was causing post-login redirects
-             to land on the dashboard instead of the appraisal. #}
-          {% set clean_at_url = accutrade_data.appraisal_url.split('?')[0] %}
-          <span style="font-size:10px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;flex:0 0 auto">Saved AccuTrade</span>
-          <a href="{{ clean_at_url }}" target="_blank" rel="noopener"
-             style="font-size:11px;color:#60a5fa;text-decoration:none;font-family:monospace;word-break:break-all;line-height:1.3;flex:1"
+        <div style="margin-top:12px;text-align:center">
+          {# URL is normalized server-side at /api/accutrade/submit so the
+             stored value already has backUrl pointing at the appraisal path.
+             Use the stored URL as-is. #}
+          <a href="{{ accutrade_data.appraisal_url }}" target="_blank" rel="noopener"
+             style="display:inline-block;padding:9px 18px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.35);border-radius:6px;color:#60a5fa;text-decoration:none;font-size:13px;font-weight:600;letter-spacing:.2px"
              title="Open the saved AccuTrade appraisal to adjust odometer / options / condition, then re-run the assessment">
-            {{ clean_at_url }} ↗
+            Saved AccuTrade on {{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }} ↗
           </a>
         </div>
         {% endif %}
