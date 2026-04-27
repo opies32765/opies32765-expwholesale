@@ -821,9 +821,18 @@ def _extract_jsonld_vehicle(html):
 
 def _parse_vehicle_node(node):
     v = {}
+    # Trust JSON-LD's VIN field even if non-17-char. Track-only specialty
+    # vehicles (Ford GT MK IV, Lambo Essenza SCV12, Pagani, vintage etc.)
+    # carry shorter dealer-assigned identifiers. Without this, the
+    # vin-extraction falls back to scanning the entire HTML for any 17-char
+    # token, which catches cross-referenced VINs from "related vehicles"
+    # panels and merges the wrong row (Ford GT MK IV merged into Ferrari 400i
+    # incident, 2026-04-27). Setting the dealer's VIN here means upsert_vehicle's
+    # `_is_valid_vin` will sanitize non-17-char strings to '' and the row
+    # dedups via URL — clean separation.
     vin = node.get('vehicleIdentificationNumber') or node.get('sku')
-    if isinstance(vin, str) and len(vin) == 17:
-        v['vin'] = vin.upper()
+    if isinstance(vin, str) and vin.strip():
+        v['vin'] = vin.upper().strip()
     y = node.get('vehicleModelDate') or node.get('modelDate') or node.get('productionDate')
     if y:
         try:
