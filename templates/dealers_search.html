@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Inventory Search — Dealer DB</title>
+<style>
+  :root{--bg:#0b0f19;--panel:#111829;--mute:#7a9bb5;--text:#e2e8f0;--line:#1e293b;--accent:#2563eb}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);font-size:15px}
+  header{padding:18px 28px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+  header h1{margin:0;font-size:20px}
+  header a{color:#7dd3fc;text-decoration:none;font-size:14px;margin-left:14px}
+  main{max-width:1500px;margin:0 auto;padding:22px 28px}
+  .filters{background:var(--panel);padding:20px 22px;border-radius:10px;margin-bottom:20px}
+  .filters h2{margin:0 0 14px;font-size:15px;color:var(--mute);text-transform:uppercase;letter-spacing:.5px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
+  .field{display:flex;flex-direction:column;gap:4px}
+  .field label{font-size:12px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+  .field input,.field select{padding:9px 11px;border:1px solid var(--line);background:var(--bg);color:var(--text);border-radius:5px;font-size:14px;font-family:inherit}
+  .field input:focus,.field select:focus{outline:none;border-color:var(--accent)}
+  .two-up{display:flex;gap:8px}.two-up input{flex:1;min-width:0}
+  .dealer-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+  .dealer-chips label{padding:5px 11px;border:1px solid var(--line);border-radius:20px;font-size:12px;color:var(--mute);cursor:pointer;user-select:none}
+  .dealer-chips input[type=checkbox]{display:none}
+  .dealer-chips input[type=checkbox]:checked + span{color:#fff}
+  .dealer-chips label:has(input:checked){background:var(--accent);border-color:var(--accent);color:#fff}
+  .toggles{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px}
+  .toggles label{font-size:13px;color:var(--text);display:flex;gap:6px;align-items:center;cursor:pointer}
+  .actions{margin-top:16px;display:flex;gap:10px;align-items:center}
+  button[type=submit]{padding:11px 28px;background:var(--accent);color:#fff;border:0;border-radius:6px;font-weight:700;font-size:14px;cursor:pointer}
+  a.reset{color:var(--mute);font-size:13px;text-decoration:none}
+  a.reset:hover{color:var(--text);text-decoration:underline}
+  .count{margin-left:auto;color:var(--mute);font-size:13px}
+  .count b{color:var(--text)}
+
+  table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:10px;overflow:hidden}
+  thead th{background:#0b1220;padding:10px 12px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--mute);border-bottom:1px solid var(--line)}
+  tbody td{padding:10px 12px;font-size:13px;border-bottom:1px solid var(--line);vertical-align:middle}
+  tbody tr{cursor:pointer}
+  tbody tr:hover{background:rgba(37,99,235,.06)}
+  .num{text-align:right;font-family:ui-monospace,monospace}
+  .thumb{width:80px;height:60px;object-fit:cover;border-radius:5px;background:#0b1220}
+  .dealer-name{color:#7dd3fc;font-size:11px}
+  .car-title{font-weight:600}
+  .car-sub{color:var(--mute);font-size:11px;font-family:ui-monospace,monospace}
+  .age{font-weight:700}
+  .age.stale{color:#ef4444}.age.aged{color:#f59e0b}
+  .drop{color:#a78bfa;font-size:11px;font-weight:700}
+  .status-sold{color:#f87171;font-size:10px;text-transform:uppercase;letter-spacing:.4px;font-weight:700}
+  .empty{text-align:center;padding:60px 20px;color:var(--mute);background:var(--panel);border-radius:10px}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>Inventory Search</h1></div>
+  <div>
+    <a href="/dealers">← All Dealers</a>
+    <a href="/">EW Dashboard</a>
+  </div>
+</header>
+
+<main>
+  <form class="filters" method="get">
+    <h2>Filters</h2>
+    <div class="grid">
+      <div class="field">
+        <label>Year</label>
+        <div class="two-up">
+          <input type="number" name="year_from" placeholder="from" min="1900" max="2030" value="{{ q.year_from or '' }}">
+          <input type="number" name="year_to" placeholder="to" min="1900" max="2030" value="{{ q.year_to or '' }}">
+        </div>
+      </div>
+      <div class="field">
+        <label>Make</label>
+        <select name="make">
+          <option value="">Any make</option>
+          {% for m in makes_all %}
+            <option value="{{ m }}" {% if q.make == m %}selected{% endif %}>{{ m }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Model (contains)</label>
+        <input type="text" name="model" placeholder="911, Continental…" value="{{ q.model or '' }}">
+      </div>
+      <div class="field">
+        <label>Trim (contains)</label>
+        <input type="text" name="trim" placeholder="AMG, GT3, Turbo…" value="{{ q.trim or '' }}">
+      </div>
+      <div class="field">
+        <label>Color (contains)</label>
+        <input type="text" name="color" placeholder="black, white…" value="{{ q.color or '' }}">
+      </div>
+      <div class="field">
+        <label>VIN (contains)</label>
+        <input type="text" name="vin" placeholder="last 6 or full" value="{{ q.vin or '' }}" style="font-family:ui-monospace,monospace">
+      </div>
+      <div class="field">
+        <label>Max Miles</label>
+        <input type="number" name="miles_max" placeholder="50000" min="0" value="{{ q.miles_max or '' }}">
+      </div>
+      <div class="field">
+        <label>Price</label>
+        <div class="two-up">
+          <input type="number" name="price_min" placeholder="min" min="0" value="{{ q.price_min or '' }}">
+          <input type="number" name="price_max" placeholder="max" min="0" value="{{ q.price_max or '' }}">
+        </div>
+      </div>
+      <div class="field">
+        <label>Days on Lot</label>
+        <div class="two-up">
+          <input type="number" name="min_age" placeholder="min" min="0" value="{{ q.min_age or '' }}">
+          <input type="number" name="max_age" placeholder="max" min="0" value="{{ q.max_age or '' }}">
+        </div>
+      </div>
+      <div class="field">
+        <label>Status</label>
+        <select name="status">
+          {% set st = q.status or 'active' %}
+          <option value="active" {% if st == 'active' %}selected{% endif %}>Active only</option>
+          <option value="sold" {% if st == 'sold' %}selected{% endif %}>Sold only</option>
+          <option value="any" {% if st == 'any' %}selected{% endif %}>Active + Sold</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field" style="margin-top:14px">
+      <label>Dealers (click to include — none = all)</label>
+      <div class="dealer-chips">
+        {% for d in dealers_all %}
+          <label>
+            <input type="checkbox" name="dealer_id" value="{{ d.id }}"
+                   {% if d.id in selected_dealer_ids %}checked{% endif %}>
+            <span>{{ d.name }}</span>
+          </label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="toggles">
+      <label><input type="checkbox" name="has_drop" value="1" {% if q.has_drop == '1' %}checked{% endif %}> Price drop only</label>
+      <label><input type="checkbox" name="has_verified_age" value="1" {% if q.has_verified_age == '1' %}checked{% endif %}> vAuto-verified age only</label>
+    </div>
+
+    <div class="actions">
+      <button type="submit">Search</button>
+      <a class="reset" href="/dealers/search">Reset</a>
+      <div class="count">{% if rows %}<b>{{ rows|length }}</b> result{{ 's' if rows|length != 1 else '' }}{% if rows|length == 500 %} (capped at 500){% endif %}{% endif %}</div>
+    </div>
+  </form>
+
+  {% if rows %}
+  <table>
+    <thead>
+      <tr>
+        <th style="width:90px">Photo</th>
+        <th>Vehicle</th>
+        <th class="num">Miles</th>
+        <th class="num">Price</th>
+        <th class="num">Price Drop</th>
+        <th class="num">Age</th>
+        <th>Status</th>
+        <th style="width:140px">Bid</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for v in rows %}
+        {% set age = v|best_age_days %}
+        {% set src = v|age_source %}
+        <tr onclick="if(!event.target.closest('button,a.bid-link'))window.open('{{ v.url }}','_blank')">
+          <td>
+            {% if v.photo_url %}
+              <img class="thumb" src="{{ v.photo_url|thumb_url('strip') }}" loading="lazy" referrerpolicy="no-referrer">
+            {% else %}
+              <div class="thumb"></div>
+            {% endif %}
+          </td>
+          <td>
+            <div class="dealer-name" style="color:#64748b;font-size:11px">{{ v.dealer_name }}</div>
+            <div class="car-title">{{ v.year }} {{ v.make }} {{ v.model }} {{ v.trim or '' }}</div>
+            <div class="car-sub">VIN {{ v.vin or '—' }}{% if v.ext_color %} · {{ v.ext_color }}{% endif %}</div>
+          </td>
+          <td class="num">{{ v.mileage|miles if v.mileage else '—' }}</td>
+          <td class="num">
+            {{ v.price|money if v.price else '—' }}
+          </td>
+          <td class="num">
+            {% if v.price_drop_amount %}
+              <div class="drop" style="font-size:14px">↓ ${{ '{:,.0f}'.format(v.price_drop_amount) }}</div>
+              {% if v.last_price and v.last_price != v.price %}
+                <div style="color:#64748b;font-size:10px;text-decoration:line-through">was ${{ '{:,.0f}'.format(v.last_price) }}</div>
+              {% endif %}
+              {% if v.price_drop_at %}
+                <div style="color:#64748b;font-size:10px">{{ v.price_drop_at.strftime('%b %d') }}</div>
+              {% endif %}
+            {% else %}
+              <span style="color:#475569">—</span>
+            {% endif %}
+          </td>
+          <td class="num">
+            <span class="age {% if age|int >= 90 %}stale{% elif age|int >= 60 %}aged{% endif %}">{{ age }}d</span>
+            {% if src == 'vauto' %}<span style="color:#22c55e;font-size:10px" title="vAuto verified">&#10003;</span>{% endif %}
+          </td>
+          <td>
+            {% if v.status == 'sold' %}<span class="status-sold">sold</span>{% else %}<span style="color:#34d399;font-size:10px;font-weight:700;text-transform:uppercase">active</span>{% endif %}
+          </td>
+          <td style="text-align:center">
+            {% if v.active_bid_id %}
+              <a class="bid-link" href="/bid/{{ v.active_bid_id }}" target="_blank"
+                 style="color:#fbbf24;font-size:11px;font-weight:700;text-decoration:none;padding:6px 10px;border:1px solid rgba(251,191,36,.35);border-radius:5px;background:rgba(251,191,36,.08);display:inline-block"
+                 title="There is already a bid in progress for this VIN">
+                Active Bid #{{ v.active_bid_id }}
+              </a>
+            {% elif v.status == 'sold' %}
+              <span style="color:#475569;font-size:11px">—</span>
+            {% elif not v.vin or v.vin|length != 17 %}
+              <span style="color:#475569;font-size:11px" title="VIN missing or non-standard">no VIN</span>
+            {% else %}
+              <button onclick="submitBid({{ v.id }}, this)"
+                      style="background:#10b981;color:#fff;border:0;border-radius:5px;padding:8px 14px;font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;cursor:pointer">
+                Submit Bid
+              </button>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif q and (q.year_from or q.year_to or q.make or q.model or q.trim or q.color or q.vin or q.miles_max or q.price_min or q.price_max or q.min_age or q.max_age or q.has_drop or q.has_verified_age) %}
+    <div class="empty">
+      <h2 style="margin:0 0 8px">No matches</h2>
+      <p>Widen the filters or reset and try again.</p>
+    </div>
+  {% else %}
+    <div class="empty">
+      <h2 style="margin:0 0 8px">Enter at least one filter</h2>
+      <p>Searches run across every active partner dealer's inventory. Combine filters to drill in — e.g., Porsche + 911 + max miles 30,000.</p>
+    </div>
+  {% endif %}
+</main>
+
+<script>
+async function submitBid(invId, btn) {
+  // Push a dealer_inventory row into the main bid pipeline. Server creates
+  // a bids row (with partner_dealer_id set), Trainer worker picks it up via
+  // /api/vauto/pending → vAuto/AccuTrade/iPacket lookups run automatically.
+  // Client lands on the dashboard to watch enrichment + decide bid amount.
+  btn.disabled = true;
+  btn.style.opacity = '.6';
+  btn.textContent = 'Submitting…';
+  try {
+    const r = await fetch('/api/bids/from_dealer_inventory', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({inventory_id: invId})
+    });
+    const d = await r.json();
+    if (d.bid_id) {
+      if (d.duplicate) {
+        // Active bid already existed — go directly to it
+        window.location = '/bid/' + d.bid_id;
+      } else {
+        // New bid created — go to main dashboard so user can watch enrichment
+        window.location = '/?highlight=' + d.bid_id;
+      }
+    } else {
+      alert('Submit failed: ' + (d.error || 'unknown'));
+      btn.disabled = false;
+      btn.style.opacity = '1';
+      btn.textContent = 'Submit Bid';
+    }
+  } catch (e) {
+    alert('Network error: ' + e.message);
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.textContent = 'Submit Bid';
+  }
+}
+</script>
+
+</body>
+</html>

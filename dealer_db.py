@@ -371,7 +371,11 @@ def dealers_search():
                        i.mileage, i.price, i.url, i.photo_url, i.status,
                        i.source_added_at, i.first_seen_at,
                        i.verified_at, i.verified_days_on_lot,
-                       i.price_drop_amount, i.price_drop_at, i.last_price
+                       i.price_drop_amount, i.price_drop_at, i.last_price,
+                       (SELECT b.id FROM bids b
+                          WHERE b.vin = i.vin
+                            AND b.status IN ('new','reviewing','bid_sent')
+                          ORDER BY b.created_at DESC LIMIT 1) AS active_bid_id
                 FROM dealer_inventory i
                 JOIN dealers d ON d.id = i.dealer_id
                 WHERE {where}
@@ -422,6 +426,65 @@ def dealers_price_drops():
 # ── APIs ─────────────────────────────────────────────────────────────────
 _scan_threads = {}           # dealer_id -> Thread
 _scan_lock = threading.Lock()
+
+
+@bp.route('/api/bids/from_dealer_inventory', methods=['POST'])
+def api_bid_from_dealer_inventory():
+    """Create a bids row from a dealer_inventory row. Powers the green
+    'SUBMIT BID' button on the Dealer DB search page — pushes a car the EW
+    client wants to bid on into the main bid pipeline so vAuto/AccuTrade/iPacket
+    lookups run automatically. Client then decides bid amount from the
+    dashboard with full enrichment data on hand.
+
+    Idempotency: if there's already a bid for this VIN in status new/
+    reviewing/bid_sent, return that existing bid_id with `duplicate=True`
+    so the client lands on the existing entry instead of creating a fork.
+    """
+    data = request.get_json(silent=True) or {}
+    inv_id = data.get('inventory_id')
+    if not inv_id:
+        return jsonify({'error': 'inventory_id required'}), 400
+
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute('''SELECT id, dealer_id, vin, year, make, model, trim,
+                              ext_color, mileage, photo_url
+                       FROM dealer_inventory WHERE id = %s''', (inv_id,))
+        inv = cur.fetchone()
+        if not inv:
+            return jsonify({'error': 'inventory row not found'}), 404
+        if not inv.get('vin') or len(inv['vin']) != 17:
+            return jsonify({'error': 'inventory row has no valid VIN'}), 400
+
+        # Idempotency check
+        cur.execute('''SELECT id FROM bids
+                       WHERE vin = %s
+                         AND status IN ('new', 'reviewing', 'bid_sent')
+                       ORDER BY created_at DESC LIMIT 1''',
+                    (inv['vin'],))
+        existing = cur.fetchone()
+        if existing:
+            return jsonify({'bid_id': existing['id'], 'duplicate': True})
+
+        # Create new bid. `phone` is NOT NULL on bids, so use a synthetic
+        # marker that distinguishes dealer-DB pushes from real customer
+        # contact. The dashboard renders this as a system-source bid.
+        cur.execute('''INSERT INTO bids (
+                         vin, year, make, model, trim, color, mileage,
+                         phone, raw_message, status,
+                         partner_dealer_id, vauto_priority, created_at
+                       ) VALUES (%s, %s, %s, %s, %s, %s, %s,
+                                 %s, %s, 'new',
+                                 %s, TRUE, NOW())
+                       RETURNING id''',
+                    (inv['vin'], inv['year'], inv['make'], inv['model'],
+                     inv.get('trim'), inv.get('ext_color'), inv.get('mileage'),
+                     f"system:dealer_db_push:{inv_id}",
+                     f"Pushed from Dealer DB search (dealer_inventory id={inv_id})",
+                     inv['dealer_id']))
+        new_bid_id = cur.fetchone()['id']
+        conn.commit()
+
+    return jsonify({'bid_id': new_bid_id, 'duplicate': False})
 
 
 @bp.route('/api/dealer/create', methods=['POST'])
