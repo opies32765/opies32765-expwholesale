@@ -478,7 +478,7 @@ def api_bid_from_dealer_inventory():
                        RETURNING id''',
                     (inv['vin'], inv['year'], inv['make'], inv['model'],
                      inv.get('trim'), inv.get('ext_color'), inv.get('mileage'),
-                     f"system:dealer_db_push:{inv_id}",
+                     "sys:db_push",  # bids.phone is varchar(20) — keep short
                      f"Pushed from Dealer DB search (dealer_inventory id={inv_id})",
                      inv['dealer_id']))
         new_bid_id = cur.fetchone()['id']
