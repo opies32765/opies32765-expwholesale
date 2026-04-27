@@ -947,19 +947,68 @@ async function submitBid() {
   if (odoFile) fd.append('odo_photo', odoFile);
   setOverlayStep('Saving bid...');
 
-  try {
-    const resp = await fetch('/api/mobile-submit', { method: 'POST', body: fd });
-    const data = await resp.json();
-    if (data.success) {
-      showSuccess(data);
-    } else {
-      alert('Error: ' + (data.error || 'Unknown error'));
-      document.getElementById('overlay').classList.remove('show');
-      document.getElementById('submit-btn').disabled = false;
-      updateChecklist();
+  // Submit with clearer error diagnostics. Older "Submission failed. Check
+  // your connection." was the same toast for every failure mode (network
+  // drop, server 5xx, body too large, JSON parse error) — making real
+  // issues impossible to triage. Now distinguishes:
+  //   • Network failure (TypeError "Failed to fetch") — likely cell drop / DNS
+  //   • Cloudflare/origin 5xx — server-side issue
+  //   • 413 — photos too large
+  //   • Non-JSON response — proxy/CDN intercepted the request
+  // And includes an Auto-Retry once on transient failures.
+  let resp = null;
+  let attempt = 0;
+  let lastError = null;
+  while (attempt < 2) {
+    attempt += 1;
+    try {
+      resp = await fetch('/api/mobile-submit', { method: 'POST', body: fd });
+      break;
+    } catch (e) {
+      lastError = e;
+      if (attempt >= 2) break;
+      console.warn('mobile-submit attempt', attempt, 'failed, retrying:', e.message);
+      await new Promise(r => setTimeout(r, 1500));
     }
-  } catch(e) {
-    alert('Submission failed. Check your connection.');
+  }
+  if (!resp) {
+    // Network-layer failure both attempts
+    document.getElementById('overlay').classList.remove('show');
+    document.getElementById('submit-btn').disabled = false;
+    updateChecklist();
+    alert('Network error: ' + (lastError && lastError.message ? lastError.message : 'unknown') +
+          '\n\nCheck signal/WiFi and try again. If photos are very large, try fewer or smaller photos.');
+    return;
+  }
+  if (resp.status === 413) {
+    document.getElementById('overlay').classList.remove('show');
+    document.getElementById('submit-btn').disabled = false;
+    updateChecklist();
+    alert('Upload too large. Try fewer or smaller photos.');
+    return;
+  }
+  if (!resp.ok) {
+    // 502/503/504/500 etc. Server reachable but errored.
+    document.getElementById('overlay').classList.remove('show');
+    document.getElementById('submit-btn').disabled = false;
+    updateChecklist();
+    alert('Server error ' + resp.status + '. Try again in a moment.');
+    return;
+  }
+  // 2xx — try to parse JSON
+  let data;
+  try { data = await resp.json(); }
+  catch (e) {
+    document.getElementById('overlay').classList.remove('show');
+    document.getElementById('submit-btn').disabled = false;
+    updateChecklist();
+    alert('Got an unexpected response from the server. Try again.');
+    return;
+  }
+  if (data.success) {
+    showSuccess(data);
+  } else {
+    alert('Error: ' + (data.error || 'Unknown error'));
     document.getElementById('overlay').classList.remove('show');
     document.getElementById('submit-btn').disabled = false;
     updateChecklist();
