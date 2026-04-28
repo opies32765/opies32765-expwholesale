@@ -18,6 +18,7 @@ import json as _json
 import os
 import re
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime, timezone, timedelta
@@ -44,6 +45,32 @@ SOLD_CONFIDENCE_THRESHOLD = 0.6
 # own; combining with missing_from_scan=0.25 easily clears the 0.60 threshold.
 MISSING_SCANS_BEFORE_PROBE = 1
 COLORS_PER_SCAN = int(os.environ.get('DEALER_COLORS_PER_SCAN', '10'))  # small burst on scan; continuous worker handles the rest
+GEMINI_CALL_TIMEOUT_SEC = int(os.environ.get('GEMINI_CALL_TIMEOUT', '30'))
+
+
+def _call_with_timeout(fn, timeout_sec, *args, **kwargs):
+    """Run fn in a daemon thread; return (ok, result) where ok=False on timeout.
+    Google genai SDK has no built-in timeout and can hang forever on a
+    half-open connection — without this guard, a single stalled photo can
+    freeze the entire scan."""
+    result = {'done': False, 'value': None, 'exc': None}
+
+    def _runner():
+        try:
+            result['value'] = fn(*args, **kwargs)
+        except Exception as e:
+            result['exc'] = e
+        finally:
+            result['done'] = True
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    t.join(timeout_sec)
+    if not result['done']:
+        return (False, None)
+    if result['exc']:
+        raise result['exc']
+    return (True, result['value'])
 
 # VDP (vehicle detail page) hints — matching one of these + more path segments means it's a VDP
 VDP_HINTS = (
@@ -2236,7 +2263,13 @@ class DealerScanner:
                     if resp.status_code != 200 or not resp.content:
                         continue
                     mime = resp.headers.get('Content-Type', 'image/jpeg').split(';')[0]
-                    raw = extract_color_from_file(resp.content, mime)
+                    ok_call, raw = _call_with_timeout(
+                        extract_color_from_file, GEMINI_CALL_TIMEOUT_SEC,
+                        resp.content, mime)
+                    if not ok_call:
+                        print(f'[dealer_scanner] gemini timed out after {GEMINI_CALL_TIMEOUT_SEC}s on {u[-60:]}',
+                              flush=True)
+                        continue
                     if _is_valid_color(raw):
                         color = raw
                 except Exception as e:
