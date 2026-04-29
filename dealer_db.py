@@ -231,59 +231,137 @@ def dealers_aged(bucket):
 
 @bp.route('/api/dealer/vauto_verify_queue', methods=['GET'])
 def api_vauto_verify_queue():
-    """Return active VINs that have NEVER been verified by vAuto.
+    """Return active VINs that have NEVER been verified by vAuto, atomically
+    claimed for this verifier worker.
 
     NEW-ONLY semantics (2026-04-27): once a vehicle is verified, its
     `verified_days_on_lot` is frozen as a snapshot and never re-checked.
     Reasoning: the dashboard's `EFFECTIVE_FS` formula computes a frozen
     anchor (`verified_at - verified_days_on_lot days`) that yields the
     correct current days-on-lot every page load via NOW() math, so the
-    stored value never goes stale. This means the Beelink verifier runs
-    in bursts after each scan brings new VINs in, then idles — instead of
-    constantly cycling through stale re-verifies. Tradeoff: if a dealer
-    pulls + re-lists a car (which would reset its vAuto days), we miss it
-    until that vehicle is removed and re-added by the scanner.
+    stored value never goes stale. Tradeoff: if a dealer pulls + re-lists
+    a car (which would reset its vAuto days), we miss it until that
+    vehicle is removed and re-added by the scanner.
 
-    Query params: dealer_id (int, optional — defaults to all active dealers),
-                  limit (int, default 5)."""
+    Two-tier dispatch (2026-04-28):
+      * priority='primary' (Beelink / legacy clients) → claims any
+        eligible row with no constraints.
+      * priority='standby' (Linux verifier-N VMs) → only claims when
+        primary verifier is busy or silent (>90s).
+
+    Stale claims auto-release after 5 min so a dead verifier doesn't
+    pin VINs forever.
+
+    Query params:
+        dealer_id  — optional int, restrict to one dealer
+        limit      — int, default 5, hard cap 50
+        worker_id  — defaults to 'beelink' for backward compat
+        priority   — 'primary' (default) or 'standby'
+    """
     try:
         dealer_id = request.args.get('dealer_id', type=int)
         limit = min(int(request.args.get('limit', 5)), 50)
     except (ValueError, TypeError):
         return jsonify({'error': 'bad params'}), 400
 
+    worker_id = (request.args.get('worker_id') or 'beelink').strip()
+    priority = (request.args.get('priority') or 'primary').strip()
+
     where_dealer = 'AND i.dealer_id = %s' if dealer_id else ''
+    # Placeholders fill IN ORDER as they appear in the SQL string. The query
+    # has these placeholders, in this exact order:
+    #   1. (optional) dealer_id   — inside the CTE WHERE clause
+    #   2. limit                  — inside the CTE LIMIT
+    #   3. worker_id              — inside UPDATE ... SET verify_claimed_by = %s
+    # Earlier this list put worker_id before limit which caused
+    # `LIMIT 'beelink'` and a 500. Order matters here.
     params = []
     if dealer_id:
         params.append(dealer_id)
     params.append(limit)
+    params.append(worker_id)
 
     with _db() as conn, conn.cursor() as cur:
+        # Standby workers: defer to primary unless primary is busy or silent.
+        if priority == 'standby':
+            cur.execute("""
+                SELECT
+                    EXISTS(
+                        SELECT 1 FROM dealer_inventory
+                        WHERE verify_claimed_by IN (
+                            SELECT worker_id FROM workers
+                            WHERE priority = 'primary' AND role = 'verifier'
+                        )
+                        AND verify_claimed_at > NOW() - INTERVAL '5 minutes'
+                    ) AS primary_busy,
+                    NOT EXISTS(
+                        SELECT 1 FROM workers
+                        WHERE priority = 'primary' AND role = 'verifier'
+                          AND last_heartbeat > NOW() - INTERVAL '90 seconds'
+                    ) AS primary_silent
+            """)
+            state = cur.fetchone()
+            if not (state['primary_busy'] or state['primary_silent']):
+                return _json_response({'queue': []})
+
+        # Atomic claim — primary always, standby only when primary busy/dead.
         cur.execute(f"""
-            SELECT i.id, i.dealer_id, d.name AS dealer_name,
-                   i.vin, i.year, i.make, i.model, i.trim, i.mileage,
-                   i.source_added_at::date AS source_added_at,
-                   i.verified_at, i.verified_days_on_lot,
-                   COALESCE(d.vauto_seller_hints, ARRAY[]::text[]) AS vauto_seller_hints
-            FROM dealer_inventory i
-            JOIN dealers d ON d.id = i.dealer_id
-            WHERE i.status = 'active' AND d.active
-              AND i.vin IS NOT NULL AND i.vin <> '' AND LENGTH(i.vin) = 17
-              -- Skip obvious fake/padded VINs (pre-1981 classics padded with
-              -- leading zeros to hit the 17-char constraint). vAuto rBook
-              -- has no data for these and the verifier hangs waiting.
-              AND i.vin NOT LIKE '000%%'
-              AND (i.year IS NULL OR i.year >= 1981)
-              -- New-only: only ever pick up never-verified rows. Skip markers
-              -- (no_rbook_data, appraisal_failed) already cleared via
-              -- verified_at being set with a non-null verified_source —
-              -- they don't re-queue.
-              AND i.verified_at IS NULL
-              {where_dealer}
-            ORDER BY i.first_seen_at ASC
-            LIMIT %s
+            WITH eligible AS (
+                SELECT i.id
+                FROM dealer_inventory i
+                JOIN dealers d ON d.id = i.dealer_id
+                WHERE i.status = 'active' AND d.active
+                  AND i.vin IS NOT NULL AND i.vin <> '' AND LENGTH(i.vin) = 17
+                  AND i.vin NOT LIKE '000%%'
+                  AND (i.year IS NULL OR i.year >= 1981)
+                  AND i.verified_at IS NULL
+                  AND (i.verify_claimed_at IS NULL
+                       OR i.verify_claimed_at < NOW() - INTERVAL '5 minutes')
+                  {where_dealer}
+                ORDER BY i.first_seen_at ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT %s
+            )
+            UPDATE dealer_inventory i
+               SET verify_claimed_by = %s,
+                   verify_claimed_at = NOW()
+              FROM eligible
+             WHERE i.id = eligible.id
+            RETURNING i.id, i.dealer_id, i.vin, i.year, i.make, i.model,
+                      i.trim, i.mileage,
+                      i.source_added_at::date AS source_added_at,
+                      i.verified_at, i.verified_days_on_lot
         """, tuple(params))
-        return _json_response({'queue': [dict(r) for r in cur.fetchall()]})
+        rows = cur.fetchall()
+
+        # Re-resolve dealer name + seller_hints (single small query).
+        if rows:
+            inventory_ids = [r['id'] for r in rows]
+            cur.execute("""
+                SELECT i.id, d.name AS dealer_name,
+                       COALESCE(d.vauto_seller_hints, ARRAY[]::text[]) AS vauto_seller_hints
+                FROM dealer_inventory i
+                JOIN dealers d ON d.id = i.dealer_id
+                WHERE i.id = ANY(%s)
+            """, (inventory_ids,))
+            meta = {m['id']: m for m in cur.fetchall()}
+            queue = []
+            for r in rows:
+                d = dict(r)
+                if r['id'] in meta:
+                    d['dealer_name'] = meta[r['id']]['dealer_name']
+                    d['vauto_seller_hints'] = meta[r['id']]['vauto_seller_hints']
+                queue.append(d)
+                cur.execute("""
+                    INSERT INTO worker_jobs (inventory_id, worker_id, job_type,
+                                             status, claimed_at)
+                    VALUES (%s, %s, 'verify', 'in_progress', NOW())
+                """, (r['id'], worker_id))
+            conn.commit()
+        else:
+            queue = []
+
+        return _json_response({'queue': queue})
 
 
 @bp.route('/api/dealer/vauto_verify', methods=['POST'])
@@ -323,11 +401,29 @@ def api_vauto_verify():
                SET verified_days_on_lot = %s,
                    verified_at = NOW(),
                    verified_source = %s,
+                   verify_claimed_by = NULL,
+                   verify_claimed_at = NULL,
                    updated_at = NOW()
              WHERE vin = %s AND status = 'active'
              RETURNING id, dealer_id
         """, (days_val, source, vin))
         rows = cur.fetchall()
+
+        # Mark worker_jobs row complete for each updated inventory row.
+        # Duration tracked from claim → submit. Multiple-row case rare
+        # (same VIN at multiple dealers) but handled correctly.
+        for r in rows:
+            cur.execute("""
+                UPDATE worker_jobs
+                   SET completed_at = NOW(),
+                       status       = 'ok',
+                       duration_ms  = EXTRACT(EPOCH FROM (NOW() - claimed_at))::int * 1000
+                 WHERE id = (
+                     SELECT id FROM worker_jobs
+                     WHERE inventory_id = %s AND completed_at IS NULL
+                     ORDER BY claimed_at DESC LIMIT 1
+                 )
+            """, (r['id'],))
         conn.commit()
 
     if not rows:

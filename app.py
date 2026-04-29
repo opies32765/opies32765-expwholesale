@@ -149,7 +149,7 @@ def thumb_url_filter(src, size='strip'):
     return '/thumb?' + urlencode({'url': src, 'size': size})
 
 DB_URL = os.environ.get('DATABASE_URL', 'postgresql://expuser:ExpWholesale2026!@localhost/expwholesale')
-DIA_DB_URL = 'postgresql://scraper@62.146.226.100/dealer_intelligence'
+DIA_DB_URL = 'postgresql://scraper@127.0.0.1/dealer_intelligence'
 TWILIO_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
 TWILIO_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
 TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '')
@@ -1467,7 +1467,12 @@ def _run_market_check_playwright(bid_id, vin):
 
             browser.close()
     except Exception as e:
-        print(f'Market check browser error: {e}')
+        # Suppress the "chrome-headless-shell binary missing" noise — the
+        # Playwright browsers aren't installed on this server, market_check
+        # is a nice-to-have, no client-facing impact. Real errors still log.
+        msg = str(e)
+        if "Executable doesn't exist" not in msg and 'chrome-headless-shell' not in msg:
+            print(f'Market check browser error: {e}')
 
     # Save results to DB
     try:
@@ -3805,74 +3810,106 @@ DEFAULT_AI_CONFIG = {
 
 
 def _ensure_ai_config_table():
+    """Same advisory-lock guard as ai_assessment_log — prevents the gunicorn
+    boot-time DDL race that deadlocks when N workers all try to ensure
+    the same table simultaneously."""
     try:
         db = get_db()
         cur = db.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS ai_config (
-                id SERIAL PRIMARY KEY,
-                version INTEGER NOT NULL,
-                config JSONB NOT NULL,
-                is_active BOOLEAN DEFAULT FALSE,
-                description TEXT,
-                created_by TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        # Partial unique index: only one row can be active at a time
-        cur.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_config_active
-            ON ai_config(is_active) WHERE is_active = TRUE
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_config_version ON ai_config(version DESC)")
-
-        # Seed if empty
-        cur.execute("SELECT COUNT(*) as n FROM ai_config")
-        row = cur.fetchone()
-        n = (row.get('n') if hasattr(row, 'get') else row[0]) if row else 0
-        if n == 0:
+        cur.execute("SELECT pg_try_advisory_lock(8127342902) AS got")
+        got = cur.fetchone()['got']
+        if not got:
+            db.close()
+            return
+        try:
             cur.execute("""
-                INSERT INTO ai_config (version, config, is_active, description, created_by)
-                VALUES (1, %s, TRUE, 'Initial defaults', 'system')
-            """, (json.dumps(DEFAULT_AI_CONFIG),))
-        db.commit()
-        db.close()
+                CREATE TABLE IF NOT EXISTS ai_config (
+                    id SERIAL PRIMARY KEY,
+                    version INTEGER NOT NULL,
+                    config JSONB NOT NULL,
+                    is_active BOOLEAN DEFAULT FALSE,
+                    description TEXT,
+                    created_by TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            # Partial unique index: only one row can be active at a time
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_config_active
+                ON ai_config(is_active) WHERE is_active = TRUE
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_config_version ON ai_config(version DESC)")
+
+            # Seed if empty
+            cur.execute("SELECT COUNT(*) as n FROM ai_config")
+            row = cur.fetchone()
+            n = (row.get('n') if hasattr(row, 'get') else row[0]) if row else 0
+            if n == 0:
+                cur.execute("""
+                    INSERT INTO ai_config (version, config, is_active, description, created_by)
+                    VALUES (1, %s, TRUE, 'Initial defaults', 'system')
+                """, (json.dumps(DEFAULT_AI_CONFIG),))
+            db.commit()
+        finally:
+            cur.execute("SELECT pg_advisory_unlock(8127342902)")
+            db.close()
     except Exception as e:
         print(f'ai_config ensure error: {e}', flush=True)
 
 
 def _ensure_ai_assessment_log_table():
+    """Idempotent table ensure. Wrapped in a Postgres advisory lock so when
+    gunicorn boots N workers simultaneously they don't all race on the
+    table-creation/alter DDL — first one to grab the lock does the work,
+    the rest skip immediately. Without this guard, concurrent
+    `CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS` from
+    multiple connections deadlocks on AccessExclusiveLock and strands
+    in-flight bid POSTs (observed 2026-04-28: bid #351 stalled for 5min
+    after a service restart triggered exactly this race).
+    """
     try:
         db = get_db()
         cur = db.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS ai_assessment_log (
-                id SERIAL PRIMARY KEY,
-                bid_id INTEGER REFERENCES bids(id) ON DELETE CASCADE,
-                config_version INTEGER,
-                bucket TEXT,
-                bucket_display TEXT,
-                baseline_price INTEGER,
-                breakdown JSONB,
-                llm_adjustment_pct NUMERIC(6,2),
-                llm_reasoning TEXT,
-                confidence_low INTEGER,
-                confidence_high INTEGER,
-                final_price INTEGER,
-                raw_response JSONB,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_aslog_bid
-            ON ai_assessment_log(bid_id, created_at DESC)
-        """)
-        cur.execute("""
-            ALTER TABLE ai_assessment_log
-            ADD COLUMN IF NOT EXISTS dealer_intel JSONB
-        """)
-        db.commit()
-        db.close()
+        # Stable arbitrary 32-bit key for this specific ensure operation.
+        # pg_try_advisory_lock returns immediately rather than blocking.
+        cur.execute("SELECT pg_try_advisory_lock(8127342901) AS got")
+        got = cur.fetchone()['got']
+        if not got:
+            # Another worker is already doing the ensure — skip without
+            # touching DDL. The other worker's ensure is idempotent.
+            db.close()
+            return
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ai_assessment_log (
+                    id SERIAL PRIMARY KEY,
+                    bid_id INTEGER REFERENCES bids(id) ON DELETE CASCADE,
+                    config_version INTEGER,
+                    bucket TEXT,
+                    bucket_display TEXT,
+                    baseline_price INTEGER,
+                    breakdown JSONB,
+                    llm_adjustment_pct NUMERIC(6,2),
+                    llm_reasoning TEXT,
+                    confidence_low INTEGER,
+                    confidence_high INTEGER,
+                    final_price INTEGER,
+                    raw_response JSONB,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_aslog_bid
+                ON ai_assessment_log(bid_id, created_at DESC)
+            """)
+            cur.execute("""
+                ALTER TABLE ai_assessment_log
+                ADD COLUMN IF NOT EXISTS dealer_intel JSONB
+            """)
+            db.commit()
+        finally:
+            cur.execute("SELECT pg_advisory_unlock(8127342901)")
+            db.close()
     except Exception as e:
         print(f'ai_assessment_log ensure error: {e}', flush=True)
 
@@ -4247,23 +4284,171 @@ def api_vauto_urgent():
 
 @app.route('/api/vauto/pending')
 def api_vauto_pending():
-    """Return bids that need vAuto lookup. Priority bids first."""
+    """Return bids that need vAuto lookup, atomically claimed for this worker.
+
+    Two-tier dispatch:
+      * priority='primary' (default — Trainer / legacy clients with no
+        worker_id passed)  → claims any unclaimed bid, no constraints.
+      * priority='standby' (Linux VM workers) → only claims when
+        primary is currently working OR primary's heartbeat is
+        stale (>90s, dead/stuck).
+
+    Both modes use FOR UPDATE SKIP LOCKED so 4 workers polling at the
+    same instant atomically partition the queue with zero races.
+
+    Stale claims (worker died mid-job) auto-release after 5 min.
+
+    Query params:
+        worker_id  — defaults to 'trainer' for backward compat with the
+                     existing CarScanner script that doesn't pass it.
+        priority   — 'primary' (default) or 'standby'.
+    """
+    worker_id = (request.args.get('worker_id') or 'trainer').strip()
+    priority = (request.args.get('priority') or 'primary').strip()
+
+    db = get_db()
+    cur = db.cursor()
+
+    # Standby workers: defer to primary unless primary is busy or silent.
+    if priority == 'standby':
+        cur.execute("""
+            SELECT
+                EXISTS(
+                    SELECT 1 FROM bids
+                    WHERE vauto_claimed_by IN (
+                        SELECT worker_id FROM workers WHERE priority = 'primary'
+                    )
+                    AND vauto_claimed_at > NOW() - INTERVAL '5 minutes'
+                ) AS primary_busy,
+                NOT EXISTS(
+                    SELECT 1 FROM workers
+                    WHERE priority = 'primary'
+                      AND last_heartbeat > NOW() - INTERVAL '90 seconds'
+                ) AS primary_silent
+        """)
+        state = cur.fetchone()
+        if not (state['primary_busy'] or state['primary_silent']):
+            # Primary is alive, idle, and capable — let it grab the bid
+            # on its next poll. Standby returns empty.
+            db.close()
+            return jsonify({'pending': []})
+
+    # Atomic claim — primary always, standby only when primary is busy/dead.
+    # NOT EXISTS instead of LEFT JOIN: Postgres rejects FOR UPDATE on the
+    # nullable side of an outer join. NOT EXISTS gives the same semantics
+    # (only bids without a vauto_lookups row) without the join.
+    cur.execute("""
+        WITH eligible AS (
+            SELECT b.id
+            FROM bids b
+            WHERE b.vin IS NOT NULL AND length(b.vin) = 17
+              AND NOT EXISTS (
+                  SELECT 1 FROM vauto_lookups vl WHERE vl.bid_id = b.id
+              )
+              AND (b.vauto_claimed_at IS NULL
+                   OR b.vauto_claimed_at < NOW() - INTERVAL '5 minutes')
+            ORDER BY b.vauto_priority DESC, b.created_at DESC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        UPDATE bids
+           SET vauto_claimed_by = %s,
+               vauto_claimed_at = NOW()
+          FROM eligible
+         WHERE bids.id = eligible.id
+        RETURNING bids.id AS bid_id, bids.vin, bids.mileage, bids.year,
+                  bids.make, bids.model, bids.trim, bids.vauto_priority
+    """, (worker_id,))
+    rows = cur.fetchall()
+
+    # Log each claim to worker_jobs (look-back history + dashboard feed).
+    for row in rows:
+        cur.execute("""
+            INSERT INTO worker_jobs (bid_id, worker_id, job_type, status, claimed_at)
+            VALUES (%s, %s, 'vauto', 'in_progress', NOW())
+        """, (row['bid_id'], worker_id))
+
+    db.commit()
+    db.close()
+    return jsonify({'pending': [dict(r) for r in rows]})
+
+
+@app.route('/api/vauto/heartbeat', methods=['POST'])
+def api_vauto_heartbeat():
+    """Workers POST every 60s with their state. Server tracks for dispatch
+    decisions (is primary alive?) and for the operator dashboard.
+
+    Body: {worker_id, priority, role, chrome_alive, lookups_done, last_lookup_at}
+    All fields optional except worker_id; sensible defaults applied.
+    """
+    data = request.get_json(silent=True) or {}
+    worker_id = (data.get('worker_id') or 'trainer').strip()
+    priority = (data.get('priority') or 'primary').strip()
+    role = (data.get('role') or 'ew_worker').strip()
+    chrome_alive = bool(data.get('chrome_alive', True))
+    lookups_done = int(data.get('lookups_done') or 0)
+    last_lookup_at = data.get('last_lookup_at')  # ISO string or None
+    last_seen_ip = request.headers.get('X-Real-IP') or request.remote_addr
+
     db = get_db()
     cur = db.cursor()
     cur.execute("""
-        SELECT b.id as bid_id, b.vin, b.mileage, b.year, b.make, b.model, b.trim,
-               b.vauto_priority
-        FROM bids b
-        LEFT JOIN vauto_lookups vl ON vl.bid_id = b.id
-        WHERE b.vin IS NOT NULL AND length(b.vin) = 17
-          AND vl.id IS NULL
-        ORDER BY b.vauto_priority DESC, b.created_at DESC
-        LIMIT 20
-    """)
-    rows = cur.fetchall()
-    # Don't clear priority here — clear it when worker submits results
+        INSERT INTO workers (worker_id, role, priority, last_heartbeat,
+                             chrome_alive, lookups_done, last_lookup_at,
+                             last_seen_ip, updated_at)
+        VALUES (%s, %s, %s, NOW(), %s, %s, %s, %s, NOW())
+        ON CONFLICT (worker_id) DO UPDATE SET
+            role           = COALESCE(workers.role, EXCLUDED.role),
+            priority       = EXCLUDED.priority,
+            last_heartbeat = NOW(),
+            chrome_alive   = EXCLUDED.chrome_alive,
+            lookups_done   = EXCLUDED.lookups_done,
+            last_lookup_at = COALESCE(EXCLUDED.last_lookup_at, workers.last_lookup_at),
+            last_seen_ip   = EXCLUDED.last_seen_ip,
+            updated_at     = NOW()
+    """, (worker_id, role, priority, chrome_alive, lookups_done,
+          last_lookup_at, last_seen_ip))
+    db.commit()
     db.close()
-    return jsonify({'pending': [dict(r) for r in rows]})
+    return jsonify({'ok': True, 'worker_id': worker_id})
+
+
+@app.route('/api/vauto/release_claim', methods=['POST'])
+def api_vauto_release_claim():
+    """Worker hands a claimed bid back when it can't complete (network
+    failure, Chrome crash, Cox session lost, etc.). Without this,
+    abandoned bids sit `in_progress` until the 5-min stale-claim sweep —
+    a noticeable client-visible delay. With this, recovery is immediate:
+    the worker calls release_claim, server clears the claim, the next
+    poll (theirs or another worker's) re-claims and retries.
+
+    Body: {bid_id, reason}  — reason is informational, logged for debugging.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        bid_id = int(data.get('bid_id'))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'bid_id required'}), 400
+    reason = (data.get('reason') or 'worker_released')[:64]
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE bids SET vauto_claimed_by = NULL, vauto_claimed_at = NULL
+         WHERE id = %s
+    """, (bid_id,))
+    cur.execute("""
+        UPDATE worker_jobs
+           SET completed_at = NOW(), status = 'released_worker', error = %s
+         WHERE id = (
+             SELECT id FROM worker_jobs
+             WHERE bid_id = %s AND completed_at IS NULL
+             ORDER BY claimed_at DESC LIMIT 1
+         )
+    """, (reason, bid_id))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'bid_id': bid_id, 'reason': reason})
 
 
 @app.route('/api/vauto/find_click_target', methods=['POST'])
@@ -4511,8 +4696,31 @@ def api_vauto_submit():
         json.dumps(data.get('raw', {})) if data.get('raw') else None,
         data.get('appraisal_url'),
     ))
-    # Clear priority flag now that we have the data
-    cur.execute("UPDATE bids SET vauto_priority=FALSE WHERE id=%s", (bid_id,))
+    # Clear priority flag + claim now that we have the data. Releasing the
+    # claim lets stale-claim recovery never need to fire on this bid.
+    cur.execute("""
+        UPDATE bids
+           SET vauto_priority   = FALSE,
+               vauto_claimed_by = NULL,
+               vauto_claimed_at = NULL
+         WHERE id = %s
+    """, (bid_id,))
+
+    # Mark the worker_jobs row complete (the most recent in_progress entry
+    # for this bid). Duration = wall-clock from claim to submit. Only
+    # touches the most recent open row in case of resubmits.
+    cur.execute("""
+        UPDATE worker_jobs
+           SET completed_at = NOW(),
+               status       = 'ok',
+               duration_ms  = EXTRACT(EPOCH FROM (NOW() - claimed_at))::int * 1000
+         WHERE id = (
+             SELECT id FROM worker_jobs
+             WHERE bid_id = %s AND completed_at IS NULL
+             ORDER BY claimed_at DESC LIMIT 1
+         )
+    """, (bid_id,))
+
     db.commit()
     db.close()
 
@@ -6036,6 +6244,41 @@ def share_page(token):
     db.close()
 
     return render_template('share.html', bid=bid, photos=photos, vauto=vauto, accutrade=accutrade, ipacket=ipacket)
+
+
+@app.route('/api/vauto/refresh_cookies', methods=['POST'])
+def api_vauto_refresh_cookies():
+    """Workers POST fresh vAuto cookies here. We upsert vauto_session so
+    api_workers always have current auth on next bid."""
+    data = request.get_json(silent=True) or {}
+    label = (data.get('label') or 'oscarpas').strip()
+    cookies = data.get('cookies') or {}
+    if not isinstance(cookies, dict) or 'vAutoAuth' not in cookies:
+        return jsonify({'ok': False, 'error': 'cookies must include vAutoAuth',
+                        'count': len(cookies) if isinstance(cookies, dict) else 0}), 400
+    entity_id = (data.get('entity_id') or '').strip()
+    platform_user_id = (data.get('platform_user_id') or '').strip()
+    user_agent = data.get('user_agent') or None
+    db = get_db()
+    cur = db.cursor()
+    cur.execute('''INSERT INTO vauto_session
+            (label, cookies, entity_id, platform_user_id, user_agent, refreshed_by, refreshed_at)
+        VALUES (%s, %s::jsonb, %s, %s, %s, 'worker_post', NOW())
+        ON CONFLICT (label) DO UPDATE SET
+            cookies          = EXCLUDED.cookies,
+            entity_id        = COALESCE(NULLIF(EXCLUDED.entity_id, ''), vauto_session.entity_id),
+            platform_user_id = COALESCE(NULLIF(EXCLUDED.platform_user_id, ''), vauto_session.platform_user_id),
+            user_agent       = COALESCE(EXCLUDED.user_agent, vauto_session.user_agent),
+            refreshed_by     = 'worker_post', refreshed_at = NOW()
+        RETURNING refreshed_at''',
+        (label, json.dumps(cookies), entity_id, platform_user_id, user_agent))
+    row = cur.fetchone()
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'label': label, 'cookie_count': len(cookies),
+                    'refreshed_at': (row["refreshed_at"].isoformat() if row else None)})
+
+
 
 
 if __name__ == '__main__':
