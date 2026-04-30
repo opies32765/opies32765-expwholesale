@@ -58,7 +58,7 @@ _PUBLIC_PREFIXES = (
     '/partner/',  # partner portal (own auth layer: partner_user_id session key)
     '/api/bid/external', '/api/push-subscribe',
     '/api/push-unsubscribe', '/api/vapid-public-key',
-    '/.well-known/', '/api/tesla-vin/', '/share/',
+    '/.well-known/', '/api/tesla-vin/', '/share/', '/m/',
     '/api/quick-extract',
 )
 
@@ -525,6 +525,175 @@ def extract_vin_from_text(text):
     return match.group(0) if match else None
 
 
+_MILES_RE_LABELED = re.compile(
+    r'(\d{1,3}(?:[,. ]\d{3})+|\d{3,6})\s*(?:k\b|mi\b|miles?\b|mileage\b)',
+    re.IGNORECASE)
+_MILES_RE_KSHORT = re.compile(r'\b(\d{2,3})\s*[kK]\b')
+# Bare comma-grouped numbers like "47,000" or "120,500" — used only when a VIN
+# is present (otherwise too risky: matches prices, years, addresses)
+_MILES_RE_COMMA = re.compile(r'(?<![\d$])(\d{1,3}(?:,\d{3})+)(?!\d)')
+
+_TEXT_EXTRACT_PROMPT = (
+    'Extract vehicle info from this SMS forwarded to a wholesale buyer. '
+    'It may be free-form text describing a car for sale (year, make, model, '
+    'mileage, exterior color, interior color, trim, asking price, condition '
+    'notes, VIN). Return ONLY this JSON, no markdown, no commentary:\n'
+    '{\n'
+    '  "vin": "17-char VIN or null",\n'
+    '  "year": 2024 or null,\n'
+    '  "make": "Toyota" or null,\n'
+    '  "model": "Camry" or null,\n'
+    '  "trim": "SE" or null,\n'
+    '  "mileage": 45000 or null,\n'
+    '  "color": "exterior color (one word ideally) or null",\n'
+    '  "int_color": "interior color or null",\n'
+    '  "asking_price": 25000 or null\n'
+    '}\n'
+    'Rules:\n'
+    '- VIN is exactly 17 chars (A-Z, 0-9). Letters I, O, Q are never valid.\n'
+    '- mileage is the odometer reading; "47k" = 47000.\n'
+    '- color = exterior body color, int_color = interior/seats color.\n'
+    '- asking_price = price seller is asking; if a sticker price is mentioned '
+    'that is NOT what they want for it, set asking_price to null.\n'
+    '- If a field is unclear or absent, set it to null.\n'
+    'Text:\n'
+)
+
+
+def _summarize_intake(body, vin, miles, text_ai):
+    """Build a clean one-liner for the bid_messages thread when the SMS is
+    long-form prose. Short messages (<80 chars) pass through unchanged so
+    quick texts like '47k miles' or 'VIN xxx asking 24' stay natural.
+    Original full body is always preserved in bids.raw_message for audit.
+    """
+    body = body or ''
+    if len(body) <= 80:
+        return body
+    bits = []
+    if vin:
+        bits.append(f"VIN {vin}")
+    yr = (text_ai or {}).get('year')
+    mk = (text_ai or {}).get('make')
+    md = (text_ai or {}).get('model')
+    tr = (text_ai or {}).get('trim')
+    ymm = ' '.join(str(p) for p in (yr, mk, md, tr) if p).strip()
+    if ymm:
+        bits.append(ymm)
+    if miles:
+        try:
+            bits.append(f"{int(miles):,} mi")
+        except (TypeError, ValueError):
+            pass
+    col = (text_ai or {}).get('color')
+    intc = (text_ai or {}).get('int_color')
+    if col and intc:
+        bits.append(f"{col}/{intc}")
+    elif col:
+        bits.append(str(col))
+    asking = (text_ai or {}).get('asking_price')
+    if asking:
+        try:
+            bits.append(f"ask ${int(float(asking)):,}")
+        except (TypeError, ValueError):
+            pass
+    if not bits:
+        # Extraction came up empty — fall back to a truncated body
+        return body[:100] + '…' if len(body) > 100 else body
+    return ' · '.join(bits)
+
+
+def extract_vehicle_info_from_text(body):
+    """Gemini Flash text-only extraction for free-form SMS prose. Cheap
+    (~$0.0003/call). Returns dict with whatever fields it could parse, or {}.
+    max_tokens=1500 to leave headroom for Flash's internal thinking tokens."""
+    if not body:
+        return {}
+    try:
+        result = gemini_call(_TEXT_EXTRACT_PROMPT + str(body)[:3000],
+                             model='gemini-2.5-flash', max_tokens=1500)
+        if not result:
+            return {}
+        raw = result.strip()
+        # Strip markdown fences
+        if raw.startswith('```'):
+            raw = re.sub(r'^```(?:json)?\s*', '', raw)
+            raw = re.sub(r'\s*```$', '', raw)
+        # Salvage: if it's not pure JSON, find the {...} block
+        if not raw.startswith('{'):
+            m = re.search(r'\{[\s\S]*\}', raw)
+            if m:
+                raw = m.group(0)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as je:
+            print(f'[text-extract] JSON parse failed: {je}; raw head={raw[:200]!r}', flush=True)
+            # One retry with Pro (more reliable on edge cases) if Flash truncated
+            try:
+                result2 = gemini_call(_TEXT_EXTRACT_PROMPT + str(body)[:3000],
+                                       model='gemini-2.5-pro', max_tokens=2000)
+                if result2:
+                    r2 = result2.strip()
+                    if r2.startswith('```'):
+                        r2 = re.sub(r'^```(?:json)?\s*', '', r2)
+                        r2 = re.sub(r'\s*```$', '', r2)
+                    if not r2.startswith('{'):
+                        m2 = re.search(r'\{[\s\S]*\}', r2)
+                        if m2:
+                            r2 = m2.group(0)
+                    return json.loads(r2)
+            except Exception as e2:
+                print(f'[text-extract] Pro retry failed: {e2}', flush=True)
+            return {}
+    except Exception as e:
+        print(f'[text-extract] error: {e}', flush=True)
+        return {}
+
+
+def extract_miles_from_text(text, has_vin=False):
+    """Regex miles extraction from SMS body. Handles 47k, 47,000 mi, 47000 miles,
+    mileage 47k. If a VIN is present in the message, also accepts bare comma-
+    grouped numbers ("VIN 47,000"). When the entire message is just a bare
+    number (e.g. partner forwarded a photo with body "10000"), treat as miles
+    in the valid range."""
+    if not text:
+        return None
+    for m in _MILES_RE_LABELED.finditer(text):
+        raw = m.group(1).replace(',', '').replace('.', '').replace(' ', '')
+        try:
+            n = int(raw)
+        except ValueError:
+            continue
+        suffix = m.group(0).rstrip()[-1].lower()
+        if suffix == 'k' and n < 1000:
+            n *= 1000
+        if 100 <= n <= 999999:
+            return n
+    m = _MILES_RE_KSHORT.search(text)
+    if m:
+        n = int(m.group(1)) * 1000
+        if 1000 <= n <= 999000:
+            return n
+    # Body-is-bare-numeric path — partner sent just digits (with optional
+    # commas/spaces), no other content. Strong signal it's the mileage.
+    stripped = text.strip()
+    if re.fullmatch(r'[\d,\s.]{2,12}', stripped):
+        digits = re.sub(r'[^\d]', '', stripped)
+        if digits:
+            try:
+                n = int(digits)
+                if 100 <= n <= 999999:
+                    return n
+            except ValueError:
+                pass
+    if has_vin:
+        # When a VIN is present, accept bare "47,000" anywhere in the message
+        for m in _MILES_RE_COMMA.finditer(text):
+            n = int(m.group(1).replace(',', ''))
+            if 100 <= n <= 999999:
+                return n
+    return None
+
+
 def extract_vin_from_photo(image_url):
     """Read a VIN from a Twilio-hosted photo URL. Google Vision first, Gemini fallback."""
     try:
@@ -903,12 +1072,21 @@ def extract_carfax_info(file_bytes, media_type='image/jpeg'):
 
 
 def extract_carfax_multi(files_list):
-    """Run Carfax extraction on multiple images, merge results (first non-null wins)."""
+    """Run Carfax extraction on multiple images, merge results (first non-null
+    wins). VINs are only accepted if they pass ISO 3779 check digit — protects
+    against OCR misreads on glare-y / angled windshield VIN tags shipping the
+    wrong car through the pipeline."""
     merged = {}
     fields = ['vin', 'year', 'make', 'model', 'trim', 'mileage',
               'title_status', 'accidents', 'owners', 'color', 'asking_price']
     for file_bytes, media_type in files_list:
         info = extract_carfax_info(file_bytes, media_type)
+        # Validate VIN before considering it
+        if info.get('vin'):
+            _v = str(info['vin']).strip().upper()
+            if len(_v) != 17 or not vin_check_digit_valid(_v):
+                print(f'[carfax-multi] rejected VIN "{_v}" (check digit fail)', flush=True)
+                info.pop('vin', None)
         for f in fields:
             if not merged.get(f) and info.get(f) is not None:
                 merged[f] = info[f]
@@ -1034,13 +1212,26 @@ def dashboard():
     cur.execute("SELECT bid_id, COUNT(*) as cnt FROM bid_photos GROUP BY bid_id")
     photo_counts = {r['bid_id']: int(r['cnt']) for r in cur.fetchall()}
 
-    cur.execute("SELECT bid_id FROM vauto_lookups")
+    # First photo per bid (prefer local copy over Twilio URL) — for the
+    # listing thumbnail. Lets ops eyeball what was uploaded without clicking
+    # into each bid. ORDER BY id ASC = chronological first attachment.
+    cur.execute("""
+        SELECT DISTINCT ON (bid_id) bid_id, COALESCE(local_path, url) AS src
+        FROM bid_photos ORDER BY bid_id, id
+    """)
+    first_photos = {r['bid_id']: r['src'] for r in cur.fetchall()}
+
+    # Badge "vA" turns green when the scan pipeline is complete. iPacket runs
+    # last (after vAuto + AccuTrade), and the worker always writes a row —
+    # success OR not_available=true — so its presence is the cleanest "done".
+    cur.execute("SELECT bid_id FROM ipacket_lookups")
     vauto_done = {r['bid_id'] for r in cur.fetchall()}
 
     db.close()
     return render_template('index.html', bids=bids, stats=stats,
                            status_filter=status_filter, rep_filter=rep_filter,
                            reps=reps, photo_counts=photo_counts,
+                           first_photos=first_photos,
                            vauto_done=vauto_done, time_ago=time_ago)
 
 
@@ -1151,9 +1342,14 @@ def bid_detail(bid_id):
     except Exception as _aelog_err:
         print(f'ai_assessment_log read error: {_aelog_err}', flush=True)
 
-    # Partner-dealer info (only if this bid is bound for a partner dealer —
-    # either via direct dealer_db push or via partner-portal submission).
-    # Drives the channel-selection UI on Send Bid (#32). Run BEFORE db.close().
+    # Partner-dealer info — show channel-selector UI on Send Bid for any bid
+    # tied to a partner dealer. Three resolution paths, in priority order:
+    #   1. partner_dealer_id  — explicit (set by Dealer DB Search push)
+    #   2. partner_request_id — bid came in via the partner portal
+    #   3. VIN match against a partner dealer's dealer_inventory — e.g. a
+    #      field rep submits a bid on a car that happens to be in a partner
+    #      store, so the bid has neither partner_* column set, but we still
+    #      want the dealer to be notifiable.
     partner_info = None
     pd_id = bid.get('partner_dealer_id')
     if not pd_id and bid.get('partner_request_id'):
@@ -1163,12 +1359,32 @@ def bid_detail(bid_id):
         r = cur.fetchone()
         if r:
             pd_id = r['dealer_id']
+    if not pd_id and bid.get('vin'):
+        # VIN-in-inventory match. Restrict to dealers that have at least one
+        # partner_user (i.e. an actual partner relationship, not a random
+        # scraped store). If multiple partners stock the same VIN, pick the
+        # most recently-scanned one.
+        cur.execute("""SELECT di.dealer_id
+                         FROM dealer_inventory di
+                         JOIN dealers d ON d.id = di.dealer_id
+                        WHERE di.vin = %s
+                          AND EXISTS (SELECT 1 FROM partner_users pu
+                                       WHERE pu.dealer_id = d.id)
+                        ORDER BY di.last_seen_at DESC NULLS LAST,
+                                 di.id DESC
+                        LIMIT 1""", (bid['vin'],))
+        r = cur.fetchone()
+        if r:
+            pd_id = r['dealer_id']
     if pd_id:
+        # Partner dealers are consented via the signed partner agreement,
+        # not the SMS double-opt-in handshake — so sms_opt_in alone gates
+        # eligibility (no sms_verified_at requirement).
         cur.execute("""SELECT d.id AS dealer_id, d.name AS dealer_name,
-                              MAX(CASE WHEN pu.sms_opt_in AND pu.sms_verified_at IS NOT NULL
+                              MAX(CASE WHEN pu.sms_opt_in
                                        THEN 1 ELSE 0 END) AS sms_ok,
                               MAX(CASE WHEN pu.email_bid_alerts THEN 1 ELSE 0 END) AS email_ok,
-                              STRING_AGG(DISTINCT pu.phone, ', ') FILTER (WHERE pu.sms_opt_in AND pu.sms_verified_at IS NOT NULL) AS sms_phones,
+                              STRING_AGG(DISTINCT pu.phone, ', ') FILTER (WHERE pu.sms_opt_in) AS sms_phones,
                               STRING_AGG(DISTINCT pu.email, ', ') FILTER (WHERE pu.email_bid_alerts) AS emails
                        FROM dealers d
                        LEFT JOIN partner_users pu ON pu.dealer_id = d.id
@@ -1190,17 +1406,243 @@ def bid_detail(bid_id):
                            time_ago=time_ago)
 
 
+# ── SMS intake observability helpers ─────────────────────────────────────────
+# Every inbound Twilio webhook gets an sms_intake_log row written at the top
+# of the handler with outcome='pending'. As the request walks the partner-
+# reply / share-reply / stitch / new-bid paths, we update the row with the
+# final outcome + a human-readable reason + the resulting bid_id (if any).
+# Lets ops answer "why didn't my text trigger a bid?" without log diving.
+
+def _log_sms_intake(cur, from_phone, body, num_media, media_urls, raw_form):
+    cur.execute("""
+        INSERT INTO sms_intake_log (from_phone, body, num_media, media_urls,
+                                    outcome, raw_form)
+        VALUES (%s, %s, %s, %s::jsonb, 'pending', %s::jsonb)
+        RETURNING id
+    """, (from_phone, body, num_media,
+          json.dumps(media_urls or []),
+          json.dumps(dict(raw_form or {}))))
+    return cur.fetchone()['id']
+
+
+def _finalize_sms_intake(cur, log_id, outcome, bid_id=None, reason=None,
+                         parsed_vin=None, parsed_miles=None):
+    if not log_id:
+        return
+    try:
+        cur.execute("""
+            UPDATE sms_intake_log
+               SET outcome=%s, bid_id=%s, reason=%s,
+                   parsed_vin=%s, parsed_miles=%s
+             WHERE id=%s
+        """, (outcome, bid_id, reason, parsed_vin, parsed_miles, log_id))
+    except Exception as _e:
+        # Never let intake-log bookkeeping break the actual webhook response.
+        print(f'[sms-intake] finalize error log_id={log_id}: {_e}', flush=True)
+
+
+def _ingest_sms_photo(cur, bid_id, media_url, media_type):
+    """INSERT bid_photos row, download bytes, save locally, set is_sms_intake.
+    Returns (photo_id, bytes_or_None, mime_or_None) so callers that need the
+    bytes for downstream Carfax extraction can chain. Bytes are downloaded
+    only for image/* media; non-image attachments still get a bid_photos row
+    with the Twilio URL for completeness."""
+    if not media_url:
+        return None
+    cur.execute("""INSERT INTO bid_photos (bid_id, url, is_sms_intake)
+                   VALUES (%s, %s, TRUE) RETURNING id""", (bid_id, media_url))
+    photo_id = cur.fetchone()['id']
+    if 'image' not in (media_type or ''):
+        return (photo_id, None, None)
+    try:
+        _resp = requests.get(media_url, auth=(TWILIO_SID, TWILIO_TOKEN), timeout=15)
+        if _resp.status_code != 200:
+            return (photo_id, None, None)
+        mime = (_resp.headers.get('Content-Type') or media_type or 'image/jpeg').split(';')[0]
+        local = _save_sms_media_local(bid_id, photo_id, _resp.content, mime)
+        if local:
+            cur.execute("UPDATE bid_photos SET local_path=%s WHERE id=%s",
+                        (local, photo_id))
+        return (photo_id, _resp.content, mime)
+    except Exception as _e:
+        print(f'[sms-photo] download error bid={bid_id} url={media_url[:60]}: {_e}', flush=True)
+        return (photo_id, None, None)
+
+
+def _save_sms_media_local(bid_id, photo_id, content_bytes, mime):
+    """Persist Twilio MMS bytes to static/uploads/sms/<bid_id>/<photo_id>.<ext>.
+    Returns the URL path (e.g. '/static/uploads/sms/547/12.jpg'), or None on
+    failure. Local copy survives Twilio media rotation and works without the
+    auth-gated /thumb proxy."""
+    try:
+        ext_map = {
+            'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/png': '.png',
+            'image/gif': '.gif', 'image/webp': '.webp', 'image/heic': '.heic',
+        }
+        ext = ext_map.get((mime or '').split(';')[0].strip().lower(), '.bin')
+        rel_dir = 'static/uploads/sms/' + str(bid_id)
+        abs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), rel_dir)
+        os.makedirs(abs_dir, exist_ok=True)
+        fname = f'{photo_id}{ext}'
+        with open(os.path.join(abs_dir, fname), 'wb') as f:
+            f.write(content_bytes)
+        return '/' + rel_dir + '/' + fname
+    except Exception as _e:
+        print(f'[sms-media] save error bid={bid_id} photo={photo_id}: {_e}', flush=True)
+        return None
+
+
 @app.route('/webhook/twilio', methods=['POST'])
 def twilio_webhook():
     from_phone = request.form.get('From', '')
     body = request.form.get('Body', '').strip()
     num_media = int(request.form.get('NumMedia', 0))
+    _media_urls = [request.form.get(f'MediaUrl{i}') for i in range(num_media)]
+    _media_urls = [u for u in _media_urls if u]
 
     db = get_db()
     cur = db.cursor()
 
+    # Pre-compute VIN/miles from body — used both for routing decisions below
+    # AND for the intake-log record so ops can see what we extracted.
+    _early_vin = extract_vin_from_text(body) if body else None
+    _early_miles = extract_miles_from_text(body, has_vin=bool(_early_vin)) if body else None
+
+    # Record this hit FIRST. Even if downstream code raises, the log row
+    # (with outcome='pending') tells ops "we got the text but it blew up."
+    intake_log_id = None
+    try:
+        intake_log_id = _log_sms_intake(cur, from_phone, body, num_media,
+                                        _media_urls, request.form)
+        db.commit()
+    except Exception as _e:
+        # Critical: never let intake-log failure poison the request transaction.
+        # Without rollback, the cursor stays in aborted state and every
+        # downstream cur.execute fails — silently dropping the inbound bid.
+        print(f'[sms-intake] log create error: {_e}', flush=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # ── Stitch precedence over share-reply ──
+    # If this phone has a bid created via SMS in the last 60 seconds, that's
+    # almost always a follow-up (VIN-then-miles, photo-then-text). Treat it
+    # as a stitch BEFORE checking share-reply, otherwise old share_sent rows
+    # hijack legitimate stitch follow-ups.
+    cur.execute("""
+        SELECT 1 FROM bids
+        WHERE phone = %s
+          AND created_at > NOW() - INTERVAL '60 seconds'
+          AND driver_token IS NOT NULL
+        LIMIT 1
+    """, (from_phone,))
+    has_recent_sms_bid = cur.fetchone() is not None
+
+    # ── Partner-dealer reply ──
+    # If the From phone matches a partner_user, the inbound MIGHT be a reply
+    # to a bid notification we sent that dealer. Route it into that bid's
+    # thread. Resolution order:
+    #   1. Skip entirely if the body looks like a new bid intake (has a VIN
+    #      or media attachment) — partners forwarding inventory texts should
+    #      still create new bids.
+    #   2. If body contains "#NNN" and bid NNN belongs to this dealer → that bid.
+    #   3. Else look up the most recent bid we sent SMS for to this phone
+    #      (partner_sms_sent table) within 30 days — this is the strongest
+    #      "you replied to that text" anchor.
+    #   4. Else most recent dealer-linked bid in last 14 days (last-resort).
+    cur.execute("""SELECT pu.id AS pu_id, pu.dealer_id, pu.full_name, d.name AS dealer_name
+                     FROM partner_users pu
+                     JOIN dealers d ON d.id = pu.dealer_id
+                    WHERE pu.phone = %s
+                    LIMIT 1""", (from_phone,))
+    partner_row = cur.fetchone()
+    # Skip the partner-reply path if the body is clearly a new bid intake.
+    _partner_looks_like_new_bid = (
+        bool(extract_vin_from_text(body)) if body else False
+    ) or (num_media > 0)
+    if partner_row and not _partner_looks_like_new_bid:
+        target_bid_id = None
+        # Path 2: explicit "#NNN" — only if the bid is tied to this dealer.
+        m = re.search(r'#\s*(\d+)', body or '')
+        if m:
+            candidate = int(m.group(1))
+            cur.execute("""SELECT b.id
+                             FROM bids b
+                             LEFT JOIN partner_bid_requests pbr
+                                    ON pbr.id = b.partner_request_id
+                             LEFT JOIN dealer_inventory di
+                                    ON di.vin = b.vin AND di.dealer_id = %s
+                            WHERE b.id = %s
+                              AND (b.partner_dealer_id = %s
+                                OR pbr.dealer_id = %s
+                                OR di.id IS NOT NULL)
+                            LIMIT 1""",
+                        (partner_row['dealer_id'], candidate,
+                         partner_row['dealer_id'], partner_row['dealer_id']))
+            r = cur.fetchone()
+            if r:
+                target_bid_id = r['id']
+        # Path 3: last bid we SMS'd this phone (within 30 days).
+        if not target_bid_id:
+            cur.execute("""SELECT bid_id FROM partner_sms_sent
+                            WHERE phone = %s
+                              AND sent_at > NOW() - INTERVAL '30 days'
+                            ORDER BY sent_at DESC LIMIT 1""", (from_phone,))
+            r = cur.fetchone()
+            if r:
+                target_bid_id = r['bid_id']
+        # Path 4: most recent dealer-linked bid (last-resort fallback).
+        if not target_bid_id:
+            cur.execute("""SELECT b.id
+                             FROM bids b
+                             LEFT JOIN partner_bid_requests pbr
+                                    ON pbr.id = b.partner_request_id
+                             LEFT JOIN dealer_inventory di
+                                    ON di.vin = b.vin AND di.dealer_id = %s
+                            WHERE b.created_at > NOW() - INTERVAL '14 days'
+                              AND (b.partner_dealer_id = %s
+                                OR pbr.dealer_id = %s
+                                OR di.id IS NOT NULL)
+                            ORDER BY b.created_at DESC
+                            LIMIT 1""",
+                        (partner_row['dealer_id'],
+                         partner_row['dealer_id'],
+                         partner_row['dealer_id']))
+            r = cur.fetchone()
+            if r:
+                target_bid_id = r['id']
+        if target_bid_id:
+            sender_name = (partner_row.get('full_name')
+                           or partner_row.get('dealer_name')
+                           or from_phone)
+            if body:
+                cur.execute("""INSERT INTO bid_messages (bid_id, direction, message, from_phone)
+                               VALUES (%s, 'inbound', %s, %s)""",
+                            (target_bid_id, f'[{sender_name}] {body}', from_phone))
+            for i in range(num_media):
+                media_url = request.form.get(f'MediaUrl{i}')
+                media_type = request.form.get(f'MediaContentType{i}', '')
+                _ingest_sms_photo(cur, target_bid_id, media_url, media_type)
+            cur.execute("UPDATE bids SET updated_at=NOW(), has_unread=TRUE WHERE id=%s",
+                        (target_bid_id,))
+            _finalize_sms_intake(
+                cur, intake_log_id, 'partner_reply', bid_id=target_bid_id,
+                reason=(f"Phone matched partner_user (dealer={partner_row.get('dealer_name')}); "
+                        f"body did not look like new-bid intake; routed reply to bid #{target_bid_id}"),
+                parsed_vin=_early_vin, parsed_miles=_early_miles)
+            db.commit()
+            db.close()
+            return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                    200, {'Content-Type': 'text/xml'})
+
     # ── Check if this is a reply to a shared bid ──
-    # Find the most recent bid shared to this phone number
+    # Find the most recent bid shared to this phone number — but skip the
+    # share-reply path when the inbound is clearly a new bid intake (contains
+    # a fresh VIN, has photo attachments, or is a follow-up to a recent SMS
+    # bid from this same phone). Otherwise a partner forwarding a new VIN
+    # or sending miles within the stitch window gets stapled onto whatever
+    # bid they last received a share for.
     cur.execute("""
         SELECT bid_id FROM share_sent
         WHERE phone = %s
@@ -1208,7 +1650,13 @@ def twilio_webhook():
     """, (from_phone,))
     share_row = cur.fetchone()
 
-    if share_row:
+    looks_like_new_bid = bool(extract_vin_from_text(body)) if body else False
+    if num_media > 0:
+        looks_like_new_bid = True
+    if has_recent_sms_bid:
+        looks_like_new_bid = True  # let stitch path handle it below
+
+    if share_row and not looks_like_new_bid:
         # This is a reply to a shared bid — add as message, don't create new bid
         shared_bid_id = share_row['bid_id']
 
@@ -1226,11 +1674,16 @@ def twilio_webhook():
         # Attach any photos to the existing bid
         for i in range(num_media):
             media_url = request.form.get(f'MediaUrl{i}')
-            if media_url:
-                cur.execute("INSERT INTO bid_photos (bid_id, url) VALUES (%s, %s)",
-                            (shared_bid_id, media_url))
+            media_type = request.form.get(f'MediaContentType{i}', '')
+            _ingest_sms_photo(cur, shared_bid_id, media_url, media_type)
 
         cur.execute("UPDATE bids SET updated_at=NOW(), has_unread=TRUE WHERE id=%s", (shared_bid_id,))
+        _finalize_sms_intake(
+            cur, intake_log_id, 'share_reply', bid_id=shared_bid_id,
+            reason=(f"Phone has prior shared bid (#{shared_bid_id}); inbound did not look "
+                    f"like new-bid intake (no fresh VIN, no media, no recent SMS bid from this phone); "
+                    f"routed as reply to that share"),
+            parsed_vin=_early_vin, parsed_miles=_early_miles)
         db.commit()
         db.close()
 
@@ -1247,60 +1700,397 @@ def twilio_webhook():
     """, (from_phone,))
     contact_id = cur.fetchone()['id']
 
-    # Extract VIN from text
+    # Extract VIN + miles from text (regex, no AI). When a VIN is present,
+    # the miles regex also accepts bare "47,000" patterns.
     vin = extract_vin_from_text(body) if body else None
+    miles = extract_miles_from_text(body, has_vin=bool(vin)) if body else None
+
+    # AI text extractor for prose-y SMS bodies. Cheap (~$0.0003) and gets
+    # color / int_color / year/make/model / asking that regex can't.
+    # Skip when body is just a bare VIN, just digits, or empty — regex
+    # already captured everything those forms contain.
+    text_ai = {}
+    _body_clean = (body or '').strip()
+    if (len(_body_clean) > 20 and
+            ' ' in _body_clean and
+            re.search(r'[A-Za-z]{3,}', _body_clean)):
+        text_ai = extract_vehicle_info_from_text(_body_clean) or {}
+        if text_ai:
+            print(f'[text-extract] body→{ {k: v for k, v in text_ai.items() if v is not None} }', flush=True)
+
+    # Regex VIN/miles always win (definitive). AI fills only the gaps.
+    if not vin and text_ai.get('vin'):
+        _ai_vin = str(text_ai['vin']).strip().upper()
+        if VIN_RE.match(_ai_vin):
+            vin = _ai_vin
+    if not miles and text_ai.get('mileage'):
+        try:
+            _m = int(text_ai['mileage'])
+            if 100 <= _m <= 999999:
+                miles = _m
+        except (ValueError, TypeError):
+            pass
+
+    # ── Stitching: merge into a recent bid from same phone ──
+    # Partners often split a forward into VIN-text-then-miles or photo-then-text.
+    # If the same phone has a bid <60s old AND the new VIN doesn't conflict
+    # with the existing one, merge into that bid instead of creating new.
+    cur.execute("""
+        SELECT id, vin, mileage FROM bids
+        WHERE phone = %s
+          AND created_at > NOW() - INTERVAL '60 seconds'
+          AND driver_token IS NOT NULL
+        ORDER BY id DESC LIMIT 1
+    """, (from_phone,))
+    recent = cur.fetchone()
+
+    can_stitch = False
+    if recent:
+        existing_vin = (recent['vin'] or '').strip().upper()
+        new_vin = (vin or '').strip().upper()
+        # Stitch when: new text has no VIN, OR new VIN matches existing,
+        # OR existing has no VIN yet (still being extracted async)
+        if not new_vin or not existing_vin or new_vin == existing_vin:
+            can_stitch = True
+
+    if can_stitch:
+        bid_id = recent['id']
+        # In stitch context, a bare 3-6 digit number is almost certainly miles —
+        # accept "53472" the same as "53472 miles". Only kick in if the labeled
+        # regex didn't already find one.
+        if not miles and body:
+            bare = re.search(r'\b(\d{3,6})\b', body.strip())
+            if bare:
+                n = int(bare.group(1))
+                if 100 <= n <= 999999:
+                    miles = n
+        # Fill VIN if existing didn't have one
+        if vin and not recent['vin']:
+            cur.execute("UPDATE bids SET vin=%s, vauto_priority=TRUE WHERE id=%s",
+                        (vin, bid_id))
+        # Miles: partner-typed text ALWAYS wins (Carfax history readings are
+        # often older than the actual current odometer; the typed value is
+        # the partner's explicit statement of fact).
+        if miles:
+            cur.execute("UPDATE bids SET mileage=%s WHERE id=%s", (miles, bid_id))
+
+        # AI-extracted fields fill NULLs only on stitch (don't overwrite values
+        # already set by the original bid or earlier follow-ups).
+        if text_ai:
+            cur.execute("""SELECT color, int_color, year, make, model, trim, asking_price
+                           FROM bids WHERE id=%s""", (bid_id,))
+            existing = cur.fetchone() or {}
+            _st_sets, _st_vals = [], []
+            for src_key, db_col, coerce in [
+                ('color',        'color',         lambda v: str(v).strip()[:64]),
+                ('int_color',    'int_color',     lambda v: str(v).strip()[:64]),
+                ('year',         'year',          lambda v: int(v) if 1900 <= int(v) <= 2100 else None),
+                ('make',         'make',          lambda v: str(v).strip()[:64]),
+                ('model',        'model',         lambda v: str(v).strip()[:64]),
+                ('trim',         'trim',          lambda v: str(v).strip()[:64]),
+                ('asking_price', 'asking_price',  lambda v: float(v) if 0 < float(v) < 10_000_000 else None),
+            ]:
+                if existing.get(db_col) not in (None, ''):
+                    continue
+                raw = text_ai.get(src_key)
+                if raw in (None, '', 'null'):
+                    continue
+                try:
+                    val = coerce(raw)
+                    if val is None:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+                _st_sets.append(f'{db_col}=%s')
+                _st_vals.append(val)
+            if _st_sets:
+                _st_vals.append(bid_id)
+                cur.execute(f"UPDATE bids SET {', '.join(_st_sets)} WHERE id=%s", _st_vals)
+        # Append the new message body (summarized when long prose)
+        if body:
+            _thread_msg = _summarize_intake(body, vin, miles, text_ai)
+            cur.execute("""
+                INSERT INTO bid_messages (bid_id, direction, message, from_phone)
+                VALUES (%s, 'inbound', %s, %s)
+            """, (bid_id, _thread_msg, from_phone))
+        # Attach photos + queue Carfax-async if any images. Centralized
+        # _ingest_sms_photo handles INSERT + download + local-disk persist;
+        # bytes are returned so Carfax can run without re-downloading.
+        photo_files = []
+        for i in range(num_media):
+            media_url = request.form.get(f'MediaUrl{i}')
+            media_type = request.form.get(f'MediaContentType{i}', '')
+            res = _ingest_sms_photo(cur, bid_id, media_url, media_type)
+            if res and res[1]:
+                photo_files.append((res[1], res[2]))
+        cur.execute("UPDATE bids SET updated_at=NOW() WHERE id=%s", (bid_id,))
+        _finalize_sms_intake(
+            cur, intake_log_id, 'stitched', bid_id=bid_id,
+            reason=(f"Stitched into bid #{bid_id} (same phone, <60s old). "
+                    f"vin_added={bool(vin and not recent['vin'])} "
+                    f"miles_added={bool(miles and not recent['mileage'])} "
+                    f"photos_added={len(photo_files)}"),
+            parsed_vin=vin, parsed_miles=miles)
+        db.commit()
+        db.close()
+        if photo_files:
+            threading.Thread(
+                target=_process_carfax_async,
+                args=(bid_id, photo_files),
+                daemon=True
+            ).start()
+        elif vin and not recent['vin']:
+            # We just learned the VIN — kick off market check now
+            try:
+                trigger_market_check(bid_id, vin)
+            except Exception:
+                pass
+        print(f'[stitch] merged into bid #{bid_id} (vin_added={bool(vin and not recent["vin"])} miles_added={bool(miles and not recent["mileage"])} photos={len(photo_files)})', flush=True)
+        return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                200, {'Content-Type': 'text/xml'})
+
+    # Mini-page token: short, URL-safe, unguessable. Used for /m/<token>
+    # auto-reply flow so the sender can review + counter from his phone.
+    import secrets as _secrets
+    driver_token = _secrets.token_urlsafe(8)[:12]
 
     # Create bid record
     cur.execute("""
-        INSERT INTO bids (contact_id, phone, vin, raw_message, status)
-        VALUES (%s, %s, %s, %s, 'new') RETURNING id
-    """, (contact_id, from_phone, vin, body))
+        INSERT INTO bids (contact_id, phone, vin, mileage, raw_message, status,
+                          driver_token, driver_phone)
+        VALUES (%s, %s, %s, %s, %s, 'new', %s, %s) RETURNING id
+    """, (contact_id, from_phone, vin, miles, body, driver_token, from_phone))
     bid_id = cur.fetchone()['id']
 
-    # Store inbound message
+    # Apply AI-extracted fields (color, int_color, year/make/model/trim, asking_price).
+    # Only fills NULL columns — never overwrites regex-extracted values above.
+    if text_ai:
+        _ai_sets, _ai_vals = [], []
+        for src_key, db_col, coerce in [
+            ('color',        'color',         lambda v: str(v).strip()[:64]),
+            ('int_color',    'int_color',     lambda v: str(v).strip()[:64]),
+            ('year',         'year',          lambda v: int(v) if 1900 <= int(v) <= 2100 else None),
+            ('make',         'make',          lambda v: str(v).strip()[:64]),
+            ('model',        'model',         lambda v: str(v).strip()[:64]),
+            ('trim',         'trim',          lambda v: str(v).strip()[:64]),
+            ('asking_price', 'asking_price',  lambda v: float(v) if 0 < float(v) < 10_000_000 else None),
+        ]:
+            raw = text_ai.get(src_key)
+            if raw in (None, '', 'null'):
+                continue
+            try:
+                val = coerce(raw)
+                if val is None:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            _ai_sets.append(f'{db_col}=%s')
+            _ai_vals.append(val)
+        if _ai_sets:
+            _ai_vals.append(bid_id)
+            cur.execute(f"UPDATE bids SET {', '.join(_ai_sets)} WHERE id=%s", _ai_vals)
+
+    # Store inbound message — use structured summary for long prose so the
+    # thread stays readable. Original full body lives in bids.raw_message.
     if body:
+        _thread_msg = _summarize_intake(body, vin, miles, text_ai)
         cur.execute("""
             INSERT INTO bid_messages (bid_id, direction, message, from_phone)
             VALUES (%s, 'inbound', %s, %s)
-        """, (bid_id, body, from_phone))
+        """, (bid_id, _thread_msg, from_phone))
 
-    # Handle photos
+    # Handle photos — _ingest_sms_photo INSERTs the bid_photos row,
+    # downloads bytes (auth Twilio MediaUrl), persists to static/uploads/sms/,
+    # and returns bytes for Carfax extraction.
+    photo_files = []  # (bytes, mime) — fed to extract_carfax_multi async
     for i in range(num_media):
         media_url = request.form.get(f'MediaUrl{i}')
         media_type = request.form.get(f'MediaContentType{i}', '')
-        if not media_url:
-            continue
+        res = _ingest_sms_photo(cur, bid_id, media_url, media_type)
+        if res and res[1]:
+            photo_files.append((res[1], res[2]))
 
-        photo_vin = None
-        if 'image' in media_type and ANTHROPIC_KEY:
-            photo_vin = extract_vin_from_photo(media_url)
-            if photo_vin and not vin:
-                vin = photo_vin
-                cur.execute("UPDATE bids SET vin=%s WHERE id=%s", (vin, bid_id))
-
-        cur.execute("""
-            INSERT INTO bid_photos (bid_id, url, vin_extracted)
-            VALUES (%s, %s, %s)
-        """, (bid_id, media_url, photo_vin))
-
-    # Decode VIN → populate vehicle fields
+    # Decode VIN → populate vehicle fields. NHTSA returns plant_city, body_class
+    # etc. which aren't bids columns; filter to actual columns to avoid SQL error.
     if vin:
         decoded = decode_vin(vin)
+        _bid_cols = {'year', 'make', 'model', 'trim'}
+        decoded = {k: v for k, v in (decoded or {}).items() if k in _bid_cols}
         if decoded:
             fields = ', '.join(f'{k}=%s' for k in decoded)
             cur.execute(f"UPDATE bids SET {fields} WHERE id=%s",
                         list(decoded.values()) + [bid_id])
         cur.execute("UPDATE bids SET vauto_priority=TRUE WHERE id=%s", (bid_id,))
 
+    _finalize_sms_intake(
+        cur, intake_log_id, 'new_bid', bid_id=bid_id,
+        reason=(f"Created bid #{bid_id} from SMS. "
+                f"vin={'yes' if vin else 'no'} "
+                f"miles={'yes' if miles else 'no'} "
+                f"photos={len(photo_files)}"),
+        parsed_vin=vin, parsed_miles=miles)
     db.commit()
     db.close()
 
-    # Background market check
-    if vin:
+    # Background Carfax-aware extraction across all forwarded images.
+    # Same path as Quick Drop: VIN + miles + YMM + trim + title + accidents +
+    # owners + color + asking_price in one Gemini Pro pass per image. Threaded
+    # so Twilio's webhook returns fast (image extraction can take 10-20s).
+    if photo_files:
+        threading.Thread(
+            target=_process_carfax_async,
+            args=(bid_id, photo_files),
+            daemon=True
+        ).start()
+    elif vin:
+        # Text-only path: VIN was extracted from message body, fire vAuto now
         trigger_market_check(bid_id, vin)
 
     return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
             200, {'Content-Type': 'text/xml'})
+
+
+def _process_carfax_async(bid_id, photo_files):
+    """Run extract_carfax_multi on SMS-forwarded images, fold results into the
+    bid (VIN, mileage, YMM, trim, color, asking, title/accidents/owners notes),
+    then trigger market check + vAuto. Idempotent: only fills NULL fields.
+
+    Photo-extracted VINs MUST pass ISO 3779 check-digit before being saved —
+    a misread (e.g. windshield glare turning '1G1' into '1GT') would push the
+    wrong car through vAuto/AccuTrade/iPacket and text the partner back the
+    wrong vehicle. If the check digit fails we drop the VIN, leave the bid
+    photos-only, and SMS the partner asking for the VIN as text."""
+    try:
+        info = extract_carfax_multi(photo_files) or {}
+    except Exception as e:
+        print(f'[carfax-async] extract error bid={bid_id}: {e}', flush=True)
+        info = {}
+
+    # Reject photo-extracted VINs that fail the check digit. Glare / angle /
+    # reflections frequently produce visually-plausible but mathematically
+    # invalid VINs. Better to ask the partner for a text VIN than ship a
+    # bad one through the pipeline.
+    _photo_vin = (info.get('vin') or '').strip().upper()
+    _photo_vin_invalid = False
+    if _photo_vin and len(_photo_vin) == 17:
+        if not vin_check_digit_valid(_photo_vin):
+            print(f'[carfax-async] bid={bid_id} VIN check digit FAILED for '
+                  f'photo-extracted "{_photo_vin}" — dropping', flush=True)
+            info.pop('vin', None)
+            _photo_vin_invalid = True
+    elif _photo_vin:
+        # Wrong length entirely — drop
+        info.pop('vin', None)
+
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            SELECT vin, mileage, year, make, model, trim, color, asking_price, notes
+            FROM bids WHERE id=%s
+        """, (bid_id,))
+        row = cur.fetchone()
+        if not row:
+            db.close()
+            return
+
+        # Photo extraction policy:
+        #   ALLOWED  — VIN, mileage, Carfax-specific fields (title/accidents/
+        #              owners). These are objective tokens vision can read
+        #              cleanly: 17-char string, odometer digits, fixed labels.
+        #   BLOCKED  — year, make, model, trim, color, asking_price. Vision
+        #              was misidentifying similar SUVs (Lexus GX → Toyota
+        #              RAV4) and overwriting NHTSA's authoritative VIN-decode.
+        #              Year/make/model come from NHTSA, period.
+        sets, vals = [], []
+        for src_key, db_col in [('vin', 'vin'), ('mileage', 'mileage')]:
+            if row[db_col] in (None, '') and info.get(src_key) is not None:
+                sets.append(f'{db_col}=%s')
+                vals.append(info[src_key])
+
+        # Carfax-specific fields go into notes (no dedicated columns)
+        carfax_bits = []
+        if info.get('title_status'):
+            carfax_bits.append(f"Title: {info['title_status']}")
+        if info.get('accidents') is not None:
+            carfax_bits.append(f"Accidents: {info['accidents']}")
+        if info.get('owners') is not None:
+            carfax_bits.append(f"Owners: {info['owners']}")
+        if carfax_bits:
+            new_notes = '[Carfax via SMS] ' + ' · '.join(carfax_bits)
+            existing = row['notes'] or ''
+            if '[Carfax via SMS]' not in existing:
+                merged = (existing + '\n' + new_notes).strip() if existing else new_notes
+                sets.append('notes=%s')
+                vals.append(merged)
+
+        if sets:
+            vals.append(bid_id)
+            cur.execute(f"UPDATE bids SET {', '.join(sets)}, updated_at=NOW() WHERE id=%s", vals)
+
+        # If we have a VIN now, flag vAuto priority + decode.
+        # NHTSA is authoritative for year/make/model — Claude Vision mis-IDs
+        # similar SUVs (Lexus GX → Toyota Land Cruiser/RAV4 has happened) so
+        # we OVERWRITE those fields when NHTSA returns data, not COALESCE.
+        # Trim still uses COALESCE because NHTSA sometimes returns an
+        # ambiguous list and a vision-read trim badge can be more specific.
+        cur.execute("SELECT vin FROM bids WHERE id=%s", (bid_id,))
+        final_vin = (cur.fetchone() or {}).get('vin')
+        if final_vin and len(final_vin) == 17:
+            cur.execute("UPDATE bids SET vauto_priority=TRUE WHERE id=%s", (bid_id,))
+            try:
+                decoded = decode_vin(final_vin) or {}
+                decoded = {k: v for k, v in decoded.items()
+                           if k in ('year', 'make', 'model', 'trim') and v}
+                if decoded:
+                    decode_sets = []
+                    decode_vals = []
+                    for k, v in decoded.items():
+                        if k == 'trim':
+                            decode_sets.append(f'{k}=COALESCE({k}, %s)')
+                        else:
+                            decode_sets.append(f'{k}=%s')
+                        decode_vals.append(v)
+                    cur.execute(f"UPDATE bids SET {', '.join(decode_sets)} WHERE id=%s",
+                                decode_vals + [bid_id])
+            except Exception as e:
+                print(f'[carfax-async] decode_vin error: {e}', flush=True)
+
+        db.commit()
+        db.close()
+
+        if final_vin:
+            try:
+                trigger_market_check(bid_id, final_vin)
+            except Exception as e:
+                print(f'[carfax-async] market_check error: {e}', flush=True)
+        elif _photo_vin_invalid:
+            # We dropped a check-digit-failing photo VIN and have nothing else.
+            # Tell the partner so they can re-send the VIN as text instead of
+            # sitting silent (or worse, getting back the wrong car).
+            try:
+                _vdb = get_db()
+                _vcur = _vdb.cursor()
+                _vcur.execute("SELECT driver_phone FROM bids WHERE id=%s", (bid_id,))
+                _row = _vcur.fetchone()
+                _vdb.close()
+                if _row and _row.get('driver_phone'):
+                    send_sms(_row['driver_phone'],
+                             f"Bid #{bid_id} — couldn't read VIN clearly from "
+                             f"the photo (glare/angle). Please text the 17-char "
+                             f"VIN and we'll re-process.")
+                    print(f'[carfax-async] bid={bid_id} sent VIN-unclear SMS to driver', flush=True)
+            except Exception as e:
+                print(f'[carfax-async] vin-unclear SMS error: {e}', flush=True)
+
+        print(f'[carfax-async] bid={bid_id} extracted={list(info.keys())} '
+              f'photo_vin_dropped={_photo_vin_invalid}', flush=True)
+    except Exception as e:
+        print(f'[carfax-async] db error bid={bid_id}: {e}', flush=True)
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 @app.route('/api/bid/<int:bid_id>/reply', methods=['POST'])
@@ -1700,6 +2490,32 @@ def _run_assessment(bid_id):
         except Exception as _dm_err:
             print(f'dealer intel lookup error: {_dm_err}', flush=True)
             _dealer_intel = None
+
+    # ── Partner-Network Velocity Score ───────────────────────────────────────
+    # Days-to-sell distribution for this YMM band over the last 90d. Labels:
+    # HOT / STEADY / SLOW / STALE / NO_SIGNAL. Gemini uses the label to lean
+    # adjustment up (fast → confidence) or down (stale → margin cushion).
+    _velocity = None
+    try:
+        from velocity import compute_velocity, format_for_prompt as _vel_format
+        _v_db = get_db()
+        _velocity = compute_velocity(
+            _v_db,
+            year=bid.get('year'),
+            make=bid.get('make'),
+            model=bid.get('model'),
+            mileage=bid.get('mileage'),
+            config=_ai_cfg,
+        )
+        _v_db.close()
+        if _velocity:
+            print(f'[ASSESS] Bid {bid_id} velocity: {_velocity.get("label")} '
+                  f'(sold {_velocity.get("sold_count")} median '
+                  f'{_velocity.get("median_days_to_sell")}d · active '
+                  f'{_velocity.get("active_count")})', flush=True)
+    except Exception as _vel_err:
+        print(f'velocity lookup error: {_vel_err}', flush=True)
+        _velocity = None
 
     # ── Build vehicle context ─────────────────────────────────────────────────
     vparts = [str(bid['year'] or ''), bid['make'] or '', bid['model'] or '', bid['trim'] or '']
@@ -2267,6 +3083,19 @@ def _run_assessment(bid_id):
         except Exception as _di_fmt_err:
             print(f'dealer intel format error: {_di_fmt_err}', flush=True)
 
+    # Inject partner-network velocity score (HOT/STEADY/SLOW/STALE/NO_SIGNAL)
+    if _velocity:
+        try:
+            _vel_block = _vel_format(_velocity,
+                                     year=bid.get('year'),
+                                     make=bid.get('make'),
+                                     model=bid.get('model'),
+                                     mileage=bid.get('mileage'))
+            if _vel_block:
+                ctx += '\n\n' + _vel_block
+        except Exception as _vel_fmt_err:
+            print(f'velocity format error: {_vel_fmt_err}', flush=True)
+
     # Inject bucket + baseline context (if we could compute one)
     _hybrid_mode = bool(_baseline_result and _baseline_result.get('baseline_price'))
     if _hybrid_mode:
@@ -2554,12 +3383,54 @@ def _auto_assess(bid_id):
             result = _run_assessment(bid_id)
             if result.get('success'):
                 print(f'Auto-assess complete for bid {bid_id}: buy_price={result.get("buy_price")}')
+                _notify_driver_if_pending(bid_id)
             else:
                 print(f'Auto-assess failed for bid {bid_id}: {result.get("error")}')
                 _release_assessment_claim(bid_id)
     except Exception as e:
         print(f'Auto-assess error for bid {bid_id}: {e}')
         _release_assessment_claim(bid_id)
+
+
+def _notify_driver_if_pending(bid_id):
+    """If this bid came in via SMS (has driver_phone) and we haven't already
+    auto-replied, text the sender the mini-page link. Idempotent — sets
+    driver_notified_at so a re-run of assessment won't double-text."""
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            SELECT id, driver_token, driver_phone, driver_notified_at,
+                   year, make, model
+            FROM bids WHERE id=%s
+        """, (bid_id,))
+        bid = cur.fetchone()
+        if not bid or not bid['driver_phone'] or not bid['driver_token']:
+            db.close()
+            return
+        if bid['driver_notified_at'] is not None:
+            db.close()
+            return
+
+        ymm_parts = [str(bid['year']) if bid['year'] else '',
+                     bid['make'] or '', bid['model'] or '']
+        ymm = ' '.join(p for p in ymm_parts if p).strip() or 'Vehicle'
+        base = os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net')
+        link = f"{base}/m/{bid['driver_token']}"
+        # Link on its own line — iMessage / Android only auto-linkify URLs
+        # preceded by whitespace, and a newline gives a cleaner rich preview.
+        body = f"Bid #{bid['id']} {ymm}\n{link}"
+
+        sent = send_sms(bid['driver_phone'], body)
+        if sent:
+            cur.execute("UPDATE bids SET driver_notified_at=NOW() WHERE id=%s", (bid_id,))
+            db.commit()
+            print(f'[driver-notify] bid={bid_id} → {bid["driver_phone"]}', flush=True)
+        else:
+            print(f'[driver-notify] SMS failed bid={bid_id}', flush=True)
+        db.close()
+    except Exception as e:
+        print(f'[driver-notify] error bid={bid_id}: {e}', flush=True)
 
 
 # ── Assessment-fire coordinator ──────────────────────────────────────────────
@@ -2829,13 +3700,70 @@ def api_bids():
     cur.execute("SELECT bid_id, COUNT(*) as cnt FROM bid_photos GROUP BY bid_id")
     photo_counts = {r['bid_id']: int(r['cnt']) for r in cur.fetchall()}
 
-    # vAuto lookup status per bid
-    cur.execute("SELECT bid_id FROM vauto_lookups")
+    cur.execute("""
+        SELECT DISTINCT ON (bid_id) bid_id, COALESCE(local_path, url) AS src
+        FROM bid_photos ORDER BY bid_id, id
+    """)
+    first_photos = {r['bid_id']: r['src'] for r in cur.fetchall()}
+
+    # Badge turns green when iPacket finishes — last in the scan pipeline.
+    # Workers always write a row (success OR not_available), so presence = done.
+    cur.execute("SELECT bid_id FROM ipacket_lookups")
     vauto_done = {r['bid_id'] for r in cur.fetchall()}
 
     db.close()
     return jsonify({'bids': bids, 'stats': stats, 'photo_counts': photo_counts,
+                    'first_photos': first_photos,
                     'vauto_done': list(vauto_done)})
+
+
+@app.route('/sms-intake')
+def sms_intake_page():
+    """Inbound SMS observability — every Twilio webhook hit, with the outcome
+    (new_bid / stitched / partner_reply / share_reply) and the reason. Lets
+    ops diagnose 'why didn't this text trigger a bid?' without log diving."""
+    outcome_filter = request.args.get('outcome', 'all')
+    db = get_db()
+    cur = db.cursor()
+    where, params = '', []
+    if outcome_filter and outcome_filter != 'all':
+        where = 'WHERE outcome = %s'
+        params.append(outcome_filter)
+    cur.execute(f"""
+        SELECT id, created_at, from_phone, body, num_media, media_urls,
+               parsed_vin, parsed_miles, outcome, bid_id, reason
+        FROM sms_intake_log
+        {where}
+        ORDER BY id DESC LIMIT 200
+    """, params)
+    rows = cur.fetchall()
+
+    # Per-row: pull the LOCAL photo for that bid (if any) so we render the
+    # downloaded copy rather than the auth-gated Twilio URL. Falls back to
+    # media_urls (raw Twilio) when no bid was created or photos didn't save.
+    bid_ids = [r['bid_id'] for r in rows if r['bid_id']]
+    locals_by_bid = {}
+    if bid_ids:
+        cur.execute("""
+            SELECT bid_id, local_path, url, id FROM bid_photos
+             WHERE bid_id = ANY(%s) AND is_sms_intake = TRUE
+             ORDER BY bid_id, id
+        """, (bid_ids,))
+        for p in cur.fetchall():
+            locals_by_bid.setdefault(p['bid_id'], []).append(
+                p['local_path'] or p['url'])
+
+    cur.execute("""SELECT outcome, COUNT(*) AS cnt FROM sms_intake_log
+                    WHERE created_at > NOW() - INTERVAL '7 days'
+                    GROUP BY outcome""")
+    counts_7d = {r['outcome']: int(r['cnt']) for r in cur.fetchall()}
+    db.close()
+
+    return render_template('sms_intake.html', rows=rows,
+                           locals_by_bid=locals_by_bid,
+                           outcome_filter=outcome_filter,
+                           counts_7d=counts_7d,
+                           time_ago=time_ago)
 
 
 @app.route('/contacts')
@@ -3116,15 +4044,10 @@ def mobile_submit():
     # --- Decode VIN ---
     decoded_vin = decode_vin(vin) if vin else {}
 
-    # --- Detect color from first car photo ---
+    # Color detection from car photos intentionally disabled — only deliberate
+    # VIN-sticker / VIN-dashboard / odometer photos should drive vehicle data.
+    # Color can still be set manually from the bid detail page if desired.
     detected_color = None
-    if ANTHROPIC_KEY and car_photo_urls:
-        try:
-            first_photo_path = os.path.join(UPLOAD_DIR, os.path.basename(car_photo_urls[0]))
-            with open(first_photo_path, 'rb') as fp:
-                detected_color = extract_color_from_file(fp.read())
-        except Exception:
-            pass
 
     # --- Build raw_message ---
     parts = []
@@ -3756,24 +4679,6 @@ DEFAULT_AI_CONFIG = {
             }
         },
         {
-            "name": "truck_commercial",
-            "display_name": "Truck / Commercial",
-            "description": "Pickups, heavy-duty, commercial vans",
-            "rules": {
-                "model_patterns": ["F-150", "F150", "F-250", "F250", "F-350", "F350",
-                                   "SILVERADO", "SIERRA", "RAM 1500", "RAM 2500", "RAM 3500",
-                                   "TUNDRA", "TITAN", "COLORADO", "CANYON", "RANGER",
-                                   "FRONTIER", "TACOMA", "GLADIATOR",
-                                   "TRANSIT", "SPRINTER", "PROMASTER", "EXPRESS", "SAVANA"]
-            },
-            "weights": {
-                "mmr": 0.40,
-                "black_book": 0.25,
-                "accutrade_target_auction": 0.20,
-                "jd_power": 0.15
-            }
-        },
-        {
             "name": "mainstream_sub50k",
             "display_name": "Mainstream (< $50k)",
             "description": "Default catch-all: everyday vehicles",
@@ -4069,6 +4974,36 @@ def _validate_ai_config(cfg):
                     return False, 'dealer_match.min_sold_confidence must be 0.00–1.00'
             except (TypeError, ValueError):
                 return False, 'dealer_match.min_sold_confidence must be numeric'
+    # Optional velocity block — validate if present
+    vel = cfg.get('velocity')
+    if vel is not None:
+        if not isinstance(vel, dict):
+            return False, 'velocity must be an object'
+        for k, (lo, hi) in {
+            'lookback_days':    (1, 730),
+            'year_tolerance':   (0, 10),
+            'mileage_band':     (0, 500000),
+            'hot_max_days':     (1, 365),
+            'steady_max_days':  (1, 365),
+            'slow_max_days':    (1, 365),
+            'stale_dol_floor':  (1, 365),
+            'min_sample_size':  (1, 100),
+        }.items():
+            if k in vel:
+                try:
+                    v = float(vel[k])
+                    if v < lo or v > hi:
+                        return False, f'velocity.{k} must be {lo}–{hi}'
+                except (TypeError, ValueError):
+                    return False, f'velocity.{k} must be numeric'
+        # Sanity: hot ≤ steady ≤ slow
+        h = vel.get('hot_max_days')
+        s = vel.get('steady_max_days')
+        sl = vel.get('slow_max_days')
+        if h is not None and s is not None and float(h) > float(s):
+            return False, 'velocity.hot_max_days must be ≤ steady_max_days'
+        if s is not None and sl is not None and float(s) > float(sl):
+            return False, 'velocity.steady_max_days must be ≤ slow_max_days'
     return True, None
 
 
@@ -4309,21 +5244,40 @@ def api_vauto_pending():
     db = get_db()
     cur = db.cursor()
 
-    # Standby workers: defer to primary unless primary is busy or silent.
+    # ── Self-healing gate ────────────────────────────────────────────────────
+    # If this worker is paused (Cox session-loss self-report) or has been
+    # auto-demoted for repeated failures, it gets nothing. It still posts
+    # heartbeats; standby logic below treats it as not-primary so other
+    # workers take over without any human intervention.
+    cur.execute("""
+        SELECT paused, effective_priority, consecutive_failures
+        FROM workers WHERE worker_id = %s
+    """, (worker_id,))
+    me = cur.fetchone()
+    if me and (me.get('paused') or me.get('effective_priority') == 'degraded'):
+        db.close()
+        return jsonify({'pending': []})
+
+    # ── Standby gate ─────────────────────────────────────────────────────────
+    # Standby workers defer to primary unless primary is busy or silent.
+    # Primary liveness uses effective_priority so an auto-demoted primary
+    # is treated as silent and standbys take over.
     if priority == 'standby':
         cur.execute("""
             SELECT
                 EXISTS(
                     SELECT 1 FROM bids
                     WHERE vauto_claimed_by IN (
-                        SELECT worker_id FROM workers WHERE priority = 'primary'
+                        SELECT worker_id FROM workers
+                        WHERE COALESCE(effective_priority, priority) = 'primary'
                     )
                     AND vauto_claimed_at > NOW() - INTERVAL '5 minutes'
                 ) AS primary_busy,
                 NOT EXISTS(
                     SELECT 1 FROM workers
-                    WHERE priority = 'primary'
+                    WHERE COALESCE(effective_priority, priority) = 'primary'
                       AND last_heartbeat > NOW() - INTERVAL '90 seconds'
+                      AND NOT COALESCE(paused, FALSE)
                 ) AS primary_silent
         """)
         state = cur.fetchone()
@@ -4349,7 +5303,7 @@ def api_vauto_pending():
                    OR b.vauto_claimed_at < NOW() - INTERVAL '5 minutes')
             ORDER BY b.vauto_priority DESC, b.created_at DESC
             FOR UPDATE SKIP LOCKED
-            LIMIT 1
+            LIMIT 5
         )
         UPDATE bids
            SET vauto_claimed_by = %s,
@@ -4376,10 +5330,22 @@ def api_vauto_pending():
 @app.route('/api/vauto/heartbeat', methods=['POST'])
 def api_vauto_heartbeat():
     """Workers POST every 60s with their state. Server tracks for dispatch
-    decisions (is primary alive?) and for the operator dashboard.
+    decisions and runs the auto-demote / auto-promote policy that lets the
+    queue route around a sessionless or hung worker without human help.
 
-    Body: {worker_id, priority, role, chrome_alive, lookups_done, last_lookup_at}
-    All fields optional except worker_id; sensible defaults applied.
+    Body: {worker_id, priority, role, chrome_alive, lookups_done,
+           last_lookup_at, last_claim_status, last_claim_duration_ms,
+           consecutive_failures, paused, pause_reason, synthetic_ok}
+
+    Auto-demote: if the worker reports paused=true OR consecutive_failures>=3
+    OR 2-of-last-3 jobs hit released_stale/released_worker/failed/duration>240s,
+    server flips effective_priority='degraded'. The pending endpoint then
+    returns empty for this worker until it recovers.
+
+    Auto-promote: a degraded worker that posts synthetic_ok=true on 3
+    consecutive heartbeats spanning at least 3 minutes is restored to its
+    operator-set priority. synthetic_ok means the worker scraped a known
+    vAuto URL and parsed an expected token without errors.
     """
     data = request.get_json(silent=True) or {}
     worker_id = (data.get('worker_id') or 'trainer').strip()
@@ -4387,30 +5353,177 @@ def api_vauto_heartbeat():
     role = (data.get('role') or 'ew_worker').strip()
     chrome_alive = bool(data.get('chrome_alive', True))
     lookups_done = int(data.get('lookups_done') or 0)
-    last_lookup_at = data.get('last_lookup_at')  # ISO string or None
+    last_lookup_at = data.get('last_lookup_at')
     last_seen_ip = request.headers.get('X-Real-IP') or request.remote_addr
+
+    last_claim_status = (data.get('last_claim_status') or '')[:32] or None
+    last_claim_duration_ms = data.get('last_claim_duration_ms')
+    try:
+        last_claim_duration_ms = int(last_claim_duration_ms) if last_claim_duration_ms is not None else None
+    except (TypeError, ValueError):
+        last_claim_duration_ms = None
+    consecutive_failures = int(data.get('consecutive_failures') or 0)
+    paused = bool(data.get('paused', False))
+    pause_reason = (data.get('pause_reason') or '')[:128] or None
+    synthetic_ok = bool(data.get('synthetic_ok', False))
 
     db = get_db()
     cur = db.cursor()
     cur.execute("""
-        INSERT INTO workers (worker_id, role, priority, last_heartbeat,
-                             chrome_alive, lookups_done, last_lookup_at,
-                             last_seen_ip, updated_at)
-        VALUES (%s, %s, %s, NOW(), %s, %s, %s, %s, NOW())
+        INSERT INTO workers (worker_id, role, priority, effective_priority,
+                             last_heartbeat, chrome_alive, lookups_done,
+                             last_lookup_at, last_seen_ip,
+                             last_claim_status, last_claim_duration_ms,
+                             consecutive_failures, paused, pause_reason,
+                             updated_at)
+        VALUES (%s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         ON CONFLICT (worker_id) DO UPDATE SET
             role           = COALESCE(workers.role, EXCLUDED.role),
             priority       = EXCLUDED.priority,
+            -- Don't clobber effective_priority on every heartbeat — auto-
+            -- demote/promote logic below owns it. Only seed on first insert.
+            effective_priority = COALESCE(workers.effective_priority, EXCLUDED.priority),
             last_heartbeat = NOW(),
             chrome_alive   = EXCLUDED.chrome_alive,
             lookups_done   = EXCLUDED.lookups_done,
             last_lookup_at = COALESCE(EXCLUDED.last_lookup_at, workers.last_lookup_at),
             last_seen_ip   = EXCLUDED.last_seen_ip,
+            last_claim_status      = COALESCE(EXCLUDED.last_claim_status, workers.last_claim_status),
+            last_claim_duration_ms = COALESCE(EXCLUDED.last_claim_duration_ms, workers.last_claim_duration_ms),
+            consecutive_failures   = EXCLUDED.consecutive_failures,
+            paused                 = EXCLUDED.paused,
+            pause_reason           = COALESCE(EXCLUDED.pause_reason, workers.pause_reason),
             updated_at     = NOW()
-    """, (worker_id, role, priority, chrome_alive, lookups_done,
-          last_lookup_at, last_seen_ip))
+    """, (worker_id, role, priority, priority, chrome_alive, lookups_done,
+          last_lookup_at, last_seen_ip,
+          last_claim_status, last_claim_duration_ms,
+          consecutive_failures, paused, pause_reason))
+
+    # ── Auto-demote evaluation ───────────────────────────────────────────────
+    # Look at the last 3 closed jobs for this worker. Two or more bad
+    # outcomes (released_stale/released_worker/failed, or duration>240s)
+    # flips us to degraded. consecutive_failures>=3 from worker's own count
+    # is a separate trigger for paths the worker can detect that the server
+    # can't (in-Chrome timeouts that never reached release_claim).
+    cur.execute("""
+        SELECT COUNT(*) AS bad
+        FROM (
+            SELECT status, duration_ms FROM worker_jobs
+            WHERE worker_id = %s AND completed_at IS NOT NULL
+            ORDER BY completed_at DESC LIMIT 3
+        ) t
+        WHERE status IN ('released_stale','released_worker','failed')
+           OR duration_ms > 240000
+    """, (worker_id,))
+    bad = cur.fetchone()['bad'] or 0
+
+    should_demote = paused or consecutive_failures >= 3 or bad >= 2
+    if should_demote:
+        cur.execute("""
+            UPDATE workers
+               SET effective_priority = 'degraded',
+                   auto_demoted_at = COALESCE(auto_demoted_at, NOW()),
+                   synthetic_ok_count = 0
+             WHERE worker_id = %s
+               AND effective_priority IS DISTINCT FROM 'degraded'
+        """, (worker_id,))
+
+    # ── Auto-promote evaluation ──────────────────────────────────────────────
+    # Synthetic checks reset the failure score. After 3 consecutive
+    # synthetic_ok heartbeats spanning at least 3 minutes, restore to the
+    # operator-set priority and clear the auto_demoted_at marker.
+    if synthetic_ok:
+        cur.execute("""
+            UPDATE workers
+               SET synthetic_ok_count = COALESCE(synthetic_ok_count, 0) + 1,
+                   last_synthetic_at = NOW()
+             WHERE worker_id = %s
+        """, (worker_id,))
+        cur.execute("""
+            UPDATE workers
+               SET effective_priority = priority,
+                   auto_demoted_at = NULL,
+                   consecutive_failures = 0,
+                   synthetic_ok_count = 0
+             WHERE worker_id = %s
+               AND effective_priority = 'degraded'
+               AND synthetic_ok_count >= 3
+               AND auto_demoted_at < NOW() - INTERVAL '3 minutes'
+        """, (worker_id,))
+    elif not paused and not should_demote:
+        # Not a synthetic-ok beat and worker is healthy — reset the
+        # synthetic streak counter so it has to demonstrate 3 in a row
+        # after demotion, not earn credit slowly over a healthy day.
+        cur.execute("""
+            UPDATE workers SET synthetic_ok_count = 0
+             WHERE worker_id = %s AND effective_priority = 'degraded'
+        """, (worker_id,))
+
+    db.commit()
+
+    # Return current state so worker can log it.
+    cur.execute("""
+        SELECT effective_priority, paused, auto_demoted_at, synthetic_ok_count
+        FROM workers WHERE worker_id = %s
+    """, (worker_id,))
+    state = cur.fetchone() or {}
+    db.close()
+    return jsonify({
+        'ok': True,
+        'worker_id': worker_id,
+        'effective_priority': state.get('effective_priority'),
+        'paused': state.get('paused'),
+        'auto_demoted_at': (state.get('auto_demoted_at').isoformat()
+                            if state.get('auto_demoted_at') else None),
+        'synthetic_ok_count': state.get('synthetic_ok_count') or 0,
+    })
+
+
+@app.route('/api/worker/session_lost', methods=['POST'])
+def api_worker_session_lost():
+    """Worker self-reports Cox/vAuto SSO session loss. The worker's claim
+    loop should pause itself the moment it detects a redirect to
+    bridge.coxautoinc.com or signin.cox — there's no point claiming bids
+    when the next nav will fail. Server marks the worker paused; dispatch
+    routes around it; standby takes over within seconds.
+
+    Body: {worker_id, url, detail}
+    """
+    data = request.get_json(silent=True) or {}
+    worker_id = (data.get('worker_id') or '').strip()
+    if not worker_id:
+        return jsonify({'ok': False, 'error': 'worker_id required'}), 400
+    url = (data.get('url') or '')[:256]
+    detail = (data.get('detail') or '')[:256]
+    reason = f"session_lost: {detail or url}"[:128]
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE workers
+           SET paused = TRUE,
+               pause_reason = %s,
+               effective_priority = 'degraded',
+               auto_demoted_at = COALESCE(auto_demoted_at, NOW()),
+               synthetic_ok_count = 0,
+               updated_at = NOW()
+         WHERE worker_id = %s
+    """, (reason, worker_id))
+    # Release any in-flight claim — the worker can't finish it.
+    cur.execute("""
+        UPDATE bids SET vauto_claimed_by = NULL, vauto_claimed_at = NULL
+         WHERE vauto_claimed_by = %s
+    """, (worker_id,))
+    cur.execute("""
+        UPDATE worker_jobs
+           SET completed_at = NOW(),
+               status = 'released_session_lost',
+               error = %s
+         WHERE worker_id = %s AND completed_at IS NULL
+    """, (reason, worker_id))
     db.commit()
     db.close()
-    return jsonify({'ok': True, 'worker_id': worker_id})
+    return jsonify({'ok': True, 'worker_id': worker_id, 'paused': True})
 
 
 @app.route('/api/vauto/release_claim', methods=['POST'])
@@ -5065,7 +6178,16 @@ def api_ipacket_submit():
     ))
     db.commit()
     db.close()
+    # AI assessment still fires in background (saved to ai_assessment column
+    # for internal reference) — but the SMS-back no longer waits for it.
     _maybe_fire_assessment(bid_id, require_all=True, source='ipacket')
+    # Driver SMS-back fires NOW — iPacket is the last step in the pipeline,
+    # success or not_available both qualify. Idempotent (driver_notified_at
+    # guard prevents double-text if assessment also tries to notify).
+    try:
+        _notify_driver_if_pending(bid_id)
+    except Exception as e:
+        print(f'[ipacket-notify] error bid={bid_id}: {e}', flush=True)
     return jsonify({'ok': True, 'bid_id': bid_id})
 
 
@@ -5824,6 +6946,14 @@ def _ensure_share_columns():
         cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS share_token VARCHAR(36)")
         cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS share_notes TEXT")
         cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS share_asking NUMERIC(10,2)")
+        # Driver mini-page columns: driver_token is the unguessable URL slug
+        # for /m/<token>; driver_phone is the SMS sender we auto-reply to
+        # when AI assessment finishes. Set together at SMS-intake time.
+        cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS driver_token VARCHAR(16)")
+        cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS driver_phone VARCHAR(20)")
+        cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS driver_notified_at TIMESTAMP")
+        cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS int_color VARCHAR(64)")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_bids_driver_token ON bids(driver_token) WHERE driver_token IS NOT NULL")
         db.commit()
         db.close()
     except Exception:
@@ -6246,40 +7376,100 @@ def share_page(token):
     return render_template('share.html', bid=bid, photos=photos, vauto=vauto, accutrade=accutrade, ipacket=ipacket)
 
 
-@app.route('/api/vauto/refresh_cookies', methods=['POST'])
-def api_vauto_refresh_cookies():
-    """Workers POST fresh vAuto cookies here. We upsert vauto_session so
-    api_workers always have current auth on next bid."""
-    data = request.get_json(silent=True) or {}
-    label = (data.get('label') or 'oscarpas').strip()
-    cookies = data.get('cookies') or {}
-    if not isinstance(cookies, dict) or 'vAutoAuth' not in cookies:
-        return jsonify({'ok': False, 'error': 'cookies must include vAutoAuth',
-                        'count': len(cookies) if isinstance(cookies, dict) else 0}), 400
-    entity_id = (data.get('entity_id') or '').strip()
-    platform_user_id = (data.get('platform_user_id') or '').strip()
-    user_agent = data.get('user_agent') or None
+# ---------------------------------------------------------------------------
+# /m/<token> — driver mini-page (owner-view, prices visible, action buttons)
+# Triggered by inbound SMS forward → auto-replied link when AI assess finishes.
+# Token is unguessable; no login. Reply endpoint at /m/<token>/reply.
+# ---------------------------------------------------------------------------
+@app.route('/m/<token>')
+def driver_mini_page(token):
     db = get_db()
     cur = db.cursor()
-    cur.execute('''INSERT INTO vauto_session
-            (label, cookies, entity_id, platform_user_id, user_agent, refreshed_by, refreshed_at)
-        VALUES (%s, %s::jsonb, %s, %s, %s, 'worker_post', NOW())
-        ON CONFLICT (label) DO UPDATE SET
-            cookies          = EXCLUDED.cookies,
-            entity_id        = COALESCE(NULLIF(EXCLUDED.entity_id, ''), vauto_session.entity_id),
-            platform_user_id = COALESCE(NULLIF(EXCLUDED.platform_user_id, ''), vauto_session.platform_user_id),
-            user_agent       = COALESCE(EXCLUDED.user_agent, vauto_session.user_agent),
-            refreshed_by     = 'worker_post', refreshed_at = NOW()
-        RETURNING refreshed_at''',
-        (label, json.dumps(cookies), entity_id, platform_user_id, user_agent))
-    row = cur.fetchone()
+    cur.execute("""
+        SELECT b.*, c.name as contact_name
+        FROM bids b LEFT JOIN contacts c ON b.contact_id = c.id
+        WHERE b.driver_token = %s
+    """, (token,))
+    bid = cur.fetchone()
+    if not bid:
+        db.close()
+        return 'Not found', 404
+
+    cur.execute("""
+        SELECT id, url FROM bid_photos
+        WHERE bid_id = %s ORDER BY id LIMIT 12
+    """, (bid['id'],))
+    photos = cur.fetchall()
+
+    cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid['id'],))
+    vauto = cur.fetchone()
+
+    accutrade = None
+    try:
+        cur.execute("SELECT * FROM accutrade_lookups WHERE bid_id = %s", (bid['id'],))
+        accutrade = cur.fetchone()
+    except Exception:
+        pass
+
+    ipacket = None
+    try:
+        cur.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s", (bid['id'],))
+        ipacket = cur.fetchone()
+    except Exception:
+        pass
+
+    db.close()
+    return render_template('m.html', bid=bid, photos=photos,
+                           vauto=vauto, accutrade=accutrade, ipacket=ipacket,
+                           token=token)
+
+
+@app.route('/m/<token>/reply', methods=['POST'])
+def driver_mini_reply(token):
+    """Token-authenticated bid action. Mirrors /api/bid/<id>/reply but scoped
+    by driver_token so the partner doesn't need a login."""
+    data = request.json or {}
+    action = data.get('action', 'bid')   # 'bid' | 'pass' | 'counter'
+    bid_amount = data.get('bid_amount')
+    message = (data.get('message') or '').strip()
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT id, phone, year, make, model FROM bids WHERE driver_token=%s", (token,))
+    bid = cur.fetchone()
+    if not bid:
+        db.close()
+        return jsonify({'error': 'Not found'}), 404
+
+    bid_id = bid['id']
+    if action == 'pass':
+        new_status = 'passed'
+        if not message:
+            message = 'Pass'
+    elif action == 'counter':
+        new_status = 'reviewing'
+        if not message and bid_amount:
+            message = f'Counter: ${int(float(bid_amount)):,}'
+    else:
+        new_status = 'bid_sent'
+        if not message and bid_amount:
+            message = f'Bid: ${int(float(bid_amount)):,}'
+
+    if not message:
+        db.close()
+        return jsonify({'error': 'Message or bid amount required'}), 400
+
+    cur.execute("""
+        UPDATE bids SET status=%s, bid_amount=%s, bid_response=%s,
+        bid_sent_at=NOW(), updated_at=NOW(), has_unread=TRUE WHERE id=%s
+    """, (new_status, bid_amount, message, bid_id))
+
+    cur.execute("""
+        INSERT INTO bid_messages (bid_id, direction, message, from_phone)
+        VALUES (%s, 'inbound', %s, %s)
+    """, (bid_id, f'[driver] {message}', bid['phone']))
     db.commit()
     db.close()
-    return jsonify({'ok': True, 'label': label, 'cookie_count': len(cookies),
-                    'refreshed_at': (row["refreshed_at"].isoformat() if row else None)})
 
-
-
-
-if __name__ == '__main__':
+    return jsonify({'success': True, 'status': new_status})
     app.run(debug=True, host='0.0.0.0', port=9000)
