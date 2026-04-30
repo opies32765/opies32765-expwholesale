@@ -1860,6 +1860,23 @@ class DealerScanner:
                 # still gets a scan attempt.
                 print('  dealerinspire algolia path failed — falling back to universal', flush=True)
 
+            # ECT (Exotic Car Trader) marketplace — Webflow + Bubble.io. Walks
+            # listings sitemap newest-first, parses Product JSON-LD per VDP,
+            # filters to listings created in the last 90 days. See dealer_ect.py.
+            if self.dealer.get('platform') == 'ect':
+                stats['platform_detected'] = 'ect'
+                from dealer_ect import fetch_ect_inventory
+                ect_v = fetch_ect_inventory(self.base_url, self.sess, max_age_days=90)
+                if ect_v is not None:
+                    print(f'  ect sitemap returned {len(ect_v)} vehicles (last 90 days)', flush=True)
+                    self._process_aan(scan_id, ect_v, stats)
+                    stats['colors_detected'] = self._detect_colors()
+                    self._update_dealer('ect', 'sitemap_jsonld', scan_id, 'ok', stats['tier'])
+                    stats['status'] = 'ok'
+                    self._finalize(scan_id, stats, started)
+                    return stats
+                print('  ect sitemap path failed', flush=True)
+
             # If the dealer has a stored scrape_config, prefer it.
             if self.dealer.get('scrape_config'):
                 platform = 'ai-generated'
