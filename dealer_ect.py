@@ -1,8 +1,22 @@
 """ECT (Exotic Car Trader) inventory fetcher.
 
-ECT is a Webflow-fronted Bubble.io marketplace. Per-VDP data lives in static
-JSON-LD `Product` blocks; per-listing creation timestamp lives encoded in the
-primary image URL (`listingcontent.exoticcartrader.com/<UnixMillis>x<rowid>/...`).
+ECT is a Webflow-fronted Bubble.io marketplace. As of ~2026-05-01 the per-VDP
+Product data is no longer rendered in a static `<script type="application/ld+json">`
+block — it's built and injected at runtime by inline JavaScript:
+
+    var price = parseInt("$18,999".substring(1)...);
+    var structuredData = { "@context": "https://schema.org", "@type": "Product",
+        "name": "1992 ...", "image": "...", "offers": { "price": price, ... } };
+    jsonldScript.textContent = JSON.stringify(structuredData);
+    document.head.appendChild(jsonldScript);
+
+The data is still all there as a JS literal — we just have to extract it ourselves.
+The literal is mostly valid JSON; the only non-JSON token is the `price` variable
+reference, which we substitute back to an int before parsing.
+
+For per-listing creation timestamp: the `og:image` meta tag still points at
+`listingcontent.exoticcartrader.com/<UnixMillis>x<rowid>/...` even though the
+JSON-LD `image` now points at the Webflow CDN (which has no embedded timestamp).
 
 We walk the listings sitemap newest→oldest, fetch each VDP, and stop when we
 have seen N consecutive listings older than `max_age_days`. Returns vehicle
@@ -35,11 +49,25 @@ _VIN_TEXT_RE = re.compile(r"VIN\s+([A-HJ-NPR-Z0-9]{17})\b")
 _LOT_RE = re.compile(r"Lot\s*#(\d+)", re.I)
 _LOC_RE = re.compile(r"<loc>\s*([^<]+?)\s*</loc>")
 _NAME_YEAR_RE = re.compile(r"^(\d{4})\s+(.+)$")
+# JS-injected Product literal (post-2026-05-01 site change)
+_JS_STRUCTURED_DATA_RE = re.compile(
+    r"var\s+structuredData\s*=\s*(\{.*?\});", re.DOTALL)
+_JS_PRICE_RE = re.compile(r'var\s+price\s*=\s*parseInt\("\$([\d,]+)"')
+_JS_PRICE_FIELD_RE = re.compile(r'"price"\s*:\s*price\b')
+# og:image meta carries the old listingcontent.exoticcartrader.com URL with
+# embedded UnixMillis timestamp, even though structuredData.image points at
+# the Webflow CDN (no timestamp).
+_OG_IMAGE_RE = re.compile(
+    r'<meta\s+(?:property|name)=["\']og:image["\']\s+content=["\']([^"\']+)["\']',
+    re.IGNORECASE)
+# URL slug trailing digits = ECT lot number for slug-form URLs like
+# /listing/1992-am-general-hummer-260252713
+_URL_LOT_RE = re.compile(r"-(\d{6,})(?:[/?#]|$)")
 
 _MULTI_WORD_MAKES = (
     "Aston Martin", "Alfa Romeo", "Land Rover", "Range Rover",
     "Mercedes-Benz", "Mercedes Benz", "Rolls-Royce", "Rolls Royce",
-    "AC Cars", "Ruf",
+    "AC Cars", "AM General", "Ruf",
 )
 
 
@@ -72,7 +100,13 @@ def _parse_name(name: str):
 
 
 def _find_product_jsonld(soup: BeautifulSoup) -> Optional[dict]:
-    """Locate the @type=Product block among possibly-multiple JSON-LD scripts."""
+    """Locate the @type=Product block among possibly-multiple JSON-LD scripts.
+
+    Returns the first Product object found in any static <script type=
+    "application/ld+json"> tag. Used by sites that still ship server-side
+    structured data — kept for backwards compatibility with any non-migrated
+    ECT VDPs and for any future Product-shipping site.
+    """
     for s in soup.select('script[type="application/ld+json"]'):
         txt = s.get_text() or ""
         if not txt.strip():
@@ -90,11 +124,96 @@ def _find_product_jsonld(soup: BeautifulSoup) -> Optional[dict]:
     return None
 
 
+def _slice_js_object(html: str, var_name: str) -> Optional[str]:
+    """Brace-balanced extraction of a JS object literal.
+
+    Returns the {...} string for `var <var_name> = {...}` or None. Uses depth
+    counting (with simple string-state tracking so braces inside double-quoted
+    strings don't confuse the counter) instead of a lazy regex, because the
+    structuredData object is followed by an unrelated `window.__X = {...};`
+    line whose terminating `};` would falsely terminate a lazy match.
+    """
+    pat = re.compile(rf"var\s+{re.escape(var_name)}\s*=\s*", re.IGNORECASE)
+    m = pat.search(html)
+    if not m:
+        return None
+    start = html.find("{", m.end())
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(html)):
+        c = html[i]
+        if escape:
+            escape = False
+            continue
+        if c == "\\":
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start:i + 1]
+    return None
+
+
+def _find_product_js_literal(html: str) -> Optional[dict]:
+    """Extract `var structuredData = {...}` JS literal as a Product dict.
+
+    Substitutes the `price` JS variable reference with the int parsed from the
+    preceding `var price = parseInt("$X,XXX"...)` declaration so the literal
+    becomes valid JSON. Returns None if either piece is missing.
+    """
+    literal = _slice_js_object(html, "structuredData")
+    if not literal:
+        return None
+    price_int = None
+    pm = _JS_PRICE_RE.search(html)
+    if pm:
+        try:
+            price_int = int(pm.group(1).replace(",", ""))
+        except ValueError:
+            price_int = None
+    # Sub `"price": price` → `"price": <int>` (or 0 if we couldn't find one;
+    # caller-side price coercion will treat 0 as missing)
+    literal = _JS_PRICE_FIELD_RE.sub(f'"price": {price_int or 0}', literal)
+    try:
+        d = json.loads(literal)
+    except Exception:
+        return None
+    if isinstance(d, dict) and d.get("@type") == "Product":
+        return d
+    return None
+
+
+def _extract_og_image(html: str) -> Optional[str]:
+    """The og:image meta still points at the old listingcontent CDN URL with
+    the embedded UnixMillis timestamp, even after the 2026-05-01 site change
+    moved structuredData.image to the (timestamp-less) Webflow CDN."""
+    m = _OG_IMAGE_RE.search(html)
+    return m.group(1) if m else None
+
+
 def _ect_extract_one(vdp_url: str, sess) -> Optional[dict]:
     """Fetch a single VDP and turn it into an AAN-shaped vehicle dict.
 
-    Returns None if the page can't be parsed or has no Product JSON-LD —
-    which is also what happens for sold/removed listings on this site.
+    Returns None if the page can't be parsed or has no Product data — which
+    is also what happens for sold/removed listings on this site.
+
+    Tries static JSON-LD first (legacy / non-migrated VDPs), then the JS
+    `var structuredData = {...}` literal injected at runtime (post-2026-05-01
+    Webflow migration). For source_added_at, prefers the og:image meta URL
+    because it still carries the listingcontent.exoticcartrader.com path with
+    embedded UnixMillis timestamp, even though structuredData.image now points
+    at the Webflow CDN (which has no timestamp).
     """
     try:
         r = sess.get(vdp_url, timeout=15)
@@ -103,26 +222,42 @@ def _ect_extract_one(vdp_url: str, sess) -> Optional[dict]:
     if r.status_code != 200 or not r.text:
         return None
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    product = _find_product_jsonld(soup)
+    html = r.text
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Try static JSON-LD first; fall back to JS-injected literal.
+    product = _find_product_jsonld(soup) or _find_product_js_literal(html)
     if not product:
         return None
 
-    # Image timestamp — bubble.io ID prefix encodes upload time as Unix ms
-    img = product.get("image")
-    if isinstance(img, list):
-        img = img[0] if img else None
-    img = img if isinstance(img, str) else None
+    # source_added_at: prefer og:image (still has listingcontent timestamp),
+    # fall back to the structuredData image (only carries timestamp on
+    # legacy non-migrated VDPs).
+    og_img = _extract_og_image(html)
+    sd_img = product.get("image")
+    if isinstance(sd_img, list):
+        sd_img = sd_img[0] if sd_img else None
+    sd_img = sd_img if isinstance(sd_img, str) else None
+
     source_added_at = None
-    m = _IMG_TS_RE.search(img or "")
-    if m:
-        ts = int(m.group(1)) / 1000.0
-        source_added_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    for candidate in (og_img, sd_img):
+        if not candidate:
+            continue
+        m = _IMG_TS_RE.search(candidate)
+        if m:
+            ts = int(m.group(1)) / 1000.0
+            source_added_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+            break
+
+    # Display photo: prefer the structuredData image (Webflow CDN, smaller +
+    # the dealer's chosen hero shot), fall back to og:image.
+    img = sd_img or og_img
 
     # Year / make / model from `name`
     year, make, model = _parse_name(product.get("name") or "")
 
-    # Price from offers
+    # Price: structuredData.offers.price is the source of truth on legacy
+    # VDPs and on JS-injected VDPs (we substituted the JS variable upstream).
     offers = product.get("offers") or {}
     price = offers.get("price")
     try:
@@ -137,23 +272,34 @@ def _ect_extract_one(vdp_url: str, sess) -> Optional[dict]:
     if um:
         vin = um.group(1)
     else:
-        # Newer ECT URLs are slug-based; fall back to meta description.
+        # Slug-form URLs: try meta description, then og:description (newer
+        # VDPs sometimes only have og:description, not the legacy `name=
+        # "description"` tag).
         meta = soup.find("meta", attrs={"name": "description"})
-        if meta:
-            tm = _VIN_TEXT_RE.search(meta.get("content") or "")
-            if tm:
-                vin = tm.group(1)
+        desc_text = (meta.get("content") if meta else "") or ""
+        if not desc_text:
+            ogd = soup.find("meta", attrs={"property": "og:description"})
+            desc_text = (ogd.get("content") if ogd else "") or ""
+        tm = _VIN_TEXT_RE.search(desc_text)
+        if tm:
+            vin = tm.group(1)
 
-    # Stock # = ECT lot number from meta description
+    # Stock # = ECT lot number. Try (a) meta description "Lot #N", then
+    # (b) trailing digits on the URL slug ("/listing/...-260252713"). The
+    # latter is the only source on JS-injected VDPs that lack a meta desc.
     stock = None
     meta = soup.find("meta", attrs={"name": "description"})
     if meta:
         lm = _LOT_RE.search(meta.get("content") or "")
         if lm:
             stock = lm.group(1)
+    if not stock:
+        um = _URL_LOT_RE.search(vdp_url)
+        if um:
+            stock = um.group(1)
 
-    # Canonical URL — ECT has a /listing/<VIN> canonical even when the
-    # sitemap returns /beta/listing/<VIN>; prefer canonical for storage.
+    # Canonical URL — ECT has a /listing/<slug-or-VIN> canonical even when
+    # the sitemap returns /beta/listing/...; prefer canonical for storage.
     canon = soup.find("link", rel="canonical")
     canon_href = canon.get("href") if canon else None
     url = canon_href or vdp_url
@@ -210,6 +356,15 @@ def fetch_ect_inventory(base_url, sess, *, max_age_days=90, max_vehicles=None,
     too_old = 0
     no_product = 0
     progress_every = 50
+    # Circuit breaker thresholds: if we burn through the warm-up window and
+    # the JSON-LD Product block is missing on most VDPs, the site is serving
+    # CF challenges / empty shells / rate-limit pages. Returning [] from this
+    # state would let the scanner reconcile against an empty list and wipe
+    # active inventory (2026-05-01 incident: 1500 fetched, 1500 no_product,
+    # kept 0 → 451 active rows swept). Returning None signals hard failure
+    # so the early-return path's zero-vehicle guard preserves inventory.
+    NO_PRODUCT_WARMUP = 30
+    NO_PRODUCT_RATIO_ABORT = 0.6
 
     for vdp_url in urls:
         if fetched >= cap:
@@ -219,6 +374,13 @@ def fetch_ect_inventory(base_url, sess, *, max_age_days=90, max_vehicles=None,
         fetched += 1
         if v is None:
             no_product += 1
+            if fetched >= NO_PRODUCT_WARMUP \
+                    and no_product / fetched > NO_PRODUCT_RATIO_ABORT:
+                log(f"  [ect] aborting: {no_product}/{fetched} VDPs missing "
+                    f"JSON-LD Product (ratio {no_product/fetched:.0%} > "
+                    f"{NO_PRODUCT_RATIO_ABORT:.0%}) — likely CF challenge "
+                    f"or rate-limit, signalling hard failure", flush=True)
+                return None
             continue
 
         added = v.get("source_added_at")
@@ -249,4 +411,14 @@ def fetch_ect_inventory(base_url, sess, *, max_age_days=90, max_vehicles=None,
 
     log(f"  [ect] done — fetched {fetched}, kept {len(vehicles)}, "
         f"too_old {too_old}, no_product {no_product}", flush=True)
+    # Post-loop circuit breaker: if we burned through fetches and kept zero
+    # while no_product was the dominant reason, signal hard failure rather
+    # than handing back []. Distinguishes "site is broken" from the legit
+    # "every recent listing is older than the cutoff window" case (where
+    # too_old would dominate and kept could legitimately be 0).
+    if vehicles == [] and fetched >= NO_PRODUCT_WARMUP \
+            and no_product / max(fetched, 1) > 0.5:
+        log(f"  [ect] post-scan abort: kept 0 with no_product-dominant "
+            f"({no_product}/{fetched}), returning None", flush=True)
+        return None
     return vehicles

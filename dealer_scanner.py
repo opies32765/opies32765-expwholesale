@@ -1841,6 +1841,19 @@ class DealerScanner:
                 di, resolved_cfg = fetch_dealer_inspire_inventory(
                     self.base_url, self.sess, cached_cfg=cached_algolia)
                 if di is not None:
+                    if not di:
+                        prior = self._zero_vehicle_abort_check()
+                        if prior:
+                            stats['status'] = 'blocked'
+                            stats['error'] = (
+                                f'dealerinspire-algolia returned 0 vehicles but '
+                                f'{prior} were active — keys may have rotated or '
+                                f'index drained, scan aborted, inventory preserved'
+                            )
+                            self._update_dealer('dealerinspire', 'algolia', scan_id,
+                                                stats['error'][:200], stats['tier'])
+                            self._finalize(scan_id, stats, started)
+                            return stats
                     print(f'  dealerinspire algolia returned {len(di)} vehicles', flush=True)
                     # Persist newly-discovered cfg to dealers.scrape_config.algolia
                     # so subsequent scans skip FlareSolverr entirely. Idempotent
@@ -1867,15 +1880,36 @@ class DealerScanner:
                 stats['platform_detected'] = 'ect'
                 from dealer_ect import fetch_ect_inventory
                 ect_v = fetch_ect_inventory(self.base_url, self.sess, max_age_days=90)
-                if ect_v is not None:
-                    print(f'  ect sitemap returned {len(ect_v)} vehicles (last 90 days)', flush=True)
-                    self._process_aan(scan_id, ect_v, stats)
-                    stats['colors_detected'] = self._detect_colors()
-                    self._update_dealer('ect', 'sitemap_jsonld', scan_id, 'ok', stats['tier'])
-                    stats['status'] = 'ok'
+                # ECT is a purpose-built handler — if it can't get inventory,
+                # the universal path WILL find ~17 unrelated URLs via generic
+                # crawl and wipe everything as "missing". Always abort here;
+                # never fall through. (2026-05-02 incident: handler returned
+                # None on CF block, fall-through universal-crawl wiped 451.)
+                if ect_v is None or not ect_v:
+                    prior = self._zero_vehicle_abort_check()
+                    if prior:
+                        stats['status'] = 'blocked'
+                        reason = ('handler hard failure (CF/rate-limit)'
+                                  if ect_v is None else 'handler returned 0 vehicles')
+                        stats['error'] = (
+                            f'ect {reason} but {prior} active rows exist — '
+                            f'scan aborted, inventory preserved'
+                        )
+                    else:
+                        stats['status'] = 'error'
+                        stats['error'] = ('ect handler failed and no prior '
+                                          'inventory to protect')
+                    self._update_dealer('ect', 'sitemap_jsonld', scan_id,
+                                        stats['error'][:200], stats['tier'])
                     self._finalize(scan_id, stats, started)
                     return stats
-                print('  ect sitemap path failed', flush=True)
+                print(f'  ect sitemap returned {len(ect_v)} vehicles (last 90 days)', flush=True)
+                self._process_aan(scan_id, ect_v, stats)
+                stats['colors_detected'] = self._detect_colors()
+                self._update_dealer('ect', 'sitemap_jsonld', scan_id, 'ok', stats['tier'])
+                stats['status'] = 'ok'
+                self._finalize(scan_id, stats, started)
+                return stats
 
             # If the dealer has a stored scrape_config, prefer it.
             if self.dealer.get('scrape_config'):
@@ -1917,6 +1951,19 @@ class DealerScanner:
             if platform == 'aan':
                 aan = fetch_aan_inventory(self.base_url, self.sess)
                 if aan is not None:
+                    if not aan:
+                        prior = self._zero_vehicle_abort_check()
+                        if prior:
+                            stats['status'] = 'blocked'
+                            stats['error'] = (
+                                f'aan /api/cars returned 0 vehicles but {prior} were '
+                                f'active — feed likely empty or auth-blocked, '
+                                f'scan aborted, inventory preserved'
+                            )
+                            self._update_dealer(platform, 'api', scan_id,
+                                                stats['error'][:200], stats['tier'])
+                            self._finalize(scan_id, stats, started)
+                            return stats
                     self._process_aan(scan_id, aan, stats)
                     stats['colors_detected'] = self._detect_colors()
                     self._update_dealer(platform, 'api', scan_id, 'ok', stats['tier'])
@@ -2119,6 +2166,28 @@ class DealerScanner:
 
         self._finalize(scan_id, stats, started)
         return stats
+
+    # ─── Shared zero-vehicle abort guard for early-return platform paths ───
+    def _zero_vehicle_abort_check(self):
+        """Return prior_active count if reconciling against zero vehicles would
+        wipe a healthy dealer (>=20 active rows); else None.
+
+        Used by the AAN, DealerInspire-Algolia, and ECT early-return paths,
+        which all hand a vehicle list straight to `_process_aan` and skip the
+        line ~2070 universal sanity guard. Caught by the 2026-05-01 ECT
+        incident: Webflow served the sitemap fine but every VDP returned no
+        JSON-LD Product block (rate-limit / CF challenge), handler returned [],
+        451 active rows got swept. This guard turns that into status=blocked
+        with inventory preserved instead.
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM dealer_inventory "
+                "WHERE dealer_id=%s AND status='active'",
+                (self.dealer_id,))
+            row = cur.fetchone()
+            prior = (row['n'] if isinstance(row, dict) else row[0]) if row else 0
+        return prior if prior >= 20 else None
 
     # ─── AAN: feed-driven upsert + direct sold marking ───
     def _process_aan(self, scan_id, aan_vehicles, stats):
@@ -2361,6 +2430,16 @@ class DealerScanner:
             combined = method
         elif tier:
             combined = tier
+        # Never demote a configured handler-platform (ect, etc.) to 'custom'.
+        # The universal fall-through path passes the auto-detected platform
+        # which is 'custom' when no HTML fingerprint matched — but the dealer
+        # may already be pinned to a custom-handler platform like 'ect'. If we
+        # let 'custom' overwrite, the next scan skips the handler block and
+        # falls through to universal-crawl, which will wipe inventory.
+        # (2026-05-02 incident: scan #141's universal fall-through overwrote
+        # dealer 7's platform from 'ect' to 'custom', causing scan #142 to
+        # also fall through and wipe 451 rows a second time.)
+        platform_to_set = None if platform == 'custom' else platform
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute('''UPDATE dealers SET
                             platform = COALESCE(%s, platform),
@@ -2370,7 +2449,7 @@ class DealerScanner:
                             last_scan_id = %s,
                             updated_at = NOW()
                            WHERE id = %s''',
-                        (platform, combined, status, scan_id, self.dealer_id))
+                        (platform_to_set, combined, status, scan_id, self.dealer_id))
             conn.commit()
 
     def _finalize(self, scan_id, stats, started):
