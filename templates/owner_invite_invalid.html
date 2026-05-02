@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0b0f19">
+<title>Link Invalid — EW Owner</title>
+<style>
+body{margin:0;font-family:-apple-system,'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:#111827;border:1px solid #1e293b;border-radius:16px;padding:36px 28px;width:100%;max-width:380px;text-align:center}
+.icon{font-size:42px;margin-bottom:14px}
+h1{font-size:18px;font-weight:700;color:#f1f5f9;margin-bottom:8px}
+p{font-size:14px;color:#64748b;line-height:1.5;margin-bottom:18px}
+a{display:inline-block;padding:12px 24px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:10px;color:#fff;text-decoration:none;font-size:14px;font-weight:700}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">⌛</div>
+  <h1>{% if expired %}Link expired{% else %}Link no longer valid{% endif %}</h1>
+  <p>{% if expired %}This invite/reset link has expired. Ask Oscar to send you a new one.{% else %}This link has already been used or doesn't exist.{% endif %}</p>
+  <a href="/owner/login">Go to sign in</a>
+</div>
+</body>
+</html>

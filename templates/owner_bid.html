@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0b0f19">
+<title>EW — Bid #{{ bid.id }}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{font-family:-apple-system,'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh;padding-bottom:24px}
+a{color:inherit;text-decoration:none}
+
+/* header */
+.hdr{background:#111827;border-bottom:1px solid #1e293b;padding:10px 12px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:100}
+.back{font-size:24px;color:#94a3b8;width:32px;text-align:center}
+.hdr-title{font-size:14px;font-weight:700;color:#f1f5f9;flex:1}
+.hdr-id{font-family:'SF Mono','Menlo',monospace;font-size:12px;color:#475569}
+
+/* banner */
+.banner{padding:14px 14px 12px;background:linear-gradient(180deg,#111827,#0b0f19);border-bottom:1px solid #1e293b}
+.b-row1{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px}
+.b-ymm{font-size:18px;font-weight:800;color:#f1f5f9;line-height:1.2}
+.b-status{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:4px 9px;border-radius:8px;flex-shrink:0;margin-left:8px}
+.b-status.new{background:rgba(59,130,246,.15);color:#60a5fa}
+.b-status.reviewing{background:rgba(168,85,247,.15);color:#c084fc}
+.b-status.bid_sent{background:rgba(245,158,11,.15);color:#fbbf24}
+.b-status.bought{background:rgba(34,197,94,.15);color:#4ade80}
+.b-status.passed{background:rgba(100,116,139,.15);color:#94a3b8}
+.b-meta{font-size:12px;color:#64748b;display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px}
+.b-meta b{color:#94a3b8;font-weight:600}
+
+/* price strip */
+.prices{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}
+.p{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:8px;text-align:center}
+.p-l{font-size:9px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.4px}
+.p-v{font-size:15px;font-weight:800;margin-top:3px;color:#cbd5e1}
+.p.ai .p-v{color:#93c5fd}
+.p.bid .p-v{color:#fbbf24}
+.p .p-v.empty{color:#334155;font-size:13px;font-weight:500}
+
+/* photo strip */
+.strip{display:flex;gap:6px;padding:10px 12px;overflow-x:auto;-webkit-overflow-scrolling:touch;background:#0b0f19}
+.strip::-webkit-scrollbar{display:none}
+.strip img{height:90px;border-radius:8px;flex-shrink:0;background:#1e293b}
+
+/* sections */
+.sect{border-top:1px solid #1e293b}
+.sect summary{padding:14px 16px;display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none;background:#0b0f19}
+.sect summary::-webkit-details-marker{display:none}
+.sect summary::marker{display:none}
+.sect summary:active{background:#0f172a}
+.sect-icon{width:28px;height:28px;border-radius:7px;background:#111827;display:inline-flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
+.sect-label{flex:1;font-size:14px;font-weight:600;color:#cbd5e1}
+.sect-meta{font-size:11px;color:#475569;font-weight:500}
+.sect-arrow{color:#475569;font-size:12px;transition:.15s}
+.sect[open] .sect-arrow{transform:rotate(90deg)}
+.sect-body{padding:0 16px 16px;color:#94a3b8;font-size:14px;line-height:1.5}
+
+/* table-ish key-value lists in section bodies */
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:8px 14px;font-size:13px;margin-top:4px}
+.kv dt{color:#64748b;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding-top:2px}
+.kv dd{color:#cbd5e1;font-weight:500;word-break:break-word}
+
+/* messages */
+.msg{padding:8px 12px;background:#111827;border-radius:10px;margin-bottom:6px;font-size:13px;line-height:1.4}
+.msg .who{font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px}
+.msg.outbound{background:#1e3a8a;color:#dbeafe}
+.msg.outbound .who{color:#93c5fd}
+.msg-time{font-size:10px;color:#475569;text-align:right;margin-top:3px}
+
+/* AI assessment text */
+.assess-text{white-space:pre-wrap;background:#111827;border-radius:10px;padding:12px;font-size:13px;line-height:1.55;color:#cbd5e1;max-height:340px;overflow-y:auto}
+
+/* book grid */
+.books{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-top:6px}
+.book{background:#111827;border-radius:8px;padding:9px 10px}
+.book-l{font-size:10px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.4px}
+.book-v{font-size:15px;font-weight:700;color:#cbd5e1;margin-top:2px}
+
+/* screenshot link */
+.shot{display:block;margin-top:8px;background:#111827;border-radius:8px;overflow:hidden}
+.shot img{width:100%;display:block}
+
+/* badges */
+.bad{display:inline-block;padding:2px 8px;border-radius:8px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+.bad.ok{background:rgba(34,197,94,.15);color:#4ade80}
+.bad.no{background:rgba(239,68,68,.15);color:#f87171}
+.bad.miss{background:rgba(100,116,139,.15);color:#94a3b8}
+
+/* lightbox */
+.lb{position:fixed;inset:0;background:rgba(0,0,0,.95);display:none;align-items:center;justify-content:center;z-index:500;padding:16px}
+.lb.show{display:flex}
+.lb img{max-width:100%;max-height:100%;border-radius:8px}
+.lb .close{position:absolute;top:16px;right:16px;color:#fff;font-size:32px;background:rgba(0,0,0,.5);width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <a href="/owner" class="back">‹</a>
+  <div class="hdr-title">Bid Detail</div>
+  <div class="hdr-id">#{{ bid.id }}</div>
+</div>
+
+<!-- BANNER (always visible) -->
+<div class="banner">
+  <div class="b-row1">
+    <div class="b-ymm">
+      {% if bid.year or bid.make or bid.model %}{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }}{% if bid.trim %} {{ bid.trim }}{% endif %}{% else %}(no YMM yet){% endif %}
+    </div>
+    <span class="b-status {{ bid.status }}">{{ bid.status.replace('_',' ') }}</span>
+  </div>
+  <div class="b-meta">
+    {% if bid.vin %}<span><b>VIN</b> {{ bid.vin }}</span>{% endif %}
+    {% if bid.mileage %}<span><b>Mi</b> {{ '{:,}'.format(bid.mileage) }}</span>{% endif %}
+    {% if bid.color %}<span><b>Color</b> {{ bid.color }}</span>{% endif %}
+    {% if bid.contact_name %}<span><b>From</b> {{ bid.contact_name }}</span>{% endif %}
+  </div>
+  <div class="prices">
+    <div class="p"><div class="p-l">Ask</div><div class="p-v {% if not bid.asking_price %}empty{% endif %}">{% if bid.asking_price %}${{ '{:,}'.format(bid.asking_price) }}{% else %}—{% endif %}</div></div>
+    <div class="p ai"><div class="p-l">AI Buy</div><div class="p-v {% if not bid.ai_price %}empty{% endif %}">{% if bid.ai_price %}${{ '{:,}'.format(bid.ai_price) }}{% else %}—{% endif %}</div></div>
+    <div class="p bid"><div class="p-l">EW Bid</div><div class="p-v {% if not bid.bid_amount %}empty{% endif %}">{% if bid.bid_amount %}${{ '{:,}'.format(bid.bid_amount) }}{% else %}—{% endif %}</div></div>
+  </div>
+</div>
+
+<!-- PHOTO STRIP (always visible, scroll horizontally) -->
+{% if photos %}
+<div class="strip">
+  {% for p in photos %}
+    <img src="/thumb?size=mobile&url={{ p.photo_url|urlencode }}" data-full="{{ p.photo_url }}" loading="lazy" onclick="openLightbox(this.dataset.full)">
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- COLLAPSED SECTIONS -->
+
+<details class="sect">
+  <summary>
+    <span class="sect-icon">💬</span>
+    <span class="sect-label">Messages</span>
+    <span class="sect-meta">{{ messages|length }} msg{% if messages|length != 1 %}s{% endif %}</span>
+    <span class="sect-arrow">›</span>
+  </summary>
+  <div class="sect-body">
+    {% if not messages %}
+      <div style="color:#475569;font-style:italic;padding:8px 0">No messages yet.</div>
+    {% endif %}
+    {% for m in messages %}
+      <div class="msg {% if m.direction == 'outbound' %}outbound{% endif %}">
+        <div class="who">{{ m.direction or '—' }}{% if m.from_phone %} · {{ m.from_phone }}{% endif %}</div>
+        <div>{{ m.message }}</div>
+        <div class="msg-time" data-time="{{ m.created_at.isoformat() if m.created_at else '' }}">…</div>
+      </div>
+    {% endfor %}
+  </div>
+</details>
+
+{% if bid.ai_assessment %}
+<details class="sect">
+  <summary>
+    <span class="sect-icon">🤖</span>
+    <span class="sect-label">AI Assessment</span>
+    {% if bid.ai_price %}<span class="sect-meta">Buy ${{ '{:,}'.format(bid.ai_price) }}</span>{% endif %}
+    <span class="sect-arrow">›</span>
+  </summary>
+  <div class="sect-body">
+    <div class="assess-text">{{ bid.ai_assessment }}</div>
+  </div>
+</details>
+{% endif %}
+
+{% if vauto %}
+<details class="sect">
+  <summary>
+    <span class="sect-icon">📊</span>
+    <span class="sect-label">vAuto Books</span>
+    <span class="sect-meta">
+      {% if vauto.title_status %}{{ vauto.title_status }}{% endif %}
+    </span>
+    <span class="sect-arrow">›</span>
+  </summary>
+  <div class="sect-body">
+    <div class="books">
+      {% if vauto.rbook %}<div class="book"><div class="book-l">rBook</div><div class="book-v">${{ '{:,}'.format(vauto.rbook|int) }}</div></div>{% endif %}
+      {% if vauto.black_book %}<div class="book"><div class="book-l">Black Book</div><div class="book-v">${{ '{:,}'.format(vauto.black_book|int) }}</div></div>{% endif %}
+      {% if vauto.mmr %}<div class="book"><div class="book-l">MMR</div><div class="book-v">${{ '{:,}'.format(vauto.mmr|int) }}</div></div>{% endif %}
+      {% if vauto.kbb %}<div class="book"><div class="book-l">KBB</div><div class="book-v">${{ '{:,}'.format(vauto.kbb|int) }}</div></div>{% endif %}
+      {% if vauto.kbb_com %}<div class="book"><div class="book-l">KBB.com</div><div class="book-v">${{ '{:,}'.format(vauto.kbb_com|int) }}</div></div>{% endif %}
+      {% if vauto.jd_power %}<div class="book"><div class="book-l">JD Power</div><div class="book-v">${{ '{:,}'.format(vauto.jd_power|int) }}</div></div>{% endif %}
+    </div>
+    {% if vauto.carfax_screenshot %}
+      <div style="margin-top:12px">
+        <div class="book-l" style="margin-bottom:5px">Carfax</div>
+        <div class="shot"><img src="{{ vauto.carfax_screenshot }}" onclick="openLightbox(this.src)"></div>
+      </div>
+    {% endif %}
+    {% if vauto.autocheck_screenshot %}
+      <div style="margin-top:12px">
+        <div class="book-l" style="margin-bottom:5px">AutoCheck</div>
+        <div class="shot"><img src="{{ vauto.autocheck_screenshot }}" onclick="openLightbox(this.src)"></div>
+      </div>
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+{% if ipacket %}
+<details class="sect">
+  <summary>
+    <span class="sect-icon">🪧</span>
+    <span class="sect-label">iPacket Window Sticker</span>
+    {% if ipacket.total_msrp %}<span class="sect-meta">MSRP ${{ '{:,}'.format(ipacket.total_msrp|int) }}</span>{% endif %}
+    <span class="sect-arrow">›</span>
+  </summary>
+  <div class="sect-body">
+    <dl class="kv">
+      {% if ipacket.total_msrp %}<dt>Total MSRP</dt><dd>${{ '{:,}'.format(ipacket.total_msrp|int) }}</dd>{% endif %}
+      {% if ipacket.base_price %}<dt>Base</dt><dd>${{ '{:,}'.format(ipacket.base_price|int) }}</dd>{% endif %}
+      {% if ipacket.exterior_color %}<dt>Exterior</dt><dd>{{ ipacket.exterior_color }}</dd>{% endif %}
+      {% if ipacket.interior_color %}<dt>Interior</dt><dd>{{ ipacket.interior_color }}</dd>{% endif %}
+    </dl>
+    {% if ipacket.screenshot %}
+      <div class="shot" style="margin-top:10px"><img src="{{ ipacket.screenshot }}" onclick="openLightbox(this.src)"></div>
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+{% if accutrade %}
+<details class="sect">
+  <summary>
+    <span class="sect-icon">📈</span>
+    <span class="sect-label">AccuTrade</span>
+    <span class="sect-arrow">›</span>
+  </summary>
+  <div class="sect-body">
+    {% if accutrade.screenshot %}
+      <div class="shot"><img src="{{ accutrade.screenshot }}" onclick="openLightbox(this.src)"></div>
+    {% else %}
+      <em style="color:#475569">No screenshot available</em>
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+<details class="sect">
+  <summary>
+    <span class="sect-icon">📍</span>
+    <span class="sect-label">Contact &amp; Notes</span>
+    <span class="sect-arrow">›</span>
+  </summary>
+  <div class="sect-body">
+    <dl class="kv">
+      {% if bid.contact_name %}<dt>Name</dt><dd>{{ bid.contact_name }}</dd>{% endif %}
+      {% if bid.contact_company %}<dt>Company</dt><dd>{{ bid.contact_company }}</dd>{% endif %}
+      {% if bid.phone %}<dt>Phone</dt><dd>{{ bid.phone }}</dd>{% endif %}
+      <dt>Created</dt><dd data-time="{{ bid.created_at.isoformat() if bid.created_at else '' }}">…</dd>
+      {% if bid.updated_at %}<dt>Updated</dt><dd data-time="{{ bid.updated_at.isoformat() }}">…</dd>{% endif %}
+    </dl>
+    {% if bid.notes %}
+      <div style="margin-top:10px;background:#111827;border-radius:8px;padding:10px;color:#cbd5e1;white-space:pre-wrap;font-size:13px;line-height:1.5">{{ bid.notes }}</div>
+    {% endif %}
+  </div>
+</details>
+
+<!-- lightbox -->
+<div id="lb" class="lb" onclick="closeLightbox()">
+  <div class="close">×</div>
+  <img id="lbImg" src="">
+</div>
+
+<script>
+function timeAgo(iso){
+  if(!iso) return '';
+  const t = new Date(iso); const now = new Date();
+  const s = Math.floor((now - t)/1000);
+  if (s < 60) return 'just now';
+  const m = Math.floor(s/60); if (m < 60) return m+'m ago';
+  const h = Math.floor(m/60); if (h < 24) return h+'h ago';
+  const d = Math.floor(h/24); if (d < 7) return d+'d ago';
+  return t.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+}
+document.querySelectorAll('[data-time]').forEach(el => {
+  const v = el.getAttribute('data-time');
+  if (v) el.textContent = timeAgo(v);
+});
+function openLightbox(src){
+  document.getElementById('lbImg').src = src;
+  document.getElementById('lb').classList.add('show');
+}
+function closeLightbox(){
+  document.getElementById('lb').classList.remove('show');
+}
+</script>
+</body>
+</html>
