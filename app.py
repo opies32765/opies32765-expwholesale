@@ -1,17 +1,31 @@
 import json
 import os
 import re
+import time
 import base64
 import uuid
 import threading
+import traceback
 import psycopg2
 import psycopg2.extras
 import requests
+from ew_v4_router import should_use_v4, v4_extract
+_BIDS_COLUMNS_CACHE = None  # populated on first auto-decode VIN call
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, redirect, url_for, send_from_directory, session
 from twilio.rest import Client as TwilioClient
 
 app = Flask(__name__)
+
+@app.errorhandler(Exception)
+def _global_exception_handler(e):
+    import traceback
+    print("[FLASK-EXCEPTION] type=" + type(e).__name__ + " msg=" + str(e), flush=True)
+    traceback.print_exc()
+    return "Internal Server Error", 500
+
+
+
 app.secret_key = os.environ.get('SECRET_KEY', 'expwholesale2026!')
 app.permanent_session_lifetime = 86400 * 30  # 30 days
 # Auto-reload templates on filesystem change so template-only edits don't
@@ -41,6 +55,14 @@ try:
 except Exception as _e:
     print(f'[cost_dashboard] blueprint not loaded: {_e}', flush=True)
 
+# Owner portal blueprint — mobile-first read-mostly view for the 3 EW owners
+try:
+    from owner_portal import bp as _owner_bp, notify_owners_new_bid
+    app.register_blueprint(_owner_bp)
+except Exception as _e:
+    notify_owners_new_bid = None
+    print(f'[owner_portal] blueprint not loaded: {_e}', flush=True)
+
 # ── Dashboard login ───────────────────────────────────────────────────────────
 EW_USERNAME = os.environ.get('EW_USERNAME', 'admin')
 EW_PASSWORD = os.environ.get('EW_PASSWORD', 'Sedecrem3')
@@ -52,10 +74,13 @@ _PUBLIC_PREFIXES = (
     '/api/mobile-submit', '/api/rep-bids', '/api/register-rep',
     '/api/vauto/', '/api/accutrade/', '/accutrade_reports/',
     '/api/ipacket/', '/ipacket_reports/',
+    '/api/worker/',  # progress, session_lost — worker-facing, no login
     '/api/dealer/vauto_verify', '/api/dealer/vauto_verify_queue',
     '/api/dealer/beelink_scrape_queue', '/api/dealer/beelink_scrape_result',
     '/api/dealer/info/',
-    '/partner/',  # partner portal (own auth layer: partner_user_id session key)
+    '/partner/',
+    '/owner',  # owner portal (own auth layer: owner_user_id session key)
+    '/healthz',  # CF Load Balancer health check  # partner portal (own auth layer: partner_user_id session key)
     '/api/bid/external', '/api/push-subscribe',
     '/api/push-unsubscribe', '/api/vapid-public-key',
     '/.well-known/', '/api/tesla-vin/', '/share/', '/m/',
@@ -70,6 +95,30 @@ def well_known(filename):
         filename,
         mimetype='application/x-pem-file'
     )
+
+@app.route('/healthz')
+def healthz():
+    """Health check for Cloudflare Load Balancer.
+
+    Returns 200 ONLY when the app can write to its database. A read-only
+    standby (pg_is_in_recovery()=true) returns 503 so CF won't route inbound
+    writes to it. After a failover promotion on C2, pg_is_in_recovery() flips
+    to false and this starts returning 200 — that's the signal CF uses to
+    flip traffic to the failover pool.
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT pg_is_in_recovery()')
+                in_recovery = cur.fetchone()
+                # RealDictCursor returns dict; key may be 'pg_is_in_recovery'
+                in_recovery = list(in_recovery.values())[0] if hasattr(in_recovery, 'values') else in_recovery[0]
+        if in_recovery:
+            return {'ok': False, 'reason': 'standby (read-only)'}, 503
+        return {'ok': True, 'role': 'primary'}, 200
+    except Exception as e:
+        return {'ok': False, 'error': str(e)[:200]}, 503
+
 _PUBLIC_SUFFIXES = ('/rep-message', '/field-update', '/messages', '/messages-poll')
 
 
@@ -859,6 +908,14 @@ def _parse_sticker_text(text):
 
 def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
     """Extract VIN from image. Google Vision first (cheap), Claude fallback."""
+    # v4 routing: if call originated from EW_TEST_USER_PHONE, try the home-machine
+    # Qwen2.5-VL-7B + LoRA first. Fall through to Gemini path on miss/timeout.
+    if should_use_v4():
+        v4_vin = v4_extract(file_bytes, task='vin')
+        if v4_vin and VIN_RE.match(v4_vin):
+            print(f'[OCR] VIN via v4 (test user): {v4_vin}', flush=True)
+            return v4_vin
+        print('[OCR] v4 missed/skipped, falling back to Gemini path', flush=True)
     # Try Google Vision first — ~$0.0015/call vs Claude ~$0.05/call
     text = _google_vision_ocr(file_bytes)
     if text:
@@ -924,6 +981,13 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
 
 def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
     """Extract odometer mileage. Google Vision first, Claude fallback."""
+    # v4 routing: same rule as VIN — only the test user routes to home v4.
+    if should_use_v4():
+        v4_miles = v4_extract(file_bytes, task='odometer')
+        if v4_miles and v4_miles.isdigit() and 100 <= int(v4_miles) <= 999999:
+            print(f'[OCR] miles via v4 (test user): {v4_miles}', flush=True)
+            return v4_miles
+        print('[OCR] v4 odo missed/skipped, falling back', flush=True)
     text = _google_vision_ocr(file_bytes)
     if text:
         up = text.upper()
@@ -1086,6 +1150,12 @@ def extract_carfax_multi(files_list):
             _v = str(info['vin']).strip().upper()
             if len(_v) != 17 or not vin_check_digit_valid(_v):
                 print(f'[carfax-multi] rejected VIN "{_v}" (check digit fail)', flush=True)
+                # Surface the candidate so the async caller can show it to
+                # the user (notes badge) + SMS the partner asking for the
+                # text VIN. First rejection wins; later-photo VINs override
+                # only if shorter/longer attempts came first.
+                if not merged.get('_rejected_vin'):
+                    merged['_rejected_vin'] = _v
                 info.pop('vin', None)
         for f in fields:
             if not merged.get(f) and info.get(f) is not None:
@@ -1098,9 +1168,19 @@ def extract_carfax_multi(files_list):
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+_TWILIO_MAGIC_RE = re.compile(r'^\+1555555\d{4}$')
+
 def send_sms(to, body):
-    """Send SMS via Twilio. Returns True on success, False on failure. Never raises."""
+    """Send SMS via Twilio. Returns True on success, False on failure. Never raises.
+
+    Twilio reserves +1 (555) 555-XXXX for testing; live accounts reject these
+    with HTTP 400 ("Invalid To"). We short-circuit here so test fixtures
+    leaking into prod data don't generate noisy retry storms.
+    """
     if not to or to.startswith('field:') or not TWILIO_SID or not TWILIO_TOKEN or not TWILIO_PHONE:
+        return False
+    if _TWILIO_MAGIC_RE.match(to):
+        print(f'SMS skipped: Twilio magic number {to[-4:]} (test fixture)', flush=True)
         return False
     try:
         client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
@@ -1224,15 +1304,40 @@ def dashboard():
     # Badge "vA" turns green when the scan pipeline is complete. iPacket runs
     # last (after vAuto + AccuTrade), and the worker always writes a row —
     # success OR not_available=true — so its presence is the cleanest "done".
-    cur.execute("SELECT bid_id FROM ipacket_lookups")
+    # Badge turns green when ALL 3 lookups have rows (iPacket row present even when not_available=true).
+    cur.execute("""
+        SELECT v.bid_id FROM vauto_lookups v
+        JOIN accutrade_lookups a ON a.bid_id = v.bid_id
+    """)
     vauto_done = {r['bid_id'] for r in cur.fetchall()}
+
+    # Live worker activity — one row per (bid, worker, job_type) currently
+    # in flight. Caps at 60s look-back so a stuck-in-progress row stops
+    # showing as "active" instead of looking eternal. Multiple jobs per bid
+    # collapse to a single most-recent row in the template.
+    cur.execute("""
+        SELECT DISTINCT ON (bid_id) bid_id, worker_id, job_type, status, claimed_at, completed_at
+          FROM worker_jobs
+         WHERE bid_id IS NOT NULL
+         ORDER BY bid_id, claimed_at DESC
+    """)
+    active_workers = {}
+    for r in cur.fetchall():
+        active_workers.setdefault(r['bid_id'], []).append({
+            'worker_id': r['worker_id'],
+            'job_type': r['job_type'],
+            'status': r.get('status', ''),
+            'completed': r.get('completed_at') is not None,
+        })
 
     db.close()
     return render_template('index.html', bids=bids, stats=stats,
                            status_filter=status_filter, rep_filter=rep_filter,
                            reps=reps, photo_counts=photo_counts,
                            first_photos=first_photos,
-                           vauto_done=vauto_done, time_ago=time_ago)
+                           vauto_done=vauto_done,
+                           active_workers=active_workers,
+                           time_ago=time_ago)
 
 
 @app.route('/bid/<int:bid_id>')
@@ -1270,11 +1375,23 @@ def bid_detail(bid_id):
     if bid['vin'] and not bid['make']:
         decoded = decode_vin(bid['vin'])
         if decoded:
-            fields = ', '.join(f'{k}=%s' for k in decoded)
-            cur.execute(f"UPDATE bids SET {fields} WHERE id=%s", list(decoded.values()) + [bid_id])
-            db.commit()
-            bid = dict(bid)
-            bid.update(decoded)
+            # decode_vin returns NHTSA fields beyond our schema (plant_city,
+            # body_class, etc.) — filter to columns that actually exist on bids.
+            global _BIDS_COLUMNS_CACHE
+            try:
+                _BIDS_COLUMNS_CACHE
+            except NameError:
+                _BIDS_COLUMNS_CACHE = None
+            if _BIDS_COLUMNS_CACHE is None:
+                cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='bids'")
+                _BIDS_COLUMNS_CACHE = {r['column_name'] for r in cur.fetchall()}
+            decoded = {k: v for k, v in decoded.items() if k in _BIDS_COLUMNS_CACHE}
+            if decoded:
+                fields = ', '.join(f'{k}=%s' for k in decoded)
+                cur.execute(f"UPDATE bids SET {fields} WHERE id=%s", list(decoded.values()) + [bid_id])
+                db.commit()
+                bid = dict(bid)
+                bid.update(decoded)
 
     # vAuto lookup data
     cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid_id,))
@@ -1394,6 +1511,15 @@ def bid_detail(bid_id):
 
     db.close()
 
+    # Surface a photo-extracted VIN candidate that failed validation so the
+    # banner can show "No VIN — best guess: XXX" with a one-click apply.
+    # Only meaningful when the bid still has no real VIN.
+    vin_candidate = None
+    if not bid.get('vin') and bid.get('notes'):
+        m = re.search(r'Photo VIN candidate \(verify\):\s*([A-Z0-9]+)', bid['notes'])
+        if m:
+            vin_candidate = m.group(1)
+
     return render_template('bid.html', bid=bid, photos=photos,
                            messages=messages, valuations=valuations,
                            vauto_data=vauto_data,
@@ -1403,6 +1529,7 @@ def bid_detail(bid_id):
                            ai_assessment=bid.get('ai_assessment'),
                            ai_log=ai_log,
                            partner_info=partner_info,
+                           vin_candidate=vin_candidate,
                            time_ago=time_ago)
 
 
@@ -1441,12 +1568,11 @@ def _finalize_sms_intake(cur, log_id, outcome, bid_id=None, reason=None,
         print(f'[sms-intake] finalize error log_id={log_id}: {_e}', flush=True)
 
 
-def _ingest_sms_photo(cur, bid_id, media_url, media_type):
-    """INSERT bid_photos row, download bytes, save locally, set is_sms_intake.
-    Returns (photo_id, bytes_or_None, mime_or_None) so callers that need the
-    bytes for downstream Carfax extraction can chain. Bytes are downloaded
-    only for image/* media; non-image attachments still get a bid_photos row
-    with the Twilio URL for completeness."""
+def _ingest_sms_photo_sync(cur, bid_id, media_url, media_type):
+    """Synchronous INSERT + download + save. Same contract as the original
+    _ingest_sms_photo. Used by Carfax/AutoCheck handlers that genuinely need
+    the bytes inside the request lifecycle. Inbound /webhook/twilio uses the
+    background-ingest variant below to stay within Twilio's 15s budget."""
     if not media_url:
         return None
     cur.execute("""INSERT INTO bid_photos (bid_id, url, is_sms_intake)
@@ -1467,6 +1593,113 @@ def _ingest_sms_photo(cur, bid_id, media_url, media_type):
     except Exception as _e:
         print(f'[sms-photo] download error bid={bid_id} url={media_url[:60]}: {_e}', flush=True)
         return (photo_id, None, None)
+
+
+def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=None):
+    """Background thread target: download MMS bytes after the webhook has
+    already responded to Twilio. Opens its own DB connection because the
+    request-bound one is closed by the time this runs.
+
+    v4 SMS auto-OCR: every inbound photo is OCR'd for VIN + miles.
+    - Test user (from_phone == EW_TEST_USER_PHONE): v4 first, Gemini fallback.
+    - Everyone else: extract_vin_from_file() / extract_mileage_from_file()
+      (Google Vision -> Gemini Flash -> Gemini Pro).
+    Results land on bid_photos.vin_extracted, bids.vin (if NULL), bids.mileage (if NULL).
+    """
+    try:
+        _resp = requests.get(media_url, auth=(TWILIO_SID, TWILIO_TOKEN), timeout=30)
+        if _resp.status_code != 200:
+            print(f'[sms-photo-bg] HTTP {_resp.status_code} bid={bid_id} photo={photo_id}', flush=True)
+            return
+        mime = (_resp.headers.get('Content-Type') or media_type or 'image/jpeg').split(';')[0]
+        img_bytes = _resp.content
+        local = _save_sms_media_local(bid_id, photo_id, img_bytes, mime)
+
+        # OCR pass — runs for EVERY inbound MMS photo.
+        vin = None
+        miles = None
+
+        # Test user → try v4 first (direct call, no request context needed)
+        test_phone = os.environ.get('EW_TEST_USER_PHONE', '').strip()
+        is_test = bool(test_phone and from_phone and from_phone.strip() == test_phone)
+        if is_test:
+            try:
+                from ew_v4_router import v4_extract
+                v4_vin = v4_extract(img_bytes, task='vin')
+                if v4_vin and VIN_RE.match(v4_vin):
+                    vin = v4_vin
+                    print(f'[v4-sms] VIN={vin} bid={bid_id} photo={photo_id}', flush=True)
+                v4_m = v4_extract(img_bytes, task='odometer')
+                if v4_m and v4_m.isdigit() and 100 <= int(v4_m) <= 999999:
+                    miles = int(v4_m)
+                    print(f'[v4-sms] miles={miles} bid={bid_id} photo={photo_id}', flush=True)
+            except Exception as _v4e:
+                print(f'[v4-sms] err bid={bid_id} photo={photo_id}: {_v4e}', flush=True)
+
+        # Gemini fallback for VIN
+        if vin is None:
+            try:
+                cand = extract_vin_from_file(img_bytes, mime)
+                if cand and VIN_RE.match(cand):
+                    vin = cand
+                    print(f'[sms-ocr] VIN via Gemini bid={bid_id}: {vin}', flush=True)
+            except Exception as _e:
+                print(f'[sms-ocr] vin err bid={bid_id} photo={photo_id}: {_e}', flush=True)
+
+        # Gemini fallback for miles
+        if miles is None:
+            try:
+                cand = extract_mileage_from_file(img_bytes, mime)
+                if cand and str(cand).isdigit() and 100 <= int(cand) <= 999999:
+                    miles = int(cand)
+                    print(f'[sms-ocr] miles via Gemini bid={bid_id}: {miles}', flush=True)
+            except Exception as _e:
+                print(f'[sms-ocr] miles err bid={bid_id} photo={photo_id}: {_e}', flush=True)
+
+        # Write everything in one transaction
+        with get_db() as conn:
+            with conn.cursor() as bg_cur:
+                if local:
+                    bg_cur.execute("UPDATE bid_photos SET local_path=%s WHERE id=%s",
+                                   (local, photo_id))
+                if vin:
+                    bg_cur.execute("UPDATE bid_photos SET vin_extracted=%s WHERE id=%s",
+                                   (vin, photo_id))
+                    bg_cur.execute("""UPDATE bids SET vin=%s, updated_at=NOW()
+                                      WHERE id=%s AND (vin IS NULL OR vin='')""",
+                                   (vin, bid_id))
+                if miles:
+                    bg_cur.execute("""UPDATE bids SET mileage=%s, updated_at=NOW()
+                                      WHERE id=%s AND mileage IS NULL""",
+                                   (miles, bid_id))
+            conn.commit()
+    except Exception as _e:
+        print(f'[sms-photo-bg] error bid={bid_id} photo={photo_id}: {_e}', flush=True)
+
+
+def _ingest_sms_photo(cur, bid_id, media_url, media_type, from_phone=None):
+    """Webhook-side photo ingest. INSERTs bid_photos row synchronously (so
+    the bid record is consistent before Twilio gets its 200), then spawns a
+    background thread to fetch the actual MMS bytes. Returns (photo_id, None,
+    None) — bytes are fetched out-of-band. If a caller genuinely needs the
+    bytes inside the request, use _ingest_sms_photo_sync().
+
+    The bg thread will OCR the photo for VIN+miles (Gemini path; v4 first
+    for test user) and write back to bid_photos.vin_extracted + bids.vin/mileage
+    when those fields are still NULL."""
+    if not media_url:
+        return None
+    cur.execute("""INSERT INTO bid_photos (bid_id, url, is_sms_intake)
+                   VALUES (%s, %s, TRUE) RETURNING id""", (bid_id, media_url))
+    photo_id = cur.fetchone()['id']
+    if 'image' not in (media_type or ''):
+        return (photo_id, None, None)
+    threading.Thread(
+        target=_bg_download_sms_photo,
+        args=(photo_id, bid_id, media_url, media_type, from_phone),
+        daemon=True,
+    ).start()
+    return (photo_id, None, None)
 
 
 def _save_sms_media_local(bid_id, photo_id, content_bytes, mime):
@@ -1623,7 +1856,7 @@ def twilio_webhook():
             for i in range(num_media):
                 media_url = request.form.get(f'MediaUrl{i}')
                 media_type = request.form.get(f'MediaContentType{i}', '')
-                _ingest_sms_photo(cur, target_bid_id, media_url, media_type)
+                _ingest_sms_photo(cur, target_bid_id, media_url, media_type, from_phone=from_phone)
             cur.execute("UPDATE bids SET updated_at=NOW(), has_unread=TRUE WHERE id=%s",
                         (target_bid_id,))
             _finalize_sms_intake(
@@ -1675,7 +1908,7 @@ def twilio_webhook():
         for i in range(num_media):
             media_url = request.form.get(f'MediaUrl{i}')
             media_type = request.form.get(f'MediaContentType{i}', '')
-            _ingest_sms_photo(cur, shared_bid_id, media_url, media_type)
+            _ingest_sms_photo(cur, shared_bid_id, media_url, media_type, from_phone=from_phone)
 
         cur.execute("UPDATE bids SET updated_at=NOW(), has_unread=TRUE WHERE id=%s", (shared_bid_id,))
         _finalize_sms_intake(
@@ -1820,7 +2053,7 @@ def twilio_webhook():
         for i in range(num_media):
             media_url = request.form.get(f'MediaUrl{i}')
             media_type = request.form.get(f'MediaContentType{i}', '')
-            res = _ingest_sms_photo(cur, bid_id, media_url, media_type)
+            res = _ingest_sms_photo(cur, bid_id, media_url, media_type, from_phone=from_phone)
             if res and res[1]:
                 photo_files.append((res[1], res[2]))
         cur.execute("UPDATE bids SET updated_at=NOW() WHERE id=%s", (bid_id,))
@@ -1906,7 +2139,7 @@ def twilio_webhook():
     for i in range(num_media):
         media_url = request.form.get(f'MediaUrl{i}')
         media_type = request.form.get(f'MediaContentType{i}', '')
-        res = _ingest_sms_photo(cur, bid_id, media_url, media_type)
+        res = _ingest_sms_photo(cur, bid_id, media_url, media_type, from_phone=from_phone)
         if res and res[1]:
             photo_files.append((res[1], res[2]))
 
@@ -1931,6 +2164,9 @@ def twilio_webhook():
         parsed_vin=vin, parsed_miles=miles)
     db.commit()
     db.close()
+
+    # Owner-portal push fan-out (best-effort, never blocks)
+    _fire_owner_new_bid(bid_id)
 
     # Background Carfax-aware extraction across all forwarded images.
     # Same path as Quick Drop: VIN + miles + YMM + trim + title + accidents +
@@ -2016,6 +2252,12 @@ def _process_carfax_async(bid_id, photo_files):
             carfax_bits.append(f"Accidents: {info['accidents']}")
         if info.get('owners') is not None:
             carfax_bits.append(f"Owners: {info['owners']}")
+        # Surface a near-VIN that failed validation so the user can verify
+        # against the photo and either correct it or text the partner. We
+        # only show this when no good VIN ended up on the bid.
+        _rejected_vin = info.get('_rejected_vin')
+        if _rejected_vin and not row.get('vin'):
+            carfax_bits.append(f"Photo VIN candidate (verify): {_rejected_vin}")
         if carfax_bits:
             new_notes = '[Carfax via SMS] ' + ' · '.join(carfax_bits)
             existing = row['notes'] or ''
@@ -2064,10 +2306,15 @@ def _process_carfax_async(bid_id, photo_files):
                 trigger_market_check(bid_id, final_vin)
             except Exception as e:
                 print(f'[carfax-async] market_check error: {e}', flush=True)
-        elif _photo_vin_invalid:
-            # We dropped a check-digit-failing photo VIN and have nothing else.
-            # Tell the partner so they can re-send the VIN as text instead of
-            # sitting silent (or worse, getting back the wrong car).
+        elif photo_files and '[Carfax via SMS]' not in (row.get('notes') or ''):
+            # No VIN ended up on the bid but we had photos to read. Cover both
+            # failure modes: 17-char-but-bad-check-digit (caught at async-level)
+            # AND wrong-length / unreadable (caught at carfax-multi level via
+            # _rejected_vin). Tell the partner so they can text the VIN
+            # instead of waiting on a silent bid. Guard: only fires on the
+            # first carfax pass for a bid (existing notes lack our marker)
+            # so a second photo upload doesn't double-SMS the partner.
+            _candidate = _rejected_vin or (_photo_vin if _photo_vin_invalid else None)
             try:
                 _vdb = get_db()
                 _vcur = _vdb.cursor()
@@ -2075,11 +2322,17 @@ def _process_carfax_async(bid_id, photo_files):
                 _row = _vcur.fetchone()
                 _vdb.close()
                 if _row and _row.get('driver_phone'):
-                    send_sms(_row['driver_phone'],
-                             f"Bid #{bid_id} — couldn't read VIN clearly from "
-                             f"the photo (glare/angle). Please text the 17-char "
-                             f"VIN and we'll re-process.")
-                    print(f'[carfax-async] bid={bid_id} sent VIN-unclear SMS to driver', flush=True)
+                    if _candidate:
+                        _msg = (f"Bid #{bid_id} — couldn't read the VIN clearly "
+                                f"(best guess: {_candidate}). Please text the "
+                                f"17-char VIN and we'll re-process.")
+                    else:
+                        _msg = (f"Bid #{bid_id} — couldn't read a VIN from the "
+                                f"photo. Please text the 17-char VIN and we'll "
+                                f"re-process.")
+                    send_sms(_row['driver_phone'], _msg)
+                    print(f'[carfax-async] bid={bid_id} sent VIN-unclear SMS to driver '
+                          f'(candidate={_candidate})', flush=True)
             except Exception as e:
                 print(f'[carfax-async] vin-unclear SMS error: {e}', flush=True)
 
@@ -2170,6 +2423,21 @@ def update_bid(bid_id):
     db = get_db()
     cur = db.cursor()
 
+    # Detect "VIN was just added" so we can fire the same downstream
+    # pipeline the SMS webhook does (NHTSA decode → vAuto/AccuTrade/iPacket
+    # priority + market check). Without this, a user fixing a photo VIN
+    # candidate manually would leave the bid stuck without lookups.
+    cur.execute("SELECT vin FROM bids WHERE id=%s", (bid_id,))
+    _existing = cur.fetchone() or {}
+    _prev_vin = (_existing.get('vin') or '').strip().upper()
+    _new_vin_in = (data.get('vin') or '').strip().upper() if data.get('vin') else ''
+    _vin_just_added = (
+        'vin' in data
+        and _new_vin_in and len(_new_vin_in) == 17
+        and vin_check_digit_valid(_new_vin_in)
+        and _new_vin_in != _prev_vin
+    )
+
     allowed = ['vin', 'year', 'make', 'model', 'trim', 'mileage', 'color', 'status', 'notes']
     fields, values = [], []
     for f in allowed:
@@ -2182,8 +2450,38 @@ def update_bid(bid_id):
         cur.execute(f"UPDATE bids SET {', '.join(fields)}, updated_at=NOW() WHERE id=%s", values)
         db.commit()
 
+    # ── VIN-just-added pipeline ──
+    # Run NHTSA decode (fills year/make/model/trim where NULL), flag for
+    # vAuto/AccuTrade/iPacket pickup, kick off market-check scrape.
+    if _vin_just_added:
+        try:
+            decoded = decode_vin(_new_vin_in) or {}
+            decoded = {k: v for k, v in decoded.items()
+                       if k in ('year', 'make', 'model', 'trim') and v}
+            if decoded:
+                # COALESCE so we never overwrite values the user explicitly
+                # filled in this same update call.
+                _sets, _vals = [], []
+                for k, v in decoded.items():
+                    _sets.append(f'{k}=COALESCE({k}, %s)')
+                    _vals.append(v)
+                _vals.append(bid_id)
+                cur.execute(f"UPDATE bids SET {', '.join(_sets)} WHERE id=%s", _vals)
+        except Exception as _e:
+            print(f'[update_bid] decode_vin error bid={bid_id}: {_e}', flush=True)
+        cur.execute("UPDATE bids SET vauto_priority=TRUE WHERE id=%s", (bid_id,))
+        db.commit()
+
     db.close()
-    return jsonify({'success': True})
+
+    # Market check fires after DB close so worker thread doesn't share cur.
+    if _vin_just_added:
+        try:
+            trigger_market_check(bid_id, _new_vin_in)
+        except Exception as _e:
+            print(f'[update_bid] market_check error bid={bid_id}: {_e}', flush=True)
+
+    return jsonify({'success': True, 'vin_pipeline_triggered': _vin_just_added})
 
 
 def _run_market_check_playwright(bid_id, vin):
@@ -3708,13 +4006,36 @@ def api_bids():
 
     # Badge turns green when iPacket finishes — last in the scan pipeline.
     # Workers always write a row (success OR not_available), so presence = done.
-    cur.execute("SELECT bid_id FROM ipacket_lookups")
+    # Badge turns green when ALL 3 lookups have rows (iPacket row present even when not_available=true).
+    cur.execute("""
+        SELECT v.bid_id FROM vauto_lookups v
+        JOIN accutrade_lookups a ON a.bid_id = v.bid_id
+    """)
     vauto_done = {r['bid_id'] for r in cur.fetchall()}
+
+    # Live worker activity — same shape as the dashboard's full-page render
+    # (60s look-back, most-recent first). Polled every 3s with the rest of
+    # the row data so the chip flips on/off as workers claim/release.
+    cur.execute("""
+        SELECT DISTINCT ON (bid_id) bid_id, worker_id, job_type, status, completed_at
+          FROM worker_jobs
+         WHERE bid_id IS NOT NULL
+         ORDER BY bid_id, claimed_at DESC
+    """)
+    active_workers = {}
+    for r in cur.fetchall():
+        active_workers.setdefault(r['bid_id'], []).append({
+            'worker_id': r['worker_id'],
+            'job_type': r['job_type'],
+            'status': r.get('status', ''),
+            'completed': r.get('completed_at') is not None,
+        })
 
     db.close()
     return jsonify({'bids': bids, 'stats': stats, 'photo_counts': photo_counts,
                     'first_photos': first_photos,
-                    'vauto_done': list(vauto_done)})
+                    'vauto_done': list(vauto_done),
+                    'active_workers': active_workers})
 
 
 @app.route('/sms-intake')
@@ -3923,6 +4244,18 @@ def push_unsubscribe():
     db.close()
     return jsonify({'success': True})
 
+def _fire_owner_new_bid(bid_id):
+    """Best-effort fan-out to owner-portal subscribers. Never blocks the
+    user-facing bid-create response; owner notification is observability,
+    not core flow."""
+    if notify_owners_new_bid is None:
+        return
+    try:
+        notify_owners_new_bid(bid_id, send_push_to_rep)
+    except Exception as e:
+        print(f'[owner-notify] {type(e).__name__}: {e}', flush=True)
+
+
 def send_push_to_rep(rep_phone, title, body, url='/mobile'):
     """Send push notification to all devices registered for this rep."""
     if not VAPID_PRIVATE_KEY:
@@ -4109,6 +4442,9 @@ def mobile_submit():
 
     db.commit()
     db.close()
+
+    # Owner-portal push fan-out (best-effort, never blocks)
+    _fire_owner_new_bid(bid_id)
 
     # Background market check
     if vin:
@@ -5327,6 +5663,184 @@ def api_vauto_pending():
     return jsonify({'pending': [dict(r) for r in rows]})
 
 
+@app.route('/share/autocheck/<int:bid_id>')
+def share_autocheck(bid_id):
+    """Public AutoCheck share — server proxies the report HTML using
+    Beelink-115's keeper cookies. Client opens this URL with no auth
+    required.
+
+    The slot2 BFF returns full HTML; we just stream it through with the
+    URL rewritten so static assets still load from autocheck.com.
+    """
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT vin FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+    row = cur.fetchone()
+    if not row or not row['vin']:
+        return ('No VIN on this bid', 404)
+    vin = row['vin']
+
+    cur.execute("SELECT cookies, entity_id, platform_user_id, refreshed_at FROM vauto_session WHERE label='oscarpas'")
+    sess = cur.fetchone()
+    db.close()
+    if not sess:
+        return ('Cox session unavailable (cookie keeper offline)', 503)
+
+    cookies = sess['cookies']
+    if isinstance(cookies, str):
+        cookies = json.loads(cookies)
+
+    import requests as _r
+    try:
+        r = _r.get(
+            f'https://slot2.bff.megazord.vauto.app.coxautoinc.com/api/autocheck/getReport?vin={vin}',
+            cookies=cookies,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/json,*/*',
+                'appraisalentityid': sess['entity_id'],
+                'currententityid': sess['entity_id'],
+                'platformuserid': sess['platform_user_id'],
+                'Referer': 'https://provision.vauto.app.coxautoinc.com/',
+            },
+            timeout=15,
+        )
+    except Exception as e:
+        return (f'Upstream error: {e}', 502)
+
+    if r.status_code != 200:
+        return (f'Upstream returned {r.status_code}', 502)
+
+    return r.content, 200, {'Content-Type': r.headers.get('content-type', 'text/html')}
+
+
+@app.route('/share/ipacket/<int:bid_id>')
+def share_ipacket(bid_id):
+    """iPacket OEM sticker share proxy: PUT to start pull, poll for result,
+    redirect client to the public document-viewer URL."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT vin FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+    row = cur.fetchone()
+    if not row or not row['vin']:
+        return ('No VIN on this bid', 404)
+    vin = row['vin']
+
+    cur.execute("SELECT cookies FROM vauto_session WHERE label='ipacket'")
+    sess = cur.fetchone()
+    db.close()
+    if not sess:
+        return ('iPacket token not yet seeded — paste a fresh JWT via /api/ipacket/refresh_token', 503)
+    token_blob = sess['cookies']
+    if isinstance(token_blob, str):
+        token_blob = json.loads(token_blob)
+    jwt = token_blob.get('jwt')
+    if not jwt:
+        return ('iPacket token missing jwt field', 503)
+
+    import requests as _r
+    import time as _t
+    H = {
+        'Authorization': f'bearer {jwt}',
+        'Origin': 'https://dpapp.autoipacket.com',
+        'Referer': 'https://dpapp.autoipacket.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+    }
+    try:
+        r = _r.put(f'https://djapi.autoipacket.com/v2/sticker-puller/pull/{vin}',
+                   headers=H, timeout=15)
+        if r.status_code == 401:
+            return ('iPacket token expired — paste a fresh JWT via /api/ipacket/refresh_token', 401)
+        if r.status_code not in (200, 201):
+            return (f'iPacket pull returned {r.status_code}: {r.text[:200]}', 502)
+        job_id = r.json().get('id')
+        if not job_id:
+            return ('iPacket: no job_id in PUT response', 502)
+        viewer_url = None
+        for _ in range(25):
+            pr = _r.get(f'https://djapi.autoipacket.com/v2/sticker-puller/poll/{job_id}',
+                        headers=H, timeout=10)
+            body = pr.json() if pr.status_code in (200, 201) else {}
+            state = body.get('state')
+            if state == 'SUCCESS':
+                viewer_url = body.get('ipacket_viewer') or body.get('pdf')
+                break
+            if state in ('FAILED', 'ERROR'):
+                return (f'iPacket pull failed: {body.get("detail", "unknown")}', 502)
+            _t.sleep(1)
+        if not viewer_url:
+            return ('iPacket pull timed out after 25s', 504)
+    except Exception as e:
+        return (f'Upstream error: {e}', 502)
+
+    return f'<html><head><meta http-equiv="refresh" content="0;url={viewer_url}"></head><body>Loading iPacket sticker... <a href="{viewer_url}">click here</a></body></html>', 200, {'Content-Type': 'text/html'}
+
+
+
+@app.route('/api/ipacket/refresh_token', methods=['POST'])
+def api_ipacket_refresh_token():
+    """Store/update iPacket JWT bearer token. Operator pastes JSON:
+    {"jwt": "eyJhbGc..."}. Stored in vauto_session table with label='ipacket'.
+    Public endpoint (no admin login) so operator can curl from any machine.
+    """
+    data = request.get_json(silent=True) or {}
+    jwt = (data.get('jwt') or '').strip()
+    if not jwt or not jwt.startswith('eyJ'):
+        return jsonify({'ok': False, 'error': 'jwt (bearer token starting with eyJ) required'}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO vauto_session (label, cookies, entity_id, platform_user_id, refreshed_at)
+        VALUES ('ipacket', %s::jsonb, 'ipacket', 'ipacket', NOW())
+        ON CONFLICT (label) DO UPDATE SET cookies=EXCLUDED.cookies, refreshed_at=NOW()
+    """, (json.dumps({'jwt': jwt}),))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'jwt_length': len(jwt)})
+
+
+@app.route('/api/vauto/refresh_cookies', methods=['POST'])
+def api_vauto_refresh_cookies():
+    """Cookie keeper endpoint. Beelink-115 + EW workers POST their freshest
+    vAuto/Cox cookies here. We UPSERT into vauto_session so the stateless
+    api_workers can read them.
+
+    Payload:
+        {
+          "label": "oscarpas",                    # session label, default oscarpas
+          "cookies": {"vAutoAuth": "...", ...},   # dict of cookie name -> value
+          "entity_id": "...",                     # dealer entity (vAuto BFF header)
+          "platform_user_id": "..."               # platform user (vAuto BFF header)
+        }
+    """
+    data = request.get_json(silent=True) or {}
+    label = (data.get('label') or 'oscarpas').strip()[:64]
+    cookies = data.get('cookies')
+    entity_id = (data.get('entity_id') or '').strip()[:128]
+    platform_user_id = (data.get('platform_user_id') or '').strip()[:128]
+
+    if not isinstance(cookies, dict) or not cookies:
+        return jsonify({'ok': False, 'error': 'cookies (dict) required'}), 400
+    if 'vAutoAuth' not in cookies:
+        return jsonify({'ok': False, 'error': 'vAutoAuth cookie missing'}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO vauto_session (label, cookies, entity_id, platform_user_id, refreshed_at)
+        VALUES (%s, %s::jsonb, %s, %s, NOW())
+        ON CONFLICT (label) DO UPDATE SET
+            cookies = EXCLUDED.cookies,
+            entity_id = COALESCE(NULLIF(EXCLUDED.entity_id, ''), vauto_session.entity_id),
+            platform_user_id = COALESCE(NULLIF(EXCLUDED.platform_user_id, ''), vauto_session.platform_user_id),
+            refreshed_at = NOW()
+    """, (label, json.dumps(cookies), entity_id, platform_user_id))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'cookies': len(cookies), 'label': label})
+
+
 @app.route('/api/vauto/heartbeat', methods=['POST'])
 def api_vauto_heartbeat():
     """Workers POST every 60s with their state. Server tracks for dispatch
@@ -5417,7 +5931,7 @@ def api_vauto_heartbeat():
     """, (worker_id,))
     bad = cur.fetchone()['bad'] or 0
 
-    should_demote = paused or consecutive_failures >= 3 or bad >= 2
+    should_demote = False  # auto-demote DISABLED per operator request 2026-04-30 - workers stay at declared priority; manual paused/UPDATE still works
     if should_demote:
         cur.execute("""
             UPDATE workers
@@ -5448,7 +5962,7 @@ def api_vauto_heartbeat():
              WHERE worker_id = %s
                AND effective_priority = 'degraded'
                AND synthetic_ok_count >= 3
-               AND auto_demoted_at < NOW() - INTERVAL '3 minutes'
+               AND (auto_demoted_at IS NULL OR auto_demoted_at < NOW() - INTERVAL '3 minutes')
         """, (worker_id,))
     elif not paused and not should_demote:
         # Not a synthetic-ok beat and worker is healthy — reset the
@@ -5463,10 +5977,21 @@ def api_vauto_heartbeat():
 
     # Return current state so worker can log it.
     cur.execute("""
-        SELECT effective_priority, paused, auto_demoted_at, synthetic_ok_count
+        SELECT effective_priority, paused, auto_demoted_at, synthetic_ok_count,
+               COALESCE(pending_exit, FALSE) AS pending_exit
         FROM workers WHERE worker_id = %s
     """, (worker_id,))
     state = cur.fetchone() or {}
+    # If watchdog flagged this worker for exit, deliver the signal exactly
+    # once and clear the flag so NSSM-restarted process doesn't immediately
+    # exit again on its first heartbeat.
+    exit_flag = bool(state.get('pending_exit'))
+    if exit_flag:
+        cur.execute("""
+            UPDATE workers SET pending_exit = FALSE, updated_at = NOW()
+             WHERE worker_id = %s
+        """, (worker_id,))
+        db.commit()
     db.close()
     return jsonify({
         'ok': True,
@@ -5476,6 +6001,7 @@ def api_vauto_heartbeat():
         'auto_demoted_at': (state.get('auto_demoted_at').isoformat()
                             if state.get('auto_demoted_at') else None),
         'synthetic_ok_count': state.get('synthetic_ok_count') or 0,
+        'exit': exit_flag,
     })
 
 
@@ -5499,13 +6025,11 @@ def api_worker_session_lost():
 
     db = get_db()
     cur = db.cursor()
+    # session_lost no longer auto-degrades or pauses (operator request 2026-04-30).
+    # Only record the reason for visibility; worker stays primary so dispatch keeps flowing.
     cur.execute("""
         UPDATE workers
-           SET paused = TRUE,
-               pause_reason = %s,
-               effective_priority = 'degraded',
-               auto_demoted_at = COALESCE(auto_demoted_at, NOW()),
-               synthetic_ok_count = 0,
+           SET pause_reason = %s,
                updated_at = NOW()
          WHERE worker_id = %s
     """, (reason, worker_id))
@@ -5524,6 +6048,987 @@ def api_worker_session_lost():
     db.commit()
     db.close()
     return jsonify({'ok': True, 'worker_id': worker_id, 'paused': True})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-phase progress + aggressive stuck-bid watchdog
+#
+# Workers POST {worker_id, bid_id, phase, state} at the start and end of each
+# of vauto / accutrade / ipacket. Watchdog thread runs every 15s; if a phase
+# has been "started" without "done" longer than its budget, it releases the
+# claim, marks the worker degraded, signals worker exit on next heartbeat,
+# and pings Telegram. This collapses the 5-min stale-claim sweep down to a
+# 30-90s recovery for live failures.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Telegram alert helper for watchdog (matches worker bot/chat per spec)
+_WATCHDOG_TG_BOT = '8639130743:AAFczHqjWoiUBs7adZwBEJ6217bQzYGhI_o'  # placeholder — overridden by env if set
+_WATCHDOG_TG_CHAT = '7985611488'
+
+
+def _tg_worker_alert(msg):
+    """Fire-and-forget Telegram alert. Never raises."""
+    try:
+        bot = os.environ.get('WATCHDOG_TG_BOT', _WATCHDOG_TG_BOT)
+        chat = os.environ.get('WATCHDOG_TG_CHAT', _WATCHDOG_TG_CHAT)
+        if not bot or not chat:
+            return
+        requests.post(
+            f'https://api.telegram.org/bot{bot}/sendMessage',
+            json={'chat_id': chat, 'text': msg, 'parse_mode': 'HTML'},
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
+@app.route('/api/worker/progress', methods=['POST'])
+def api_worker_progress():
+    """Worker reports phase start/done. Lets the watchdog detect stuck bids
+    in 30-90s instead of 5min.
+
+    Body: {worker_id, bid_id, phase, state}
+      phase: 'vauto' | 'accutrade' | 'ipacket'
+      state: 'started' | 'done'
+    """
+    data = request.get_json(silent=True) or {}
+    worker_id = (data.get('worker_id') or '').strip()
+    bid_id = data.get('bid_id')
+    phase = (data.get('phase') or '').strip()
+    state = (data.get('state') or '').strip()
+
+    if not worker_id or not bid_id or phase not in ('vauto', 'accutrade', 'ipacket') \
+            or state not in ('started', 'done'):
+        return jsonify({'ok': False, 'error': 'missing/invalid fields'}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO bid_phase_progress (bid_id, phase, state, worker_id, ts)
+        VALUES (%s, %s, %s, %s, NOW())
+        ON CONFLICT (bid_id, phase, state) DO UPDATE SET
+            ts        = NOW(),
+            worker_id = EXCLUDED.worker_id
+    """, (bid_id, phase, state, worker_id))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+
+
+# ── Per-bid live progress (used by dashboard progress bars) ──────────────────
+# Phase budgets (seconds): vauto=45, accutrade=55, ipacket=10. Total ~110s.
+# pct_complete maps so that pre-vauto/vauto = 0..38, accutrade = 38..84,
+# ipacket = 84..99, all-done OR not in_flight = 100.
+_PHASE_DURATION_SEC = {'vauto': 45, 'accutrade': 55, 'ipacket': 10}
+_PHASE_PCT = {'vauto': (0, 38), 'accutrade': (38, 84), 'ipacket': (84, 99)}
+_PHASE_TOTAL_SEC = 110
+
+
+def _compute_progress_for_bid(bid_id, bid_row, markers, lookups_present):
+    """Pure helper — given DB rows, compute the response dict.
+
+    bid_row: dict with keys vauto_claimed_at (or None), vauto_claimed_by.
+    markers: list of dicts {phase, state, ts (datetime), age_sec}.
+    lookups_present: dict {'vauto': bool, 'accutrade': bool, 'ipacket': bool}.
+    """
+    in_flight = bool(bid_row and bid_row.get('vauto_claimed_at'))
+    claimed_at = bid_row.get('vauto_claimed_at') if bid_row else None
+    claimed_by = bid_row.get('vauto_claimed_by') if bid_row else None
+
+    # Index markers by (phase, state)
+    by_ps = {(m['phase'], m['state']): m for m in markers}
+    v_started = by_ps.get(('vauto', 'started'))
+    v_done = by_ps.get(('vauto', 'done'))
+    a_started = by_ps.get(('accutrade', 'started'))
+    a_done = by_ps.get(('accutrade', 'done'))
+    i_started = by_ps.get(('ipacket', 'started'))
+    i_done = by_ps.get(('ipacket', 'done'))
+
+    all_done = bool(v_done and a_done and i_done) or (
+        lookups_present.get('vauto') and lookups_present.get('accutrade')
+        and lookups_present.get('ipacket'))
+
+    # Determine current phase + when it started
+    phase = None
+    phase_started_at = None
+    if i_started and not i_done:
+        phase, phase_started_at = 'ipacket', i_started.get('ts')
+    elif a_done and not i_done:
+        # accutrade done, ipacket not yet started — still "ipacket" pending
+        phase, phase_started_at = 'ipacket', a_done.get('ts')
+    elif a_started and not a_done:
+        phase, phase_started_at = 'accutrade', a_started.get('ts')
+    elif v_done and not a_done:
+        phase, phase_started_at = 'accutrade', v_done.get('ts')
+    elif v_started and not v_done:
+        phase, phase_started_at = 'vauto', v_started.get('ts')
+    elif in_flight and not v_started:
+        phase, phase_started_at = 'vauto', claimed_at
+    elif all_done:
+        phase = 'done'
+
+    # Elapsed for the row overall (vs claim time)
+    elapsed_sec = 0
+    if claimed_at:
+        try:
+            from datetime import datetime, timezone
+            now = datetime.now(claimed_at.tzinfo) if getattr(
+                claimed_at, 'tzinfo', None) else datetime.utcnow()
+            elapsed_sec = max(0, int((now - claimed_at).total_seconds()))
+        except Exception:
+            elapsed_sec = 0
+
+    # Compute pct
+    if all_done or not in_flight:
+        pct = 100 if all_done else 0
+    elif phase == 'done':
+        pct = 100
+    else:
+        lo, hi = _PHASE_PCT.get(phase, (0, 38))
+        # Within-phase progress = min(1, elapsed_in_phase / expected_duration)
+        within = 0.0
+        if phase_started_at:
+            try:
+                from datetime import datetime
+                now = datetime.now(phase_started_at.tzinfo) if getattr(
+                    phase_started_at, 'tzinfo', None) else datetime.utcnow()
+                in_phase = max(0, (now - phase_started_at).total_seconds())
+                expected = _PHASE_DURATION_SEC.get(phase, 45)
+                within = min(1.0, in_phase / max(1.0, expected))
+            except Exception:
+                within = 0.0
+        pct = int(round(lo + (hi - lo) * within))
+        # Floor pct at lo of current phase (don't go backwards)
+        pct = max(lo, min(hi, pct))
+
+    estimated_total = _PHASE_TOTAL_SEC
+    eta = max(5, min(300, estimated_total - elapsed_sec)) if in_flight and not all_done else 0
+
+    return {
+        'bid_id': bid_id,
+        'in_flight': in_flight,
+        'claimed_at': claimed_at.isoformat() if hasattr(claimed_at, 'isoformat') else claimed_at,
+        'claimed_by': claimed_by,
+        'phase': phase,
+        'phase_started_at': phase_started_at.isoformat() if hasattr(phase_started_at, 'isoformat') else phase_started_at,
+        'elapsed_sec': elapsed_sec,
+        'estimated_total_sec': estimated_total,
+        'pct_complete': max(0, min(100, pct)),
+        'eta_sec': eta,
+        'all_done': bool(all_done),
+    }
+
+
+def _fetch_progress_bulk(cur, bid_ids):
+    """Returns {bid_id: progress_dict} for the given ids in a few queries."""
+    if not bid_ids:
+        return {}
+    cur.execute("""
+        SELECT id, vauto_claimed_by, vauto_claimed_at
+          FROM bids WHERE id = ANY(%s)
+    """, (list(bid_ids),))
+    bid_rows = {r['id']: dict(r) for r in cur.fetchall()}
+
+    cur.execute("""
+        SELECT bid_id, phase, state, ts,
+               EXTRACT(EPOCH FROM (NOW() - ts))::int AS age_sec
+          FROM bid_phase_progress
+         WHERE bid_id = ANY(%s)
+    """, (list(bid_ids),))
+    markers_by_bid = {}
+    for r in cur.fetchall():
+        markers_by_bid.setdefault(r['bid_id'], []).append(dict(r))
+
+    # Existence of lookup rows (cheap, indexed PK lookup per table)
+    cur.execute("SELECT bid_id FROM vauto_lookups WHERE bid_id = ANY(%s)",
+                (list(bid_ids),))
+    have_v = {r['bid_id'] for r in cur.fetchall()}
+    cur.execute("SELECT bid_id FROM accutrade_lookups WHERE bid_id = ANY(%s)",
+                (list(bid_ids),))
+    have_a = {r['bid_id'] for r in cur.fetchall()}
+    cur.execute("SELECT bid_id FROM ipacket_lookups WHERE bid_id = ANY(%s)",
+                (list(bid_ids),))
+    have_i = {r['bid_id'] for r in cur.fetchall()}
+
+    out = {}
+    for bid_id in bid_ids:
+        out[bid_id] = _compute_progress_for_bid(
+            bid_id,
+            bid_rows.get(bid_id, {}),
+            markers_by_bid.get(bid_id, []),
+            {'vauto': bid_id in have_v,
+             'accutrade': bid_id in have_a,
+             'ipacket': bid_id in have_i})
+    return out
+
+
+@app.route('/api/bid/<int:bid_id>/progress')
+def api_bid_progress(bid_id):
+    db = get_db()
+    cur = db.cursor()
+    out = _fetch_progress_bulk(cur, [bid_id]).get(bid_id)
+    db.close()
+    if not out:
+        return jsonify({'bid_id': bid_id, 'in_flight': False,
+                        'pct_complete': 0, 'all_done': False,
+                        'eta_sec': 0, 'elapsed_sec': 0,
+                        'phase': None,
+                        'estimated_total_sec': _PHASE_TOTAL_SEC}), 200
+    return jsonify(out)
+
+
+@app.route('/api/bids/progress')
+def api_bids_progress_batch():
+    raw = request.args.get('ids', '').strip()
+    if not raw:
+        return jsonify({'bids': []})
+    ids = []
+    for tok in raw.split(','):
+        tok = tok.strip()
+        if tok.isdigit():
+            ids.append(int(tok))
+        if len(ids) >= 200:
+            break
+    if not ids:
+        return jsonify({'bids': []})
+    db = get_db()
+    cur = db.cursor()
+    out = _fetch_progress_bulk(cur, ids)
+    db.close()
+    return jsonify({'bids': [out[i] for i in ids if i in out]})
+
+
+
+def _watchdog_evaluate_once():
+    # Per-phase watchdog DISABLED 2026-05-01 — was killing healthy workers on slow-Cox bids.
+    # Heartbeat-based recovery (NSSM + manual /admin/workers buttons) is the only safety net now.
+    return 0
+
+def _watchdog_evaluate_once_DISABLED_REFERENCE():
+    """One pass of the stuck-bid evaluator. Returns the count of bids it
+    released so callers can log it.
+
+    Per-phase budgets:
+      - vAuto:     started → done within 60s
+      - AccuTrade: vauto.done → accutrade.done within 70s
+      - iPacket:   accutrade.done → ipacket.done within 30s
+      - never started: 30s after claim
+      - hard cap:  180s on any active claim
+    """
+    released = 0
+    try:
+        db = get_db()
+        cur = db.cursor()
+        # Cluster-wide singleton: only one gunicorn worker actually evaluates
+        # per tick. The 5 others get the lock=false and skip — cheap, safe.
+        # Magic key 826341 chosen arbitrarily; pg_try_advisory_lock auto-
+        # releases on connection close (which happens at the end of this fn).
+        cur.execute("SELECT pg_try_advisory_lock(826341) AS got")
+        if not cur.fetchone()['got']:
+            db.close()
+            return 0
+        # All in-flight bids: claimed but no vauto_lookups row yet (i.e.
+        # vAuto submit hasn't fired and cleared the claim).
+        cur.execute("""
+            SELECT b.id AS bid_id,
+                   b.vauto_claimed_by AS worker_id,
+                   b.vauto_claimed_at AS claimed_at,
+                   EXTRACT(EPOCH FROM (NOW() - b.vauto_claimed_at))::int AS age_sec
+            FROM bids b
+            WHERE b.vauto_claimed_at IS NOT NULL
+              AND b.vauto_claimed_by IS NOT NULL
+        """)
+        in_flight = cur.fetchall()
+
+        for row in in_flight:
+            bid_id = row['bid_id']
+            worker_id = row['worker_id']
+            age_sec = row['age_sec'] or 0
+
+            # Pull the latest progress markers for this bid
+            cur.execute("""
+                SELECT phase, state, ts,
+                       EXTRACT(EPOCH FROM (NOW() - ts))::int AS age_sec
+                FROM bid_phase_progress
+                WHERE bid_id = %s
+            """, (bid_id,))
+            markers = {(r['phase'], r['state']): r for r in cur.fetchall()}
+
+            v_started = markers.get(('vauto', 'started'))
+            v_done = markers.get(('vauto', 'done'))
+            a_done = markers.get(('accutrade', 'done'))
+            i_done = markers.get(('ipacket', 'done'))
+
+            stuck_rule = None
+            stuck_phase = None
+            stuck_age = age_sec
+
+            # Rules in priority order (first match wins)
+            if v_started and not v_done and (v_started["age_sec"] or 0) > 180:
+                stuck_rule = "vauto>180s"
+                stuck_phase = 'vauto'
+                stuck_age = v_started['age_sec']
+            elif v_done and not a_done and (v_done["age_sec"] or 0) > 160:
+                stuck_rule = "accutrade>160s"
+                stuck_phase = 'accutrade'
+                stuck_age = v_done['age_sec']
+            elif a_done and not i_done and (a_done["age_sec"] or 0) > 80:
+                stuck_rule = "ipacket>80s"
+                stuck_phase = 'ipacket'
+                stuck_age = a_done['age_sec']
+            elif not v_started and age_sec > 30:
+                stuck_rule = 'never_started>30s'
+                stuck_phase = 'pre_vauto'
+                stuck_age = age_sec
+            elif age_sec > 180:
+                stuck_rule = 'hard_cap>180s'
+                stuck_phase = 'unknown'
+                stuck_age = age_sec
+
+            if not stuck_rule:
+                continue
+
+            # ── Stuck. Mark degraded, release claim, log, signal exit, alert.
+            cur.execute("""
+                UPDATE workers
+                   SET effective_priority = 'degraded',
+                       auto_demoted_at = COALESCE(auto_demoted_at, NOW()),
+                       synthetic_ok_count = 0,
+                       pending_exit = TRUE,
+                       pause_reason = %s,
+                       updated_at = NOW()
+                 WHERE worker_id = %s
+            """, (f'watchdog: stuck {stuck_phase} {stuck_age}s', worker_id))
+
+            cur.execute("""
+                UPDATE bids
+                   SET vauto_claimed_by = NULL,
+                       vauto_claimed_at = NULL
+                 WHERE id = %s
+            """, (bid_id,))
+
+            cur.execute("""
+                UPDATE worker_jobs
+                   SET completed_at = NOW(),
+                       status = 'released_watchdog',
+                       error  = %s,
+                       duration_ms = EXTRACT(EPOCH FROM (NOW() - claimed_at))::int * 1000
+                 WHERE id = (
+                     SELECT id FROM worker_jobs
+                     WHERE bid_id = %s AND completed_at IS NULL
+                     ORDER BY claimed_at DESC LIMIT 1
+                 )
+            """, (f'watchdog: {stuck_rule}', bid_id))
+
+            cur.execute("""
+                INSERT INTO stuck_log (bid_id, worker_id, phase, age_sec, rule)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (bid_id, worker_id, stuck_phase, stuck_age, stuck_rule))
+
+            db.commit()
+            released += 1
+
+            try:
+                _tg_worker_alert(
+                    f"⚠️ EW watchdog: worker <b>{worker_id}</b> stuck on bid #{bid_id} "
+                    f"({stuck_phase}, {stuck_age}s, {stuck_rule}) — claim released, "
+                    f"worker flagged for exit"
+                )
+            except Exception:
+                pass
+        db.close()
+    except Exception as e:
+        print(f"[watchdog] error: {e}")
+    return released
+
+
+_watchdog_thread = None
+_watchdog_started = threading.Event()
+
+
+def _watchdog_loop():
+    """Poll every 15s. Daemon thread, dies with the gunicorn worker."""
+    while True:
+        try:
+            _watchdog_evaluate_once()
+        except Exception:
+            traceback.print_exc()
+        time.sleep(15)
+
+
+def _start_watchdog_once():
+    """Idempotent: only one watchdog per process. Called lazily on first
+    request to dodge the gunicorn pre-fork issue (threads spawned at import
+    time get killed by os.fork)."""
+    global _watchdog_thread
+    if _watchdog_started.is_set():
+        return
+    _watchdog_started.set()
+    _watchdog_thread = threading.Thread(
+        target=_watchdog_loop, daemon=True, name='ew_watchdog'
+    )
+    _watchdog_thread.start()
+    print('[ew_watchdog] started')
+
+
+@app.before_request
+def _ensure_watchdog():
+    if not _watchdog_started.is_set():
+        _start_watchdog_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /admin/workers — internal worker monitoring dashboard
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── /admin/workers Proxmox enrichment (added 2026-05-01) ───
+# Maps EW worker_id -> Proxmox vmid. Hardcoded for now; future: small DB table.
+# vm-worker-1 currently runs in vmid 9000 (the original template VM).
+# Clones for workers 2-5 will be at vmids 100-103.
+_WORKER_VMID_MAP = {
+    'vm-worker-1': 9000,
+    'vm-worker-2': 100,
+    'vm-worker-3': 101,
+    'vm-worker-4': 102,
+    'vm-worker-5': 103,
+    'vm-worker-6': 110,
+    'vm-worker-7': 111,
+    'vm-worker-8': 112,
+    'vm-worker-9': 113,
+    'vm-worker-10': 114,
+}
+
+def _worker_to_vmid(worker_id):
+    """Return the Proxmox vmid for a given EW worker_id, or None."""
+    if not worker_id:
+        return None
+    return _WORKER_VMID_MAP.get(worker_id)
+
+# In-process 5s cache for Proxmox snapshot data so /api/admin/workers/snapshot
+# stays cheap when the page polls every 3-5s. Single-flight via a lock.
+_PROXMOX_CACHE = {'ts': 0.0, 'data': None}
+_PROXMOX_CACHE_LOCK = threading.Lock()
+_PROXMOX_CACHE_TTL = 5.0  # seconds
+_PROXMOX_FAST_TIMEOUT = 8.0  # seconds — keeps /api/admin/workers/snapshot snappy
+
+def _proxmox_get_fast(path):
+    """Like _proxmox_request('GET', path) but with a 3s timeout — for use
+    inside the polled workers snapshot endpoint where 8s blocks the UI."""
+    if not PROXMOX_API_BASE or not PROXMOX_API_TOKEN:
+        return None, 'Proxmox API not configured'
+    url = f'{PROXMOX_API_BASE}/api2/json{path}'
+    try:
+        resp = requests.get(
+            url,
+            headers={'Authorization': f'PVEAPIToken={PROXMOX_API_TOKEN}'},
+            verify=False,
+            timeout=_PROXMOX_FAST_TIMEOUT,
+        )
+        if resp.status_code >= 400:
+            return None, f'HTTP {resp.status_code}'
+        return resp.json(), None
+    except requests.exceptions.Timeout:
+        return None, 'Proxmox timeout (>8s)'
+    except requests.exceptions.ConnectionError as e:
+        return None, f'Cannot reach Proxmox: {str(e)[:120]}'
+    except Exception as e:
+        return None, f'Request failed: {str(e)[:120]}'
+
+def _get_proxmox_snapshot_cached():
+    """Return a dict with proxmox host stats + per-vmid stats + per-vmid
+    snapshot info, cached for ~5s. Always returns a dict; on error, the
+    'error' key is populated and 'vms'/'host' may be empty.
+
+    Shape:
+      {
+        'ok': bool,
+        'error': str|None,
+        'host': { ... same fields as /api/proxmox/host ... } or None,
+        'vms_by_id': { vmid_int: {status,uptime_s,cpu_pct,mem,maxmem,...} },
+        'snapshots_by_id': { vmid_int: {'count': int, 'last_age_sec': int|None} },
+      }
+    """
+    now = time.time()
+    with _PROXMOX_CACHE_LOCK:
+        if _PROXMOX_CACHE['data'] is not None and (now - _PROXMOX_CACHE['ts']) < _PROXMOX_CACHE_TTL:
+            return _PROXMOX_CACHE['data']
+
+        result = {
+            'ok': False,
+            'error': None,
+            'host': None,
+            'vms_by_id': {},
+            'snapshots_by_id': {},
+            'services_by_id': {},
+        }
+
+        if not PROXMOX_API_BASE or not PROXMOX_API_TOKEN:
+            result['error'] = 'Proxmox API not configured'
+            _PROXMOX_CACHE['ts'] = now
+            _PROXMOX_CACHE['data'] = result
+            return result
+
+        # 1) Cluster resources (one call gets all VMs with cpu/mem/uptime/status)
+        # If this fails (typically tunnel unreachable), short-circuit — don't
+        # spend another 8s × N calls discovering the same outage.
+        cluster_failed = False
+        try:
+            vmdata, vmerr = _proxmox_get_fast('/cluster/resources?type=vm')
+            if vmerr:
+                result['error'] = vmerr
+                cluster_failed = True
+            else:
+                vm_total = 0
+                vm_running = 0
+                for v in (vmdata or {}).get('data', []) or []:
+                    if v.get('type') != 'qemu':
+                        continue
+                    vmid = v.get('vmid')
+                    if vmid is None:
+                        continue
+                    vm_total += 1
+                    if v.get('status') == 'running':
+                        vm_running += 1
+                    maxmem = v.get('maxmem') or 0
+                    mem = v.get('mem') or 0
+                    cpu = v.get('cpu') or 0
+                    result['vms_by_id'][int(vmid)] = {
+                        'vmid': int(vmid),
+                        'name': v.get('name') or f"vm-{vmid}",
+                        'status': v.get('status') or 'unknown',
+                        'uptime_sec': int(v.get('uptime') or 0),
+                        'cpu_pct': round(float(cpu) * 100.0, 2),
+                        'mem_used_mb': int(mem / (1024 * 1024)) if mem else 0,
+                        'mem_total_mb': int(maxmem / (1024 * 1024)) if maxmem else 0,
+                        'mem_pct': round((mem / maxmem) * 100.0, 1) if maxmem else 0.0,
+                        'template': bool(v.get('template')),
+                    }
+                result['_vm_total'] = vm_total
+                result['_vm_running'] = vm_running
+        except Exception as e:
+            result['error'] = result['error'] or f'cluster resources failed: {e}'
+            cluster_failed = True
+
+        # 2) Host stats (single node 'pve') — skip if cluster call already failed
+        try:
+            if cluster_failed:
+                raise RuntimeError('skip host call — cluster unreachable')
+            hdata, herr = _proxmox_get_fast(f'/nodes/{PROXMOX_NODE}/status')
+            if not herr and hdata:
+                d = (hdata or {}).get('data', {}) or {}
+                cpu = float(d.get('cpu') or 0) * 100.0
+                mem = d.get('memory', {}) or {}
+                mem_total = mem.get('total') or 0
+                mem_used = mem.get('used') or 0
+                mem_free = max(mem_total - mem_used, 0)
+                result['host'] = {
+                    'cpu_pct': round(cpu, 2),
+                    'mem_total_gb': round(mem_total / (1024**3), 1) if mem_total else 0,
+                    'mem_used_gb': round(mem_used / (1024**3), 1) if mem_used else 0,
+                    'mem_free_gb': round(mem_free / (1024**3), 1) if mem_free else 0,
+                    'vm_total': result.get('_vm_total', 0),
+                    'vm_running': result.get('_vm_running', 0),
+                    # Capacity = (free_RAM_GB - 4 headroom) / 4 per worker, floored
+                    'capacity_more_workers': max(int((mem_free / (1024**3) - 4) // 4), 0) if mem_total else 0,
+                }
+        except Exception as e:
+            # Don't overwrite a more specific earlier error
+            if not result['error']:
+                result['error'] = f'host status failed: {e}'
+
+        # 3) Per-VM snapshot lists — only if cluster reachable AND vmid was
+        #    found in the cluster list (avoids 8s timeouts on phantom vmids
+        #    when Proxmox is fully down).
+        # Per-VM snapshot fetch DISABLED 2026-05-02 — was fanning out 10×3s = 30s+
+        # over the Cloudflare tunnel. VM stats from /cluster/resources are enough.
+        mapped_vmids = set()
+        if False:
+            mapped_vmids = set(int(v) for v in _WORKER_VMID_MAP.values())
+        present_vmids = set(result['vms_by_id'].keys())
+        if cluster_failed:
+            present_vmids = set()  # don't fan out 5 more 8s timeouts
+        for vmid in mapped_vmids & present_vmids:
+            try:
+                sdata, serr = _proxmox_get_fast(
+                    f'/nodes/{_node_for_vmid(vmid)}/qemu/{vmid}/snapshot'
+                )
+                if serr:
+                    continue
+                snaps = [s for s in ((sdata or {}).get('data', []) or [])
+                         if s.get('name') and s.get('name') != 'current']
+                # Use snaptime (unix ts) when present
+                latest = 0
+                for s in snaps:
+                    t = s.get('snaptime') or 0
+                    if t and t > latest:
+                        latest = t
+                last_age = int(now - latest) if latest else None
+                result['snapshots_by_id'][vmid] = {
+                    'count': len(snaps),
+                    'last_age_sec': last_age,
+                }
+            except Exception:
+                pass
+
+        # Services = non-worker VMs in the cluster (e.g., vm-verifier, future helpers).
+        # Match: name starts with 'vm-' but NOT 'vm-worker-', skip templates.
+        try:
+            for vmid_int, vm in result.get('vms_by_id', {}).items():
+                name = (vm.get('name') or '').lower()
+                if not name.startswith('vm-'):
+                    continue
+                if name.startswith('vm-worker-'):
+                    continue
+                if vm.get('template'):
+                    continue
+                node = _NODE_BY_VMID.get(int(vmid_int)) or PROXMOX_NODE
+                result['services_by_id'][int(vmid_int)] = {
+                    'name': vm.get('name'),
+                    'vmid': int(vmid_int),
+                    'status': vm.get('status'),
+                    'cpu_pct': vm.get('cpu_pct'),
+                    'mem_used_mb': vm.get('mem_used_mb'),
+                    'mem_total_mb': vm.get('mem_total_mb'),
+                    'mem_pct': vm.get('mem_pct'),
+                    'uptime_sec': vm.get('uptime_sec'),
+                    'node': node,
+                }
+        except Exception:
+            pass
+
+        result['ok'] = result['error'] is None
+        # Strip private keys before caching
+        result.pop('_vm_total', None)
+        result.pop('_vm_running', None)
+        _PROXMOX_CACHE['ts'] = now
+        _PROXMOX_CACHE['data'] = result
+        return result
+# ─── end Proxmox enrichment helpers ───
+
+
+@app.route('/admin/workers')
+def admin_workers():
+    """Render worker monitoring dashboard. Auth handled by global require_login."""
+    return render_template('admin_workers.html')
+
+
+@app.route('/api/admin/workers/snapshot')
+def api_admin_workers_snapshot():
+    """Aggregated state for /admin/workers. Returns workers, stuck bids, and
+    recent activity in one payload to keep the client polling cheap."""
+    db = get_db()
+    cur = db.cursor()
+
+    # Workers grid — include current claim if any, plus today's lookup count.
+    cur.execute("""
+        SELECT
+            w.worker_id,
+            w.role,
+            w.priority,
+            w.effective_priority,
+            w.paused,
+            w.pause_reason,
+            COALESCE(w.pending_exit, FALSE) AS pending_exit,
+            w.last_heartbeat,
+            EXTRACT(EPOCH FROM (NOW() - w.last_heartbeat))::int AS last_hb_sec,
+            w.chrome_alive,
+            w.lookups_done,
+            w.last_lookup_at,
+            w.last_seen_ip::text AS last_seen_ip,
+            w.consecutive_failures,
+            w.auto_demoted_at,
+            (SELECT COUNT(*) FROM worker_jobs wj
+              WHERE wj.worker_id = w.worker_id
+                AND wj.status = 'ok'
+                AND wj.completed_at::date = (NOW() AT TIME ZONE 'America/New_York')::date
+            ) AS lookups_today,
+            (SELECT b.id FROM bids b
+              WHERE b.vauto_claimed_by = w.worker_id
+                AND b.vauto_claimed_at IS NOT NULL
+              ORDER BY b.vauto_claimed_at DESC LIMIT 1
+            ) AS current_bid_id,
+            (SELECT b.vauto_claimed_at FROM bids b
+              WHERE b.vauto_claimed_by = w.worker_id
+                AND b.vauto_claimed_at IS NOT NULL
+              ORDER BY b.vauto_claimed_at DESC LIMIT 1
+            ) AS current_claim_at
+        FROM workers w
+        ORDER BY
+            CASE COALESCE(w.effective_priority, w.priority)
+                WHEN 'primary' THEN 1
+                WHEN 'standby' THEN 2
+                WHEN 'degraded' THEN 3
+                ELSE 4
+            END,
+            CAST(NULLIF(REGEXP_REPLACE(w.worker_id, '[^0-9]', '', 'g'), '') AS INTEGER) ASC NULLS LAST
+    """)
+    workers = []
+    for r in cur.fetchall():
+        d = dict(r)
+        # Per-phase progress for current claim (if any)
+        d['phases'] = {'vauto': None, 'accutrade': None, 'ipacket': None}
+        d['current_elapsed_sec'] = None
+        if d.get('current_bid_id'):
+            cur.execute("""
+                SELECT phase, state, ts FROM bid_phase_progress
+                WHERE bid_id = %s
+            """, (d['current_bid_id'],))
+            for pr in cur.fetchall():
+                key = pr['phase']
+                if key in d['phases']:
+                    cur_state = d['phases'][key]
+                    if cur_state is None or pr['state'] == 'done':
+                        d['phases'][key] = pr['state']
+            if d.get('current_claim_at'):
+                cur.execute("""
+                    SELECT EXTRACT(EPOCH FROM (NOW() - %s))::int AS s
+                """, (d['current_claim_at'],))
+                d['current_elapsed_sec'] = cur.fetchone()['s']
+
+        # ISO-format timestamps for JSON
+        for k in ('last_heartbeat', 'last_lookup_at', 'auto_demoted_at',
+                  'current_claim_at'):
+            v = d.get(k)
+            if hasattr(v, 'isoformat'):
+                d[k] = v.isoformat()
+        workers.append(d)
+
+    # Stuck bids (live snapshot — same predicates as watchdog but no action).
+    cur.execute("""
+        SELECT b.id AS bid_id, b.vin, b.year, b.make, b.model,
+               b.vauto_claimed_by AS worker_id,
+               b.vauto_claimed_at AS claimed_at,
+               EXTRACT(EPOCH FROM (NOW() - b.vauto_claimed_at))::int AS age_sec
+        FROM bids b
+        WHERE b.vauto_claimed_at IS NOT NULL
+          AND b.vauto_claimed_by IS NOT NULL
+        ORDER BY b.vauto_claimed_at ASC
+    """)
+    in_flight = cur.fetchall()
+    stuck = []
+    for r in in_flight:
+        bid_id = r['bid_id']
+        cur.execute("""
+            SELECT phase, state, ts,
+                   EXTRACT(EPOCH FROM (NOW() - ts))::int AS phase_age_sec
+            FROM bid_phase_progress
+            WHERE bid_id = %s
+            ORDER BY ts DESC
+        """, (bid_id,))
+        markers = cur.fetchall()
+        last_phase = markers[0]['phase'] if markers else 'pre-vauto'
+        last_state = markers[0]['state'] if markers else None
+        last_age = markers[0]['phase_age_sec'] if markers else r['age_sec']
+
+        # Same tripwires as watchdog
+        looks_stuck = False
+        age = r['age_sec'] or 0
+        # Check for any unbalanced started/done
+        marker_map = {(m['phase'], m['state']): m for m in markers}
+        v_started = marker_map.get(('vauto', 'started'))
+        v_done = marker_map.get(('vauto', 'done'))
+        a_done = marker_map.get(('accutrade', 'done'))
+        i_done = marker_map.get(('ipacket', 'done'))
+        if v_started and not v_done and (v_started['phase_age_sec'] or 0) > 60:
+            looks_stuck = True
+        elif v_done and not a_done and (v_done['phase_age_sec'] or 0) > 70:
+            looks_stuck = True
+        elif a_done and not i_done and (a_done['phase_age_sec'] or 0) > 30:
+            looks_stuck = True
+        elif not v_started and age > 30:
+            looks_stuck = True
+        elif age > 180:
+            looks_stuck = True
+
+        item = {
+            'bid_id': bid_id,
+            'vin': r['vin'],
+            'ymm': ' '.join(filter(None, [str(r.get('year') or '').strip(),
+                                          r.get('make') or '',
+                                          r.get('model') or ''])).strip(),
+            'worker_id': r['worker_id'],
+            'claimed_at': r['claimed_at'].isoformat() if r['claimed_at'] else None,
+            'age_sec': age,
+            'last_phase': last_phase,
+            'last_state': last_state,
+            'last_phase_age_sec': last_age,
+            'stuck': looks_stuck,
+        }
+        if looks_stuck:
+            stuck.append(item)
+
+    # Recent activity timeline — last 50 completed bids
+    cur.execute("""
+        SELECT wj.bid_id, wj.worker_id, wj.claimed_at, wj.completed_at,
+               wj.duration_ms, wj.status,
+               b.vin, b.year, b.make, b.model
+        FROM worker_jobs wj
+        LEFT JOIN bids b ON b.id = wj.bid_id
+        WHERE wj.completed_at IS NOT NULL
+        ORDER BY wj.completed_at DESC
+        LIMIT 50
+    """)
+    activity = []
+    for r in cur.fetchall():
+        bid_id = r['bid_id']
+        # Pull phase markers
+        cur.execute("""
+            SELECT phase, state, ts FROM bid_phase_progress
+            WHERE bid_id = %s
+            ORDER BY ts ASC
+        """, (bid_id,))
+        markers = []
+        for pm in cur.fetchall():
+            markers.append({
+                'phase': pm['phase'], 'state': pm['state'],
+                'ts': pm['ts'].isoformat() if pm['ts'] else None,
+            })
+        activity.append({
+            'bid_id': bid_id,
+            'worker_id': r['worker_id'],
+            'vin': r['vin'],
+            'ymm': ' '.join(filter(None, [str(r.get('year') or '').strip(),
+                                          r.get('make') or '',
+                                          r.get('model') or ''])).strip(),
+            'claimed_at': r['claimed_at'].isoformat() if r['claimed_at'] else None,
+            'completed_at': r['completed_at'].isoformat() if r['completed_at'] else None,
+            'duration_ms': r['duration_ms'],
+            'status': r['status'],
+            'phases': markers,
+        })
+
+    db.close()
+
+    # ─── Proxmox enrichment (added 2026-05-01) ───
+    # Merge per-VM stats into each worker; never let Proxmox failure break the
+    # snapshot endpoint. All errors are surfaced in worker['vm']['error'] or
+    # the top-level 'proxmox' block.
+    try:
+        px = _get_proxmox_snapshot_cached()
+        for w in workers:
+            vmid = _worker_to_vmid(w.get('worker_id'))
+            if vmid is None:
+                w['vm'] = None
+                continue
+            vm_stats = px.get('vms_by_id', {}).get(vmid)
+            if not vm_stats:
+                # VM not yet provisioned (e.g., clones not built yet) or proxmox down
+                w['vm'] = {
+                    'vmid': vmid,
+                    'status': 'absent',
+                    'error': px.get('error') or 'VM not found in Proxmox cluster',
+                }
+                continue
+            snap = px.get('snapshots_by_id', {}).get(vmid, {})
+            w['vm'] = {
+                'vmid': vmid,
+                'status': vm_stats.get('status'),
+                'uptime_sec': vm_stats.get('uptime_sec'),
+                'cpu_pct': vm_stats.get('cpu_pct'),
+                'mem_used_mb': vm_stats.get('mem_used_mb'),
+                'mem_total_mb': vm_stats.get('mem_total_mb'),
+                'mem_pct': vm_stats.get('mem_pct'),
+                'snapshot_count': snap.get('count', 0),
+                'last_snapshot_age_sec': snap.get('last_age_sec'),
+            }
+        proxmox_block = {
+            'ok': px.get('ok', False),
+            'error': px.get('error'),
+            'host': px.get('host'),
+        }
+    except Exception as e:
+        # Defensive: never let enrichment break the page
+        for w in workers:
+            if 'vm' not in w:
+                w['vm'] = None
+        proxmox_block = {'ok': False, 'error': f'enrichment exception: {e}', 'host': None}
+    # ─── end Proxmox enrichment ───
+
+    # Services list (non-worker VMs). Pulled from same Proxmox snapshot
+    # cache used above - never adds another API round-trip.
+    services_list = []
+    try:
+        px_for_svc = _get_proxmox_snapshot_cached()
+        svc_map = px_for_svc.get('services_by_id', {}) or {}
+        for vmid_int in sorted(svc_map.keys()):
+            services_list.append(svc_map[vmid_int])
+    except Exception:
+        services_list = []
+
+    return jsonify({
+        'workers': workers,
+        'stuck': stuck,
+        'activity': activity,
+        'proxmox': proxmox_block,
+        'services': services_list,
+        'now': datetime.now().isoformat(),
+    })
+
+
+@app.route('/api/admin/workers/<worker_id>/pause', methods=['POST'])
+def api_admin_worker_pause(worker_id):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE workers SET paused = TRUE, pause_reason = %s, updated_at = NOW()
+         WHERE worker_id = %s
+    """, ('manual: admin dashboard', worker_id))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/admin/workers/<worker_id>/unpause', methods=['POST'])
+def api_admin_worker_unpause(worker_id):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE workers SET paused = FALSE, pause_reason = NULL, updated_at = NOW()
+         WHERE worker_id = %s
+    """, (worker_id,))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/admin/workers/<worker_id>/exit', methods=['POST'])
+def api_admin_worker_exit(worker_id):
+    """Set pending_exit so worker self-terminates on next heartbeat."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE workers SET pending_exit = TRUE, updated_at = NOW()
+         WHERE worker_id = %s
+    """, (worker_id,))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/admin/workers/release/<int:bid_id>', methods=['POST'])
+def api_admin_release_claim(bid_id):
+    """Manual claim release from the dashboard."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE bids SET vauto_claimed_by = NULL, vauto_claimed_at = NULL
+         WHERE id = %s
+    """, (bid_id,))
+    cur.execute("""
+        UPDATE worker_jobs
+           SET completed_at = NOW(),
+               status = 'released_admin',
+               duration_ms = EXTRACT(EPOCH FROM (NOW() - claimed_at))::int * 1000
+         WHERE id = (
+             SELECT id FROM worker_jobs
+             WHERE bid_id = %s AND completed_at IS NULL
+             ORDER BY claimed_at DESC LIMIT 1
+         )
+    """, (bid_id,))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True})
 
 
 @app.route('/api/vauto/release_claim', methods=['POST'])
@@ -5895,11 +7400,20 @@ def thumb():
                     with open(local_path, 'rb') as f:
                         raw = f.read()
             elif src.startswith('http'):
-                # External CDN URL
-                import urllib.request
-                req = urllib.request.Request(src, headers={'User-Agent': 'EW-Thumb/1.0'})
-                with urllib.request.urlopen(req, timeout=15) as r:
-                    raw = r.read()
+                # External CDN URL — Twilio MediaUrls need basic auth, other
+                # CDNs are public. Twilio rotates media after ~few hours so
+                # historical SMS photos may also 404 here; that's fine.
+                if 'api.twilio.com' in src and TWILIO_SID and TWILIO_TOKEN:
+                    _r = requests.get(src, auth=(TWILIO_SID, TWILIO_TOKEN),
+                                      headers={'User-Agent': 'EW-Thumb/1.0'},
+                                      timeout=15)
+                    if _r.status_code == 200:
+                        raw = _r.content
+                else:
+                    import urllib.request
+                    req = urllib.request.Request(src, headers={'User-Agent': 'EW-Thumb/1.0'})
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        raw = r.read()
         except Exception:
             pass
 
@@ -6742,6 +8256,9 @@ def api_bid_external():
     db.commit()
     db.close()
 
+    # Owner-portal push fan-out (best-effort, never blocks)
+    _fire_owner_new_bid(bid_id)
+
     # Auto-search Autotrader, Cars.com, CarGurus for this VIN (same as field agent bids)
     trigger_market_check(bid_id, vin)
 
@@ -6906,6 +8423,9 @@ def api_bid_quick_drop():
 
     db.commit()
     db.close()
+
+    # Owner-portal push fan-out (best-effort, never blocks)
+    _fire_owner_new_bid(bid_id)
 
     # Trigger market check if we have a VIN
     if vin and len(vin) == 17:
@@ -7472,4 +8992,364 @@ def driver_mini_reply(token):
     db.close()
 
     return jsonify({'success': True, 'status': new_status})
+
+
+
+
+# ─── Proxmox VM Management (added 2026-05-01) ───────────────────────────────
+# Internal admin dashboard for managing the Proxmox host that runs Playwright
+# bid-worker VMs. Routes:
+#   GET  /admin/vms                              — page
+#   GET  /api/proxmox/vms                        — list VMs
+#   GET  /api/proxmox/host                       — host stats
+#   POST /api/proxmox/vm/<vmid>/start            — start
+#   POST /api/proxmox/vm/<vmid>/stop             — graceful shutdown
+#   POST /api/proxmox/vm/<vmid>/forcestop        — force stop
+#   POST /api/proxmox/vm/<vmid>/reboot           — graceful reboot
+#   POST /api/proxmox/vm/<vmid>/reset            — force reset
+#   GET  /api/proxmox/vm/<vmid>/snapshots        — list snapshots
+#   POST /api/proxmox/vm/<vmid>/snapshot         — create snapshot
+#   POST /api/proxmox/vm/<vmid>/snapshot/<name>/restore — rollback
+#   DELETE /api/proxmox/vm/<vmid>/snapshot/<name>       — delete snapshot
+#
+# Connectivity: Contabo 1 cannot reach Oscar's home LAN (192.168.1.209)
+# directly. PROXMOX_API_BASE must point at a Cloudflare-tunnel hostname that
+# forwards to the Proxmox API (e.g. https://pve.experience-wholesale.net:8006).
+# If unreachable, endpoints return HTTP 502 with a clear "cannot reach
+# Proxmox" message and the UI shows a dedicated error state.
+
+PROXMOX_API_BASE = os.environ.get('PROXMOX_API_BASE', '').rstrip('/')
+PROXMOX_API_TOKEN = os.environ.get('PROXMOX_API_TOKEN', '')
+PROXMOX_NODE = os.environ.get('PROXMOX_NODE', 'pve')
+# Per-vmid node lookup (cluster has multiple nodes; vmids 110-114 on pve115, etc.)
+_NODE_BY_VMID = {}
+_NODE_BY_VMID_TS = 0
+
+def _node_for_vmid(vmid):
+    """Return the cluster node hosting this vmid. 30s cache. Falls back to PROXMOX_NODE."""
+    import time as _t
+    global _NODE_BY_VMID_TS
+    now = _t.time()
+    if now - _NODE_BY_VMID_TS > 30 or int(vmid) not in _NODE_BY_VMID:
+        try:
+            data, err = _proxmox_get_fast('/cluster/resources?type=vm')
+            if not err and data:
+                _NODE_BY_VMID.clear()
+                for v in (data.get('data') or []):
+                    if v.get('vmid') is not None:
+                        _NODE_BY_VMID[int(v['vmid'])] = v.get('node') or PROXMOX_NODE
+                _NODE_BY_VMID_TS = now
+        except Exception: pass
+    return _NODE_BY_VMID.get(int(vmid), PROXMOX_NODE)
+
+PROXMOX_TIMEOUT = int(os.environ.get('PROXMOX_TIMEOUT', '8'))
+
+
+def _proxmox_log(action, vmid=None, snapshot=None, success=False, response_excerpt=None):
+    """Audit-log a Proxmox action to proxmox_action_log."""
+    try:
+        username = session.get('username') or 'admin'
+    except Exception:
+        username = 'system'
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            INSERT INTO proxmox_action_log
+                (action, vmid, snapshot, username, success, response_excerpt)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (action, vmid, snapshot, username, bool(success),
+              (response_excerpt or '')[:1000]))
+        db.commit()
+        db.close()
+    except Exception as e:
+        try:
+            print(f'[proxmox_log] failed: {e}')
+        except Exception:
+            pass
+
+
+def _proxmox_request(method, path, **kwargs):
+    """Wrapper around requests.* that injects the Proxmox API token, base URL,
+    and standard timeout/verify settings. Returns (status_code, json_or_text,
+    error_string_or_None)."""
+    if not PROXMOX_API_BASE or not PROXMOX_API_TOKEN:
+        return 0, None, 'Proxmox API not configured (PROXMOX_API_BASE / PROXMOX_API_TOKEN missing)'
+    url = f'{PROXMOX_API_BASE}/api2/json{path}'
+    headers = kwargs.pop('headers', {}) or {}
+    headers['Authorization'] = f'PVEAPIToken={PROXMOX_API_TOKEN}'
+    try:
+        resp = requests.request(
+            method, url,
+            headers=headers,
+            verify=False,
+            timeout=PROXMOX_TIMEOUT,
+            **kwargs
+        )
+    except requests.exceptions.SSLError as e:
+        return 0, None, f'SSL error: {e}'
+    except requests.exceptions.ConnectTimeout:
+        return 0, None, 'Cannot reach Proxmox (connection timeout)'
+    except requests.exceptions.ConnectionError as e:
+        return 0, None, f'Cannot reach Proxmox (connection error): {str(e)[:200]}'
+    except requests.exceptions.Timeout:
+        return 0, None, 'Proxmox request timeout'
+    except Exception as e:
+        return 0, None, f'Request failed: {str(e)[:200]}'
+    body = None
+    try:
+        body = resp.json()
+    except Exception:
+        body = resp.text
+    if resp.status_code >= 400:
+        excerpt = (resp.text or '')[:300]
+        return resp.status_code, body, f'HTTP {resp.status_code}: {excerpt}'
+    return resp.status_code, body, None
+
+
+def _proxmox_unreachable_response(err):
+    """Standard JSON error envelope for Proxmox connectivity / config issues.
+    Returns HTTP 200 (not 502) so Cloudflare doesn't replace the body with its
+    own error page — the UI distinguishes failures via the `ok:false` field."""
+    return jsonify({
+        'ok': False,
+        'reachable': False,
+        'error': err or 'Cannot reach Proxmox',
+        'hint': ('Set up a Cloudflare tunnel hostname (e.g. '
+                 'pve.experience-wholesale.net -> https://192.168.1.209:8006) '
+                 'and set PROXMOX_API_BASE / PROXMOX_API_TOKEN env vars on '
+                 'the EW service.'),
+    }), 200
+
+
+@app.route('/admin/vms')
+def admin_vms_page():
+    """Render the Proxmox VM management dashboard."""
+    return render_template(
+        'admin_vms.html',
+        proxmox_configured=bool(PROXMOX_API_BASE and PROXMOX_API_TOKEN),
+        proxmox_base=PROXMOX_API_BASE or '(not configured)',
+        proxmox_node=PROXMOX_NODE,
+    )
+
+
+@app.route('/api/proxmox/vms', methods=['GET'])
+def api_proxmox_vms():
+    """List VMs across the cluster (currently single-node)."""
+    status, data, err = _proxmox_request('GET', '/cluster/resources?type=vm')
+    if err:
+        return _proxmox_unreachable_response(err)
+    vms = []
+    for v in (data or {}).get('data', []) or []:
+        if v.get('type') != 'qemu':
+            continue
+        maxmem = v.get('maxmem') or 0
+        mem = v.get('mem') or 0
+        maxdisk = v.get('maxdisk') or 0
+        disk = v.get('disk') or 0
+        cpu = v.get('cpu') or 0
+        vms.append({
+            'vmid': v.get('vmid'),
+            'name': v.get('name') or f"vm-{v.get('vmid')}",
+            'status': v.get('status') or 'unknown',
+            'node': v.get('node') or PROXMOX_NODE,
+            'cpu_pct': round(float(cpu) * 100.0, 2),
+            'maxcpu': v.get('maxcpu') or 0,
+            'mem_bytes': mem,
+            'maxmem_bytes': maxmem,
+            'mem_pct': round((mem / maxmem) * 100.0, 1) if maxmem else 0.0,
+            'disk_bytes': disk,
+            'maxdisk_bytes': maxdisk,
+            'uptime_s': v.get('uptime') or 0,
+            'template': bool(v.get('template')),
+        })
+    vms.sort(key=lambda x: x['vmid'])
+    return jsonify({'ok': True, 'reachable': True, 'vms': vms})
+
+
+@app.route('/api/proxmox/host', methods=['GET'])
+def api_proxmox_host():
+    """Host (node) stats."""
+    status, data, err = _proxmox_request('GET', f'/nodes/{PROXMOX_NODE}/status')
+    if err:
+        return _proxmox_unreachable_response(err)
+    s, vms_data, vms_err = _proxmox_request('GET', '/cluster/resources?type=vm')
+    total = running = stopped = 0
+    if not vms_err:
+        for v in (vms_data or {}).get('data', []) or []:
+            if v.get('type') != 'qemu':
+                continue
+            total += 1
+            if v.get('status') == 'running':
+                running += 1
+            else:
+                stopped += 1
+    d = (data or {}).get('data', {}) or {}
+    cpu = float(d.get('cpu') or 0) * 100.0
+    cpuinfo = d.get('cpuinfo', {}) or {}
+    mem = d.get('memory', {}) or {}
+    rootfs = d.get('rootfs', {}) or {}
+    loadavg = d.get('loadavg', [0, 0, 0]) or [0, 0, 0]
+    return jsonify({
+        'ok': True,
+        'reachable': True,
+        'node': PROXMOX_NODE,
+        'cpu_pct': round(cpu, 2),
+        'cpu_cores': cpuinfo.get('cpus') or cpuinfo.get('cores') or 0,
+        'cpu_model': cpuinfo.get('model') or '',
+        'mem_total': mem.get('total') or 0,
+        'mem_used': mem.get('used') or 0,
+        'mem_pct': round((mem.get('used', 0) / mem.get('total', 1)) * 100.0, 1) if mem.get('total') else 0,
+        'disk_total': rootfs.get('total') or 0,
+        'disk_used': rootfs.get('used') or 0,
+        'disk_pct': round((rootfs.get('used', 0) / rootfs.get('total', 1)) * 100.0, 1) if rootfs.get('total') else 0,
+        'loadavg': loadavg,
+        'uptime_s': d.get('uptime') or 0,
+        'pve_version': d.get('pveversion') or '',
+        'vm_total': total,
+        'vm_running': running,
+        'vm_stopped': stopped,
+    })
+
+
+def _proxmox_vm_action(vmid, action_path, action_label):
+    """Helper: POST /nodes/<node>/qemu/<vmid>/status/<action_path> and audit-log."""
+    status, data, err = _proxmox_request(
+        'POST',
+        f'/nodes/{_node_for_vmid(vmid)}/qemu/{vmid}/status/{action_path}'
+    )
+    success = (err is None)
+    excerpt = err if err else (str(data)[:300] if data else 'ok')
+    _proxmox_log(action_label, vmid=vmid, success=success, response_excerpt=excerpt)
+    if err:
+        return jsonify({'ok': False, 'error': err}), 200
+    upid = (data or {}).get('data') if isinstance(data, dict) else None
+    return jsonify({'ok': True, 'upid': upid, 'action': action_label})
+
+
+@app.route('/api/proxmox/vm/<int:vmid>/start', methods=['POST'])
+def api_proxmox_vm_start(vmid):
+    return _proxmox_vm_action(vmid, 'start', 'start')
+
+
+@app.route('/api/proxmox/vm/<int:vmid>/stop', methods=['POST'])
+def api_proxmox_vm_stop(vmid):
+    # 'shutdown' in Proxmox = graceful via guest agent / ACPI
+    return _proxmox_vm_action(vmid, 'shutdown', 'shutdown')
+
+
+@app.route('/api/proxmox/vm/<int:vmid>/forcestop', methods=['POST'])
+def api_proxmox_vm_forcestop(vmid):
+    return _proxmox_vm_action(vmid, 'stop', 'forcestop')
+
+
+@app.route('/api/proxmox/vm/<int:vmid>/reboot', methods=['POST'])
+def api_proxmox_vm_reboot(vmid):
+    return _proxmox_vm_action(vmid, 'reboot', 'reboot')
+
+
+@app.route('/api/proxmox/vm/<int:vmid>/reset', methods=['POST'])
+def api_proxmox_vm_reset(vmid):
+    return _proxmox_vm_action(vmid, 'reset', 'reset')
+
+
+@app.route('/api/proxmox/vm/<int:vmid>/snapshots', methods=['GET'])
+def api_proxmox_vm_snapshots(vmid):
+    status, data, err = _proxmox_request(
+        'GET', f'/nodes/{_node_for_vmid(vmid)}/qemu/{vmid}/snapshot'
+    )
+    if err:
+        return _proxmox_unreachable_response(err)
+    snaps = []
+    for s in (data or {}).get('data', []) or []:
+        # Proxmox always includes a synthetic 'current' entry — keep it last
+        # but mark it so UI can render distinctly.
+        snaps.append({
+            'name': s.get('name'),
+            'description': (s.get('description') or '').strip(),
+            'snaptime': s.get('snaptime') or 0,
+            'parent': s.get('parent'),
+            'vmstate': bool(s.get('vmstate')),
+            'is_current': s.get('name') == 'current',
+        })
+    return jsonify({'ok': True, 'reachable': True, 'snapshots': snaps})
+
+
+@app.route('/api/proxmox/vm/<int:vmid>/snapshot', methods=['POST'])
+def api_proxmox_vm_snapshot_create(vmid):
+    body = request.get_json(silent=True) or {}
+    name = (body.get('name') or '').strip()
+    description = (body.get('description') or '').strip()
+    if not name:
+        return jsonify({'ok': False, 'error': 'snapshot name required'}), 400
+    # Proxmox snapname rules: starts with letter, alnum/_/- only, <=40 chars
+    safe = re.sub(r'[^A-Za-z0-9_-]', '_', name)[:40]
+    if not safe or not safe[0].isalpha():
+        safe = 'snap_' + safe
+    payload = {'snapname': safe}
+    if description:
+        payload['description'] = description[:500]
+    status, data, err = _proxmox_request(
+        'POST',
+        f'/nodes/{_node_for_vmid(vmid)}/qemu/{vmid}/snapshot',
+        data=payload,
+    )
+    success = (err is None)
+    excerpt = err if err else (str(data)[:300] if data else 'ok')
+    _proxmox_log('snapshot_create', vmid=vmid, snapshot=safe,
+                 success=success, response_excerpt=excerpt)
+    if err:
+        return jsonify({'ok': False, 'error': err}), 200
+    upid = (data or {}).get('data') if isinstance(data, dict) else None
+    return jsonify({'ok': True, 'upid': upid, 'snapshot': safe})
+
+
+@app.route('/api/proxmox/vm/<int:vmid>/snapshot/<name>/restore', methods=['POST'])
+def api_proxmox_vm_snapshot_restore(vmid, name):
+    status, data, err = _proxmox_request(
+        'POST',
+        f'/nodes/{_node_for_vmid(vmid)}/qemu/{vmid}/snapshot/{name}/rollback'
+    )
+    success = (err is None)
+    excerpt = err if err else (str(data)[:300] if data else 'ok')
+    _proxmox_log('snapshot_restore', vmid=vmid, snapshot=name,
+                 success=success, response_excerpt=excerpt)
+    if err:
+        return jsonify({'ok': False, 'error': err}), 200
+    upid = (data or {}).get('data') if isinstance(data, dict) else None
+    return jsonify({'ok': True, 'upid': upid})
+
+
+@app.route('/api/proxmox/vm/<int:vmid>/snapshot/<name>', methods=['DELETE'])
+def api_proxmox_vm_snapshot_delete(vmid, name):
+    status, data, err = _proxmox_request(
+        'DELETE',
+        f'/nodes/{_node_for_vmid(vmid)}/qemu/{vmid}/snapshot/{name}'
+    )
+    success = (err is None)
+    excerpt = err if err else (str(data)[:300] if data else 'ok')
+    _proxmox_log('snapshot_delete', vmid=vmid, snapshot=name,
+                 success=success, response_excerpt=excerpt)
+    if err:
+        return jsonify({'ok': False, 'error': err}), 200
+    upid = (data or {}).get('data') if isinstance(data, dict) else None
+    return jsonify({'ok': True, 'upid': upid})
+
+
+@app.route('/api/proxmox/console-url/<int:vmid>', methods=['GET'])
+def api_proxmox_console_url(vmid):
+    """Return the Proxmox web-console URL for a VM. The user has their own
+    Proxmox login still — this just opens the right deep link in a new tab."""
+    if not PROXMOX_API_BASE:
+        return jsonify({'ok': False, 'error': 'Proxmox API not configured'}), 200
+    base = PROXMOX_API_BASE
+    return jsonify({
+        'ok': True,
+        'url': f'{base}/?console=kvm&vmid={vmid}&node={_node_for_vmid(vmid)}&resize=scale',
+    })
+
+# ─── End Proxmox VM Management ──────────────────────────────────────────────
+
+
+if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=9000)

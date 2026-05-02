@@ -1,4 +1,7 @@
-const CACHE_NAME = 'ew-field-v1';
+// Bump on any SW change so the activate handler evicts old caches.
+// v2 (2026-05-02): added /owner + /admin skip rules; routed
+// notificationclick by URL prefix between /mobile and /owner windows.
+const CACHE_NAME = 'ew-field-v2';
 const STATIC_ASSETS = [
   '/mobile',
   '/static/manifest.json',

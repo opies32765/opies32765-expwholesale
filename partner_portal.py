@@ -758,8 +758,9 @@ def notify_partner_of_ew_response(bid_id: int, send_email: bool = False, send_te
         share contact_id via _ensure_partner_contact).
       - send_email: client-checkbox + dealer's email_bid_alerts opt-in
         (BOTH must be true to send).
-      - send_text:  client-checkbox + dealer's sms_opt_in + sms_verified_at
-        (legal requirement — verified opt-in before any SMS).
+      - send_text:  client-checkbox + dealer's sms_opt_in. Partner dealers
+        consent via the signed partner agreement, not the SMS double-opt-in
+        handshake, so sms_verified_at is not required here.
 
     Works for both partner-portal bids (via partner_request_id) AND EW-pushed
     back-bids from Dealer DB Search (via partner_dealer_id directly on bids).
@@ -817,14 +818,26 @@ def notify_partner_of_ew_response(bid_id: int, send_email: bool = False, send_te
                         f'Open your dashboard</a></p>'
                         f'<p style="font-size:12px;color:#64748b">You can counter, accept, '
                         f'or decline from the portal.</p>')
-                # SMS — only if client requested AND user opted in AND verified
-                if send_text and u.get('sms_opt_in') and u.get('sms_verified_at') and u.get('phone'):
-                    sms_body_parts = [f'EW responded on your {car}']
+                # SMS — only if client requested AND user opted in (partner
+                # agreement = consent; no separate sms_verified_at needed).
+                # Bid # leads the message so partner replies can be routed
+                # back to this thread by the Twilio inbound webhook.
+                if send_text and u.get('sms_opt_in') and u.get('phone'):
+                    sms_body_parts = [f'Bid #{bid_id} ({car})',
+                                      'EW responded — reply to this text to chat']
                     if b['bid_amount']:
                         sms_body_parts.append(f'Offer: ${int(float(b["bid_amount"])):,}')
-                    sms_body_parts.append(f'Open: {portal_url}')
                     sms_body_parts.append('Reply STOP to unsubscribe.')
-                    _send_sms(u['phone'], ' — '.join(sms_body_parts))
+                    if _send_sms(u['phone'], ' — '.join(sms_body_parts)):
+                        # Track the (phone, bid) anchor so the inbound webhook
+                        # can route a plain reply back to this exact bid.
+                        try:
+                            cur.execute("""INSERT INTO partner_sms_sent
+                                             (phone, bid_id, dealer_id)
+                                           VALUES (%s, %s, %s)""",
+                                        (u['phone'], bid_id, b['dealer_id']))
+                        except Exception as _e:
+                            print(f'[partner sms_sent log] skipped: {_e}')
     except Exception as e:
         print(f'[partner notify] failed for bid {bid_id}: {e}')
 

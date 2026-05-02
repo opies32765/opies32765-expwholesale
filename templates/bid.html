@@ -241,6 +241,13 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
       <div class="vb-meta">
         <div class="bid-id">Bid #{{ bid.id }} · {{ time_ago(bid.created_at) }}</div>
         <div class="vin-big">{{ bid.vin or 'No VIN' }}</div>
+        {% if vin_candidate %}
+        <div style="margin-top:6px;padding:6px 10px;background:rgba(251,191,36,.10);border:1px solid rgba(251,191,36,.4);border-radius:6px;font-size:12px;color:#fbbf24;display:inline-flex;align-items:center;gap:8px;font-family:'JetBrains Mono',ui-monospace,monospace">
+          <span style="font-family:'Inter',sans-serif;font-weight:600">Photo VIN (verify):</span>
+          <span>{{ vin_candidate }}</span>
+          <button onclick="applyVinCandidate('{{ vin_candidate }}')" style="background:#fbbf24;color:#0b0f19;border:none;border-radius:4px;padding:3px 8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif">Use</button>
+        </div>
+        {% endif %}
         {% if bid.year or bid.make %}
         <div class="vehicle-desc-big">{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }} {{ bid.trim or '' }}</div>
         {% endif %}
@@ -301,11 +308,12 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
     </div>
     <div class="photos-scroll" id="photos-scroll">
       {% for photo in photos %}
+      {% set _src = photo.local_path or photo.url %}
       <div class="photo-thumb{% if loop.index > max_visible %} photo-hidden{% endif %}{% if not photo.include_in_share %} photo-excluded{% endif %}"
            id="photo-tile-{{ photo.id }}"
-           onclick="openLightbox('{{ photo.url|thumb_url('full') }}')"
+           onclick="openLightbox('{{ _src|thumb_url('full') }}')"
            style="position:relative">
-        <img src="{{ photo.url|thumb_url('strip') }}" alt="Vehicle photo" loading="lazy" referrerpolicy="no-referrer">
+        <img src="{{ _src|thumb_url('strip') }}" alt="Vehicle photo" loading="lazy" referrerpolicy="no-referrer">
         <label onclick="event.stopPropagation()"
                style="position:absolute;bottom:4px;left:4px;right:4px;background:rgba(0,0,0,.75);color:#fff;padding:4px 6px;border-radius:5px;font-size:11px;font-weight:600;display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none">
           <input type="checkbox"
@@ -1193,6 +1201,20 @@ async function decodeVin() {
     toast(d.error || 'Could not decode VIN', false);
     btn.textContent = '🔍 Decode VIN'; btn.disabled = false;
   }
+}
+
+function applyVinCandidate(candidate) {
+  // Drop the candidate into the VIN field, expand Vehicle Details so the user
+  // can eyeball-correct against the photo, scroll to it, and focus the input.
+  // No auto-save — wrong-length / misread VINs would just replay the bug.
+  const f = document.getElementById('f-vin');
+  if (f) f.value = (candidate || '').toUpperCase();
+  const body = document.getElementById('vehicle-details-body');
+  if (body && body.style.display === 'none') {
+    if (typeof toggleVehicleDetails === 'function') toggleVehicleDetails();
+    else body.style.display = 'block';
+  }
+  if (f) { f.scrollIntoView({behavior:'smooth', block:'center'}); f.focus(); f.select(); }
 }
 
 async function saveVehicle() {
