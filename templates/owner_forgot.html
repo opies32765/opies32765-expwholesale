@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="theme-color" content="#0b0f19">
+<title>Forgot Password — EW Owner</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:#111827;border:1px solid #1e293b;border-radius:16px;padding:36px 28px;width:100%;max-width:380px}
+h1{font-size:18px;font-weight:700;color:#f1f5f9;text-align:center;margin-bottom:8px}
+p{font-size:13px;color:#64748b;text-align:center;margin-bottom:18px;line-height:1.5}
+label{display:block;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin:18px 0 6px}
+input{width:100%;padding:12px 14px;background:#0f172a;border:1.5px solid #1e293b;border-radius:10px;color:#e2e8f0;font-size:16px;font-family:inherit;outline:none}
+input:focus{border-color:#3b82f6}
+button{width:100%;padding:14px;margin-top:20px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border:none;border-radius:10px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit}
+.flash{margin-top:12px;padding:10px 14px;border-radius:8px;font-size:13px;text-align:center;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:#4ade80}
+.bk{display:block;text-align:center;margin-top:14px;font-size:13px;color:#64748b;text-decoration:none}
+</style>
+</head>
+<body>
+<form class="card" method="post">
+  <h1>Reset your password</h1>
+  <p>Enter your email and we'll send you a reset link.</p>
+  {% with messages = get_flashed_messages() %}
+    {% for msg in messages %}<div class="flash">{{ msg }}</div>{% endfor %}
+  {% endwith %}
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" autocomplete="username" required>
+  <button type="submit">Send reset link</button>
+  <a href="/owner/login" class="bk">‹ Back to sign in</a>
+</form>
+</body>
+</html>

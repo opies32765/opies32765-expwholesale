@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Owners — EW Admin</title>
+<style>
+body{margin:0;font-family:-apple-system,'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh}
+header{padding:18px 28px;background:#111827;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;align-items:center}
+header h1{margin:0;font-size:20px;font-weight:700}
+header a{color:#7dd3fc;font-size:13px;text-decoration:none;margin-left:18px}
+main{max-width:1100px;margin:0 auto;padding:24px 28px}
+.card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:20px 24px;margin-bottom:20px}
+.card h2{font-size:14px;font-weight:700;color:#cbd5e1;text-transform:uppercase;letter-spacing:.6px;margin-bottom:14px}
+.flash{padding:11px 16px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:#4ade80;border-radius:8px;font-size:13px;margin-bottom:16px}
+.flash.error{background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.3);color:#f87171}
+form.invite{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}
+label{display:block;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
+input{width:100%;padding:10px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;color:#e2e8f0;font-size:14px;font-family:inherit;outline:none}
+input:focus{border-color:#3b82f6}
+button{padding:10px 18px;background:#3b82f6;border:none;border-radius:8px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
+button.danger{background:transparent;border:1px solid #7f1d1d;color:#f87171}
+table{width:100%;border-collapse:collapse;background:#111827;border-radius:10px;overflow:hidden;margin-top:8px}
+thead th{background:#0f172a;padding:12px 14px;text-align:left;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #1e293b}
+tbody td{padding:14px 14px;font-size:14px;border-bottom:1px solid #1e293b;vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+.bad{display:inline-block;padding:2px 8px;border-radius:8px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+.bad.on{background:rgba(34,197,94,.15);color:#4ade80}
+.bad.off{background:rgba(100,116,139,.15);color:#94a3b8}
+.bad.pending{background:rgba(245,158,11,.15);color:#fbbf24}
+.muted{color:#64748b;font-size:12px}
+.row-actions{display:flex;gap:8px}
+.row-actions form{margin:0}
+.row-actions button{padding:6px 12px;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Owner Portal Admins</h1>
+  <a href="/">‹ Back to Buy Center</a>
+</header>
+<main>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for cat, msg in messages %}<div class="flash {{ cat }}">{{ msg }}</div>{% endfor %}
+  {% endwith %}
+
+  <div class="card">
+    <h2>Invite a new owner</h2>
+    <form class="invite" method="post" action="/admin/owners/invite">
+      <div>
+        <label for="i-email">Email</label>
+        <input id="i-email" name="email" type="email" required placeholder="owner@example.com">
+      </div>
+      <div>
+        <label for="i-name">Name</label>
+        <input id="i-name" name="name" type="text" placeholder="(optional)">
+      </div>
+      <div>
+        <label for="i-phone">Phone</label>
+        <input id="i-phone" name="phone" type="tel" placeholder="(optional)">
+      </div>
+      <button type="submit">Send invite</button>
+    </form>
+    <p class="muted" style="margin-top:14px">Owners get a one-time invite link to set their password, then a phone-first dashboard at /owner. Push notifications fire on new bids if they install the app and grant permission.</p>
+  </div>
+
+  <div class="card">
+    <h2>Owners ({{ owners|length }})</h2>
+    {% if not owners %}
+      <p class="muted">No owners yet. Invite the first one above.</p>
+    {% else %}
+    <table>
+      <thead>
+        <tr>
+          <th>Email</th><th>Name</th><th>Status</th><th>Notify</th>
+          <th>Last seen</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in owners %}
+        <tr>
+          <td>
+            {{ o.email }}
+            {% if o.phone %}<div class="muted">{{ o.phone }}</div>{% endif %}
+          </td>
+          <td>{{ o.name or '—' }}</td>
+          <td>
+            {% if not o.active %}
+              <span class="bad off">disabled</span>
+            {% elif not o.invite_used_at %}
+              <span class="bad pending">invite pending</span>
+            {% else %}
+              <span class="bad on">active</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if o.notify_new_bid %}<span class="bad on" title="New bid push">new</span>{% endif %}
+            {% if o.notify_bid_reply %}<span class="bad on" title="Reply push">reply</span>{% endif %}
+            {% if not o.notify_new_bid and not o.notify_bid_reply %}<span class="muted">none</span>{% endif %}
+          </td>
+          <td class="muted">
+            {% if o.last_seen_at %}{{ o.last_seen_at.strftime('%b %d %H:%M') }}{% else %}never{% endif %}
+            {% if o.last_ip %}<div style="font-size:11px">{{ o.last_ip }}</div>{% endif %}
+          </td>
+          <td>
+            <div class="row-actions">
+              <form method="post" action="/admin/owners/{{ o.id }}/toggle">
+                <button type="submit">{% if o.active %}Disable{% else %}Enable{% endif %}</button>
+              </form>
+              <form method="post" action="/admin/owners/{{ o.id }}/delete"
+                    onsubmit="return confirm('Delete {{ o.email }}? This removes their account and push subscriptions.');">
+                <button type="submit" class="danger">Delete</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div>
+</main>
+</body>
+</html>

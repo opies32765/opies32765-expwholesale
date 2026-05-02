@@ -34,11 +34,15 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Partner portal + admin pages must never be intercepted or cached by
-  // this service worker. The SW is installed for the field-rep /mobile
-  // PWA and should not hijack dealer-facing or admin URLs.
+  // Partner portal, owner portal, and admin pages must never be intercepted
+  // or cached by this service worker. The SW is installed for the field-rep
+  // /mobile PWA and should not hijack dealer-facing, owner-facing, or admin
+  // URLs (they have their own auth, their own no-cache headers, and rely on
+  // fresh network responses).
   if (url.pathname.startsWith('/partner/')
-      || url.pathname.startsWith('/admin/partner/')) {
+      || url.pathname.startsWith('/admin/')
+      || url.pathname === '/owner'
+      || url.pathname.startsWith('/owner/')) {
     return;
   }
 
@@ -119,16 +123,29 @@ self.addEventListener('push', event => {
   );
 });
 
-// Notification click — open/focus app
+// Notification click — open/focus the app the notification belongs to.
+// Owner pushes carry url=/owner/bid/<id>; rep pushes carry url=/mobile/...;
+// pick an existing window matching the same prefix, else open targetUrl.
 self.addEventListener('notificationclick', event => {
   event.notification.close();
   const targetUrl = (event.notification.data && event.notification.data.url) || '/mobile';
+  // Pick a focus key that distinguishes owner-portal vs field-rep windows
+  // so an owner click never steals focus to an open /mobile rep window.
+  let prefix = '/mobile';
+  if (targetUrl.startsWith('/owner')) prefix = '/owner';
   event.waitUntil(
     self.clients.matchAll({ type: 'window' }).then(clients => {
       for (const client of clients) {
-        if (client.url.includes('/mobile') && 'focus' in client) {
-          return client.focus();
-        }
+        try {
+          const cu = new URL(client.url);
+          if (cu.pathname.startsWith(prefix) && 'focus' in client) {
+            // Navigate the existing window to the deep-link target then focus
+            if ('navigate' in client && client.url !== targetUrl) {
+              return client.navigate(targetUrl).then(() => client.focus());
+            }
+            return client.focus();
+          }
+        } catch (e) {}
       }
       return self.clients.openWindow(targetUrl);
     })

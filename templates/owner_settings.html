@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0b0f19">
+<title>Settings — EW Owner</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{font-family:-apple-system,'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh;padding-bottom:24px}
+a{color:inherit;text-decoration:none}
+.hdr{background:#111827;border-bottom:1px solid #1e293b;padding:10px 12px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:100}
+.back{font-size:24px;color:#94a3b8;width:32px;text-align:center}
+.hdr-title{font-size:14px;font-weight:700;color:#f1f5f9;flex:1}
+.page{padding:18px 16px;max-width:520px;margin:0 auto}
+.section{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:16px;margin-bottom:14px}
+.section h3{font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.6px;margin-bottom:14px}
+.who{font-size:14px;color:#cbd5e1;line-height:1.5}
+.who b{color:#f1f5f9}
+.who-meta{font-size:12px;color:#64748b;margin-top:6px}
+.toggle-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #1e293b}
+.toggle-row:last-child{border-bottom:0}
+.toggle-l{flex:1}
+.toggle-l div{font-size:14px;color:#f1f5f9;font-weight:600}
+.toggle-l small{font-size:12px;color:#64748b;display:block;margin-top:2px}
+.switch{position:relative;display:inline-block;width:48px;height:28px;flex-shrink:0;margin-left:12px}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;cursor:pointer;inset:0;background:#1e293b;border:1px solid #334155;border-radius:28px;transition:.2s}
+.slider::before{content:'';position:absolute;width:20px;height:20px;left:3px;top:3px;background:#94a3b8;border-radius:50%;transition:.2s}
+.switch input:checked + .slider{background:#1e3a8a;border-color:#3b82f6}
+.switch input:checked + .slider::before{transform:translateX(20px);background:#fff}
+.btn{display:block;width:100%;padding:13px;background:#1e293b;border:1px solid #334155;border-radius:10px;color:#cbd5e1;font-size:14px;font-weight:600;text-align:center;cursor:pointer;margin-top:10px;font-family:inherit}
+.btn.primary{background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-color:#3b82f6;color:#fff}
+.btn.danger{background:transparent;border-color:#7f1d1d;color:#f87171;margin-top:24px}
+.flash{padding:10px 14px;border-radius:8px;font-size:13px;text-align:center;margin-bottom:12px}
+.flash.success{background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:#4ade80}
+.push-status{font-size:13px;color:#64748b;margin-top:8px;padding:10px;background:#0f172a;border-radius:8px;text-align:center}
+.push-status.on{color:#4ade80}
+.push-status.off{color:#94a3b8}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <a href="/owner" class="back">‹</a>
+  <div class="hdr-title">Settings</div>
+</div>
+
+<div class="page">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for cat, msg in messages %}<div class="flash {{ cat }}">{{ msg }}</div>{% endfor %}
+  {% endwith %}
+
+  <div class="section">
+    <h3>Account</h3>
+    <div class="who"><b>{{ user.name or '—' }}</b></div>
+    <div class="who-meta">{{ user.email }}{% if user.phone %} · {{ user.phone }}{% endif %}</div>
+  </div>
+
+  <form method="post" class="section">
+    <h3>Notifications</h3>
+    <div class="toggle-row">
+      <div class="toggle-l">
+        <div>New bids</div>
+        <small>Push when a new bid arrives</small>
+      </div>
+      <label class="switch">
+        <input type="checkbox" name="notify_new_bid" {% if user.notify_new_bid %}checked{% endif %}>
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="toggle-row">
+      <div class="toggle-l">
+        <div>Bid replies</div>
+        <small>Push when a seller replies on a bid</small>
+      </div>
+      <label class="switch">
+        <input type="checkbox" name="notify_bid_reply" {% if user.notify_bid_reply %}checked{% endif %}>
+        <span class="slider"></span>
+      </label>
+    </div>
+    <button type="submit" class="btn primary">Save preferences</button>
+  </form>
+
+  <div class="section">
+    <h3>Push notifications on this device</h3>
+    <div id="pushStatus" class="push-status">Checking…</div>
+    <button type="button" class="btn primary" id="pushBtn" onclick="togglePush()" style="display:none">Enable on this device</button>
+    <button type="button" class="btn" id="pushOffBtn" onclick="disablePush()" style="display:none">Disable on this device</button>
+  </div>
+
+  <a href="/owner/logout" class="btn danger">Sign out</a>
+</div>
+
+<script>
+function urlBase64ToUint8Array(b64){
+  const padding = '='.repeat((4 - b64.length % 4) % 4);
+  const base64 = (b64 + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+async function refreshPushStatus(){
+  const status = document.getElementById('pushStatus');
+  const btnOn = document.getElementById('pushBtn');
+  const btnOff = document.getElementById('pushOffBtn');
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    status.textContent = 'This browser does not support push notifications';
+    return;
+  }
+  if (Notification.permission === 'denied') {
+    status.className = 'push-status off';
+    status.textContent = 'Permission was denied. Enable in your browser settings.';
+    return;
+  }
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  if (sub) {
+    status.className = 'push-status on';
+    status.textContent = '🔔 Notifications are active on this device';
+    btnOff.style.display = 'block';
+  } else {
+    status.className = 'push-status off';
+    status.textContent = 'Not subscribed on this device';
+    btnOn.style.display = 'block';
+  }
+}
+async function togglePush(){
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') return refreshPushStatus();
+  const reg = await navigator.serviceWorker.ready;
+  const { publicKey } = await (await fetch('/api/vapid-public-key')).json();
+  if (!publicKey) { alert('Push not configured on the server.'); return; }
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(publicKey),
+  });
+  await fetch('/owner/push/subscribe', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    credentials:'same-origin',
+    body: JSON.stringify({subscription: sub.toJSON()})
+  });
+  document.getElementById('pushBtn').style.display = 'none';
+  refreshPushStatus();
+}
+async function disablePush(){
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  if (sub) {
+    await fetch('/owner/push/unsubscribe', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      credentials:'same-origin',
+      body: JSON.stringify({endpoint: sub.endpoint})
+    });
+    await sub.unsubscribe();
+  }
+  document.getElementById('pushOffBtn').style.display = 'none';
+  refreshPushStatus();
+}
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/service-worker.js', { scope: '/' }).then(refreshPushStatus).catch(()=>{
+    document.getElementById('pushStatus').textContent = 'Service worker failed to load';
+  });
+}
+</script>
+</body>
+</html>
