@@ -54,7 +54,12 @@ def lookup(page, ctx, vin, miles, t, trim=None):
     print(f"[+{time.time()-t:5.1f}s] [accutrade] logged in")
     page = next((pg for pg in ctx.pages if is_logged_in(pg.url)), page)
 
-    page.goto(ACCUTRADE_URL, wait_until="domcontentloaded", timeout=20000); time.sleep(2)
+    # Skip the redundant re-goto when we're already on the dashboard.
+    # auto_login leaves us logged in but on /home or wherever; the second
+    # goto was costing ~3s + 2s sleep for no reason.
+    if not is_logged_in(page.url):
+        page.goto(ACCUTRADE_URL, wait_until="domcontentloaded", timeout=20000)
+        time.sleep(1)
     page.evaluate(r"""() => {
         const btns = document.querySelectorAll('button, a, [role="button"]');
         for (const b of btns) {
@@ -69,7 +74,7 @@ def lookup(page, ctx, vin, miles, t, trim=None):
         }
         return 'not_found';
     }""")
-    time.sleep(1.5)
+    time.sleep(0.5)  # was 1.5s
     page.evaluate(r"""() => {
         const items = document.querySelectorAll('a, button, li, [role="menuitem"], [role="option"], span, div');
         for (const item of items) {
@@ -80,7 +85,7 @@ def lookup(page, ctx, vin, miles, t, trim=None):
         }
         return 'not_found';
     }""")
-    time.sleep(2)
+    time.sleep(1)  # was 2s
 
     deadline = time.time() + 20; has_vin = False
     while time.time() < deadline:
@@ -93,7 +98,7 @@ def lookup(page, ctx, vin, miles, t, trim=None):
             return false;
         }""")
         if has_vin: break
-        time.sleep(1)
+        time.sleep(0.3)  # was 1s — vin input usually appears within a couple ticks
     if not has_vin: return {"error": "vin_input_not_found"}
 
     page.evaluate(r"""(vin) => {
@@ -111,7 +116,7 @@ def lookup(page, ctx, vin, miles, t, trim=None):
         }
         return 'not_found';
     }""", vin)
-    time.sleep(1)
+    time.sleep(0.5)  # was 1s
     page.evaluate(r"""() => {
         const all = document.querySelectorAll('*');
         for (const el of all) {
@@ -120,7 +125,7 @@ def lookup(page, ctx, vin, miles, t, trim=None):
             if (direct.toLowerCase() === 'search') { el.click(); return 'clicked'; }
         }
     }""")
-    time.sleep(3)
+    time.sleep(1)  # was 3s
 
     fast = page.evaluate(r"""() => {
         const url = window.location.href.toLowerCase();
@@ -131,7 +136,7 @@ def lookup(page, ctx, vin, miles, t, trim=None):
                && /\$[\d,]{3,}/.test(text);
     }""")
     if not fast:
-        time.sleep(2)
+        time.sleep(1)  # was 2s
         page.evaluate(r"""(trimHint) => {
             function fc(el) { try { el.click(); } catch(e) {}
                 try { el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window})); } catch(e) {} }
@@ -161,12 +166,12 @@ def lookup(page, ctx, vin, miles, t, trim=None):
             if (inner) fc(inner);
             return 'clicked_trim';
         }""", trim or "")
-        time.sleep(3)
+        time.sleep(1)  # was 3s
         deadline = time.time() + 30
         while time.time() < deadline:
             if "/appraisal/" in page.url and "/new" not in page.url:
                 break
-            time.sleep(1)
+            time.sleep(0.3)  # was 1s — tighter polling lands on the new URL faster
 
     # Set mileage
     page.evaluate(r"""(target) => {
@@ -204,7 +209,25 @@ def lookup(page, ctx, vin, miles, t, trim=None):
             i.dispatchEvent(new Event('blur',   {bubbles: true}));
         }
     }""", int(miles))
-    time.sleep(7)
+    # Was time.sleep(7) — replaced with poll-until-values-appear loop.
+    # Most lookups finish recalc in 2-4s; we cap at 7s so worst case == old behavior.
+    deadline = time.time() + 7
+    while time.time() < deadline:
+        ready = page.evaluate(r"""() => {
+            const text = document.body.innerText || '';
+            // Need at least 2 of the dollar-value labels to have a $value next to them
+            const labels = ['Instant Offer','Target Auction','Target Retail','Wholesale'];
+            let hits = 0;
+            for (const lab of labels) {
+                const idx = text.indexOf(lab);
+                if (idx < 0) continue;
+                const win = text.substring(idx, idx + 100);
+                if (/\$\s*[\d,]{3,}/.test(win)) hits++;
+            }
+            return hits >= 2;
+        }""")
+        if ready: break
+        time.sleep(0.4)
 
     values = page.evaluate(r"""() => {
         const map = [

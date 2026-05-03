@@ -152,7 +152,7 @@ def ew_get_pending():
     try:
         params = {"worker_id": WORKER_ID, "priority": WORKER_PRIORITY}
         r = http_requests.get(f"{EW_SERVER}/api/vauto/pending",
-                              params=params, timeout=15)
+                              params=params, timeout=30)
         if r.status_code == 200:
             return r.json().get("pending", [])
     except Exception as e:
@@ -253,7 +253,7 @@ def _heartbeat_loop():
                 "worker": "ew",
             }
             r = http_requests.post(f"{EW_SERVER}/api/vauto/heartbeat",
-                                   json=payload, timeout=5)
+                                   json=payload, timeout=15)
             # Server-driven self-exit: watchdog flagged us as stuck. NSSM
             # auto-restarts in a few seconds.
             try:

@@ -5639,7 +5639,7 @@ def api_vauto_pending():
                    OR b.vauto_claimed_at < NOW() - INTERVAL '5 minutes')
             ORDER BY b.vauto_priority DESC, b.created_at DESC
             FOR UPDATE SKIP LOCKED
-            LIMIT 5
+            LIMIT 1
         )
         UPDATE bids
            SET vauto_claimed_by = %s,
@@ -6489,14 +6489,12 @@ def _ensure_watchdog():
 _WORKER_VMID_MAP = {
     'vm-worker-1': 9000,
     'vm-worker-2': 100,
-    'vm-worker-3': 101,
     'vm-worker-4': 102,
     'vm-worker-5': 103,
-    'vm-worker-6': 110,
+    'vm-worker-6': 116,
     'vm-worker-7': 111,
     'vm-worker-8': 112,
-    'vm-worker-9': 113,
-    'vm-worker-10': 114,
+    'vm-worker-10': 115,
 }
 
 def _worker_to_vmid(worker_id):
@@ -6593,15 +6591,18 @@ def _get_proxmox_snapshot_cached():
                     maxmem = v.get('maxmem') or 0
                     mem = v.get('mem') or 0
                     cpu = v.get('cpu') or 0
+                    # mem can exceed maxmem when the virtio-balloon driver is not
+                    # reporting back — clamp for display so we never show >100%.
+                    mem_display = min(mem, maxmem) if maxmem else mem
                     result['vms_by_id'][int(vmid)] = {
                         'vmid': int(vmid),
                         'name': v.get('name') or f"vm-{vmid}",
                         'status': v.get('status') or 'unknown',
                         'uptime_sec': int(v.get('uptime') or 0),
                         'cpu_pct': round(float(cpu) * 100.0, 2),
-                        'mem_used_mb': int(mem / (1024 * 1024)) if mem else 0,
+                        'mem_used_mb': int(mem_display / (1024 * 1024)) if mem_display else 0,
                         'mem_total_mb': int(maxmem / (1024 * 1024)) if maxmem else 0,
-                        'mem_pct': round((mem / maxmem) * 100.0, 1) if maxmem else 0.0,
+                        'mem_pct': round((mem_display / maxmem) * 100.0, 1) if maxmem else 0.0,
                         'template': bool(v.get('template')),
                     }
                 result['_vm_total'] = vm_total

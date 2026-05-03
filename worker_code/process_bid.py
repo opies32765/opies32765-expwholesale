@@ -1,9 +1,15 @@
-"""End-to-end bid processor: vAuto -> AccuTrade -> iPacket on a single VIN.
+"""End-to-end bid processor: vAuto + AccuTrade + iPacket all PARALLEL.
 
-ONE Playwright context, ONE persistent profile shared across all 3 sites.
-This is the production worker function shape minus the EW-server polling/upload.
+Three Playwright instances run concurrently in separate threads, each with
+its own profile dir. No SSO collisions because all three vendors use
+different auth systems:
+  - vAuto    -> Cox SSO    (OscarPas)
+  - AccuTrade-> Auth0       (opies32765@gmail.com / Sedecremlun35$)
+  - iPacket  -> iPacket SSO (opies32765@gmail.com / Sedecremlun34$)
+
+Wall-clock per bid drops from ~92s sequential to ~40s = max(vauto, accutrade, ipacket).
 """
-import sys, time, json
+import sys, time, json, threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -14,73 +20,90 @@ import worker_ipacket
 
 from playwright.sync_api import sync_playwright
 
-PROFILE_DIR = Path(r"C:\worker\vauto_profile")
+VAUTO_PROFILE_DIR     = Path(r"C:\worker\vauto_profile")
+ACCUTRADE_PROFILE_DIR = Path(r"C:\worker\accutrade_profile")
+IPACKET_PROFILE_DIR   = Path(r"C:\worker\ipacket_profile")
+for d in (VAUTO_PROFILE_DIR, ACCUTRADE_PROFILE_DIR, IPACKET_PROFILE_DIR):
+    d.mkdir(parents=True, exist_ok=True)
 
-# Test bid — Audi R8 (bid #602)
+# Test bid
 TEST_VIN = "WUASUAFG3CN000625"
 TEST_MILES = 30000
 TEST_TRIM = None
 
+# Per-vendor wall-clock cap. Single hung lookup can't block the bid forever.
+LOOKUP_TIMEOUT_SEC = 90
+
+
+def _run_lookup_in_own_browser(profile_dir, runner):
+    """Spin up an isolated Playwright/Chromium just for this one lookup,
+    invoke runner(page, ctx) and return its result. Always closes."""
+    with sync_playwright() as p:
+        ctx = p.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir), headless=False,
+            viewport={"width": 1500, "height": 1000},
+        )
+        try:
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            return runner(page, ctx)
+        finally:
+            try: ctx.close()
+            except Exception: pass
+
 
 def process_bid(vin, miles, trim=None, on_phase=None):
-    """Run vAuto -> AccuTrade -> iPacket on a single VIN.
+    """Run all three lookups in parallel.
 
-    on_phase: optional callback (phase: str, state: str) called at the
-    boundaries of each lookup so an outer worker can drive watchdog timers.
-    Phases: 'vauto', 'accutrade', 'ipacket'. States: 'started', 'done'.
+    on_phase: optional callback (phase: str, state: str) for watchdog markers.
     """
     t = time.time()
     print(f"=== process_bid: {vin} miles={miles:,} ===")
     result = {"vin": vin, "miles": miles, "vauto": None, "accutrade": None, "ipacket": None}
 
+    _phase_lock = threading.Lock()
     def _phase(phase, state):
-        if on_phase is None:
-            return
-        try:
-            on_phase(phase, state)
-        except Exception:
-            pass
+        if on_phase is None: return
+        with _phase_lock:
+            try: on_phase(phase, state)
+            except Exception: pass
 
-    with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR), headless=False,
-            viewport={"width": 1500, "height": 1000},
-        )
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
-
-        # vAuto
-        _phase("vauto", "started")
+    def _wrap(name, profile, runner):
+        _phase(name, "started")
         try:
-            result["vauto"] = worker_vauto.lookup(page, ctx, vin, miles, t)
+            result[name] = _run_lookup_in_own_browser(profile, runner)
         except Exception as e:
             import traceback; traceback.print_exc()
-            result["vauto"] = {"error": str(e)}
-        _phase("vauto", "done")
+            result[name] = {"error": str(e)}
+        _phase(name, "done")
 
-        # Switch the page reference to whatever vauto left us on
-        page = next((pg for pg in ctx.pages if not pg.is_closed()), page)
+    threads = [
+        threading.Thread(
+            target=_wrap, name="vauto", daemon=True,
+            args=("vauto", VAUTO_PROFILE_DIR,
+                  lambda page, ctx: worker_vauto.lookup(page, ctx, vin, miles, t)),
+        ),
+        threading.Thread(
+            target=_wrap, name="accutrade", daemon=True,
+            args=("accutrade", ACCUTRADE_PROFILE_DIR,
+                  lambda page, ctx: worker_accutrade.lookup(page, ctx, vin, miles, t, trim=trim)),
+        ),
+        threading.Thread(
+            target=_wrap, name="ipacket", daemon=True,
+            args=("ipacket", IPACKET_PROFILE_DIR,
+                  lambda page, ctx: worker_ipacket.lookup(page, ctx, vin, t)),
+        ),
+    ]
+    for th in threads: th.start()
 
-        # AccuTrade
-        _phase("accutrade", "started")
-        try:
-            result["accutrade"] = worker_accutrade.lookup(page, ctx, vin, miles, t, trim=trim)
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            result["accutrade"] = {"error": str(e)}
-        _phase("accutrade", "done")
-
-        page = next((pg for pg in ctx.pages if not pg.is_closed()), page)
-
-        # iPacket
-        _phase("ipacket", "started")
-        try:
-            result["ipacket"] = worker_ipacket.lookup(page, ctx, vin, t)
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            result["ipacket"] = {"error": str(e)}
-        _phase("ipacket", "done")
-
-        ctx.close()
+    deadline = time.time() + LOOKUP_TIMEOUT_SEC
+    for th in threads:
+        remaining = max(1.0, deadline - time.time())
+        th.join(timeout=remaining)
+        if th.is_alive():
+            name = th.name
+            print(f"[!] {name} thread still alive past {LOOKUP_TIMEOUT_SEC}s — abandoning")
+            if result.get(name) is None:
+                result[name] = {"error": f"{name}_timeout"}
 
     print(f"\n=== TOTAL ELAPSED: {time.time()-t:.1f}s ===")
     return result

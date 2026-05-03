@@ -95,13 +95,24 @@ def lookup(page, ctx, vin, t):
     while time.time() < deadline:
         st = page.evaluate(r"""(vin) => {
             const v = (vin || '').toUpperCase();
-            // PRIMARY: iPacket renders the sticker inline inside .stickerpull-view-container
-            //   when a pull succeeds. The .module-pdf or .document-viewer-container child
-            //   appears once the sticker is loaded. This is the real "ready" signal.
+            // PRIMARY: iPacket renders sticker via react-pdf to a
+            //   <canvas class="react-pdf__Page__canvas">. The canvas grows
+            //   as PDF.js paints more — we have to wait until it STOPS
+            //   changing or we capture a partial render. Track dimensions
+            //   between polls and require 2 consecutive identical readings.
             const view = document.querySelector('.stickerpull-view-container');
             if (view && view.offsetParent !== null) {
-                const viewer = view.querySelector('.document-viewer-container, .module-pdf, .module-viewer-container');
-                if (viewer) return {state: 'ready'};
+                const canvas = view.querySelector('.react-pdf__Page__canvas');
+                if (canvas && canvas.width > 500 && canvas.height > 500) {
+                    const sig = canvas.width + 'x' + canvas.height;
+                    const prev = window.__ipk_canvas_sig;
+                    window.__ipk_canvas_sig = sig;
+                    if (prev === sig) {
+                        // Stable for >= 2 polls (~0.8s) — fully rendered
+                        return {state: 'ready', size: sig};
+                    }
+                    return {state: 'rendering', size: sig};
+                }
             }
             // SECONDARY: pull-history-table-download with our VIN's download URL
             //   (download URLs end in /<VIN>)
@@ -147,25 +158,42 @@ def lookup(page, ctx, vin, t):
             print(f"[ipacket] debug dump failed: {e}")
         return {"not_available": True, "reason": msg or "no sticker"}
 
-    print(f"[+{time.time()-t:5.1f}s] [ipacket] ready (inline viewer)")
-    # Sticker is already rendered inline in .stickerpull-view-container.
-    # No need to click "View Sticker" / open new tab — just screenshot the
-    # current page after a brief settle for the PDF render.
+    print(f"[+{time.time()-t:5.1f}s] [ipacket] ready (canvas stable)")
     sticker_page = page
     time.sleep(2)
 
-    time.sleep(3)
     ts = int(time.time())
     screenshot = REPORTS_DIR / f"ipacket_{vin}_{ts}.png"
+    sticker_url = sticker_page.url
+
+    # Capture: navigate to the iframe's src (document-viewer.autoipacket.com)
+    # which loads the sticker as a standalone page (no dashboard chrome),
+    # then take a full-page screenshot. This is exactly what produced bid
+    # 731's clean sticker capture. iPacket's iframe URL has a JWT token in
+    # the query string so it works as a standalone load.
     try:
+        viewer_src = sticker_page.evaluate(
+            "() => { const f = document.querySelector('iframe.ipacket-viewer, iframe[src*=\"document-viewer.autoipacket.com\"]'); return f ? f.src : null; }"
+        )
+        if viewer_src:
+            print(f"[+{time.time()-t:5.1f}s] [ipacket] navigating to viewer src directly")
+            try:
+                sticker_page.goto(viewer_src, wait_until="domcontentloaded", timeout=30000)
+            except Exception as nav_ex:
+                print(f"[+{time.time()-t:5.1f}s] [ipacket] nav to viewer failed: {nav_ex}")
+            # Brief wait for the sticker to render in the standalone view
+            time.sleep(4)
+
         sticker_page.screenshot(path=str(screenshot), full_page=True)
         size = screenshot.stat().st_size
         print(f"[+{time.time()-t:5.1f}s] [ipacket] screenshot {size:,} bytes")
     except Exception as e:
-        print(f"[+{time.time()-t:5.1f}s] [ipacket] screenshot FAIL: {e}")
-        screenshot = None
+        print(f"[+{time.time()-t:5.1f}s] [ipacket] capture FAIL: {e}")
+        try:
+            sticker_page.screenshot(path=str(screenshot), full_page=True)
+        except Exception:
+            screenshot = None
 
-    sticker_url = sticker_page.url
     if sticker_page is not page:
         try: sticker_page.close()
         except Exception: pass

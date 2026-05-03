@@ -143,15 +143,6 @@ tr:last-child td{border-bottom:none}
   .logo-text{font-size:13px}
   .header-right a{font-size:11px !important;padding:4px 8px !important}
 }
-/* Per-bid live progress bar (under each in-flight row) */
-.bid-progress{margin-top:5px;height:3px;width:100%;max-width:110px;background:rgba(30,41,59,.7);border-radius:2px;overflow:hidden;opacity:0;transition:opacity 600ms ease;pointer-events:none}
-.bid-progress.show{opacity:.85}
-.bid-progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#f59e0b,#fbbf24);transition:width 1500ms ease-out,background 600ms ease;border-radius:2px}
-.bid-progress.done .bid-progress-fill{background:linear-gradient(90deg,#10b981,#34d399)}
-.bid-progress-label{margin-top:3px;font-size:10px;font-weight:500;color:rgba(255,255,255,.5);letter-spacing:.2px;pointer-events:none;display:none;white-space:nowrap;line-height:1.2}
-.bid-progress-label.show{display:block}
-.bid-progress-label.done{color:rgba(52,211,153,.85)}
-
 </style>
 </head>
 <body>
@@ -176,9 +167,9 @@ tr:last-child td{border-bottom:none}
     <a href="/reports" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Reports</a>
     <a href="/sms-intake" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Inbound SMS log — every text we received and what we did with it">SMS Log</a>
     <a href="/intel/" target="_blank" style="font-size:13px;color:#c084fc;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(168,85,247,.35);border-radius:6px;transition:all .15s;background:rgba(168,85,247,.1)" onmouseover="this.style.background='rgba(168,85,247,.2)';this.style.color='#d8b4fe'" onmouseout="this.style.background='rgba(168,85,247,.1)';this.style.color='#c084fc'" title="Dealer Intelligence — separate login (admin / Sedecrem34)">Dealer Intel ↗</a>
+    <a href="/admin/workers" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · Worker monitor (live phase progress, stuck-bid watchdog)">Workers</a>
     <a href="/admin/costs" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · Cost Analysis">Costs</a>
     <a href="/admin/ai-levers" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · AI Levers (segment buckets, weights, velocity)">AI Levers</a>
-    <a href="/admin/workers" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · Worker monitor (live phase progress, stuck-bid watchdog)">Workers</a>
     <div class="live-dot"></div>
     <span class="live-label">LIVE</span>
   </div>
@@ -286,12 +277,9 @@ tr:last-child td{border-bottom:none}
             {% set _row = _active[0] %}
             {% set _wid = _row.worker_id %}
             {% set _wname = ('Worker-' + _wid.split('-')[1]) if _wid.startswith('worker-') else _wid|capitalize %}
-            {% set _done = _row.completed %}
-            {% set _dot = '#94a3b8' if _done else '#4ade80' %}
-            {% set _anim = '' if _done else 'animation:pulse 1.5s ease-in-out infinite;' %}
-            <div title="{{ _wid }}" style="margin-top:3px;display:inline-flex;align-items:center;gap:5px;padding:2px 7px;background:rgba(96,165,250,.10);border:1px solid rgba(96,165,250,.3);border-radius:10px;font-size:10px;font-weight:600;color:#60a5fa;font-family:'Inter',sans-serif;letter-spacing:.2px">
-              <span style="width:6px;height:6px;background:{{ _dot }};border-radius:50%;display:inline-block;{{ _anim }}"></span>
-              {{ _wname }}
+            <div title="{{ _wid }} working on {{ _row.job_type }}" style="margin-top:3px;display:inline-flex;align-items:center;gap:5px;padding:2px 7px;background:rgba(96,165,250,.10);border:1px solid rgba(96,165,250,.3);border-radius:10px;font-size:10px;font-weight:600;color:#60a5fa;font-family:'Inter',sans-serif;letter-spacing:.2px">
+              <span style="width:6px;height:6px;background:#4ade80;border-radius:50%;display:inline-block;animation:pulse 1.5s ease-in-out infinite"></span>
+              {{ _wname }} · {{ _row.job_type }}
             </div>
           {% endif %}
         </td>
@@ -322,6 +310,9 @@ tr:last-child td{border-bottom:none}
         <td>
           {% if bid.partner_request_id %}
             <span style="display:inline-block;padding:2px 7px;background:#1e3a8a;color:#dbeafe;border-radius:10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;margin-right:6px">PARTNER</span>
+          {% endif %}
+          {% if bid.salesperson %}
+            <span style="display:inline-block;padding:2px 7px;background:rgba(168,139,250,.15);color:#c4b5fd;border:1px solid rgba(168,139,250,.35);border-radius:10px;font-size:10px;font-weight:700;letter-spacing:.3px;margin-right:6px" title="EW salesperson tagged from dealer assignment at submit time">👤 {{ bid.salesperson }}</span>
           {% endif %}
           <div class="msg-preview">{{ (bid.raw_message or '')|msg_display or '—' }}</div>
         </td>
@@ -512,20 +503,17 @@ function renderRow(b, pc, fp, activeWorker) {
   const aiPrice  = b.ai_price    ? `<div style="font-size:15px;font-weight:700;color:#a78bfa">$${Math.round(b.ai_price).toLocaleString()}</div>` : '—';
   const bidSent  = b.bid_amount  ? `<div style="font-size:15px;font-weight:700;color:#34d399">$${Math.round(b.bid_amount).toLocaleString()}</div>` : '—';
   const star = b.has_unread ? '<span class="unread-star" title="Unread message">&#9733;</span>' : '';
-  // Worker chip — most-recent worker per bid; persists after completion (pulse=in-progress, static=done)
+  // Live worker chip — first/most-recent active job for this bid (60s window)
   let workerChip = '';
   if (activeWorker && activeWorker.length) {
     const w = activeWorker[0];
     const wid = w.worker_id || '';
     const wname = wid.startsWith('worker-') ? ('Worker-' + wid.split('-')[1])
                                             : (wid.charAt(0).toUpperCase() + wid.slice(1));
-    const done = !!w.completed;
-    const dot = done ? '#94a3b8' : '#4ade80';
-    const anim = done ? '' : 'animation:pulse 1.5s ease-in-out infinite;';
-    workerChip = `<div title="${wid}" style="margin-top:3px;display:inline-flex;align-items:center;gap:5px;padding:2px 7px;background:rgba(96,165,250,.10);border:1px solid rgba(96,165,250,.3);border-radius:10px;font-size:10px;font-weight:600;color:#60a5fa;letter-spacing:.2px"><span style="width:6px;height:6px;background:${dot};border-radius:50%;display:inline-block;${anim}"></span>${wname}</div>`;
+    workerChip = `<div title="${wid} working on ${w.job_type}" style="margin-top:3px;display:inline-flex;align-items:center;gap:5px;padding:2px 7px;background:rgba(96,165,250,.10);border:1px solid rgba(96,165,250,.3);border-radius:10px;font-size:10px;font-weight:600;color:#60a5fa;letter-spacing:.2px"><span style="width:6px;height:6px;background:#4ade80;border-radius:50%;display:inline-block;animation:pulse 1.5s ease-in-out infinite"></span>${wname} · ${w.job_type}</div>`;
   }
   return `<tr data-id="${b.id}" data-created="${b.created_at||''}" class="${rowClass}" data-unread="${b.has_unread?1:0}">
-    <td><div class="bid-num">${star}#${b.id}</div><div class="bid-time">${timeAgo(b.created_at)}</div>${workerChip}<div class="bid-progress-label"></div><div class="bid-progress"><div class="bid-progress-fill"></div></div></td>
+    <td><div class="bid-num">${star}#${b.id}</div><div class="bid-time">${timeAgo(b.created_at)}</div>${workerChip}</td>
     <td>${contactCell}</td>
     <td>${vehicle}</td>
     <td><div class="msg-preview">${stripFieldMeta(b.raw_message)}</div></td>
@@ -603,30 +591,7 @@ async function poll() {
     if (d.bids.length > 0) {
       if (empty) empty.style.display = 'none';
       if (tbody) {
-        // Stash existing progress-bar DOM nodes by bid_id so we can re-attach
-        // them after innerHTML wipe — preserves the live element instances and
-        // avoids the 0%-to-N% CSS transition flash every 3s. (2026-05-01)
-        const _progStash = {};
-        tbody.querySelectorAll('tr[data-id]').forEach(tr => {
-          const id = tr.dataset.id;
-          const prog = tr.querySelector('.bid-progress');
-          const lbl  = tr.querySelector('.bid-progress-label');
-          if (prog || lbl) _progStash[id] = { prog: prog, lbl: lbl };
-        });
         tbody.innerHTML = d.bids.map(b => renderRow(b, d.photo_counts[b.id], (d.first_photos||{})[b.id], (d.active_workers||{})[b.id])).join('');
-        // Re-attach the original bar/label nodes into the freshly-rendered rows.
-        tbody.querySelectorAll('tr[data-id]').forEach(tr => {
-          const id = tr.dataset.id;
-          const old = _progStash[id];
-          if (!old) return;
-          const newProg = tr.querySelector('.bid-progress');
-          const newLbl  = tr.querySelector('.bid-progress-label');
-          if (newProg && old.prog) newProg.replaceWith(old.prog);
-          if (newLbl  && old.lbl)  newLbl.replaceWith(old.lbl);
-        });
-        // Replay cache for any rows that did NOT have a stashed bar (e.g. newly-
-        // arrived bids whose progress was already cached from a prior tick).
-        if (window._replayProgressCache) window._replayProgressCache();
         // Re-apply active search filter after re-render
         if (_bidSearchQuery) filterVisibleRows();
         // Flash new rows
@@ -664,91 +629,7 @@ function showNewBidAlert(count) {
 }
 
 // Poll every 3 seconds
-setInterval(poll, 5000);
-
-// ── Per-bid progress bar updater ─────────────────────────────────────────────
-// Polls /api/bids/progress for all currently-rendered bid rows, updates the
-// thin bar at the bottom of each row in-place. Mirrors the 3s loadBids cadence.
-const _progressDoneFlash = new Set();  // bid ids that just hit 100% (flash green)
-const _progressCache = new Map();      // bid_id -> last progress payload (replay on re-render)
-
-function _phaseLabel(p){return p==='vauto'?'vAuto':p==='accutrade'?'AccuTrade':p==='ipacket'?'iPacket':''}
-
-function applyProgress(bid){
-  const tr = document.querySelector(`tr[data-id="${bid.bid_id}"]`);
-  if (!tr) return;
-  const bar = tr.querySelector('.bid-progress');
-  const fill = tr.querySelector('.bid-progress-fill');
-  const label = tr.querySelector('.bid-progress-label');
-  if (!bar || !fill || !label) return;
-
-  // Cache so loadBids re-renders can replay last state instantly
-  _progressCache.set(bid.bid_id, bid);
-
-  // Hide cases
-  if (!bid.in_flight && !bid.all_done){
-    bar.classList.remove('show','done');
-    label.classList.remove('show','done');
-    if (fill.dataset.w !== '0'){ fill.style.width = '0%'; fill.dataset.w = '0'; }
-    return;
-  }
-  if (bid.all_done && !bid.in_flight){
-    // Done — silently hide bar. No green flash (was perceived as random flashing).
-    bar.classList.remove('show','done');
-    label.classList.remove('show','done');
-    _progressDoneFlash.delete(bid.bid_id);
-    _progressCache.delete(bid.bid_id);
-    return;
-  }
-  // In-flight: only show the bar once there's real progress (pct >= 5).
-  // Below 5% the bid is just claimed but workers haven't started a phase yet.
-  const pct = Math.max(0, Math.min(100, bid.pct_complete||0));
-  if (pct < 5){
-    bar.classList.remove('show','done');
-    label.classList.remove('show','done');
-    return;
-  }
-  bar.classList.add('show');
-  bar.classList.remove('done');
-  label.classList.add('show');
-  label.classList.remove('done');
-  // Skip DOM write if width unchanged (avoids re-triggering CSS transition for no reason)
-  if (fill.dataset.w !== String(pct)){
-    fill.style.width = pct + '%';
-    fill.dataset.w = String(pct);
-  }
-  const phaseTxt = _phaseLabel(bid.phase) || 'Starting';
-  const eta = bid.eta_sec ? `~${bid.eta_sec}s left` : '';
-  const elapsed = bid.elapsed_sec ? `${bid.elapsed_sec}s elapsed` : '';
-  const newLabel = [phaseTxt, elapsed, eta].filter(Boolean).join(' · ');
-  if (label.textContent !== newLabel) label.textContent = newLabel;
-}
-
-// Replay cached progress right after loadBids re-renders the tbody,
-// so bars don't flash empty waiting for the next pollProgress tick.
-function _replayProgressCache(){
-  _progressCache.forEach((bid) => {
-    const tr = document.querySelector(`tr[data-id="${bid.bid_id}"]`);
-    if (tr) applyProgress(bid);
-  });
-}
-window._replayProgressCache = _replayProgressCache;
-
-async function pollProgress(){
-  try {
-    const ids = Array.from(document.querySelectorAll('tbody tr[data-id]'))
-                     .map(r => r.dataset.id).filter(Boolean).slice(0, 100);
-    if (!ids.length) return;
-    const r = await fetch('/api/bids/progress?ids=' + ids.join(','));
-    if (!r.ok) return;
-    const d = await r.json();
-    (d.bids||[]).forEach(applyProgress);
-  } catch(e){ /* silent — non-critical UI overlay */ }
-}
-
-setTimeout(pollProgress, 800);
-setInterval(pollProgress, 4000);
-
+setInterval(poll, 3000);
 
 // Poll active reps every 10 seconds
 async function pollActiveReps() {
