@@ -193,6 +193,10 @@ a.veh-link:hover{text-decoration:underline}
       <span class="meta-chip {% if dealer.last_scan_status == 'ok' %}ok{% elif dealer.last_scan_status and 'error' in dealer.last_scan_status %}err{% endif %}">
         Last scan · {{ dealer.last_scan_at|time_ago }} ({{ dealer.last_scan_status or '—' }})
       </span>
+      <span class="meta-chip" id="spChip" style="cursor:pointer;background:rgba(168,139,250,.12);border-color:rgba(168,139,250,.4);color:#c4b5fd"
+            onclick="editSalesperson()" title="Click to edit — partner-portal bids get tagged with this name">
+        👤 Salesperson · <b style="color:#f1f5f9;margin-left:4px" id="spVal">{{ dealer.salesperson or '— set —' }}</b>
+      </span>
     </div>
   </div>
   <div class="dealer-head-actions">
@@ -536,6 +540,25 @@ async function loadSoldRows(dealerId) {
 <script>
 const DEALER_ID = {{ dealer.dealer_id }};
 let pollTimer = null;
+
+async function editSalesperson(){
+  const cur = document.getElementById('spVal').textContent.trim();
+  const placeholder = (cur === '— set —') ? '' : cur;
+  const v = prompt('EW salesperson assigned to this dealer\n(blank to clear):', placeholder);
+  if (v === null) return;
+  const name = (v || '').trim();
+  try {
+    const r = await fetch('/api/dealer/' + DEALER_ID + '/salesperson', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({salesperson: name}),
+    });
+    if (!r.ok) throw new Error('Save failed (HTTP ' + r.status + ')');
+    document.getElementById('spVal').textContent = name || '— set —';
+  } catch(e) {
+    alert('Could not save salesperson: ' + e.message);
+  }
+}
 
 async function runScan(){
   const btn = document.getElementById('scanBtn');
