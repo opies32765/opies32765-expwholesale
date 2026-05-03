@@ -741,6 +741,29 @@ def delete_dealer(dealer_id):
     return jsonify({'ok': True})
 
 
+@bp.route('/api/dealer/<int:dealer_id>/salesperson', methods=['POST'])
+def set_dealer_salesperson(dealer_id):
+    """Assign or update the EW salesperson responsible for a dealer.
+    The value is copied onto bids.salesperson at partner-portal submit time
+    (frozen on the bid even if the dealer is later reassigned). Empty string
+    or null clears the assignment.
+    Reachable by admin login only (gated by app.py before_request)."""
+    data = request.get_json(silent=True) or request.form
+    name = (data.get('salesperson') or '').strip() or None
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute("""UPDATE dealers
+                       SET salesperson = %s,
+                           salesperson_set_at = CASE WHEN %s IS NULL THEN NULL ELSE NOW() END
+                       WHERE id = %s
+                       RETURNING id, name, salesperson, salesperson_set_at""",
+                    (name, name, dealer_id))
+        row = cur.fetchone()
+        conn.commit()
+    if not row:
+        return jsonify({'ok': False, 'error': 'dealer not found'}), 404
+    return _json_response({'ok': True, 'dealer': dict(row)})
+
+
 @bp.route('/api/dealer/<int:dealer_id>')
 def dealer_json(dealer_id):
     with _db() as conn, conn.cursor() as cur:
