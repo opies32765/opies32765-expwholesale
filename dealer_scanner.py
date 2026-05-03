@@ -218,6 +218,12 @@ def detect_platform(html):
         return ('shopify', 'shopify-products')
     if 'eprocess' in h or 'dealer-eprocess' in h:
         return ('dealer-eprocess', 'sitemap+jsonld')
+    # DealerOn — server-rendered Vehicle + Product JSON-LD per VDP, sitemap.xml
+    # carries the full VDP list. Vendor CDN: dealeron.com / dlron.us; theme:
+    # harmoniq. Standard universal-discover path (sitemap → fetch → JSON-LD)
+    # handles it; this fingerprint exists to skip the $1-3 AI-discovery spawn.
+    if 'dealeron.com' in h or 'dlron.us' in h or '/dealeron.js' in h:
+        return ('dealeron', 'sitemap+jsonld')
     if 'wp-content' in h or 'wp-includes' in h:
         return ('wordpress', 'jsonld+html')
     if 'vinsolutions' in h:
@@ -774,6 +780,14 @@ def _is_vdp_url(url):
     m = re.search(r'-(\d{3,6})$', path)
     if m and '/' in path[1:]:
         return True
+    # Trailing 17-char VIN — strongest possible VDP signal. Used by DealerOn
+    # (URL pattern: /used-{city}-{year}-{make}-{model}-...-{17char-VIN}) and
+    # by any future dealer that suffixes its VDPs with a VIN. Case-insensitive
+    # because path was lower()'d above; VIN must include at least one letter
+    # so we don't false-match a 17-digit number.
+    m = re.search(r'-([a-hj-npr-z0-9]{17})$', path)
+    if m and re.search(r'[a-hj-npr-z]', m.group(1)):
+        return True
     return False
 
 
@@ -949,6 +963,43 @@ def extract_vehicle(url, html):
     if out.get('trim'):
         out['trim'] = _title_case(out['trim'])
 
+    # Strip leading-model duplication from trim. Happens when JSON-LD
+    # provides a multi-word model (e.g. "E 450", "Range Rover Sport", "4
+    # Series") that the URL-slug fallback wasn't aware of, so the
+    # URL-derived trim still contains some/all model words at the front.
+    #
+    # Two patterns to handle:
+    #   (a) Full model overlap. JSON-LD model="E 450", URL trim="E 450
+    #       4matic Cabriolet ...". Strip 2 leading trim tokens.
+    #   (b) Partial model overlap. URL parser took ONE model token
+    #       (e.g. "range") then JSON-LD overrode model with "Range Rover
+    #       Sport"; URL trim still leads with "Rover Sport P400 ...". Need
+    #       to strip the model SUFFIX that matches the trim prefix.
+    #
+    # Algorithm: find the largest k for which any contiguous k-token window
+    # of model matches the first-k tokens of trim (case-insensitive). Strip
+    # those k tokens from trim. Covers all overlap shapes:
+    #   - "E 450" + "E 450 4matic ..."          → suffix==prefix==full model
+    #   - "Range Rover Sport" + "Rover Sport P400 ..." → suffix overlap (2 of 3)
+    #   - "S 63 Amg®" + "S 63 4 Door Sedan ..." → prefix overlap (2 of 3)
+    #   - "4 Series" + "Series M440i ..."       → suffix overlap (1 of 2)
+    # k=0 means no overlap, no strip.
+    if out.get('model') and out.get('trim'):
+        m_toks = out['model'].split()
+        t_toks = out['trim'].split()
+        m_low = [t.lower() for t in m_toks]
+        t_low = [t.lower() for t in t_toks]
+        # Largest k bounded by both list lengths; always leave at least one
+        # trim token so we don't end up with an empty trim field.
+        max_k = min(len(m_low), len(t_low) - 1)
+        for k in range(max_k, 0, -1):
+            t_prefix = t_low[:k]
+            # Does any k-window of model equal trim's first k tokens?
+            if any(m_low[i:i+k] == t_prefix
+                   for i in range(len(m_low) - k + 1)):
+                out['trim'] = ' '.join(t_toks[k:]) or None
+                break
+
     # Filter: need at least ONE of year/make/model OR vin
     if not (out.get('vin') or out.get('make') or out.get('year')):
         return None
@@ -964,9 +1015,20 @@ def _first_match(pattern, text):
 
 def _parse_ymm_from_url(url):
     """Parse year/make/model/trim from a VDP URL slug.
-    Handles patterns like /vehicle-details/2019-rolls-royce-phantom-6709/."""
+    Handles patterns like /vehicle-details/2019-rolls-royce-phantom-6709/.
+
+    DealerOn (encoreautos.com) URL-encodes intra-token spaces as `+` and
+    suffixes the slug with the 17-char VIN, e.g.:
+        /used-Sarasota-2025-Mercedes+Benz-Cle+300-4matic+cabriolet+w+line+package-W1KMK4HB6SF054997
+    Normalizing `+` to `-` up front lets the existing hyphen-tokenizer see
+    individual words, and the trailing-17-char-VIN strip rule below removes
+    the VIN before it lands in `trim`. (2026-05-03 Encore onboarding.)
+    """
     path = urlparse(url).path.rstrip('/').lower()
     slug = path.rsplit('/', 1)[-1] if path else ''
+    # Normalize DealerOn's `+`-as-space to a uniform `-` separator so the
+    # tokenizer below produces proper word tokens for trim/make/model.
+    slug = slug.replace('+', '-')
     if not slug or '-' not in slug:
         return None
     tokens = [t for t in slug.split('-') if t]
@@ -979,6 +1041,12 @@ def _parse_ymm_from_url(url):
             break
     if year is None:
         return None
+    # Strip trailing 17-char VIN (DealerOn URL pattern). Matches the
+    # _is_vdp_url trailing-VIN rule. Letter-required so a 17-digit number
+    # never matches.
+    if tokens and re.fullmatch(r'[a-hj-npr-z0-9]{17}', tokens[-1]) \
+            and re.search(r'[a-hj-npr-z]', tokens[-1]):
+        tokens = tokens[:-1]
     # Stock# = trailing numeric token (short number)
     if tokens and re.fullmatch(r'[a-z]?\d{2,6}[a-z]?', tokens[-1]):
         tokens = tokens[:-1]
