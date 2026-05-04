@@ -459,11 +459,17 @@ def process_one_bid(item):
     _post_phase(bid_id, "ipacket", "started")
     if ipkt and not ipkt.get("error"):
         if ipkt.get("not_available"):
-            ok = ew_submit_ipacket({
+            # Refinement C: forward screenshot if iPacket captured one before
+            # giving up (viewer_did_not_render path). Server-side INSERT
+            # already accepts NULL or a path.
+            na_payload = {
                 "bid_id": bid_id, "vin": vin,
                 "not_available": True,
                 "unavailable_reason": ipkt.get("reason", "unavailable"),
-            })
+            }
+            if ipkt.get("screenshot"):
+                na_payload["screenshot"] = ipacket_upload(ipkt.get("screenshot"))
+            ok = ew_submit_ipacket(na_payload)
             print(f"  iPacket {'OK' if ok else 'FAIL'}: NOT AVAILABLE")
         else:
             screenshot_path = ipacket_upload(ipkt.get("screenshot"))

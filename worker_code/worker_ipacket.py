@@ -91,6 +91,118 @@ def lookup(page, ctx, vin, t):
     page.goto("https://dpapp.autoipacket.com/stickerpull", wait_until="domcontentloaded", timeout=20000)
     time.sleep(3)
 
+    # ===== V9 fast-path (additive, repeat-VIN only) =====
+    # If this VIN is already in iPacket's Recent Sticker Pulls table, the
+    # .pull-history-table-download anchor IS the visible "View Sticker" link.
+    # Its React onClick uses dashboard auth (the href itself 403s on direct
+    # fetch). Clicking bypasses the silent rate-limit-on-repeat-submit that
+    # produces blank screenshots. Strictly additive: falls through to the
+    # original Submit flow for fresh VINs OR if V9 doesn't actually render.
+    try:
+        cached_clicked = page.evaluate(r"""(v) => {
+            const V = (v||'').toUpperCase();
+            const anchors = document.querySelectorAll('.pull-history-table-download[href]');
+            for (const a of anchors) {
+                const h = (a.getAttribute('href') || '').toUpperCase();
+                if (h.endsWith('/' + V)) { a.click(); return true; }
+            }
+            return false;
+        }""", vin)
+    except Exception as v9_ev_err:
+        print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 cached-check error: {v9_ev_err}")
+        cached_clicked = False
+
+    if cached_clicked:
+        print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 VIN cached -- clicked Recent Pulls anchor, waiting for viewer")
+        time.sleep(3)
+        v9_deadline = time.time() + 22
+        v9_ready = False
+        while time.time() < v9_deadline:
+            try:
+                st = page.evaluate(r"""(v) => {
+                    const V = (v||'').toUpperCase();
+                    const f = document.querySelector('iframe.ipacket-viewer, iframe[src*="document-viewer.autoipacket.com"]');
+                    if (f) {
+                        const src = (f.getAttribute('src') || '').toUpperCase();
+                        if (src.indexOf('/STICKER/' + V) >= 0 || src.indexOf('/' + V + '?') >= 0) return 'iframe';
+                    }
+                    const view = document.querySelector('.stickerpull-view-container');
+                    if (view) {
+                        const c = view.querySelector('.react-pdf__Page__canvas');
+                        if (c && c.width > 1000 && c.height > 1000) return 'canvas';
+                    }
+                    return null;
+                }""", vin)
+            except Exception:
+                st = None
+            if st: v9_ready = True; print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 viewer ready via {st}"); break
+            time.sleep(0.5)
+
+        if v9_ready:
+            try:
+                ts = int(time.time())
+                v9_screenshot = REPORTS_DIR / f"ipacket_{vin}_{ts}.png"
+                v9_url = page.url
+                v9_target = page
+                try:
+                    viewer_src = page.evaluate(
+                        "() => { const f = document.querySelector('iframe.ipacket-viewer, iframe[src*=\"document-viewer.autoipacket.com\"]'); return f ? f.src : null; }"
+                    )
+                    if viewer_src:
+                        print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 navigating to viewer src for capture")
+                        v9_target.goto(viewer_src, wait_until="domcontentloaded", timeout=30000)
+                        time.sleep(5)
+                except Exception as v9_nav_err:
+                    print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 viewer-src nav error: {v9_nav_err}")
+                v9_target.screenshot(path=str(v9_screenshot), full_page=True)
+                v9_size = v9_screenshot.stat().st_size if v9_screenshot.exists() else 0
+                v9_text = ""
+                try:
+                    v9_text = v9_target.evaluate(r"""() => {
+                        const layers = document.querySelectorAll(".react-pdf__Page__textContent, .textLayer");
+                        if (layers.length) {
+                            const out = []; for (const l of layers) out.push(l.innerText || l.textContent || "");
+                            return out.join("\n");
+                        }
+                        return document.body ? (document.body.innerText || "") : "";
+                    }""") or ""
+                except Exception:
+                    pass
+                print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 capture: text_chars={len(v9_text)} screenshot={v9_size:,}b")
+                # Sanity check: must contain pricing markers — otherwise V9 didn't actually capture a real sticker, fall through
+                v9_upper = v9_text.upper()
+                v9_markers = [m for m in ("MSRP","TOTAL PRICE","SUGGESTED","AS DELIVERED PRICE","TOTAL VEHICLE PRICE","VEHICLE PRICE") if m in v9_upper]
+                if v9_markers:
+                    v9_parsed = _parse_sticker_text(v9_text)
+                    if v9_parsed.get("total_msrp"):
+                        print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 SUCCESS MSRP=${v9_parsed.get('total_msrp') or 0:,} base=${v9_parsed.get('base_price') or 0:,}")
+                    return {
+                        "screenshot": str(v9_screenshot) if v9_screenshot.exists() else None,
+                        "sticker_url": v9_url,
+                        "total_msrp": v9_parsed.get("total_msrp"),
+                        "base_price": v9_parsed.get("base_price"),
+                        "exterior_color": v9_parsed.get("exterior_color"),
+                        "interior_color": v9_parsed.get("interior_color"),
+                        "raw": {"options": v9_parsed.get("options", []), "v9_path": True, "text_chars": len(v9_text)},
+                    }
+                else:
+                    print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 captured but no pricing markers -- falling through to Submit flow")
+                    # Restore page state best we can: navigate back to dashboard for Submit flow to work
+                    try:
+                        page.goto("https://dpapp.autoipacket.com/stickerpull", wait_until="domcontentloaded", timeout=15000)
+                        time.sleep(2)
+                    except Exception: pass
+            except Exception as v9_cap_err:
+                print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 capture error: {v9_cap_err} -- falling through")
+        else:
+            print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 click didn't render viewer in 22s -- falling through")
+            # Make sure we're back on dashboard so Submit flow has a known starting state
+            try:
+                page.goto("https://dpapp.autoipacket.com/stickerpull", wait_until="domcontentloaded", timeout=15000)
+                time.sleep(2)
+            except Exception: pass
+    # ===== END V9 fast-path =====
+
     # Fill VIN
     f = page.evaluate(r"""(vin) => {
         const inputs = document.querySelectorAll('input');
@@ -132,7 +244,7 @@ def lookup(page, ctx, vin, t):
 
     submit_ts = time.time()
     deadline = submit_ts + 30  # bumped from 18 to 30 — long stickers can take time
-    state = "waiting"; msg = ""
+    state = "waiting"; msg = ""; canvas_size = None
     UNAVAIL_GRACE_SEC = 4.0  # ignore "unavailable" toasts for the first 4s — stale UI / pre-existing banners
     READY_PRIORITY = True    # if both ready+unavailable present, ready wins
     while time.time() < deadline:
@@ -200,6 +312,7 @@ def lookup(page, ctx, vin, t):
             return {state: 'waiting'};
         }""", vin) or {}
         state = st.get("state", "waiting"); msg = st.get("msg", "")
+        if st.get("size"): canvas_size = st.get("size")
         # Within the grace window, ignore "unavailable" — it's almost always
         # a stale element from the previous lookup or a permanent UI banner.
         if state == "unavailable" and (time.time() - submit_ts) < UNAVAIL_GRACE_SEC:
@@ -208,17 +321,79 @@ def lookup(page, ctx, vin, t):
         time.sleep(0.4)
 
     if state != "ready":
-        print(f"[+{time.time()-t:5.1f}s] [ipacket] not_available ({state})")
-        # Dump page HTML + screenshot for offline debugging of false-negatives
+        # Refinement E: BEFORE giving up, check Recent Pulls — if iPacket has a
+        # cached sticker for this VIN, the dashboard exposes a download link.
+        # Fetch it; if PDF, navigate Chromium to it (built-in PDF viewer renders
+        # text-selectable) and fall through to extraction.
+        recovered = False
         try:
+            recent_url = page.evaluate(r"""(v) => {
+                const V = (v||'').toUpperCase();
+                const rows = document.querySelectorAll('.pull-history-table-download[href]');
+                for (const a of rows) {
+                    const h = a.getAttribute('href') || '';
+                    if (h.toUpperCase().endsWith('/' + V)) return h;
+                }
+                return null;
+            }""", vin)
+        except Exception:
+            recent_url = None
+        if recent_url:
+            try:
+                resp = page.context.request.get(recent_url, timeout=15000)
+                ct = (resp.headers.get("content-type") or "").lower()
+                if resp.ok and ct.startswith("application/pdf"):
+                    print(f"[+{time.time()-t:5.1f}s] [ipacket] recent-pulls PDF found, recovering")
+                    ts = int(time.time())
+                    pdf_path = REPORTS_DIR / f"ipacket_{vin}_{ts}.pdf"
+                    pdf_path.write_bytes(resp.body())
+                    try:
+                        page.goto(recent_url, wait_until="domcontentloaded", timeout=30000)
+                        time.sleep(4)
+                        recovered = True
+                    except Exception as nav_ex:
+                        print(f"[+{time.time()-t:5.1f}s] [ipacket] PDF nav failed: {nav_ex}")
+            except Exception as fx:
+                print(f"[+{time.time()-t:5.1f}s] [ipacket] recent-pulls fetch failed: {fx}")
+
+        if not recovered:
+            # Refinement D: rich grep-able diagnostic + Refinement C: screenshot in return
             ts = int(time.time())
-            dbg = REPORTS_DIR / f"debug_{vin}_{ts}.html"
-            dbg.write_text(page.content(), encoding="utf-8", errors="ignore")
-            page.screenshot(path=str(REPORTS_DIR / f"debug_{vin}_{ts}.png"), full_page=True)
-            print(f"[ipacket] DEBUG dump: {dbg}")
-        except Exception as e:
-            print(f"[ipacket] debug dump failed: {e}")
-        return {"not_available": True, "reason": msg or "no sticker"}
+            screenshot_path = REPORTS_DIR / f"debug_{vin}_{ts}.png"
+            try:
+                dbg = REPORTS_DIR / f"debug_{vin}_{ts}.html"
+                dbg.write_text(page.content(), encoding="utf-8", errors="ignore")
+                page.screenshot(path=str(screenshot_path), full_page=True)
+            except Exception as e:
+                print(f"[ipacket] debug dump failed: {e}")
+            try:
+                diag = page.evaluate(r"""() => {
+                    const view = document.querySelector('.stickerpull-view-container');
+                    const c = view ? view.querySelector('.react-pdf__Page__canvas') : null;
+                    const layers = document.querySelectorAll('.react-pdf__Page__textContent, .textLayer');
+                    let txt = '';
+                    for (const l of layers) txt += (l.innerText || l.textContent || '') + '\n';
+                    if (!txt && document.body) txt = document.body.innerText || '';
+                    const f = document.querySelector('iframe.ipacket-viewer, iframe[src*="document-viewer.autoipacket.com"]');
+                    return {cw: c?c.width:0, ch: c?c.height:0, text: (txt||'').slice(0, 8000), iframe: f? (f.getAttribute('src')||''): null};
+                }""") or {}
+            except Exception:
+                diag = {}
+            dtxt = (diag.get("text") or "").upper()
+            MARKERS = ("MSRP","TOTAL PRICE","SUGGESTED","AS DELIVERED PRICE","TOTAL VEHICLE PRICE","VEHICLE PRICE")
+            found = [m for m in MARKERS if m in dtxt]
+            cw, ch = diag.get("cw") or 0, diag.get("ch") or 0
+            canvas_str = f"{cw}x{ch}" if (cw or ch) else "no canvas"
+            iframe_str = diag.get("iframe") or "none"
+            try: ss_bytes = screenshot_path.stat().st_size if screenshot_path.exists() else 0
+            except Exception: ss_bytes = 0
+            print(f"[ipacket] DIAG bid={vin} canvas={canvas_str} text_chars={len(diag.get('text') or '')} markers={found} iframe_src={iframe_str} screenshot_bytes={ss_bytes}")
+            return {
+                "not_available": True,
+                "reason": msg or "viewer_did_not_render",
+                "screenshot": str(screenshot_path) if screenshot_path.exists() else None,
+                "sticker_url": page.url,
+            }
 
     print(f"[+{time.time()-t:5.1f}s] [ipacket] ready (canvas stable)")
     sticker_page = page
@@ -276,6 +451,58 @@ def lookup(page, ctx, vin, t):
         """) or ""
     except Exception as e:
         print(f"[+{time.time()-t:5.1f}s] [ipacket] text extract FAIL: {e}")
+
+    # Refinement B: text-marker sanity check. Refinement F (v5): if WARN
+    # fires, escalate to Recent Pulls PDF fallback — the standalone viewer
+    # didn't actually render but iPacket's cache may still have the sticker.
+    if sticker_text:
+        TXT_U = sticker_text.upper()
+        MARKERS = ("MSRP","TOTAL PRICE","SUGGESTED","AS DELIVERED PRICE","TOTAL VEHICLE PRICE","VEHICLE PRICE")
+        found_markers = [m for m in MARKERS if m in TXT_U]
+        if not found_markers and len(sticker_text) > 200:
+            print(f"[+{time.time()-t:5.1f}s] [ipacket] WARN suspect render: text_chars={len(sticker_text)} but no pricing markers found — trying Recent Pulls fallback")
+            try:
+                # V7: navigate dashboard, find the Recent Pulls row containing
+                # this VIN, grab the "View Sticker" link, navigate sticker_page
+                # to its href. The download endpoint requires a Bearer JWT we
+                # don't have (returned 403). The "View Sticker" link uses the
+                # dashboard's own auth flow.
+                page.goto("https://dpapp.autoipacket.com/stickerpull", wait_until="domcontentloaded", timeout=20000)
+                time.sleep(2)
+                view_info = page.evaluate(r"""(v) => {
+                    const V = (v||'').toUpperCase();
+                    // First: find any element on the page whose direct text matches the VIN
+                    // (don't rely on <tr>; iPacket may use divs).
+                    const all = document.querySelectorAll('*');
+                    for (const el of all) {
+                        const t = (el.innerText || '').toUpperCase();
+                        if (!t.includes(V)) continue;
+                        // Pick the smallest container that has the VIN — walk down to find
+                        // the tightest row-like ancestor with reasonable size.
+                        if ((el.children || []).length > 30) continue; // too big
+                        if (t.length > 1500) continue;
+                        const tag = el.tagName;
+                        // Want a row container — must contain VIN AND ideally a "view" or click-able cell
+                        if (!['TR','DIV','LI','SECTION'].includes(tag)) continue;
+                        // Make sure parent isn't an even smaller VIN-matching element
+                        // (otherwise we get a giant wrapper)
+                        return {
+                            tag: tag,
+                            cls: (el.className || '').slice(0,80),
+                            text: (el.innerText || '').slice(0, 500),
+                            html: el.outerHTML.slice(0, 3000),
+                            children_count: (el.children || []).length,
+                        };
+                    }
+                    return null;
+                }""", vin)
+                if view_info:
+                    print(f"[+{time.time()-t:5.1f}s] [ipacket] V8 DIAG match tag={view_info.get('tag')} cls={view_info.get('cls')!r} children={view_info.get('children_count')} text={view_info.get('text')[:200]!r}")
+                    print(f"[+{time.time()-t:5.1f}s] [ipacket] V8 DIAG html={view_info.get('html')!r}")
+                else:
+                    print(f"[+{time.time()-t:5.1f}s] [ipacket] V8 DIAG VIN not found in any element")
+            except Exception as fx:
+                print(f"[+{time.time()-t:5.1f}s] [ipacket] V8 fallback errored: {fx}")
 
     parsed = _parse_sticker_text(sticker_text) if sticker_text else {}
     if parsed.get("total_msrp"):
