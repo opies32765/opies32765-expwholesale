@@ -112,10 +112,29 @@ def main():
             if stats.get('error'):
                 print(f'  error: {stats["error"]}', flush=True)
             summary_lines.append(_scan_summary_line(d['name'], stats))
+            # Immediate Telegram alert on abort — a dealer scan that aborts
+            # with status=blocked has preserved inventory but the dealer's
+            # data is now stale until the next run. We want Oscar to know
+            # within minutes, not at the end of the multi-hour digest.
+            if status == 'blocked':
+                err = (stats.get('error') or 'blocked').strip()[:200]
+                preserved = stats.get('vehicles_found', 0)
+                with dealer_scanner.get_conn() as _cn, _cn.cursor() as _cu:
+                    _cu.execute(
+                        "SELECT COUNT(*) AS n FROM dealer_inventory "
+                        "WHERE dealer_id=%s AND status='active'", (d['id'],))
+                    _row = _cu.fetchone()
+                    preserved = _row['n'] if isinstance(_row, dict) else _row[0]
+                tg_send(
+                    f'🚧 <b>{d["name"]} scan ABORTED</b>\n'
+                    f'<i>{err}</i>\n'
+                    f'{preserved} active rows preserved — will retry next scan'
+                )
         except Exception as e:
             totals['error'] += 1
             print(f'  EXCEPTION: {type(e).__name__}: {e}', flush=True)
             summary_lines.append(f'🛑 <b>{d["name"]}</b> · EXCEPTION: {type(e).__name__}')
+            tg_send(f'🛑 <b>{d["name"]} scan EXCEPTION</b>\n{type(e).__name__}: {str(e)[:200]}')
 
     elapsed = int(time.time() - started)
     print(f'\n[{datetime.now().isoformat(timespec="seconds")}] scan_all complete in {elapsed}s',

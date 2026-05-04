@@ -2264,24 +2264,47 @@ class DealerScanner:
         sold_confidence=1.0 immediately — no multi-signal inference needed."""
         scanned_vins, scanned_urls = set(), set()
         sold_vins = set()
+        # Diagnostic counters — surface why kept-input may not match
+        # vehicles_found in stats. Reasons:
+        #   marked_sold     — listing had _aan_sold flag, routed to sold path
+        #   no_keys         — upsert_vehicle returned None (no VIN AND no URL,
+        #                     or only invalid all-digit "VIN")
+        #   inserted/updated — upsert succeeded; rows actually touched
+        #   url_only_match  — upsert succeeded but VIN was empty/invalid; row
+        #                     deduped by URL and won't appear in scanned_vins
+        # The 2026-05-04 investigation showed the kept→stored "30% loss" was
+        # an artifact of stats['vehicles_found'] = len(scanned_vins) ignoring
+        # 159 VIN-less rows that were correctly stored — see commit message.
+        reasons = {'marked_sold': 0, 'no_keys': 0,
+                   'inserted': 0, 'updated': 0, 'url_only_match': 0}
+        for v in aan_vehicles:
+            vin = (v.get('vin') or '').upper().strip()
+            if v.get('_aan_sold'):
+                reasons['marked_sold'] += 1
+                if vin:
+                    sold_vins.add(vin)
         with get_conn() as conn, conn.cursor() as cur:
             for v in aan_vehicles:
                 vin = (v.get('vin') or '').upper().strip()
                 if v.get('_aan_sold'):
-                    if vin:
-                        sold_vins.add(vin)
-                    continue
+                    continue  # already counted above; sold rows handled below
                 # Strip the AAN-specific flags before calling the shared upsert
                 clean = {k: val for k, val in v.items() if not k.startswith('_aan_')}
                 inv_id, is_new, drop = upsert_vehicle(cur, self.dealer_id, scan_id, clean)
                 if inv_id is None:
+                    reasons['no_keys'] += 1
                     continue
                 if is_new:
                     stats['new_count'] += 1
+                    reasons['inserted'] += 1
+                else:
+                    reasons['updated'] += 1
                 if drop:
                     stats['price_drop_count'] += 1
                 if vin:
                     scanned_vins.add(vin)
+                else:
+                    reasons['url_only_match'] += 1
                 if v.get('url'):
                     scanned_urls.add(v['url'])
 
@@ -2322,7 +2345,20 @@ class DealerScanner:
         extra = self._reconcile(scan_id, scanned_vins, scanned_urls)
         stats['sold_count'] += extra.get('sold_count', 0)
         stats['missing_count'] = extra.get('missing_count', 0)
-        stats['vehicles_found'] = len(scanned_vins)
+        # vehicles_found counts every row actually upserted, NOT just unique
+        # VINs. Pre-2026-05-04 this was len(scanned_vins) which excluded the
+        # ~35% of vintage ECT listings without a 17-char VIN (deduped by URL
+        # only) and looked like a 30% silent data loss in scan reports.
+        stats['vehicles_found'] = reasons['inserted'] + reasons['updated']
+        # Log the rejection / disposition breakdown so any future kept-vs-
+        # stored gap is immediately visible in /var/log/ew-dealer-scans.log.
+        print(f'  [process_aan] dealer={self.dealer_id} input={len(aan_vehicles)} '
+              f'inserted={reasons["inserted"]} updated={reasons["updated"]} '
+              f'url_only_match={reasons["url_only_match"]} '
+              f'marked_sold={reasons["marked_sold"]} '
+              f'no_keys={reasons["no_keys"]} '
+              f'unique_vins={len(scanned_vins)} unique_urls={len(scanned_urls)}',
+              flush=True)
 
     # ─── reconcile missing / sold ───
     def _reconcile(self, scan_id, scanned_vins, scanned_urls):

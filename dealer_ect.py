@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
@@ -34,6 +35,26 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 
 ECT_SITEMAP = "https://www.exoticcartrader.com/sitemap/listings.xml"
+# Fallback sitemap — alphabetic ordering by URL slug rather than chronological,
+# but contains every active /listing/ URL on the site (~8.3K). Used when the
+# primary sitemap times out / 5xx's; we sort by trailing lot-number desc
+# afterwards to approximate newest-first walking, then rely on per-VDP
+# source_added_at filtering for the cutoff. (2026-05-04 fix: prior version
+# would abort the entire scan on a single Read-timed-out, swept inventory
+# was preserved by the abort circuit but the next morning's scan also
+# transient-failed and the user got no fresh data for days.)
+ECT_CMS_SITEMAP = "https://www.exoticcartrader.com/cms-sitemap.xml"
+
+# Sitemap fetch retry schedule — 3 attempts, 60s per-attempt timeout, with
+# delays between retries. ~150s of grace before falling back to cms-sitemap.
+SITEMAP_RETRY_DELAYS = (5, 15, 30)
+SITEMAP_PER_ATTEMPT_TIMEOUT = 60
+
+# Trailing numeric lot ID for sorting cms-sitemap URLs newest-first when we
+# fall back. Modern slug-form URLs end in `-260456575`-style numbers that
+# increase monotonically with listing creation; legacy VIN-form URLs lack a
+# trailing number and are pushed to the end (mostly older inventory).
+_URL_LOT_TAIL_RE = re.compile(r"-(\d{6,})$")
 
 # Stop walking after this many consecutive older-than-cutoff listings — the
 # sitemap is chronologically ordered but not guaranteed strict, so we don't
@@ -323,32 +344,100 @@ def _ect_extract_one(vdp_url: str, sess) -> Optional[dict]:
     }
 
 
+def _fetch_sitemap_with_retry(sess, sitemap_url, log):
+    """Fetch a sitemap URL with retry+backoff. Returns response.text on success
+    or None on terminal failure. Logs each attempt clearly so cron logs make
+    the failure mode obvious."""
+    attempts = len(SITEMAP_RETRY_DELAYS)
+    last_err = None
+    for n in range(1, attempts + 1):
+        try:
+            r = sess.get(sitemap_url, timeout=SITEMAP_PER_ATTEMPT_TIMEOUT)
+            if r.status_code == 200 and r.text:
+                if n > 1:
+                    log(f"  [ect] sitemap attempt {n}/{attempts} succeeded "
+                        f"({sitemap_url})", flush=True)
+                return r.text
+            last_err = f"HTTP {r.status_code}"
+        except Exception as exc:
+            last_err = str(exc) or type(exc).__name__
+        if n < attempts:
+            delay = SITEMAP_RETRY_DELAYS[n - 1]
+            log(f"  [ect] sitemap attempt {n}/{attempts} failed: {last_err}, "
+                f"retrying in {delay}s ({sitemap_url})", flush=True)
+            time.sleep(delay)
+        else:
+            log(f"  [ect] sitemap attempt {n}/{attempts} failed: {last_err} "
+                f"({sitemap_url}) — giving up on this source", flush=True)
+    return None
+
+
+def _load_ect_urls(sess, sitemap_url, log):
+    """Load and order ECT listing URLs newest-first.
+
+    Tries the primary listings.xml (chronological, walked in reverse). On
+    terminal failure tries cms-sitemap.xml (alphabetic — we re-sort by
+    trailing lot-number desc to approximate chronological order). Returns
+    (urls_list, source_label) or (None, None) on total failure.
+    """
+    # Primary: chronological sitemap, reverse for newest-first.
+    body = _fetch_sitemap_with_retry(sess, sitemap_url, log)
+    if body:
+        urls = _LOC_RE.findall(body)
+        if urls:
+            urls.reverse()
+            return urls, "primary"
+        log("  [ect] primary sitemap had zero <loc> entries", flush=True)
+
+    # Fallback: cms-sitemap.xml, sort by lot-number desc.
+    log(f"  [ect] falling back to cms-sitemap ({ECT_CMS_SITEMAP})", flush=True)
+    body = _fetch_sitemap_with_retry(sess, ECT_CMS_SITEMAP, log)
+    if not body:
+        return None, None
+    raw = _LOC_RE.findall(body)
+    # Restrict to /listing/ URLs (cms-sitemap also includes builder pages,
+    # CMS landing pages, etc. that we don't want to fetch as VDPs).
+    listing_urls = [u for u in raw if "/listing/" in u]
+    if len(listing_urls) < 50:
+        log(f"  [ect] cms-sitemap fallback: only {len(listing_urls)} listing "
+            f"URLs found (need >=50) — treating as failure", flush=True)
+        return None, None
+
+    def _sort_key(u):
+        m = _URL_LOT_TAIL_RE.search(u)
+        # Slug-form URLs sort by lot-number desc (negative = larger first).
+        # VIN-form URLs (no trailing lot number) get pushed to the end.
+        return (0, -int(m.group(1))) if m else (1, 0)
+
+    listing_urls.sort(key=_sort_key)
+    return listing_urls, "fallback"
+
+
 def fetch_ect_inventory(base_url, sess, *, max_age_days=90, max_vehicles=None,
                         sitemap_url=ECT_SITEMAP, log=print) -> Optional[list]:
     """Walk the ECT listings sitemap from newest to oldest, return vehicle
     dicts for listings created within `max_age_days`.
 
-    Returns None on hard failure (sitemap unreachable). Returns [] if
-    sitemap was readable but yielded no in-window listings (treat as ok).
+    Returns None only when BOTH the primary sitemap and the cms-sitemap
+    fallback are unreachable / unparsable. Returns [] if sitemap was readable
+    but yielded no in-window listings (treat as ok).
     """
-    try:
-        r = sess.get(sitemap_url, timeout=30)
-    except Exception as exc:
-        log(f"  [ect] sitemap fetch failed: {exc}", flush=True)
-        return None
-    if r.status_code != 200 or not r.text:
-        log(f"  [ect] sitemap status={r.status_code}", flush=True)
-        return None
-
-    urls = _LOC_RE.findall(r.text)
+    urls, source = _load_ect_urls(sess, sitemap_url, log)
     if not urls:
-        log("  [ect] sitemap had zero <loc> entries", flush=True)
+        log("  [ect] both primary sitemap and cms-sitemap fallback failed — "
+            "returning None so scanner abort circuit preserves inventory",
+            flush=True)
         return None
-    urls.reverse()  # newest first
-    log(f"  [ect] sitemap: {len(urls)} URLs total, walking newest-first", flush=True)
+    log(f"  [ect] sitemap: {len(urls)} URLs total ({source}), "
+        f"walking newest-first", flush=True)
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
     cap = min(max_vehicles or MAX_VDP_FETCHES, MAX_VDP_FETCHES)
+    # Fallback ordering (sort-by-lot-number) is approximately chronological
+    # but not strictly so — bump the consecutive-old stop on the fallback
+    # path to avoid prematurely terminating if a few old listings cluster.
+    consecutive_old_stop = (CONSECUTIVE_OLD_STOP if source == "primary"
+                            else CONSECUTIVE_OLD_STOP * 3)
 
     vehicles = []
     consecutive_old = 0
@@ -396,9 +485,9 @@ def fetch_ect_inventory(base_url, sess, *, max_age_days=90, max_vehicles=None,
         if is_old:
             too_old += 1
             consecutive_old += 1
-            if consecutive_old >= CONSECUTIVE_OLD_STOP:
-                log(f"  [ect] {CONSECUTIVE_OLD_STOP} consecutive listings older than "
-                    f"{max_age_days}d — stopping at sitemap pos "
+            if consecutive_old >= consecutive_old_stop:
+                log(f"  [ect] {consecutive_old_stop} consecutive listings older "
+                    f"than {max_age_days}d — stopping at sitemap pos "
                     f"{len(urls) - urls.index(vdp_url)}", flush=True)
                 break
             continue
