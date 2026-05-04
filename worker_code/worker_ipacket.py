@@ -112,6 +112,14 @@ def lookup(page, ctx, vin, t):
     if f != "filled": return {"error": "vin_input_not_found"}
 
     time.sleep(0.5)
+    # Clear stale canvas signature + record pre-submit canvas size, so detector
+    # waits for a NEW render instead of matching the prior lookup's stable canvas.
+    page.evaluate(r"""() => {
+        window.__ipk_canvas_sig = null;
+        const view = document.querySelector(".stickerpull-view-container");
+        const canvas = view ? view.querySelector(".react-pdf__Page__canvas") : null;
+        window.__ipk_pre_submit_size = canvas ? (canvas.width + "x" + canvas.height) : null;
+    }""")
     page.evaluate(r"""() => {
         const btns = document.querySelectorAll('button, input[type="submit"], a');
         for (const b of btns) {
@@ -140,13 +148,32 @@ def lookup(page, ctx, vin, t):
                 const canvas = view.querySelector('.react-pdf__Page__canvas');
                 if (canvas && canvas.width > 500 && canvas.height > 500) {
                     const sig = canvas.width + 'x' + canvas.height;
+                    const presub = window.__ipk_pre_submit_size;
+                    if (presub && presub === sig) {
+                        return {state: 'pre_submit_canvas', size: sig};
+                    }
                     const prev = window.__ipk_canvas_sig;
                     window.__ipk_canvas_sig = sig;
                     if (prev === sig) {
-                        // Stable for >= 2 polls (~0.8s) — fully rendered
                         return {state: 'ready', size: sig};
                     }
                     return {state: 'rendering', size: sig};
+                }
+            }
+            // PRIMARY-2: iPacket renders the sticker as an iframe whose
+            //   src contains '/sticker/<VIN>?token=<jwt>'. The canvas lives
+            //   INSIDE that iframe (same-origin policy hides it from us),
+            //   but the iframe itself with our VIN in the src is the
+            //   authoritative signal that iPacket has data for this VIN.
+            //   This is the path that fires for fresh lookups (VIN not yet
+            //   in Recent Pulls).
+            const iframes = document.querySelectorAll(
+                'iframe.ipacket-viewer, iframe[src*="document-viewer.autoipacket.com"]'
+            );
+            for (const f of iframes) {
+                const src = (f.getAttribute('src') || '').toUpperCase();
+                if (src.indexOf('/STICKER/' + v) >= 0 || src.indexOf('/' + v + '?') >= 0) {
+                    return {state: 'ready', size: 'iframe-' + v};
                 }
             }
             // SECONDARY: pull-history-table-download with our VIN's download URL
@@ -234,7 +261,7 @@ def lookup(page, ctx, vin, t):
     # server-side Gemini OCR fallback firing on every bid.
     sticker_text = ""
     try:
-        sticker_text = sticker_page.evaluate("""
+        sticker_text = sticker_page.evaluate(r"""
             () => {
                 const layers = document.querySelectorAll(
                     ".react-pdf__Page__textContent, .textLayer"
