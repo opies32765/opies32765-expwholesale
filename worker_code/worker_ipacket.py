@@ -1,5 +1,5 @@
 """iPacket lookup module — keep it simple: sticker pulls or it doesn't."""
-import os, time
+import os, re, time
 from pathlib import Path
 
 REPORTS_DIR = Path(r"C:\worker\ipacket_reports")
@@ -9,6 +9,41 @@ EMAIL = os.environ.get("IPACKET_EMAIL", "opies32765@gmail.com")
 PASSWORD = os.environ.get("IPACKET_PASSWORD", "Sedecremlun34$")
 IPACKET_DPAPP = "https://dpapp.autoipacket.com/"
 LOGIN_MARKERS = ("/login", "/signin", "/sign-in", "/forgot")
+
+
+
+def _parse_sticker_text(text):
+    """Regex-extract MSRP / base / colors / options from sticker text.
+    Mirrors app.py _parse_sticker_text — keep them in sync."""
+    out = {"total_msrp": None, "base_price": None,
+           "exterior_color": None, "interior_color": None, "options": []}
+    if not text or len(text) < 50:
+        return out
+    for pat in (r"TOTAL\s+(?:PREDICTED\s+)?PRICE\s*[:$]?\s*\$?\s*([\d,]+)",
+                r"TOTAL\s+MSRP\s*[:$]?\s*\$?\s*([\d,]+)",
+                r"(?<!BASE\s)MSRP\s*[:$]?\s*\$?\s*([\d,]+)"):
+        m = re.search(pat, text, re.I)
+        if m:
+            try:
+                v = int(m.group(1).replace(",", ""))
+                if 1000 < v < 10_000_000:
+                    out["total_msrp"] = v; break
+            except ValueError: pass
+    for pat in (r"BASE\s+SUGGESTED\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)",
+                r"BASE\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)",
+                r"BASE\s+MSRP\s*[:$]?\s*\$?\s*([\d,]+)"):
+        m = re.search(pat, text, re.I)
+        if m:
+            try:
+                v = int(m.group(1).replace(",", ""))
+                if 1000 < v < 10_000_000:
+                    out["base_price"] = v; break
+            except ValueError: pass
+    m = re.search(r"EXTERIOR(?:\s+COLOR)?[:\s]+([A-Za-z][A-Za-z\s/-]{2,40})", text, re.I)
+    if m: out["exterior_color"] = m.group(1).strip().split(chr(10))[0].strip()
+    m = re.search(r"INTERIOR(?:\s+COLOR)?[:\s]+([A-Za-z][A-Za-z\s/-]{2,40})", text, re.I)
+    if m: out["interior_color"] = m.group(1).strip().split(chr(10))[0].strip()
+    return out
 
 
 def is_logged_in(url):
@@ -194,6 +229,34 @@ def lookup(page, ctx, vin, t):
         except Exception:
             screenshot = None
 
+    # Extract text from the rendered sticker (react-pdf textLayer or body)
+    # so worker can return MSRP/base/colors via regex — avoids the
+    # server-side Gemini OCR fallback firing on every bid.
+    sticker_text = ""
+    try:
+        sticker_text = sticker_page.evaluate("""
+            () => {
+                const layers = document.querySelectorAll(
+                    ".react-pdf__Page__textContent, .textLayer"
+                );
+                if (layers.length) {
+                    const out = [];
+                    for (const l of layers) out.push(l.innerText || l.textContent || "");
+                    return out.join("\n");
+                }
+                return document.body ? (document.body.innerText || "") : "";
+            }
+        """) or ""
+    except Exception as e:
+        print(f"[+{time.time()-t:5.1f}s] [ipacket] text extract FAIL: {e}")
+
+    parsed = _parse_sticker_text(sticker_text) if sticker_text else {}
+    if parsed.get("total_msrp"):
+        _m = parsed.get("total_msrp") or 0
+        _b = parsed.get("base_price") or 0
+        _ec = parsed.get("exterior_color") or ""
+        print(f"[+{time.time()-t:5.1f}s] [ipacket] regex MSRP=${_m:,} base=${_b:,} ext={_ec} text={len(sticker_text)} chars")
+
     if sticker_page is not page:
         try: sticker_page.close()
         except Exception: pass
@@ -201,4 +264,10 @@ def lookup(page, ctx, vin, t):
     return {
         "screenshot": str(screenshot) if screenshot else None,
         "sticker_url": sticker_url,
+        "total_msrp": parsed.get("total_msrp"),
+        "base_price": parsed.get("base_price"),
+        "exterior_color": parsed.get("exterior_color"),
+        "interior_color": parsed.get("interior_color"),
+        "raw": {"options": parsed.get("options", []),
+                "text_chars": len(sticker_text)},
     }
