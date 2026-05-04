@@ -160,34 +160,45 @@ def ew_get_pending():
     return []
 
 
+def _ew_submit_with_retry(url, payload, name, max_attempts=3):
+    """POST payload to EW server, retry on transient failures.
+    timeout=60 catches slow gunicorn responses (was 15 — too tight when
+    gunicorn is mid-AI-assessment). Retries 1s/3s/8s on 5xx or exception.
+    Don't retry on 4xx (permanent client error). Logs status+body on
+    every non-200 so we can diagnose."""
+    last_err = "no attempts"
+    for attempt in range(1, max_attempts + 1):
+        try:
+            r = http_requests.post(url, json=payload, timeout=60)
+            if r.status_code == 200:
+                return True
+            try: body = (r.text or "")[:300]
+            except Exception: body = "<no body>"
+            last_err = f"HTTP {r.status_code} body={body!r}"
+            if 400 <= r.status_code < 500:
+                # Permanent — don't retry
+                print(f"  [EW] {name} submit attempt {attempt}/{max_attempts}: {last_err} (4xx — no retry)")
+                return False
+            print(f"  [EW] {name} submit attempt {attempt}/{max_attempts}: {last_err}")
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            print(f"  [EW] {name} submit attempt {attempt}/{max_attempts} exception: {last_err}")
+        if attempt < max_attempts:
+            time.sleep([1, 3, 8][attempt - 1] if attempt - 1 < 3 else 8)
+    print(f"  [EW] {name} submit gave up after {max_attempts} attempts: {last_err}")
+    return False
+
+
 def ew_submit_vauto(payload):
-    try:
-        r = http_requests.post(f"{EW_SERVER}/api/vauto/submit",
-                               json=payload, timeout=15)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"  [EW] vAuto submit error: {e}")
-        return False
+    return _ew_submit_with_retry(f"{EW_SERVER}/api/vauto/submit", payload, "vAuto")
 
 
 def ew_submit_accutrade(payload):
-    try:
-        r = http_requests.post(f"{EW_SERVER}/api/accutrade/submit",
-                               json=payload, timeout=15)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"  [EW] AccuTrade submit error: {e}")
-        return False
+    return _ew_submit_with_retry(f"{EW_SERVER}/api/accutrade/submit", payload, "AccuTrade")
 
 
 def ew_submit_ipacket(payload):
-    try:
-        r = http_requests.post(f"{EW_SERVER}/api/ipacket/submit",
-                               json=payload, timeout=15)
-        return r.status_code == 200
-    except Exception as e:
-        print(f"  [EW] iPacket submit error: {e}")
-        return False
+    return _ew_submit_with_retry(f"{EW_SERVER}/api/ipacket/submit", payload, "iPacket")
 
 
 def _post_phase(bid_id, phase, state):
