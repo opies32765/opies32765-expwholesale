@@ -6495,6 +6495,9 @@ _WORKER_VMID_MAP = {
     'vm-worker-7': 111,
     'vm-worker-8': 112,
     'vm-worker-10': 115,
+    "vm-worker-11": 122,
+    "vm-worker-12": 123,
+    "vm-worker-13": 124,
 }
 
 def _worker_to_vmid(worker_id):
