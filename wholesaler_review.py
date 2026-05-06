@@ -500,13 +500,18 @@ def _approve_impl(reviewer, bid_id):
     with _db() as conn, conn.cursor() as cur:
         # Match the salesperson filter so reviewers can only approve bids
         # they own. RETURNING guards against double-approval races.
+        # Approve = the deal is done (bought). Flip status to 'bought' so it
+        # surfaces in the EW Buy Center as a closed deal record. The
+        # negotiation already happened in the wholesaler dashboard via
+        # /api/bid/<id>/reply counters.
         if new_ask is not None:
             cur.execute(f"""
                 UPDATE bids
                 SET review_status = 'approved',
+                    status        = 'bought',
                     review_by     = %s,
                     review_at     = NOW(),
-                    asking_price  = %s,
+                    bid_amount    = COALESCE(%s, bid_amount),
                     updated_at    = NOW()
                 WHERE id = %s
                   AND review_status = 'pending'
@@ -517,6 +522,7 @@ def _approve_impl(reviewer, bid_id):
             cur.execute(f"""
                 UPDATE bids
                 SET review_status = 'approved',
+                    status        = 'bought',
                     review_by     = %s,
                     review_at     = NOW(),
                     updated_at    = NOW()

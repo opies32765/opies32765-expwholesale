@@ -33,8 +33,10 @@
   .link-row{display:flex;align-items:center;gap:8px;background:#0f172a;border:1px solid var(--line);padding:6px 8px;border-radius:6px}
   .link-row .lbl{font-size:10px;color:var(--mute);min-width:60px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
   .link-row a{color:#7dd3fc;text-decoration:none;font-size:11px;flex:1;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .link-row button{padding:5px 9px;background:#1e3a8a;color:#dbeafe;border:0;border-radius:4px;font-size:10px;cursor:pointer;font-weight:700}
+  .link-row button{padding:5px 9px;background:#1e3a8a;color:#dbeafe;border:0;border-radius:4px;font-size:10px;cursor:pointer;font-weight:700;white-space:nowrap}
   .link-row button:hover{background:#2563eb}
+  .link-row button.send-link{background:#14532d;color:#bbf7d0}
+  .link-row button.send-link:hover{background:#16a34a;color:#062b16}
   .actions{display:flex;gap:8px;margin-top:6px}
   .actions a{flex:1;text-align:center;padding:8px;border-radius:6px;font-size:12px;font-weight:700;text-decoration:none}
   .actions .review{background:#422006;color:#fde68a}
@@ -97,11 +99,21 @@
               <span class="lbl">Dashboard</span>
               <a href="{{ _dash }}" target="_blank" title="{{ _dash }}">{{ _dash }}</a>
               <button data-copy="{{ _dash }}">Copy</button>
+              <button class="send-link"
+                      data-share-url="{{ _dash }}"
+                      data-share-name="{{ w.name }}"
+                      data-share-kind="dashboard"
+                      title="Send the dashboard link via Messages / WhatsApp / etc.">📱 Text</button>
             </div>
             <div class="link-row">
               <span class="lbl">Mobile</span>
               <a href="{{ _mob }}" target="_blank" title="{{ _mob }}">{{ _mob }}</a>
               <button data-copy="{{ _mob }}">Copy</button>
+              <button class="send-link"
+                      data-share-url="{{ _mob }}"
+                      data-share-name="{{ w.name }}"
+                      data-share-kind="mobile app"
+                      title="Send the mobile-app link via Messages / WhatsApp / etc.">📱 Text</button>
             </div>
           </div>
 
@@ -124,6 +136,41 @@ document.querySelectorAll('[data-copy]').forEach(b => {
     const orig = b.textContent;
     b.textContent = 'Copied';
     setTimeout(() => b.textContent = orig, 1200);
+  });
+});
+
+// Share via SMS / Messages / native share sheet. Web Share API on
+// mobile pops up Messages/WhatsApp/etc. with the URL pre-filled — the
+// recipient gets the link verbatim (no SMS-app truncation of long
+// URLs). Desktop falls back to sms: protocol; if the OS has Messages /
+// iMessage configured, that fires a compose. Worst case: clipboard.
+document.querySelectorAll('.send-link').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const url = btn.dataset.shareUrl;
+    const name = btn.dataset.shareName;
+    const kind = btn.dataset.shareKind || 'dashboard';
+    const subject = `Your Experience Wholesale ${kind}`;
+    const body = `${name} — your private Experience Wholesale ${kind} is ready. ` +
+                 `Tap this link to open it (no login needed):\n\n${url}`;
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: subject, text: body, url });
+        return;
+      } catch (e) {
+        if (e.name !== 'AbortError') console.warn('share fallback', e);
+        else return;
+      }
+    }
+    // Fallback: sms: link with body. URL-encode the body. Works on
+    // iOS/Android/macOS Messages. On desktop without Messages, this
+    // falls through to clipboard.
+    const sms = `sms:?&body=${encodeURIComponent(body)}`;
+    const win = window.open(sms, '_blank');
+    if (!win) {
+      navigator.clipboard.writeText(url);
+      btn.textContent = 'Copied URL';
+      setTimeout(() => btn.textContent = '📱 Text', 1500);
+    }
   });
 });
 </script>
