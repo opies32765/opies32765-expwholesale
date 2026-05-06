@@ -135,9 +135,13 @@ def dashboard(reviewer):
 
     rs_sql = ' AND '.join(rs_clauses)
 
-    bid_params = list(sp_params)
+    # Param order must match the WHERE clause: rs_clauses (which may
+    # include partner_dealer_id) come BEFORE sp_sql in the SQL, so their
+    # values come first in the param list.
+    bid_params = []
     if dealer_filter not in (None, '', 'all'):
         bid_params.append(int(dealer_filter))
+    bid_params.extend(sp_params)
 
     with _db() as conn, conn.cursor() as cur:
         # Bids — same shape as /api/bids, scoped to this reviewer.
@@ -278,14 +282,14 @@ def api_bids(reviewer):
         rs_clauses.append("b.review_at > NOW() - INTERVAL '7 days'")
     else:
         rs_clauses.append("b.review_status IS NOT NULL")
-    bid_params = list(sp_params)
+    bid_params = []
     if dealer_filter not in (None, '', 'all'):
         try:
-            int(dealer_filter)
-            rs_clauses.append("b.partner_dealer_id = %s")
             bid_params.append(int(dealer_filter))
+            rs_clauses.append("b.partner_dealer_id = %s")
         except ValueError:
             pass
+    bid_params.extend(sp_params)
 
     rs_sql = ' AND '.join(rs_clauses)
 
