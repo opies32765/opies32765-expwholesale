@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>My Wholesalers — {{ reviewer_name }}</title>
+<style>
+  :root{--bg:#0f172a;--panel:#1e293b;--mute:#94a3b8;--text:#e2e8f0;
+        --line:#334155;--accent:#2563eb;--good:#22c55e;--warn:#f59e0b}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);font-size:15px}
+  header{padding:20px 28px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
+  header h1{margin:0;font-size:20px}
+  header a{color:#7dd3fc;text-decoration:none;font-size:14px;margin-left:14px}
+  header .add-btn{background:var(--good);color:#062b16;padding:9px 14px;border-radius:7px;font-weight:800;font-size:14px}
+  main{max-width:1200px;margin:0 auto;padding:24px 28px}
+  .empty{padding:60px 20px;text-align:center;color:var(--mute);background:var(--panel);border-radius:10px}
+  .empty h2{margin:0 0 6px;font-size:20px;color:#cbd5e1}
+  .empty .add-btn{display:inline-block;margin-top:14px;background:var(--good);color:#062b16;padding:11px 18px;border-radius:7px;font-weight:800;font-size:14px;text-decoration:none}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;display:flex;flex-direction:column;gap:10px;transition:border-color .2s}
+  .card:target{border-color:var(--good);box-shadow:0 0 0 2px rgba(34,197,94,.25)}
+  .card .head{display:flex;align-items:center;gap:10px;justify-content:space-between}
+  .card .name{font-size:18px;font-weight:700;color:#f1f5f9;line-height:1.2}
+  .card .slug{font-size:11px;color:var(--mute);font-family:ui-monospace,monospace;margin-top:2px}
+  .card .meta{display:flex;gap:14px;color:var(--mute);font-size:13px;flex-wrap:wrap}
+  .card .meta b{color:#cbd5e1}
+  .pill{display:inline-block;padding:3px 9px;border-radius:11px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+  .pill.pending{background:#422006;color:#fde68a}
+  .pill.zero{background:#1e293b;color:#64748b}
+  .links{margin-top:6px;display:flex;flex-direction:column;gap:6px}
+  .link-row{display:flex;align-items:center;gap:8px;background:#0f172a;border:1px solid var(--line);padding:6px 8px;border-radius:6px}
+  .link-row .lbl{font-size:10px;color:var(--mute);min-width:60px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+  .link-row a{color:#7dd3fc;text-decoration:none;font-size:11px;flex:1;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .link-row button{padding:5px 9px;background:#1e3a8a;color:#dbeafe;border:0;border-radius:4px;font-size:10px;cursor:pointer;font-weight:700}
+  .link-row button:hover{background:#2563eb}
+  .actions{display:flex;gap:8px;margin-top:6px}
+  .actions a{flex:1;text-align:center;padding:8px;border-radius:6px;font-size:12px;font-weight:700;text-decoration:none}
+  .actions .review{background:#422006;color:#fde68a}
+  .actions .review:hover{background:#92400e}
+  .actions .open{background:transparent;color:#7dd3fc;border:1px solid var(--line)}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>My Wholesalers — {{ reviewer_name }}</h1>
+    <div style="font-size:12px;color:var(--mute);margin-top:4px">
+      {{ wholesalers|length }} portal{{ 's' if wholesalers|length != 1 else '' }}
+    </div>
+  </div>
+  <div>
+    <a href="{{ url_for('wholesaler_review.dashboard', reviewer=reviewer_slug) }}">← Review dashboard</a>
+    <a class="add-btn" href="{{ url_for('wholesaler_review.onboard', reviewer=reviewer_slug) }}">+ Add wholesaler</a>
+  </div>
+</header>
+
+<main>
+  {% if not wholesalers %}
+    <div class="empty">
+      <h2>No wholesalers yet.</h2>
+      <p>Spin one up — takes 10 seconds. Their dashboard will be ready instantly.</p>
+      <a class="add-btn" href="{{ url_for('wholesaler_review.onboard', reviewer=reviewer_slug) }}">+ Add your first wholesaler</a>
+    </div>
+  {% else %}
+    <div class="grid">
+      {% for w in wholesalers %}
+        {% set _slug = w.portal_slug %}
+        {% set _dash = portal_base ~ '/partner/' ~ _slug ~ '/d/' ~ w.dashboard_token %}
+        {% set _mob  = portal_base ~ '/mobile?p=' ~ w.mobile_token %}
+        <div class="card" id="dealer-{{ w.id }}">
+          <div class="head">
+            <div>
+              <div class="name">{{ w.name }}</div>
+              <div class="slug">/partner/{{ _slug }}</div>
+            </div>
+            {% if w.pending_count and w.pending_count > 0 %}
+              <span class="pill pending">{{ w.pending_count }} pending</span>
+            {% else %}
+              <span class="pill zero">0 pending</span>
+            {% endif %}
+          </div>
+
+          <div class="meta">
+            <span><b>{{ w.approved_count or 0 }}</b> approved</span>
+            {% if w.last_submission_at %}
+              <span>Last: {{ w.last_submission_at.strftime('%b %d') }}</span>
+            {% else %}
+              <span style="color:#64748b">No submissions yet</span>
+            {% endif %}
+          </div>
+
+          <div class="links">
+            <div class="link-row">
+              <span class="lbl">Dashboard</span>
+              <a href="{{ _dash }}" target="_blank" title="{{ _dash }}">{{ _dash }}</a>
+              <button data-copy="{{ _dash }}">Copy</button>
+            </div>
+            <div class="link-row">
+              <span class="lbl">Mobile</span>
+              <a href="{{ _mob }}" target="_blank" title="{{ _mob }}">{{ _mob }}</a>
+              <button data-copy="{{ _mob }}">Copy</button>
+            </div>
+          </div>
+
+          <div class="actions">
+            {% if w.pending_count and w.pending_count > 0 %}
+              <a class="review" href="{{ url_for('wholesaler_review.dashboard', reviewer=reviewer_slug) }}?dealer={{ w.id }}">Review {{ w.pending_count }} →</a>
+            {% endif %}
+            <a class="open" href="{{ _dash }}" target="_blank">View their portal ↗</a>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+</main>
+
+<script>
+document.querySelectorAll('[data-copy]').forEach(b => {
+  b.addEventListener('click', () => {
+    navigator.clipboard.writeText(b.dataset.copy);
+    const orig = b.textContent;
+    b.textContent = 'Copied';
+    setTimeout(() => b.textContent = orig, 1200);
+  });
+});
+</script>
+
+</body>
+</html>

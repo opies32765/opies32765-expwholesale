@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Add Wholesaler — {{ reviewer_name }}</title>
+<style>
+  :root{--bg:#0f172a;--panel:#1e293b;--mute:#94a3b8;--text:#e2e8f0;
+        --line:#334155;--accent:#2563eb;--good:#22c55e}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);font-size:15px}
+  header{padding:20px 28px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+  header h1{margin:0;font-size:20px}
+  header a{color:#7dd3fc;text-decoration:none;font-size:14px;margin-left:14px}
+  main{max-width:640px;margin:0 auto;padding:28px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:24px}
+  label{display:block;font-size:11px;font-weight:700;color:var(--mute);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 6px}
+  input[type=text],input[type=tel],input[type=url]{width:100%;padding:11px 13px;border:1px solid var(--line);background:#0f172a;color:var(--text);border-radius:7px;font-size:15px;font-weight:500;font-family:inherit}
+  input[type=color]{width:60px;height:42px;border:1px solid var(--line);background:#0f172a;border-radius:7px;cursor:pointer;padding:4px}
+  .help{font-size:12px;color:var(--mute);margin-top:4px;line-height:1.45}
+  .btn{padding:13px 18px;background:var(--good);color:#062b16;border:0;border-radius:8px;font-weight:800;font-size:15px;cursor:pointer;width:100%;margin-top:22px}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .err{margin-top:12px;padding:11px 14px;background:#7f1d1d;color:#fecaca;border-radius:7px;font-size:14px;display:none}
+  .err.show{display:block}
+  .ok{margin-top:18px;padding:18px;background:#064e3b;border:1px solid #14532d;border-radius:10px}
+  .ok h3{margin:0 0 12px;color:#bbf7d0;font-size:16px}
+  .ok .link-row{margin:8px 0;display:flex;align-items:center;gap:10px;background:#022c22;padding:8px 10px;border-radius:6px}
+  .ok .link-row .lbl{font-size:11px;color:#86efac;min-width:80px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+  .ok .link-row a{color:#86efac;text-decoration:none;font-size:13px;word-break:break-all;flex:1;font-family:ui-monospace,monospace}
+  .ok .link-row button{padding:6px 10px;background:#14532d;color:#bbf7d0;border:0;border-radius:5px;font-size:11px;cursor:pointer;font-weight:700}
+  .ok .link-row button:hover{background:#166534}
+  .row{display:flex;gap:14px;align-items:end}
+  .row > div{flex:1}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Add Wholesaler</h1>
+  <div>
+    <a href="{{ url_for('wholesaler_review.dashboard', reviewer=reviewer_slug) }}">← Review dashboard</a>
+    <a href="{{ url_for('wholesaler_review.wholesaler_list', reviewer=reviewer_slug) }}">My wholesalers</a>
+  </div>
+</header>
+
+<main>
+  <div class="card">
+    <p style="margin:0 0 4px;color:var(--mute);font-size:14px">
+      Reviewer: <b style="color:#cbd5e1">{{ reviewer_name }}</b>
+    </p>
+    <p style="margin:0 0 4px;color:var(--mute);font-size:13px;line-height:1.5">
+      Creates a private portal for this wholesaler. Submissions land in <b style="color:#cbd5e1">your review queue</b> — invisible to bidders until you approve. Same EW workers (vAuto, AccuTrade, iPacket, AI assessment) process every submission in the background.
+    </p>
+
+    <form id="onboardForm">
+      <label for="name">Wholesaler name *</label>
+      <input type="text" id="name" name="name" required maxlength="200" autofocus
+             placeholder="e.g. Mike's Auto Group">
+      <div class="help">Shown on their dashboard header. We'll generate a clean URL slug from this.</div>
+
+      <label for="phone">Salesperson SMS phone (optional)</label>
+      <input type="tel" id="phone" name="phone" placeholder="+1 (XXX) XXX-XXXX">
+      <div class="help">If set, you get an SMS each time this wholesaler submits a bid.</div>
+
+      <div class="row">
+        <div>
+          <label for="primary_color">Brand color</label>
+          <input type="color" id="primary_color" name="primary_color" value="#0D68C5">
+        </div>
+        <div style="flex:3">
+          <label for="logo_url">Logo URL (optional)</label>
+          <input type="url" id="logo_url" name="logo_url" placeholder="https://…">
+        </div>
+      </div>
+      <div class="help">Skip both for the default blue theme.</div>
+
+      <button type="submit" class="btn" id="submitBtn">Create portal →</button>
+      <div class="err" id="errMsg"></div>
+    </form>
+
+    <div id="okBlock"></div>
+  </div>
+</main>
+
+<script>
+document.getElementById('onboardForm').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const f = ev.target;
+  const btn = document.getElementById('submitBtn');
+  const err = document.getElementById('errMsg');
+  err.classList.remove('show');
+  btn.disabled = true; btn.textContent = 'Creating…';
+
+  try {
+    const fd = new FormData(f);
+    const r = await fetch(window.location.pathname, {
+      method: 'POST',
+      body: fd,
+      headers: { 'X-Requested-With': 'fetch', 'Accept': 'application/json' }
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+
+    // Render success card with copy buttons.
+    document.getElementById('okBlock').innerHTML = `
+      <div class="ok">
+        <h3>✅ Portal created for ${j.name}</h3>
+        <div class="link-row">
+          <span class="lbl">Dashboard</span>
+          <a href="${j.dashboard_url}" target="_blank">${j.dashboard_url}</a>
+          <button data-copy="${j.dashboard_url}">Copy</button>
+        </div>
+        <div class="link-row">
+          <span class="lbl">Mobile</span>
+          <a href="${j.mobile_url}" target="_blank">${j.mobile_url}</a>
+          <button data-copy="${j.mobile_url}">Copy</button>
+        </div>
+        <div style="margin-top:14px;display:flex;gap:8px">
+          <a href="/wholesaler-{{ reviewer_slug }}/wholesalers" style="flex:1;text-align:center;padding:10px;background:#064e3b;color:#bbf7d0;text-decoration:none;border-radius:6px;font-weight:700;font-size:13px">View all my wholesalers →</a>
+          <a href="/wholesaler-{{ reviewer_slug }}/new" style="flex:1;text-align:center;padding:10px;background:transparent;color:#86efac;text-decoration:none;border:1px solid #14532d;border-radius:6px;font-weight:700;font-size:13px">+ Add another</a>
+        </div>
+      </div>`;
+    f.reset();
+    document.querySelectorAll('[data-copy]').forEach(b => {
+      b.addEventListener('click', () => {
+        navigator.clipboard.writeText(b.dataset.copy);
+        b.textContent = 'Copied';
+        setTimeout(() => b.textContent = 'Copy', 1200);
+      });
+    });
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.add('show');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Create portal →';
+  }
+});
+</script>
+
+</body>
+</html>
