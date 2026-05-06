@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ reviewer_name }} — Wholesaler Review Queue</title>
+<style>
+  :root{--bg:#0f172a;--panel:#1e293b;--mute:#94a3b8;--text:#e2e8f0;
+        --line:#334155;--accent:#2563eb;--good:#22c55e;--warn:#f59e0b;--bad:#ef4444}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);font-size:15px}
+  header{padding:20px 28px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
+  header h1{margin:0;font-size:22px;font-weight:700}
+  header .sub{color:var(--mute);font-size:13px;margin-top:3px}
+  header a{color:#7dd3fc;text-decoration:none;font-size:14px}
+  main{max-width:1400px;margin:0 auto;padding:24px 28px}
+  .empty{padding:60px 20px;text-align:center;color:var(--mute);background:var(--panel);border-radius:10px}
+  .empty h2{margin:0 0 6px;font-size:20px}
+  section h2{font-size:18px;margin:24px 0 12px;color:#cbd5e1;font-weight:700;letter-spacing:.2px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;background:#1e3a8a;color:#dbeafe;margin-left:8px}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:14px}
+  .card-row{display:grid;grid-template-columns:140px 1fr 280px;gap:18px;align-items:start}
+  @media(max-width:900px){.card-row{grid-template-columns:1fr}}
+  .photo{width:140px;height:105px;border-radius:8px;background:#0f172a;border:1px solid var(--line);object-fit:cover;display:block}
+  .photo.placeholder{display:flex;align-items:center;justify-content:center;color:#475569;font-size:11px}
+  .photo-count{font-size:11px;color:var(--mute);margin-top:4px;text-align:center}
+
+  .vehicle{font-size:18px;font-weight:700;color:#f1f5f9;margin-bottom:4px}
+  .meta{color:var(--mute);font-size:13px;line-height:1.6}
+  .meta b{color:#cbd5e1;font-weight:600}
+  .vin{font-family:ui-monospace,monospace;font-size:12px;color:#94a3b8}
+  .ask{font-size:24px;font-weight:800;color:var(--good);margin-top:6px}
+  .ask .lbl{font-size:11px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:2px}
+  .books{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;font-size:12px;color:var(--mute)}
+  .books span b{color:#cbd5e1;font-weight:700}
+  .notes{margin-top:8px;padding:8px 10px;background:#0f172a;border-radius:6px;border-left:3px solid #334155;font-size:13px;color:#cbd5e1;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+  .dealer-line{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:13px;color:var(--mute)}
+  .dealer-line .name{color:#cbd5e1;font-weight:600}
+  .dealer-line .sp{color:#7dd3fc}
+  .age{font-size:12px;color:var(--mute);margin-top:8px}
+
+  .actions{display:flex;flex-direction:column;gap:10px}
+  .actions label{font-size:11px;font-weight:700;color:var(--mute);text-transform:uppercase;letter-spacing:.5px}
+  .actions input[type=text]{width:100%;padding:10px;border:1px solid var(--line);background:#0f172a;color:var(--text);border-radius:6px;font-size:15px;font-weight:600}
+  .actions textarea{width:100%;min-height:60px;padding:8px 10px;border:1px solid var(--line);background:#0f172a;color:var(--text);border-radius:6px;font-size:13px;resize:vertical;font-family:inherit;line-height:1.4}
+  .btn{padding:11px 14px;border:0;border-radius:7px;font-weight:700;font-size:14px;cursor:pointer;transition:opacity .15s}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn-approve{background:var(--good);color:#062b16}
+  .btn-reject{background:transparent;color:#fca5a5;border:1px solid #7f1d1d}
+  .btn-preview{background:transparent;color:#7dd3fc;border:1px solid var(--line);text-decoration:none;text-align:center;display:block;padding:9px}
+  .vauto-pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+  .vauto-pill.ready{background:#064e3b;color:#bbf7d0}
+  .vauto-pill.pending{background:#422006;color:#fde68a}
+
+  .recent-table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:10px;overflow:hidden}
+  .recent-table th,.recent-table td{padding:10px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:13px}
+  .recent-table th{background:#0f172a;color:var(--mute);font-size:11px;text-transform:uppercase;letter-spacing:.5px;font-weight:700}
+  .recent-table tr:last-child td{border-bottom:0}
+  .pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+  .pill.approved{background:#064e3b;color:#bbf7d0}
+  .pill.rejected{background:#7f1d1d;color:#fecaca}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Wholesaler Review Queue</h1>
+    <div class="sub">Reviewer: <b style="color:#cbd5e1">{{ reviewer_name }}</b> · {{ pending|length }} pending</div>
+  </div>
+  <div>
+    <a href="/wholesaler-{{ reviewer_slug }}">← Dashboard view</a>
+    <a href="/wholesaler-{{ reviewer_slug }}/wholesalers" style="margin-left:18px">My wholesalers</a>
+    <a href="/wholesaler-{{ reviewer_slug }}/new" style="margin-left:18px;background:#22c55e;color:#062b16;padding:8px 12px;border-radius:6px;font-weight:800">+ Add wholesaler</a>
+    <a href="/" style="margin-left:18px">EW Buy Center →</a>
+    <a href="/logout" style="margin-left:18px">Sign out</a>
+  </div>
+</header>
+
+<main>
+
+{% if not pending %}
+  <div class="empty">
+    <h2>Nothing to review.</h2>
+    <p>Wholesaler submissions assigned to {{ reviewer_name }} will land here.</p>
+  </div>
+{% else %}
+  <section>
+    <h2>Pending <span class="badge">{{ pending|length }}</span></h2>
+    {% for b in pending %}
+      <div class="card" id="bid-{{ b.id }}">
+        <div class="card-row">
+
+          <!-- Photo + count -->
+          <div>
+            {% if b.first_photo %}
+              <a href="{{ b.first_photo }}" target="_blank">
+                <img class="photo" src="/thumb?url={{ b.first_photo|urlencode }}&size=strip" alt="">
+              </a>
+            {% else %}
+              <div class="photo placeholder">no photos</div>
+            {% endif %}
+            {% if b.photo_count %}
+              <div class="photo-count">{{ b.photo_count }} photo{{ 's' if b.photo_count != 1 else '' }}</div>
+            {% endif %}
+          </div>
+
+          <!-- Vehicle + dealer + notes -->
+          <div>
+            <div class="dealer-line">
+              <span class="name">{{ b.dealer_name or 'Unknown wholesaler' }}</span>
+              {% if b.salesperson %}· <span class="sp">👤 {{ b.salesperson }}</span>{% endif %}
+              {% if b.vauto_done %}
+                <span class="vauto-pill ready" style="margin-left:auto">vAuto ready</span>
+              {% else %}
+                <span class="vauto-pill pending" style="margin-left:auto">vAuto pending…</span>
+              {% endif %}
+            </div>
+            <div class="vehicle">
+              {{ b.year or '' }} {{ b.make or '' }} {{ b.model or '' }} {{ b.trim or '' }}
+            </div>
+            <div class="meta">
+              <span class="vin">{{ b.vin }}</span>
+              {% if b.mileage %} · <b>{{ '{:,}'.format(b.mileage) }}</b> mi{% endif %}
+            </div>
+            <div class="ask">
+              <span class="lbl">Wholesaler asking</span>
+              ${{ '{:,.0f}'.format(b.asking_price or 0) }}
+            </div>
+            {% if b.vauto_done %}
+              <div class="books">
+                {% if b.mmr %}<span>MMR <b>${{ '{:,.0f}'.format(b.mmr) }}</b></span>{% endif %}
+                {% if b.black_book %}<span>BlackBook <b>${{ '{:,.0f}'.format(b.black_book) }}</b></span>{% endif %}
+                {% if b.kbb %}<span>KBB <b>${{ '{:,.0f}'.format(b.kbb) }}</b></span>{% endif %}
+                {% if b.kbb_com %}<span>KBB.com <b>${{ '{:,.0f}'.format(b.kbb_com) }}</b></span>{% endif %}
+                {% if b.jd_power %}<span>JD <b>${{ '{:,.0f}'.format(b.jd_power) }}</b></span>{% endif %}
+                {% if b.rbook %}<span>rBook <b>${{ '{:,.0f}'.format(b.rbook) }}</b></span>{% endif %}
+              </div>
+            {% endif %}
+            {% if b.notes or b.raw_message %}
+              <div class="notes">{{ b.notes or b.raw_message }}</div>
+            {% endif %}
+            {% if b.ai_price %}
+              <div class="age">🤖 AI suggests buy at <b style="color:#a7f3d0">${{ '{:,.0f}'.format(b.ai_price) }}</b></div>
+            {% endif %}
+            <div class="age">Submitted {{ b.created_at.strftime('%b %d · %I:%M %p') if b.created_at else '' }}</div>
+          </div>
+
+          <!-- Actions -->
+          <div class="actions">
+            <a class="btn btn-preview" href="/bid/{{ b.id }}" target="_blank">Open full bid detail ↗</a>
+
+            <form class="approve-form" data-bid="{{ b.id }}">
+              <label for="ask-{{ b.id }}">Adjust asking before approving (optional)</label>
+              <input type="text" id="ask-{{ b.id }}" name="asking_price" placeholder="${{ '{:,.0f}'.format(b.asking_price or 0) }}" inputmode="numeric">
+              <button type="submit" class="btn btn-approve" style="margin-top:6px">Approve → push to bidders</button>
+            </form>
+
+            <form class="reject-form" data-bid="{{ b.id }}">
+              <label for="note-{{ b.id }}">Reject reason (sent to wholesaler)</label>
+              <textarea id="note-{{ b.id }}" name="note" placeholder="Optional — e.g. 'Asking too high, would have to be under $X to bid'"></textarea>
+              <button type="submit" class="btn btn-reject" style="margin-top:6px">Pass</button>
+            </form>
+          </div>
+
+        </div>
+      </div>
+    {% endfor %}
+  </section>
+{% endif %}
+
+{% if recent %}
+  <section>
+    <h2>Recent decisions <span class="badge">last 7 days</span></h2>
+    <table class="recent-table">
+      <thead>
+        <tr>
+          <th>When</th><th>Bid</th><th>Vehicle</th><th>Wholesaler</th>
+          <th>Ask</th><th>Result</th><th>Note</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in recent %}
+          <tr>
+            <td>{{ b.review_at.strftime('%b %d %I:%M%p') if b.review_at else '' }}</td>
+            <td><a href="/bid/{{ b.id }}" target="_blank" style="color:#7dd3fc;text-decoration:none">#{{ b.id }}</a></td>
+            <td>{{ b.year or '' }} {{ b.make or '' }} {{ b.model or '' }}</td>
+            <td>{{ b.dealer_name or '' }}</td>
+            <td>${{ '{:,.0f}'.format(b.asking_price or 0) }}</td>
+            <td><span class="pill {{ b.review_status }}">{{ b.review_status }}</span></td>
+            <td style="color:var(--mute)">{{ b.review_note or '' }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endif %}
+
+</main>
+
+<script>
+(function(){
+  const slug = {{ reviewer_slug|tojson }};
+
+  document.querySelectorAll('.approve-form').forEach(f => {
+    f.addEventListener('submit', async ev => {
+      ev.preventDefault();
+      const bidId = f.dataset.bid;
+      const fd = new FormData(f);
+      const btn = f.querySelector('button');
+      btn.disabled = true; btn.textContent = 'Approving…';
+      try {
+        const r = await fetch(`/wholesaler-${slug}/${bidId}/approve`, { method:'POST', body: fd });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+        const card = document.getElementById('bid-' + bidId);
+        if (card) { card.style.transition='opacity .25s'; card.style.opacity='0'; setTimeout(()=>card.remove(), 280); }
+      } catch(e) {
+        alert('Approve failed: ' + e.message);
+        btn.disabled = false; btn.textContent = 'Approve → push to bidders';
+      }
+    });
+  });
+
+  document.querySelectorAll('.reject-form').forEach(f => {
+    f.addEventListener('submit', async ev => {
+      ev.preventDefault();
+      const bidId = f.dataset.bid;
+      if (!confirm('Reject this submission? The wholesaler will be notified.')) return;
+      const fd = new FormData(f);
+      const btn = f.querySelector('button');
+      btn.disabled = true; btn.textContent = 'Rejecting…';
+      try {
+        const r = await fetch(`/wholesaler-${slug}/${bidId}/reject`, { method:'POST', body: fd });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+        const card = document.getElementById('bid-' + bidId);
+        if (card) { card.style.transition='opacity .25s'; card.style.opacity='0'; setTimeout(()=>card.remove(), 280); }
+      } catch(e) {
+        alert('Reject failed: ' + e.message);
+        btn.disabled = false; btn.textContent = 'Pass';
+      }
+    });
+  });
+})();
+</script>
+
+</body>
+</html>
