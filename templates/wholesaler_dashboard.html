@@ -105,14 +105,40 @@ tr:last-child td{border-bottom:none}
 .btn-view{padding:7px 14px;background:#2a3f54;border:1px solid #3d5a74;border-radius:6px;color:#a8c0d6;font-size:13px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-decoration:none}
 .btn-view:hover{background:#344f68;color:#e2e8f0}
 
-/* Approve / Pass row actions */
-.row-actions{display:flex;flex-direction:column;gap:6px;min-width:140px}
-.btn-approve{padding:8px 14px;background:#16a34a;border:1px solid #22c55e;border-radius:6px;color:#062b16;font-size:13px;font-weight:800;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-align:center}
-.btn-approve:hover{background:#22c55e}
-.btn-approve:disabled{opacity:.5;cursor:not-allowed}
+/* Counter / Mark Bought / Pass row actions. Counter is the primary action
+   (most common — back-and-forth negotiation). Mark Bought is the deal-done
+   button that pushes the bid to EW Buy Center. Pass kills it. */
+.row-actions{display:flex;flex-direction:column;gap:6px;min-width:160px}
+.btn-counter{padding:9px 14px;background:#a855f7;border:1px solid #c084fc;border-radius:6px;color:#fff;font-size:13px;font-weight:800;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-align:center}
+.btn-counter:hover{background:#c084fc;color:#1e0a3c}
+.btn-counter:disabled{opacity:.5;cursor:not-allowed}
+.btn-bought{padding:7px 14px;background:#14532d;border:1px solid #22c55e;border-radius:6px;color:#bbf7d0;font-size:12px;font-weight:700;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-align:center}
+.btn-bought:hover{background:#22c55e;color:#052e16}
+.btn-bought:disabled{opacity:.5;cursor:not-allowed}
 .btn-pass{padding:7px 14px;background:transparent;border:1px solid rgba(127,29,29,.5);border-radius:6px;color:#fca5a5;font-size:12px;font-weight:700;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-align:center}
 .btn-pass:hover{background:rgba(127,29,29,.3);color:#fecaca}
 .btn-pass:disabled{opacity:.5;cursor:not-allowed}
+
+/* Counter modal */
+.counter-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;align-items:center;justify-content:center;padding:20px}
+.counter-overlay.show{display:flex}
+.counter-modal{background:#243447;border:1px solid #344f68;border-radius:12px;padding:24px;max-width:520px;width:100%;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+.counter-modal h3{font-size:18px;font-weight:700;color:#f1f5f9;margin-bottom:6px}
+.counter-modal .ctx{font-size:13px;color:#94a3b8;margin-bottom:16px;line-height:1.5}
+.counter-modal .ctx b{color:#cbd5e1}
+.counter-modal label{display:block;font-size:11px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;margin:14px 0 6px}
+.counter-modal input,.counter-modal textarea{width:100%;padding:11px 13px;border:1px solid #344f68;background:#1f2e40;color:#e2e8f0;border-radius:7px;font-size:15px;font-family:'Inter',sans-serif;font-weight:500;box-sizing:border-box}
+.counter-modal input:focus,.counter-modal textarea:focus{border-color:#a855f7;outline:none}
+.counter-modal textarea{min-height:90px;resize:vertical;line-height:1.5}
+.counter-modal .actions{display:flex;gap:10px;margin-top:18px}
+.counter-modal .actions button{flex:1;padding:12px;border-radius:7px;font-weight:800;font-size:14px;border:0;cursor:pointer;font-family:'Inter',sans-serif}
+.counter-modal .send{background:#a855f7;color:#fff}
+.counter-modal .send:hover{background:#c084fc;color:#1e0a3c}
+.counter-modal .send:disabled{opacity:.5;cursor:not-allowed}
+.counter-modal .cancel{background:#1f2e40;color:#a8c0d6;border:1px solid #344f68}
+.counter-modal .cancel:hover{background:#344f68;color:#e2e8f0}
+.counter-modal .err{margin-top:10px;padding:9px 12px;background:#7f1d1d;color:#fecaca;border-radius:6px;font-size:13px;display:none}
+.counter-modal .err.show{display:block}
 
 /* Empty state */
 .empty{text-align:center;padding:80px 24px;color:#5a7a96}
@@ -218,9 +244,10 @@ tr:last-child td{border-bottom:none}
         <th>#</th>
         <th>Wholesaler</th>
         <th>Vehicle / VIN</th>
-        <th>Notes</th>
+        <th>Notes / Last Reply</th>
         <th>Ask</th>
         <th>AI Price</th>
+        <th>Your Bid</th>
         <th>Photos</th>
         <th>Status</th>
         <th></th>
@@ -259,6 +286,11 @@ tr:last-child td{border-bottom:none}
         </td>
         <td>
           <div class="msg-preview">{{ (bid.raw_message or '')|msg_display or '—' }}</div>
+          {% if bid.bid_response %}
+            <div style="margin-top:6px;font-size:12px;color:#7a9bb5;border-left:2px solid #a855f7;padding-left:8px;line-height:1.4;max-width:340px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">
+              <span style="color:#c084fc;font-weight:600">You:</span> {{ bid.bid_response }}
+            </div>
+          {% endif %}
         </td>
         <td>
           {% if bid.asking_price %}
@@ -269,6 +301,11 @@ tr:last-child td{border-bottom:none}
           {% if bid.ai_price %}
             <div style="font-size:15px;font-weight:700;color:#a78bfa">${{ '{:,.0f}'.format(bid.ai_price) }}</div>
           {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if bid.bid_amount %}
+            <div style="font-size:15px;font-weight:700;color:#34d399">${{ '{:,.0f}'.format(bid.bid_amount) }}</div>
+          {% else %}<span style="color:#5a7a96">—</span>{% endif %}
         </td>
         <td>
           {% set pc = photo_counts.get(bid.id, 0) %}
@@ -298,9 +335,15 @@ tr:last-child td{border-bottom:none}
         <td>
           {% if bid.review_status == 'pending' or not bid.review_status %}
             <div class="row-actions">
-              <button class="btn-approve" data-bid="{{ bid.id }}" data-action="approve">Approve →</button>
-              <button class="btn-pass"    data-bid="{{ bid.id }}" data-action="reject">Pass</button>
-              <a href="/bid/{{ bid.id }}" class="btn-view" style="text-align:center;font-size:11px;padding:5px 10px">Open detail ↗</a>
+              <button class="btn-counter" data-bid="{{ bid.id }}"
+                      data-vin="{{ bid.vin or '' }}"
+                      data-ymm="{{ (bid.year or '') }} {{ (bid.make or '') }} {{ (bid.model or '') }}"
+                      data-ask="{{ bid.asking_price or '' }}"
+                      data-ai="{{ bid.ai_price or '' }}"
+                      data-current="{{ bid.bid_amount or '' }}">Counter →</button>
+              <button class="btn-bought" data-bid="{{ bid.id }}" data-action="approve" data-current="{{ bid.bid_amount or '' }}">Mark Bought · push to EW</button>
+              <button class="btn-pass"   data-bid="{{ bid.id }}" data-action="reject">Pass</button>
+              <a href="/bid/{{ bid.id }}" class="btn-view" style="text-align:center;font-size:11px;padding:5px 10px">Open full thread ↗</a>
             </div>
           {% else %}
             <a href="/bid/{{ bid.id }}" class="btn-view">View →</a>
@@ -321,6 +364,23 @@ tr:last-child td{border-bottom:none}
     <p>{% if not stats.wholesalers %}<a href="{{ url_for('wholesaler_review.onboard', reviewer=reviewer_slug) }}" style="color:#86efac">+ Add your first wholesaler</a> to start.{% else %}Submissions from your wholesalers will appear here.{% endif %}</p>
   </div>
   {% endif %}
+</div>
+
+<!-- Counter offer modal — shared across all rows -->
+<div class="counter-overlay" id="counterOverlay">
+  <div class="counter-modal">
+    <h3>Counter offer</h3>
+    <div class="ctx" id="counterCtx"></div>
+    <label for="counterAmount">Your bid amount</label>
+    <input type="text" id="counterAmount" inputmode="numeric" placeholder="$0">
+    <label for="counterMsg">Message to wholesaler</label>
+    <textarea id="counterMsg" placeholder="e.g. Best I can do at this mileage given the books — ${...}"></textarea>
+    <div class="actions">
+      <button class="cancel" type="button" id="counterCancel">Cancel</button>
+      <button class="send"   type="button" id="counterSend">Send counter</button>
+    </div>
+    <div class="err" id="counterErr"></div>
+  </div>
 </div>
 
 <script>
@@ -402,6 +462,10 @@ function renderRow(b, pc, fp, activeWorker) {
   const rowClass = `review-${reviewState}`;
   const askPrice = b.asking_price ? `<div style="font-size:15px;font-weight:700;color:#94a3b8">$${Math.round(b.asking_price).toLocaleString()}</div>` : '—';
   const aiPrice  = b.ai_price    ? `<div style="font-size:15px;font-weight:700;color:#a78bfa">$${Math.round(b.ai_price).toLocaleString()}</div>` : '—';
+  const yourBid  = b.bid_amount  ? `<div style="font-size:15px;font-weight:700;color:#34d399">$${Math.round(b.bid_amount).toLocaleString()}</div>` : '<span style="color:#5a7a96">—</span>';
+  const lastReply = b.bid_response
+    ? `<div style="margin-top:6px;font-size:12px;color:#7a9bb5;border-left:2px solid #a855f7;padding-left:8px;line-height:1.4;max-width:340px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical"><span style="color:#c084fc;font-weight:600">You:</span> ${b.bid_response.replace(/</g,'&lt;')}</div>`
+    : '';
   let workerChip = '';
   if (activeWorker && activeWorker.length) {
     const w = activeWorker[0];
@@ -409,11 +473,16 @@ function renderRow(b, pc, fp, activeWorker) {
     const wname = wid.startsWith('worker-') ? ('Worker-' + wid.split('-')[1]) : (wid.charAt(0).toUpperCase() + wid.slice(1));
     workerChip = `<div title="${wid} working on ${w.job_type}" style="margin-top:3px;display:inline-flex;align-items:center;gap:5px;padding:2px 7px;background:rgba(96,165,250,.10);border:1px solid rgba(96,165,250,.3);border-radius:10px;font-size:10px;font-weight:600;color:#60a5fa;letter-spacing:.2px"><span style="width:6px;height:6px;background:#4ade80;border-radius:50%;display:inline-block;animation:pulse 1.5s ease-in-out infinite"></span>${wname} · ${w.job_type}</div>`;
   }
+  const ymm = [b.year, b.make, b.model].filter(Boolean).join(' ');
   const actions = (reviewState === 'pending')
     ? `<div class="row-actions">
-         <button class="btn-approve" data-bid="${b.id}" data-action="approve">Approve →</button>
-         <button class="btn-pass" data-bid="${b.id}" data-action="reject">Pass</button>
-         <a href="/bid/${b.id}" class="btn-view" style="text-align:center;font-size:11px;padding:5px 10px">Open detail ↗</a>
+         <button class="btn-counter" data-bid="${b.id}"
+                 data-vin="${b.vin||''}" data-ymm="${ymm}"
+                 data-ask="${b.asking_price||''}" data-ai="${b.ai_price||''}"
+                 data-current="${b.bid_amount||''}">Counter →</button>
+         <button class="btn-bought" data-bid="${b.id}" data-action="approve" data-current="${b.bid_amount||''}">Mark Bought · push to EW</button>
+         <button class="btn-pass"   data-bid="${b.id}" data-action="reject">Pass</button>
+         <a href="/bid/${b.id}" class="btn-view" style="text-align:center;font-size:11px;padding:5px 10px">Open full thread ↗</a>
        </div>`
     : `<a href="/bid/${b.id}" class="btn-view">View →</a>`;
   const statusMeta = (reviewState === 'approved' && b.review_by)
@@ -425,9 +494,10 @@ function renderRow(b, pc, fp, activeWorker) {
     <td><div class="bid-num">#${b.id}</div><div class="bid-time">${timeAgo(b.created_at)}</div>${workerChip}</td>
     <td>${wholesalerCell}</td>
     <td>${vehicle}</td>
-    <td><div class="msg-preview">${stripFieldMeta(b.raw_message)}</div></td>
+    <td><div class="msg-preview">${stripFieldMeta(b.raw_message)}</div>${lastReply}</td>
     <td>${askPrice}</td>
     <td>${aiPrice}</td>
+    <td>${yourBid}</td>
     <td>${photos}</td>
     <td>${reviewBadge(reviewState)}${statusMeta}</td>
     <td>${actions}</td>
@@ -478,8 +548,6 @@ async function poll() {
     const d = await r.json();
     updateStats(d.stats);
     const tbody = document.querySelector('tbody');
-    const empty = document.querySelector('.empty');
-    if (d.bids.length === 0 && !tbody) return;
     const fresh = d.bids.filter(b => b.is_new);
     if (fresh.length > 0) {
       newCount += fresh.length;
@@ -488,11 +556,34 @@ async function poll() {
       playChime();
     }
     if (d.vauto_done) _vautoDone = new Set(d.vauto_done);
-    if (d.bids.length > 0 && tbody) {
-      if (empty) empty.style.display = 'none';
-      tbody.innerHTML = d.bids.map(b => renderRow(b, d.photo_counts[b.id], (d.first_photos||{})[b.id], (d.active_workers||{})[b.id])).join('');
-      if (_bidSearchQuery) filterVisibleRows();
-      bindRowActions();
+    if (tbody) {
+      if (d.bids.length > 0) {
+        // Replace all rows with the fresh server state. This drops any
+        // bids that were deleted by the wholesaler (or approved/rejected
+        // and now filtered out) since the last poll.
+        tbody.innerHTML = d.bids.map(b => renderRow(b, d.photo_counts[b.id], (d.first_photos||{})[b.id], (d.active_workers||{})[b.id])).join('');
+        if (_bidSearchQuery) filterVisibleRows();
+        bindRowActions();
+      } else {
+        // API returned 0 bids — clear stale rows and show the empty
+        // state. Was previously a no-op, which left deleted bids on
+        // screen until full page reload.
+        tbody.innerHTML = '';
+        const wrap = document.querySelector('.table-wrap');
+        const tableEl = document.querySelector('.table-wrap table');
+        if (tableEl) tableEl.style.display = 'none';
+        let empty = document.querySelector('.empty');
+        if (!empty && wrap) {
+          empty = document.createElement('div');
+          empty.className = 'empty';
+          empty.innerHTML = '<div class="empty-icon">🌙</div><h3>Nothing in this view.</h3><p>Submissions matching the current filter will appear here.</p>';
+          wrap.appendChild(empty);
+        }
+      }
+    } else if (d.bids.length > 0) {
+      // The page rendered without a tbody (empty state) but the server
+      // now has bids — full reload is the simplest path to a correct table.
+      window.location.reload();
     }
   } catch(e) { console.warn('poll error', e); }
 }
@@ -521,38 +612,133 @@ setInterval(() => {
   });
 }, 60000);
 
-// Approve / Pass row actions — stop event propagation so the row-click
-// handler doesn't navigate away, then POST to the review endpoints.
+// ── Counter modal (shared across all rows) ─────────────────────────────
+const counterOverlay = document.getElementById('counterOverlay');
+const counterCtx     = document.getElementById('counterCtx');
+const counterAmount  = document.getElementById('counterAmount');
+const counterMsg     = document.getElementById('counterMsg');
+const counterErr     = document.getElementById('counterErr');
+const counterSendBtn = document.getElementById('counterSend');
+const counterCancel  = document.getElementById('counterCancel');
+let _counterBidId = null;
+
+function openCounter(btn) {
+  _counterBidId = btn.dataset.bid;
+  const vin = btn.dataset.vin || '';
+  const ymm = (btn.dataset.ymm || '').trim();
+  const ask = btn.dataset.ask;
+  const ai  = btn.dataset.ai;
+  const cur = btn.dataset.current;
+  let ctx = `<b>Bid #${_counterBidId}</b>`;
+  if (ymm) ctx += ` · ${ymm}`;
+  if (vin) ctx += ` · <span style="font-family:monospace">${vin}</span>`;
+  ctx += '<br>';
+  if (ask) ctx += ` Asking: <b>$${parseInt(ask).toLocaleString()}</b>`;
+  if (ai)  ctx += ` &nbsp; AI: <b style="color:#c084fc">$${parseInt(ai).toLocaleString()}</b>`;
+  if (cur) ctx += ` &nbsp; Last counter: <b style="color:#34d399">$${parseInt(cur).toLocaleString()}</b>`;
+  counterCtx.innerHTML = ctx;
+  counterAmount.value = cur || '';
+  counterMsg.value = '';
+  counterErr.classList.remove('show');
+  counterOverlay.classList.add('show');
+  setTimeout(() => counterAmount.focus(), 30);
+}
+
+function closeCounter() {
+  counterOverlay.classList.remove('show');
+  _counterBidId = null;
+}
+
+counterCancel.addEventListener('click', closeCounter);
+counterOverlay.addEventListener('click', ev => {
+  if (ev.target === counterOverlay) closeCounter();
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape' && counterOverlay.classList.contains('show')) closeCounter();
+});
+
+counterSendBtn.addEventListener('click', async () => {
+  const bidId = _counterBidId;
+  if (!bidId) return;
+  const amt = (counterAmount.value || '').replace(/[,$\s]/g,'').trim();
+  const msg = (counterMsg.value || '').trim();
+  if (!amt || isNaN(parseFloat(amt)) || parseFloat(amt) <= 0) {
+    counterErr.textContent = 'Bid amount required.';
+    counterErr.classList.add('show'); return;
+  }
+  if (!msg) {
+    counterErr.textContent = 'Message required (sent to the wholesaler).';
+    counterErr.classList.add('show'); return;
+  }
+  counterErr.classList.remove('show');
+  counterSendBtn.disabled = true;
+  counterSendBtn.textContent = 'Sending…';
+  try {
+    // Reuse the existing EW reply endpoint — it handles bid_amount,
+    // bid_response, outbound bid_messages, and the partner-portal banner
+    // notification fan-out. review_status stays 'pending' (we never
+    // approve/reject from the counter path).
+    const r = await fetch(`/api/bid/${bidId}/reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'bid', bid_amount: parseFloat(amt), message: msg })
+    });
+    const j = await r.json();
+    if (!r.ok || !j.success) throw new Error(j.error || ('HTTP ' + r.status));
+    closeCounter();
+    // Force a poll so the row re-renders with the new bid_amount + bid_response.
+    poll();
+  } catch (e) {
+    counterErr.textContent = `Counter failed: ${e.message}`;
+    counterErr.classList.add('show');
+  } finally {
+    counterSendBtn.disabled = false;
+    counterSendBtn.textContent = 'Send counter';
+  }
+});
+
+// ── Row actions (Counter / Mark Bought / Pass) ─────────────────────────
 function bindRowActions() {
-  document.querySelectorAll('.btn-approve, .btn-pass').forEach(btn => {
+  document.querySelectorAll('.btn-counter').forEach(btn => {
+    if (btn.dataset.bound) return; btn.dataset.bound = '1';
+    btn.addEventListener('click', ev => {
+      ev.preventDefault(); ev.stopPropagation();
+      openCounter(btn);
+    });
+  });
+  document.querySelectorAll('.btn-bought, .btn-pass').forEach(btn => {
     if (btn.dataset.bound) return; btn.dataset.bound = '1';
     btn.addEventListener('click', async ev => {
-      ev.preventDefault();
-      ev.stopPropagation();
+      ev.preventDefault(); ev.stopPropagation();
       const bidId = btn.dataset.bid;
       const action = btn.dataset.action;
       if (action === 'reject') {
-        const note = prompt('Pass reason (optional, sent to wholesaler):', '');
-        if (note === null) return;  // cancelled
-        await postAction(bidId, action, btn, note);
+        const note = prompt('Pass reason (optional, sent to the wholesaler):', '');
+        if (note === null) return;
+        await postAction(bidId, action, btn, note, '');
       } else {
-        const adjust = prompt('Adjust asking price before approving? Leave blank to keep as-is.', '');
-        if (adjust === null) return;
-        await postAction(bidId, action, btn, '', adjust.trim());
+        // approve = Mark Bought, push to EW. Confirm the final price.
+        const cur = btn.dataset.current || '';
+        const finalPrice = prompt(
+          'Final bought price?\n\n(Leave blank to keep the last counter on file.)',
+          cur);
+        if (finalPrice === null) return;
+        if (!confirm('Push this bid to the EW Buy Center as BOUGHT? This cannot be undone from here.')) return;
+        await postAction(bidId, action, btn, '', finalPrice.trim());
       }
     });
   });
 }
 
-async function postAction(bidId, action, btn, note='', askPrice='') {
+async function postAction(bidId, action, btn, note='', finalPrice='') {
   const url = `/wholesaler-${REVIEWER_SLUG}/${bidId}/${action}`;
   btn.disabled = true;
   const orig = btn.textContent;
-  btn.textContent = action === 'approve' ? 'Approving…' : 'Passing…';
+  btn.textContent = action === 'approve' ? 'Pushing to EW…' : 'Passing…';
   try {
     const fd = new FormData();
     if (note) fd.append('note', note);
-    if (askPrice) fd.append('asking_price', askPrice);
+    if (finalPrice) fd.append('asking_price', finalPrice);  // server reuses this field
     const r = await fetch(url, { method:'POST', body: fd });
     const j = await r.json();
     if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
