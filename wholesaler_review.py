@@ -901,17 +901,13 @@ def signup(reviewer):
                                reviewer_phone_display=cfg.get('phone_display', ''))
 
     # ── POST ─────────────────────────────────────────────────────────────
-    # Skip rate limit when the request is from an authenticated EW admin
-    # (so Oscar can test signups end-to-end without waiting an hour).
+    # Note: the IP rate limit lives further down, AFTER the validation +
+    # dedupe lookup. That way existing wholesalers can always re-submit
+    # this form to recover their portal link — they only get throttled
+    # when actually creating a new row. Admins (session.logged_in) bypass
+    # the throttle entirely so Oscar can test freely.
     import time
     is_admin = bool(session.get('logged_in'))
-    ip = _client_ip()
-    now = time.time()
-    if not is_admin:
-        last = _signup_last_ip.get(ip, 0)
-        if now - last < _SIGNUP_RATE_LIMIT_SECONDS:
-            wait_min = int((_SIGNUP_RATE_LIMIT_SECONDS - (now - last)) / 60) + 1
-            return jsonify({'error': f'Too many signups from this network. Try again in {wait_min} min.'}), 429
 
     full_name   = (request.form.get('full_name') or '').strip()
     business    = (request.form.get('business_name') or '').strip()
@@ -961,6 +957,9 @@ def signup(reviewer):
         """, (email, phone))
         existing = cur.fetchone()
         if existing and existing.get('dashboard_token'):
+            # Returning wholesaler — give them their existing portal back.
+            # No rate-limit hit (this isn't a new signup) and no
+            # Telegram/SMS noise (Oscar already knows about this one).
             portal_base = os.environ.get('PORTAL_BASE', 'https://experience-wholesale.net')
             return jsonify({
                 'ok': True,
@@ -970,6 +969,17 @@ def signup(reviewer):
                 'dashboard_url': f'{portal_base}/partner/{existing["portal_slug"]}/d/{existing["dashboard_token"]}',
                 'mobile_url':    f'{portal_base}/mobile?p={existing["mobile_token"]}',
             })
+
+        # ── New-signup gate: enforce IP rate limit ONLY when about to
+        # actually create a new dealer/partner_user. Returning wholesalers
+        # already short-circuited above. Admins bypass entirely.
+        ip = _client_ip()
+        now = time.time()
+        if not is_admin:
+            last = _signup_last_ip.get(ip, 0)
+            if now - last < _SIGNUP_RATE_LIMIT_SECONDS:
+                wait_min = int((_SIGNUP_RATE_LIMIT_SECONDS - (now - last)) / 60) + 1
+                return jsonify({'error': f'Too many signups from this network. Try again in {wait_min} min.'}), 429
 
         # Slug uniqueness — append short hex on collision.
         for _ in range(5):
