@@ -7110,6 +7110,7 @@ def api_admin_ai_accuracy_data():
                    lsl_deal_code
             FROM ai_accuracy
             WHERE COALESCE(actual_purchased_at, ai_assessed_at)::date BETWEEN %s::date AND %s::date
+              AND delta_pct IS NOT NULL AND bid_id > 0
             ORDER BY actual_purchased_at DESC NULLS LAST, ai_assessed_at DESC
         """, (date_from, date_to))
         rows = [dict(r) for r in cur.fetchall()]
@@ -7170,6 +7171,7 @@ def api_admin_ai_accuracy_data():
             FROM ai_accuracy
             WHERE COALESCE(actual_purchased_at, ai_assessed_at)::date BETWEEN %s::date AND %s::date
               AND make IS NOT NULL
+              AND delta_pct IS NOT NULL AND bid_id > 0
             GROUP BY make
             HAVING COUNT(*) >= 1
             ORDER BY n DESC, mean_abs_pct ASC
@@ -7199,6 +7201,7 @@ def api_admin_ai_accuracy_data():
                 FROM ai_accuracy
                 WHERE actual_purchased_at IS NOT NULL
                   AND actual_purchased_at::date BETWEEN %s::date AND %s::date
+                  AND delta_pct IS NOT NULL AND bid_id > 0
             )
             SELECT day,
                    COUNT(*) AS n,

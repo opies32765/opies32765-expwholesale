@@ -1,0 +1,3 @@
+# Reconcile AI predictions vs LSL actual purchases every 30 min.
+# Joins ai_assessment_log -> bids -> LSL deals.purchase_cost by VIN.
+*/30 * * * * root /opt/expwholesale/venv/bin/python3 /opt/expwholesale/reconcile_ai_accuracy.py --days 7 >> /var/log/ai_accuracy.log 2>&1
