@@ -809,6 +809,69 @@ def onboard(reviewer):
                             reviewer=reviewer) + f'#dealer-{dealer_id}')
 
 
+# ── Hard-delete a wholesaler (and all their bids/photos/messages) ────────
+# Reviewer-scoped: an admin can only delete wholesalers under their own
+# salesperson_match. Cascades via FK handle partner_users +
+# partner_alert_config + partner_bid_requests (ON DELETE CASCADE on
+# dealer_id). Bids are deleted explicitly because bids.partner_dealer_id
+# uses ON DELETE SET NULL — without this we'd leave orphan bid rows.
+@bp.route('/wholesaler-<reviewer>/wholesaler/<int:dealer_id>/delete',
+          methods=['POST'])
+def wholesaler_delete(reviewer, dealer_id):
+    redir = _require_admin()
+    if redir is not None:
+        return redir
+    cfg = _resolve_reviewer(reviewer)
+    if not cfg:
+        abort(404)
+
+    sp_sql, sp_params = _salesperson_filter_sql(cfg['salesperson_match'])
+    d_sp_sql_bare = sp_sql.replace('b.salesperson', 'salesperson')
+
+    try:
+        with _db() as conn, conn.cursor() as cur:
+            # Defense in depth: only delete dealers in wholesaler portal mode
+            # AND assigned to this reviewer's salesperson.
+            cur.execute(f"""
+                SELECT id, name FROM dealers
+                WHERE id = %s
+                  AND portal_mode = 'wholesaler'
+                  AND {d_sp_sql_bare}
+            """, [dealer_id] + sp_params)
+            d = cur.fetchone()
+            if not d:
+                return jsonify({'error': 'Not found or not your wholesaler.'}), 404
+
+            cur.execute("""
+                DELETE FROM bid_messages
+                WHERE bid_id IN (SELECT id FROM bids WHERE partner_dealer_id = %s)
+            """, (dealer_id,))
+            cur.execute("""
+                DELETE FROM bid_photos
+                WHERE bid_id IN (SELECT id FROM bids WHERE partner_dealer_id = %s)
+            """, (dealer_id,))
+            cur.execute("DELETE FROM bids WHERE partner_dealer_id = %s",
+                        (dealer_id,))
+            bids_deleted = cur.rowcount
+
+            cur.execute("DELETE FROM dealers WHERE id = %s", (dealer_id,))
+            conn.commit()
+    except Exception as e:
+        import traceback
+        print(f'[wholesaler_review.delete] {type(e).__name__}: {e}\n{traceback.format_exc()}', flush=True)
+        return jsonify({'error': f'{type(e).__name__}: {e}'}), 500
+
+    try:
+        from partner_portal import _tg_alert
+        _tg_alert(f'\U0001f5d1️ <b>{cfg["display_name"]}</b> deleted wholesaler '
+                  f'<b>{d["name"]}</b> (id={dealer_id}) · {bids_deleted} bid(s) removed')
+    except Exception:
+        pass
+
+    return jsonify({'ok': True, 'dealer_id': dealer_id,
+                    'name': d['name'], 'bids_deleted': bids_deleted})
+
+
 # ── Public self-serve signup ─────────────────────────────────────────────
 # Anyone with the link can sign up — no admin auth. App.py adds
 # `/wholesaler-` to _PUBLIC_PREFIXES; the rest of the routes in this file

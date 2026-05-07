@@ -165,6 +165,14 @@
               <a class="review" href="{{ url_for('wholesaler_review.dashboard', reviewer=reviewer_slug) }}?dealer={{ w.id }}">Review {{ w.pending_count }} →</a>
             {% endif %}
             <a class="open" href="{{ _dash }}" target="_blank">View their portal ↗</a>
+            <button type="button" class="del-btn"
+                    data-dealer-id="{{ w.id }}"
+                    data-dealer-name="{{ w.name }}"
+                    data-pending="{{ w.pending_count or 0 }}"
+                    data-approved="{{ w.approved_count or 0 }}"
+                    style="flex:0 0 auto;background:#7f1d1d;color:#fecaca;border:0;
+                           padding:8px 12px;border-radius:6px;font-size:12px;
+                           font-weight:700;cursor:pointer">🗑️ Delete</button>
           </div>
         </div>
       {% endfor %}
@@ -213,6 +221,55 @@ document.querySelectorAll('.send-link').forEach(btn => {
       navigator.clipboard.writeText(url);
       btn.textContent = 'Copied URL';
       setTimeout(() => btn.textContent = '📱 Text', 1500);
+    }
+  });
+});
+
+// Hard-delete a wholesaler. Two-step confirm — must type the dealer name
+// to proceed. Wipes their bids/messages/photos/portal_users via the
+// /wholesaler-<reviewer>/wholesaler/<id>/delete endpoint. Irreversible.
+document.querySelectorAll('.del-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const id = btn.dataset.dealerId;
+    const name = btn.dataset.dealerName;
+    const pending = parseInt(btn.dataset.pending || '0', 10);
+    const approved = parseInt(btn.dataset.approved || '0', 10);
+
+    let warn = `Delete wholesaler "${name}"?\n\nThis HARD-deletes:\n` +
+               `  • their portal (dashboard + mobile tokens)\n` +
+               `  • their partner_user record\n` +
+               `  • all their bids, messages, photos`;
+    if (pending || approved) {
+      warn += `\n\n⚠️  ${pending} pending bid(s) and ${approved} approved bid(s) will be removed.`;
+    }
+    warn += `\n\nThis is IRREVERSIBLE.\n\nType the wholesaler name to confirm:`;
+
+    const typed = window.prompt(warn, '');
+    if (typed === null) return;
+    if (typed.trim().toLowerCase() !== name.trim().toLowerCase()) {
+      alert(`Name didn't match — nothing deleted.`);
+      return;
+    }
+
+    btn.disabled = true; btn.textContent = 'Deleting…';
+    try {
+      const r = await fetch(`/wholesaler-{{ reviewer_slug }}/wholesaler/${id}/delete`, {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'fetch', 'Accept': 'application/json' }
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      // Fade card out + remove
+      const card = document.getElementById('dealer-' + id);
+      if (card) {
+        card.style.transition = 'opacity .35s, transform .35s';
+        card.style.opacity = '0';
+        card.style.transform = 'scale(.95)';
+        setTimeout(() => card.remove(), 380);
+      }
+    } catch (e) {
+      alert('Delete failed: ' + e.message);
+      btn.disabled = false; btn.textContent = '🗑️ Delete';
     }
   });
 });
