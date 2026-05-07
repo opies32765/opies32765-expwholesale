@@ -1437,8 +1437,19 @@ def bid_detail(bid_id):
                 bid = dict(bid)
                 bid.update(decoded)
 
-    # vAuto lookup data
-    cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid_id,))
+    # vAuto lookup data — explicit columns, drops heavy JSONB blobs
+    # (rbook_competitive_set + manheim_transactions) which are only used
+    # for market_intel and are now read from market_intel_cached.
+    cur.execute("""
+        SELECT id, bid_id, vin, rbook, mmr, kbb, kbb_com, jd_power, black_book,
+               title_status, price_rank, adj_pct_market,
+               carfax_screenshot, autocheck_screenshot, carfax_share_url,
+               looked_up_at, appraisal_url,
+               rbook_completed_at, manheim_completed_at,
+               enrichment_state, market_intel_cached,
+               api_carfax, api_price_guides, api_refreshed_at
+        FROM vauto_lookups WHERE bid_id = %s
+    """, (bid_id,))
     vauto_data = cur.fetchone()
 
     # AccuTrade lookup data
@@ -1478,13 +1489,26 @@ def bid_detail(bid_id):
     # ── Latest hybrid-assessment log row (bucket + baseline + adjustment) ───
     ai_log = None
     try:
+        # Explicit columns — drop the two heavy JSONB blobs (market_intel ~50KB,
+        # raw_response variable). market_intel is substituted from
+        # vauto_data.market_intel_cached below (same data, faster path).
         cur.execute("""
-            SELECT * FROM ai_assessment_log
+            SELECT id, bid_id, config_version, bucket, bucket_display,
+                   baseline_price, breakdown, llm_adjustment_pct,
+                   llm_reasoning, confidence_low, confidence_high,
+                   final_price, created_at,
+                   dealer_intel, buyer_intel, flags_v2
+            FROM ai_assessment_log
             WHERE bid_id = %s
             ORDER BY created_at DESC
             LIMIT 1
         """, (bid_id,))
         ai_log = cur.fetchone()
+        # ai_log_uses_cached: substitute market_intel from vauto cache so
+        # the template still has it without paying the 50KB TOAST tax.
+        if ai_log and vauto_data and vauto_data.get('market_intel_cached'):
+            ai_log = dict(ai_log)
+            ai_log['market_intel'] = vauto_data['market_intel_cached']
         if ai_log:
             ai_log = dict(ai_log)
             # breakdown is JSONB — may come back as dict/list already or as str
@@ -1576,9 +1600,9 @@ def bid_detail(bid_id):
         if m:
             vin_candidate = m.group(1)
 
-    # Compute market_intel for the rBook Retail Comps card + MMR closest sale.
-    # Uses the same fn the AI assessment uses, on the same data — so the
-    # numbers shown match what the model sees.
+    # Read cached market_intel from vauto_lookups (populated when rbook
+    # completes via vauto_enrichment.kick_direct_enrichment, or lazily
+    # on first view of older bids).
     market_intel = None
     try:
         from market_intel import compute_market_intel as _mi
@@ -1590,14 +1614,34 @@ def bid_detail(bid_id):
                 except Exception:
                     return None
             return x
-        _manheim = _maybe_parse((vauto_data or {}).get('manheim_transactions')) if vauto_data else None
-        _rbook   = _maybe_parse((vauto_data or {}).get('rbook_competitive_set')) if vauto_data else None
-        market_intel = _mi(
-            {'year': bid.get('year'), 'make': bid.get('make'),
-             'model': bid.get('model'), 'mileage': bid.get('mileage'),
-             'vin': bid.get('vin')},
-            _manheim, _rbook, None,  # buyer_intel optional here
-        )
+
+        if vauto_data and vauto_data.get('market_intel_cached'):
+            cached = vauto_data['market_intel_cached']
+            market_intel = _maybe_parse(cached) if isinstance(cached, str) else cached
+        elif vauto_data:
+            # Lazy fill: compute live and persist for next render.
+            # One-shot extra fetch of the heavy JSONB columns.
+            _db2 = get_db()
+            _cur2 = _db2.cursor()
+            _cur2.execute("SELECT rbook_competitive_set, manheim_transactions "
+                          "FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+            _extra = _cur2.fetchone()
+            if _extra:
+                _manheim = _maybe_parse(_extra.get('manheim_transactions'))
+                _rbook   = _maybe_parse(_extra.get('rbook_competitive_set'))
+                market_intel = _mi(
+                    {'year': bid.get('year'), 'make': bid.get('make'),
+                     'model': bid.get('model'), 'mileage': bid.get('mileage'),
+                     'vin': bid.get('vin')},
+                    _manheim, _rbook, None,
+                )
+                if market_intel:
+                    import json as _j
+                    _cur2.execute("UPDATE vauto_lookups SET market_intel_cached=%s::jsonb "
+                                  "WHERE bid_id=%s",
+                                  (_j.dumps(market_intel), bid_id))
+                    _db2.commit()
+            _db2.close()
         # Phase 2: enqueue MSRP lookups for the top-3 closest comp VINs and
         # merge any cached MSRPs into the closest_3 rows so both the UI and
         # (downstream) the AI prompt see them. Idempotent — repeat visits

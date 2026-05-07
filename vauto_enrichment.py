@@ -259,6 +259,27 @@ def kick_direct_enrichment(bid_id: int, db_conn_factory) -> None:
         cs = result['competitive_set'] or {}
         pg_raw = (result.get('_raw_pg') or {})  # raw priceGuides response
         pg = result['price_guides'] or {}
+
+        # Pre-compute market_intel and cache it on vauto_lookups so
+        # bid_detail can skip the heavy rbook_competitive_set JSONB read.
+        # ~152 KB column → 120ms+ TOAST decompression on every page load.
+        market_intel_json = None
+        try:
+            from market_intel import compute_market_intel
+            mi = compute_market_intel(
+                {'year': vehicle.get('year'), 'make': vehicle.get('make'),
+                 'model': vehicle.get('model'),
+                 'mileage': vehicle.get('odometer'),
+                 'vin': vehicle.get('vin')},
+                None,  # manheim transactions — direct API doesn't have these yet
+                cs,    # rbook competitive set we just fetched
+                None,
+            )
+            if mi:
+                market_intel_json = json.dumps(mi)
+        except Exception as mi_err:
+            log.debug('bid %d market_intel pre-compute failed: %s', bid_id, mi_err)
+
         try:
             with db_conn_factory() as conn:
                 with conn.cursor() as cur:
@@ -275,6 +296,7 @@ def kick_direct_enrichment(bid_id: int, db_conn_factory) -> None:
                             rbook_completed_at = NOW(),
                             api_price_guides = %s::jsonb,
                             api_refreshed_at = NOW(),
+                            market_intel_cached = %s::jsonb,
                             enrichment_state = COALESCE(enrichment_state,
                                                         '{}'::jsonb) || %s::jsonb
                         WHERE bid_id = %s
@@ -282,12 +304,14 @@ def kick_direct_enrichment(bid_id: int, db_conn_factory) -> None:
                     """, (
                         json.dumps(cs),
                         json.dumps(pg) if pg else None,
+                        market_intel_json,
                         json.dumps(state_patch),
                         bid_id,
                     ))
                     rows = cur.rowcount
                 conn.commit()
-            log.info('bid %d direct write: rows=%d', bid_id, rows)
+            log.info('bid %d direct write: rows=%d (market_intel cached=%s)',
+                     bid_id, rows, 'yes' if market_intel_json else 'no')
 
             # Best-effort: poke the assess gate so Gemini fires immediately
             # if rbook+manheim are now both done.
