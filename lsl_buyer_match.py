@@ -31,7 +31,7 @@ LSL_DB_PATH = os.environ.get('LSL_DB_PATH', '/opt/livesaleslog/crm.db')
 
 
 DEFAULT_LSL_BUYER_MATCH_CONFIG = {
-    "year_tolerance": 0,
+    "year_tolerance": 2,
     "recent_days": 365,
     "max_deals": 10,
     # Recency window for the "very recent" 90d sub-count used by pitch
@@ -96,7 +96,7 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None) -> dict:
     if not (year and make and model):
         return empty
 
-    year_tol = int(_cfg(config, 'year_tolerance', 0))
+    year_tol = int(_cfg(config, 'year_tolerance', 2))
     recent_days = int(_cfg(config, 'recent_days', 365))
     max_deals = int(_cfg(config, 'max_deals', 10))
     very_recent = int(_cfg(config, 'very_recent_days', 90))
