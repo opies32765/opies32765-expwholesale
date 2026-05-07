@@ -22,6 +22,33 @@ import time
 import re
 
 
+# Module-level competition-set JSON capture. The listener accumulates across
+# scrapes (Playwright's ctx.on doesn't dedupe handler closures perfectly), so
+# binding to a module-level dict means whichever listener fires updates the
+# same target — no more "captured" log + "never fired" check stuck on stale
+# closures. Each scrape resets _COMPETITION_CAPTURE['value'] = None at start.
+_COMPETITION_CAPTURE = {'value': None}
+
+
+def _on_competition_response(resp):
+    """Module-level Playwright response listener — writes any
+    /api/competition/vehicles POST body into _COMPETITION_CAPTURE."""
+    try:
+        url = resp.url or ''
+        if '/api/competition/vehicles' in url and resp.request.method == 'POST':
+            if resp.status == 200:
+                body = resp.json()
+                _COMPETITION_CAPTURE['value'] = body
+                try:
+                    size = len(resp.body() or b'')
+                except Exception:
+                    size = 0
+                print(f'  [rbook] captured /api/competition/vehicles JSON '
+                      f'({size:,} bytes)', flush=True)
+    except Exception as e:
+        print(f'  [rbook] response-capture error: {e}', flush=True)
+
+
 # JS — find the rBook count link and return its rect (NO click here).
 # The Python worker uses page.mouse.click(cx, cy) for a TRUSTED user event
 # that actually triggers vAuto's popup handlers. Synthetic JS clicks via
@@ -654,24 +681,25 @@ def scrape(page, job: dict) -> dict | None:
     # frontend POSTs to /api/competition/vehicles which returns ALL rows as
     # clean JSON (~180KB, 165+ vehicles). We intercept that response — no
     # Excel button, no xlsx parsing, no popup pagination.
-    competition_json = {'value': None}
+    #
+    # IMPORTANT: We use a MODULE-LEVEL capture dict + module-level listener
+    # because Playwright's ctx.on('page', ...) accumulates listeners across
+    # scrapes — each scrape would create a new local dict, but old listeners
+    # (from prior scrapes) still hold references to their old dicts and end
+    # up "stealing" the JSON before the new one's wait-loop sees it. By
+    # writing to the same module dict, whichever listener fires updates it,
+    # and we just reset the dict at the start of each scrape.
+    _COMPETITION_CAPTURE['value'] = None
+    competition_json = _COMPETITION_CAPTURE  # alias for the rest of this fn
 
-    def _on_response(resp):
-        try:
-            url = resp.url or ''
-            if '/api/competition/vehicles' in url and resp.request.method == 'POST':
-                if resp.status == 200:
-                    body = resp.json()
-                    competition_json['value'] = body
-                    print(f'  [rbook] captured /api/competition/vehicles JSON '
-                          f'({len(resp.body() or b""):,} bytes)', flush=True)
-        except Exception as e:
-            print(f'  [rbook] response-capture error: {e}', flush=True)
     ctx = page.context
+    # Attach listener to existing + future pages. Idempotent — Playwright
+    # de-dupes identical handlers. (Even if it didn't, all listeners write
+    # to the same dict so duplication doesn't break anything.)
     for p in ctx.pages:
-        try: p.on('response', _on_response)
+        try: p.on('response', _on_competition_response)
         except Exception: pass
-    ctx.on('page', lambda p: p.on('response', _on_response))
+    ctx.on('page', lambda p: p.on('response', _on_competition_response))
 
     # TRUSTED click via real mouse coordinates — fires the popup AND the
     # /api/competition/vehicles XHR.
