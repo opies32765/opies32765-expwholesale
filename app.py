@@ -1667,6 +1667,39 @@ def bid_detail(bid_id):
         print(f'[bid view] market_intel compute err: {_mi_err}', flush=True)
         market_intel = None
 
+    # ── ML model second opinion (per-make XGBoost) ────────────────────
+    # Built from existing market_intel + bid attrs. Lazy-loads the model
+    # on first call per gunicorn worker, kept in-memory after that.
+    # Returns None for makes without a trained model — silent skip.
+    ml_prediction = None
+    try:
+        from ml_predict import predict_for_bid
+        _mi = market_intel or {}
+        _manheim = _mi.get('manheim') or {}
+        _rbook = _mi.get('rbook') or {}
+        _est_wholesale = (_manheim.get('adjusted_mmr')
+                          or _manheim.get('base_mmr')
+                          or (vauto_data or {}).get('mmr'))
+        _market_asking = (_rbook.get('avg_price')
+                          or _rbook.get('median')
+                          or (vauto_data or {}).get('rbook'))
+        _ipkt_msrp = (ipacket_data or {}).get('total_msrp')
+        if _est_wholesale and bid.get('make'):
+            ml_prediction = predict_for_bid({
+                'make_name':          bid.get('make') or '',
+                'model_name':         bid.get('model'),
+                'year':               bid.get('year'),
+                'odometer':           bid.get('mileage'),
+                'est_wholesale_price': _est_wholesale,
+                'market_asking_price': _market_asking,
+                'original_msrp':      _ipkt_msrp,
+                'base_appraised_value': _market_asking,
+                'sale_type':          'Wholesale',
+                'vehicle_sale_type':  'Used',
+            })
+    except Exception as _ml_err:
+        print(f'[bid_detail] ml_predict err: {_ml_err}', flush=True)
+
     return render_template('bid.html', bid=bid, photos=photos,
                            messages=messages, valuations=valuations,
                            vauto_data=vauto_data,
@@ -1678,6 +1711,7 @@ def bid_detail(bid_id):
                            partner_info=partner_info,
                            vin_candidate=vin_candidate,
                            market_intel=market_intel,
+                           ml_prediction=ml_prediction,
                            time_ago=time_ago)
 
 

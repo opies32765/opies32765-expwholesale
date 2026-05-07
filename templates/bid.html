@@ -480,6 +480,39 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
             {% endif %}
             {% endif %}
 
+            {# ── ML model second opinion (per-make XGBoost) ────────── #}
+            {% if ml_prediction and ml_prediction.prediction %}
+            <div style="display:flex;justify-content:space-between;align-items:baseline;padding:10px 0 4px;margin-top:8px;border-top:1px dashed #1e293b">
+              <span style="font-size:11px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:.5px">
+                ML Model
+                {% if ml_prediction.source == 'xgboost' %}
+                  <span style="font-size:9px;color:#64748b;font-weight:500;text-transform:none;letter-spacing:0">· XGBoost · n={{ ml_prediction.n_train }}</span>
+                {% else %}
+                  <span style="font-size:9px;color:#64748b;font-weight:500;text-transform:none;letter-spacing:0">· baseline ratio</span>
+                {% endif %}
+              </span>
+              <span style="font-size:18px;font-weight:800;color:#fbbf24;font-family:monospace">${{ '{:,}'.format(ml_prediction.prediction) }}</span>
+            </div>
+            {% if ml_prediction.mape_pct is not none %}
+            <div style="text-align:right;font-size:10px;color:#64748b;font-family:monospace;margin-top:-2px">
+              MAPE {{ '%.1f' % ml_prediction.mape_pct }}%{% if ml_prediction.within_10pct %} · ±10% on {{ '%.0f' % ml_prediction.within_10pct }}% of recent {{ ml_prediction.make_name }} test bids{% endif %}
+            </div>
+            {% endif %}
+            {% if ai_log.final_price and ml_prediction.prediction %}
+              {% set _ml_delta = ml_prediction.prediction - ai_log.final_price %}
+              {% set _ml_delta_pct = (_ml_delta * 100.0 / ai_log.final_price) %}
+              {% if _ml_delta_pct < -15 or _ml_delta_pct > 15 %}
+              <div style="margin-top:6px;padding:6px 8px;background:rgba(239,68,68,.10);border:1px solid rgba(239,68,68,.3);border-radius:4px;font-size:11px;color:#fca5a5">
+                ⚠ ML vs Gemini disagree by {{ '%+.1f' % _ml_delta_pct }}% — review recommended
+              </div>
+              {% else %}
+              <div style="text-align:right;margin-top:4px;font-size:10px;color:#64748b;font-family:monospace">
+                vs Gemini: {% if _ml_delta >= 0 %}+{% endif %}${{ '{:,}'.format(_ml_delta) }} ({{ '%+.1f' % _ml_delta_pct }}%)
+              </div>
+              {% endif %}
+            {% endif %}
+            {% endif %}
+
             {# Reasoning — surfaced for both v1 and v2 #}
             {% if ai_log.llm_reasoning %}
             <div style="margin-top:10px;padding:10px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:6px">
