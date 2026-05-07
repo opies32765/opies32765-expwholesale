@@ -245,6 +245,19 @@ def dashboard(reviewer):
                           AND {d_sp_sql}""", sp_params)
         stats['wholesalers'] = int(cur.fetchone()['cnt'])
 
+        # Signup-page traffic for this reviewer (today, ET-anchored).
+        cur.execute("""SELECT
+                         COUNT(*)                                          AS hits,
+                         COUNT(DISTINCT ip)                                AS unique_ips,
+                         COUNT(*) FILTER (WHERE outcome = 'submit_ok')     AS submits
+                       FROM signup_visits
+                       WHERE reviewer = %s
+                         AND hit_at::date = CURRENT_DATE""", (reviewer,))
+        sv_row = cur.fetchone() or {}
+        stats['signup_hits_today']    = int(sv_row.get('hits') or 0)
+        stats['signup_unique_today']  = int(sv_row.get('unique_ips') or 0)
+        stats['signup_submits_today'] = int(sv_row.get('submits') or 0)
+
         # Wholesaler dropdown options
         cur.execute(f"""SELECT d.id, d.name FROM dealers d
                         WHERE d.portal_mode = 'wholesaler'
@@ -809,6 +822,163 @@ def onboard(reviewer):
                             reviewer=reviewer) + f'#dealer-{dealer_id}')
 
 
+# ── Signup-page visit log + dashboard ─────────────────────────────────────
+# Reviewer-scoped visitor analytics for the public /wholesaler-<reviewer>/signup
+# form. Real client IPs (CF-Connecting-IP) get geolocated lazily via
+# ip-api.com on demand from the dashboard — no background worker needed.
+
+def _geofill_pending(reviewer: str, max_lookups: int = 50):
+    """Resolve country/region/city for any signup_visits rows (for this
+    reviewer) where country IS NULL. Uses ip-api.com /batch (free, 45
+    req/min, no key, HTTP only). Caps at max_lookups per call so a
+    page-load with hundreds of pending IPs doesn't time out."""
+    try:
+        import json
+        import urllib.request
+        with _db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT ip FROM signup_visits
+                WHERE reviewer = %s
+                  AND country IS NULL
+                  AND ip IS NOT NULL
+                  AND ip <> ''
+                ORDER BY ip
+                LIMIT %s
+            """, (reviewer, max_lookups))
+            ips = [r['ip'] for r in cur.fetchall()]
+            if not ips:
+                return 0
+
+            payload = json.dumps([{'query': ip,
+                                   'fields': 'status,country,regionName,city,query'}
+                                  for ip in ips]).encode()
+            req = urllib.request.Request(
+                'http://ip-api.com/batch',
+                data=payload,
+                headers={'Content-Type': 'application/json',
+                         'User-Agent': 'EW-WholesalerSignup/1.0'},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                results = json.loads(resp.read())
+
+            updated = 0
+            for r in results:
+                if not isinstance(r, dict):
+                    continue
+                ip = r.get('query')
+                if not ip:
+                    continue
+                if r.get('status') == 'success':
+                    cur.execute("""
+                        UPDATE signup_visits
+                        SET country = %s, region = %s, city = %s
+                        WHERE ip = %s AND country IS NULL
+                    """, (r.get('country'), r.get('regionName'), r.get('city'), ip))
+                else:
+                    # Mark as resolved-but-unknown so we don't keep re-looking-up
+                    cur.execute("""
+                        UPDATE signup_visits
+                        SET country = '?'
+                        WHERE ip = %s AND country IS NULL
+                    """, (ip,))
+                updated += cur.rowcount
+            conn.commit()
+            return updated
+    except Exception as e:
+        print(f'[signup_visits] geofill failed: {type(e).__name__}: {e}', flush=True)
+        return 0
+
+
+def _ua_short(ua: str) -> str:
+    """Tiny UA pretty-printer. Just the obvious browser/OS hints."""
+    if not ua:
+        return ''
+    ua_l = ua.lower()
+    if 'curl/' in ua_l:    return 'curl'
+    if 'wget' in ua_l:     return 'wget'
+    if 'cloudflare' in ua_l: return 'CF probe'
+    if 'bot' in ua_l or 'crawler' in ua_l or 'spider' in ua_l: return 'bot'
+    browser = 'browser'
+    if 'edg/' in ua_l:        browser = 'Edge'
+    elif 'chrome/' in ua_l:   browser = 'Chrome'
+    elif 'firefox/' in ua_l:  browser = 'Firefox'
+    elif 'safari/' in ua_l and 'chrome/' not in ua_l: browser = 'Safari'
+    os_ = ''
+    if 'iphone' in ua_l:    os_ = 'iPhone'
+    elif 'ipad' in ua_l:    os_ = 'iPad'
+    elif 'android' in ua_l: os_ = 'Android'
+    elif 'mac os' in ua_l:  os_ = 'Mac'
+    elif 'windows' in ua_l: os_ = 'Win'
+    elif 'linux' in ua_l:   os_ = 'Linux'
+    return f'{browser} · {os_}' if os_ else browser
+
+
+@bp.route('/wholesaler-<reviewer>/signup-visits')
+def signup_visits(reviewer):
+    redir = _require_admin()
+    if redir is not None:
+        return redir
+    cfg = _resolve_reviewer(reviewer)
+    if not cfg:
+        abort(404)
+
+    # Top up geolocation for any pending IPs (best-effort, capped).
+    _geofill_pending(reviewer, max_lookups=50)
+
+    with _db() as conn, conn.cursor() as cur:
+        # Aggregate stats
+        cur.execute("""
+            SELECT
+              COUNT(*)                                                       AS total,
+              COUNT(*) FILTER (WHERE hit_at::date = CURRENT_DATE)            AS today,
+              COUNT(*) FILTER (WHERE hit_at > NOW() - INTERVAL '7 days')     AS last_7d,
+              COUNT(DISTINCT ip)                                             AS unique_ips_total,
+              COUNT(DISTINCT ip) FILTER (WHERE hit_at::date = CURRENT_DATE)  AS unique_ips_today,
+              COUNT(*) FILTER (WHERE outcome = 'submit_ok')                  AS submits_total,
+              COUNT(*) FILTER (WHERE outcome = 'submit_returning')           AS returning_total,
+              COUNT(*) FILTER (WHERE outcome = 'rate_limited')               AS rate_limited
+            FROM signup_visits
+            WHERE reviewer = %s
+        """, (reviewer,))
+        agg = cur.fetchone() or {}
+
+        # Top countries / cities (last 30d)
+        cur.execute("""
+            SELECT country, region, city, COUNT(DISTINCT ip) AS uniq, COUNT(*) AS hits
+            FROM signup_visits
+            WHERE reviewer = %s
+              AND country IS NOT NULL AND country <> '?'
+              AND hit_at > NOW() - INTERVAL '30 days'
+            GROUP BY country, region, city
+            ORDER BY uniq DESC, hits DESC
+            LIMIT 15
+        """, (reviewer,))
+        top_locations = cur.fetchall()
+
+        # Recent visits — last 200
+        cur.execute("""
+            SELECT id, hit_at, method, ip, user_agent,
+                   country, region, city, outcome, dealer_id, error_msg
+            FROM signup_visits
+            WHERE reviewer = %s
+            ORDER BY hit_at DESC
+            LIMIT 200
+        """, (reviewer,))
+        visits = cur.fetchall()
+
+    from app import time_ago
+    return render_template(
+        'wholesaler_visits.html',
+        reviewer_slug=reviewer,
+        reviewer_name=cfg['display_name'],
+        agg=agg,
+        top_locations=top_locations,
+        visits=visits,
+        ua_short=_ua_short,
+        time_ago=time_ago,
+    )
+
+
 # ── Hard-delete a wholesaler (and all their bids/photos/messages) ────────
 # Reviewer-scoped: an admin can only delete wholesalers under their own
 # salesperson_match. Cascades via FK handle partner_users +
@@ -881,9 +1051,36 @@ _EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 
 
 def _client_ip() -> str:
-    # nginx in front: prefer X-Forwarded-For first hop. Fall back to remote_addr.
+    # CF-Connecting-IP is the canonical real-client IP when Cloudflare is
+    # in front (it's set by CF and stripped from any client-supplied
+    # value, so it's safe to trust). Fall back to X-Forwarded-For first
+    # hop, then nginx remote_addr.
+    cf = (request.headers.get('CF-Connecting-IP') or '').strip()
+    if cf:
+        return cf
     xff = (request.headers.get('X-Forwarded-For') or '').split(',')[0].strip()
     return xff or (request.remote_addr or '0.0.0.0')
+
+
+def _log_visit(reviewer: str, method: str, outcome: str,
+               dealer_id: int | None = None, error_msg: str | None = None):
+    """Best-effort visit log. Failures are swallowed — this MUST never
+    block the signup endpoint. Geolocation columns left NULL; the
+    /signup-visits dashboard fills them lazily via ip-api.com."""
+    try:
+        ua = (request.headers.get('User-Agent') or '')[:500]
+        ip = _client_ip()
+        with _db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO signup_visits
+                    (reviewer, method, ip, user_agent, outcome,
+                     dealer_id, error_msg)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (reviewer, method, ip, ua, outcome,
+                  dealer_id, (error_msg or '')[:500] or None))
+            conn.commit()
+    except Exception as e:
+        print(f'[signup_visits] log failed: {type(e).__name__}: {e}', flush=True)
 
 
 @bp.route('/wholesaler-<reviewer>/signup', methods=['GET', 'POST'])
@@ -893,6 +1090,7 @@ def signup(reviewer):
         abort(404)
 
     if request.method == 'GET':
+        _log_visit(reviewer, 'GET', 'view')
         return render_template('wholesaler_signup.html',
                                reviewer_slug=reviewer,
                                reviewer_name=cfg['display_name'],
@@ -915,17 +1113,20 @@ def signup(reviewer):
     phone_raw   = (request.form.get('phone') or '').strip()
     contact_pref = (request.form.get('contact_pref') or 'both').strip().lower()
 
+    def _bad(msg):
+        _log_visit(reviewer, 'POST', 'validation_error', error_msg=msg)
+        return jsonify({'error': msg}), 400
     if not full_name or len(full_name) > 120:
-        return jsonify({'error': 'Your name is required.'}), 400
+        return _bad('Your name is required.')
     if not email or not _EMAIL_RE.match(email) or len(email) > 200:
-        return jsonify({'error': 'A valid email is required.'}), 400
+        return _bad('A valid email is required.')
     phone = _normalize_phone(phone_raw)
     if not phone:
-        return jsonify({'error': 'A valid US phone number is required.'}), 400
+        return _bad('A valid US phone number is required.')
     if contact_pref not in ('sms', 'email', 'both'):
         contact_pref = 'both'
     if business and len(business) > 200:
-        return jsonify({'error': 'Business name is too long.'}), 400
+        return _bad('Business name is too long.')
 
     # Dealer name = business if provided, otherwise the person's name.
     dealer_name = business or full_name
@@ -960,6 +1161,8 @@ def signup(reviewer):
             # Returning wholesaler — give them their existing portal back.
             # No rate-limit hit (this isn't a new signup) and no
             # Telegram/SMS noise (Oscar already knows about this one).
+            _log_visit(reviewer, 'POST', 'submit_returning',
+                       dealer_id=existing['dealer_id'])
             portal_base = os.environ.get('PORTAL_BASE', 'https://experience-wholesale.net')
             return jsonify({
                 'ok': True,
@@ -979,6 +1182,8 @@ def signup(reviewer):
             last = _signup_last_ip.get(ip, 0)
             if now - last < _SIGNUP_RATE_LIMIT_SECONDS:
                 wait_min = int((_SIGNUP_RATE_LIMIT_SECONDS - (now - last)) / 60) + 1
+                _log_visit(reviewer, 'POST', 'rate_limited',
+                           error_msg=f'wait {wait_min}m')
                 return jsonify({'error': f'Too many signups from this network. Try again in {wait_min} min.'}), 429
 
         # Slug uniqueness — append short hex on collision.
@@ -1053,6 +1258,8 @@ def signup(reviewer):
             send_sms(reviewer_phone, sms_body[:300])
         except Exception:
             pass
+
+    _log_visit(reviewer, 'POST', 'submit_ok', dealer_id=dealer_id)
 
     return jsonify({
         'ok': True,
