@@ -52,7 +52,12 @@ EW buys cars and resells them to retail dealers, who then retail them to consume
 3. Does this car's condition (Carfax flags, mileage vs comps, options package) suggest premium or discount vs comps?
 4. What's our LSL avg gross for this YMM? That's our PVR target on this deal.
 5. Is velocity HOT? Buyer dealers will pay up to lock supply. SLOW/STALE? Pay down for cushion.
-6. {asking_constraint}
+6. **MILEAGE GAP CHECK**: If subject mileage is >2x the avg comp mileage shown in rBook, the rBook median is NOT a fair price anchor — it represents a near-new cohort, not yours. In that case:
+   • Use **vAuto's Adjusted MMR** (which is already auto-adjusted for miles + condition) as your primary anchor.
+   • Or use the **3 closest-mile rBook comps** (a better-matched cohort).
+   • Don't over-discount from the raw rBook median — the market sets a tighter mileage curve than naively pricing each 1k miles linearly.
+   • The Manheim MMR median already reflects mixed-mileage auction reality, so it's a more honest floor than rBook for high-mile subjects.
+7. {asking_constraint}
 
 ═══ YOUR OUTPUT ═══
 
