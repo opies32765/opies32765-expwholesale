@@ -781,19 +781,21 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
                 {% if c.pending_sale %}<span style="font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.15);border-radius:3px;padding:1px 5px">PENDING</span>{% endif %}
               </span>
             </div>
-            <div style="margin-top:3px;font-size:11px;color:#64748b;font-family:monospace">
-              {{ c.dealer or 'unknown dealer' }}{% if c.dealer_city %} &middot; {{ c.dealer_city }}{% if c.dealer_state %}, {{ c.dealer_state }}{% endif %}{% endif %}
-              {% if c.msrp_lookup %}
-                {% if c.msrp_lookup.msrp %}
-                  &middot; <span style="color:#cbd5e1;font-weight:700">MSRP ${{ '{:,}'.format(c.msrp_lookup.msrp|int) }}</span>
-                {% elif c.msrp_lookup.status == 'pending' or c.msrp_lookup.status == 'in_progress' %}
-                  &middot; <span style="color:#fbbf24">MSRP pending&hellip;</span>
-                {% elif c.msrp_lookup.status == 'failed' %}
-                  &middot; <span style="color:#64748b">MSRP unavailable</span>
+            <div style="margin-top:3px;font-size:11px;color:#64748b;font-family:monospace;display:flex;justify-content:space-between;align-items:baseline;gap:12px">
+              <span>{{ c.dealer or 'unknown dealer' }}{% if c.dealer_city %} &middot; {{ c.dealer_city }}{% if c.dealer_state %}, {{ c.dealer_state }}{% endif %}{% endif %}</span>
+              <span style="white-space:nowrap">
+                {% if c.msrp_lookup %}
+                  {% if c.msrp_lookup.msrp %}
+                    <span style="color:#cbd5e1;font-weight:700">MSRP ${{ '{:,}'.format(c.msrp_lookup.msrp|int) }}</span>
+                  {% elif c.msrp_lookup.status == 'pending' or c.msrp_lookup.status == 'in_progress' %}
+                    <span style="color:#fbbf24">MSRP pending&hellip;</span>
+                  {% elif c.msrp_lookup.status == 'failed' %}
+                    <span style="color:#64748b">MSRP unavailable</span>
+                  {% endif %}
+                {% else %}
+                  <span style="color:#fbbf24">MSRP queued</span>
                 {% endif %}
-              {% else %}
-                &middot; <span style="color:#fbbf24">MSRP queued</span>
-              {% endif %}
+              </span>
             </div>
           </div>
           {% endfor %}
