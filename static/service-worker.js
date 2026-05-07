@@ -1,7 +1,22 @@
 // Bump on any SW change so the activate handler evicts old caches.
+// v7 (2026-05-05): mobile.html partner-banner logo gets the same /thumb
+//                  onerror fallback the dashboard already had. Fixes
+//                  TXT Charlie (Hostinger hotlink-block) showing a
+//                  broken image inside the installed PWA.
+// v6 (2026-05-05): partner dashboard mobile-inventory revert — drop the
+//                  days-pill / mobile-meta-line experiment and return to
+//                  original column layout. Bump to evict cached HTML.
+// v5 (2026-05-04): per-dealer brand theme on partner-tagged mobile —
+//                  logo + primary color override the default blue accents.
+//                  Cache bump so devices pick up the themed HTML.
+// v4 (2026-05-04): asking-price required + friendlier 4xx error parsing
+//                  in mobile-submit. Bumped to evict caches that still
+//                  hold the old form HTML where ask was optional.
+// v3 (2026-05-02): user-facing rename "EW Owner" → "EW Partner" across
+//                  manifest + templates; force iOS Safari to re-fetch.
 // v2 (2026-05-02): added /owner + /admin skip rules; routed
-// notificationclick by URL prefix between /mobile and /owner windows.
-const CACHE_NAME = 'ew-field-v2';
+//                  notificationclick by URL prefix between /mobile and /owner.
+const CACHE_NAME = 'ew-field-v8';
 const STATIC_ASSETS = [
   '/mobile',
   '/static/manifest.json',
@@ -45,7 +60,8 @@ self.addEventListener('fetch', event => {
   if (url.pathname.startsWith('/partner/')
       || url.pathname.startsWith('/admin/')
       || url.pathname === '/owner'
-      || url.pathname.startsWith('/owner/')) {
+      || url.pathname.startsWith('/owner/')
+      || url.pathname.startsWith('/wholesaler-')) {
     return;
   }
 
