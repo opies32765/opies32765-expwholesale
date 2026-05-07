@@ -750,6 +750,13 @@ def extract_miles_from_text(text, has_vin=False):
             n = int(m.group(1).replace(',', ''))
             if 100 <= n <= 999999:
                 return n
+        # Also accept bare digit runs (e.g. "WP0CB2A95MS248271\n\n28138")
+        # by stripping the VIN itself first so we don't match its digits.
+        cleaned = re.sub(r'[A-HJ-NPR-Z0-9]{17}', ' ', text)
+        for m in re.finditer(r'\b(\d{3,6})\b', cleaned):
+            n = int(m.group(1))
+            if 100 <= n <= 999999:
+                return n
     return None
 
 
@@ -2894,6 +2901,7 @@ def _run_assessment(bid_id):
             _buyer_intel = find_lsl_buyers(
                 bid.get('year'), bid.get('make'), bid.get('model'),
                 mileage=bid.get('mileage'),
+                trim=bid.get('trim'),
                 config=_ai_cfg,
             )
             _bn_n = (_buyer_intel.get('patterns') or {}).get('total_deals', 0)

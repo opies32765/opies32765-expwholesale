@@ -66,6 +66,42 @@ def _norm_make_pattern(make: str) -> str:
     return str(make).strip().replace('-', '%').replace('_', '%')
 
 
+# Body-style synonyms for LSL vehicle_info matching. LSL uses verbose body
+# strings ("Convertible", "2D Coupe", "Sport Utility Vehicle"); bid.trim
+# may use OEM terminology ("Cabriolet", "Suv", "Sedan"). Map them so we can
+# exclude wrong-body comps (e.g. don't show 911 Coupes when subject is a
+# 911 Cabriolet).
+_BODY_STYLE_GROUPS = [
+    # Convertibles: Cabriolet (Porsche/Audi/BMW), Spider/Spyder, Roadster,
+    # Convertible
+    ('convertible', ['cabriolet', 'convertible', 'spider', 'spyder', 'roadster']),
+    ('coupe',       ['coupe', '2d coupe']),
+    ('targa',       ['targa']),
+    ('sedan',       ['sedan', '4d sedan']),
+    ('suv',         ['suv', 'sport utility', 'crossover']),
+    ('hatchback',   ['hatchback']),
+    ('wagon',       ['wagon']),
+    ('truck',       ['pickup', 'crew cab', 'extended cab', 'regular cab',
+                     'super cab', 'super crew', 'quad cab']),
+    ('van',         ['cargo van', 'passenger van', 'minivan']),
+]
+
+
+def _body_style_patterns(trim_text: str | None) -> list[str]:
+    """Detect the bid's body style from trim/notes and return LIKE patterns
+    that match equivalent LSL `vehicle_info` strings. Empty list when nothing
+    detectable — caller should NOT add a body filter in that case."""
+    if not trim_text:
+        return []
+    t = trim_text.lower()
+    for _key, synonyms in _BODY_STYLE_GROUPS:
+        for s in synonyms:
+            if s in t:
+                # Return ALL synonyms for this group as wildcard LIKE patterns
+                return [f'%{x}%' for x in synonyms]
+    return []
+
+
 def _open_lsl_ro():
     uri = f'file:{LSL_DB_PATH}?mode=ro&immutable=1'
     conn = sqlite3.connect(uri, uri=True, timeout=5.0)
@@ -73,7 +109,7 @@ def _open_lsl_ro():
     return conn
 
 
-def find_same_ymm_deals(year, make, model, mileage=None, config=None) -> dict:
+def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None) -> dict:
     """Return raw EW deal rows + per-buyer candidate ranking for the bid's
     year/make/model band.
 
@@ -116,6 +152,16 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None) -> dict:
     year_prefix_clause = ' OR '.join(["vehicle_info LIKE ?" for _ in range(y_lo, y_hi + 1)])
     year_prefix_args = [f'{yp} %' for yp in range(y_lo, y_hi + 1)]
 
+    # Body-style filter — keep only same-body comps so a 911 Cabriolet bid
+    # doesn't get matched to 911 Coupes / Targas / Turbo S etc.
+    body_patterns = _body_style_patterns(trim)
+    if body_patterns:
+        body_clause = '(' + ' OR '.join(['UPPER(vehicle_info) LIKE UPPER(?)' for _ in body_patterns]) + ')'
+        body_args = body_patterns
+    else:
+        body_clause = '1=1'
+        body_args = []
+
     try:
         conn = _open_lsl_ro()
         cur = conn.cursor()
@@ -135,6 +181,7 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None) -> dict:
         WHERE UPPER(make_name) LIKE UPPER(?)
           AND UPPER(vehicle_info) LIKE UPPER(?)
           AND ({year_prefix_clause})
+          AND {body_clause}
           AND sold_at > date('now', ? || ' days')
           AND sale_price > 0
           AND customer_name IS NOT NULL AND TRIM(customer_name) != ''
@@ -142,7 +189,7 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None) -> dict:
         LIMIT ?
         """
         cur.execute(sql_deals, (
-            make_pat, model_pat, *year_prefix_args, f'-{recent_days}', max_deals,
+            make_pat, model_pat, *year_prefix_args, *body_args, f'-{recent_days}', max_deals,
         ))
         deals = [dict(r) for r in cur.fetchall()]
 
@@ -160,11 +207,12 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None) -> dict:
         WHERE UPPER(make_name) LIKE UPPER(?)
           AND UPPER(vehicle_info) LIKE UPPER(?)
           AND ({year_prefix_clause})
+          AND {body_clause}
           AND sold_at > date('now', ? || ' days')
           AND sale_price > 0
         """
         cur.execute(sql_patterns,
-                    (make_pat, model_pat, *year_prefix_args, f'-{recent_days}'))
+                    (make_pat, model_pat, *year_prefix_args, *body_args, f'-{recent_days}'))
         patterns = dict(cur.fetchone() or {})
 
         # 3/6/12-month rolling windows — count + avg sale + avg gross at each.
@@ -184,12 +232,13 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None) -> dict:
                 WHERE UPPER(make_name) LIKE UPPER(?)
                   AND UPPER(vehicle_info) LIKE UPPER(?)
                   AND ({year_prefix_clause})
+                  AND {body_clause}
                   AND sold_at > date('now', ? || ' days')
                   AND sale_price > 0
                   AND purchase_cost > 0
                   AND customer_name IS NOT NULL
                   AND TRIM(customer_name) != ''
-            """, (make_pat, model_pat, *year_prefix_args, f'-{days}'))
+            """, (make_pat, model_pat, *year_prefix_args, *body_args, f'-{days}'))
             windows[label] = dict(cur.fetchone() or {})
         patterns['windows'] = windows
         # Backwards-compat: keep the old flat key the existing card reads.
@@ -227,6 +276,7 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None) -> dict:
         WHERE UPPER(d.make_name) LIKE UPPER(?)
           AND UPPER(d.vehicle_info) LIKE UPPER(?)
           AND ({year_prefix_clause})
+          AND {body_clause.replace('vehicle_info', 'd.vehicle_info')}
           AND d.sold_at > date('now', ? || ' days')
           AND d.sale_price > 0 AND d.purchase_cost > 0
           AND d.customer_name IS NOT NULL AND TRIM(d.customer_name) != ''
@@ -238,6 +288,7 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None) -> dict:
             f'-{very_recent}',
             make_pat, model_pat,
             *year_prefix_args,
+            *body_args,
             f'-{recent_days}',
             max_recent,
         ))
@@ -257,13 +308,14 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None) -> dict:
               AND UPPER(make_name) LIKE UPPER(?)
               AND UPPER(vehicle_info) LIKE UPPER(?)
               AND ({year_prefix_clause})
+              AND {body_clause}
               AND sold_at > date('now', ? || ' days')
               AND sale_price > 0 AND purchase_cost > 0
             ORDER BY customer_name, sold_at DESC
             """
             cur.execute(sql_buyer_deals, (
                 *buyer_names, make_pat, model_pat,
-                *year_prefix_args, f'-{recent_days}',
+                *year_prefix_args, *body_args, f'-{recent_days}',
             ))
             deals_by_buyer = {}
             for d in cur.fetchall():
