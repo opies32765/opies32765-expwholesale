@@ -131,6 +131,7 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
     <a href="/dealers" class="nav-link">Dealer DB</a>
     <a href="/drop" class="nav-link">Quick Drop</a>
     <a href="/admin/ai-levers" class="nav-link active">AI Levers</a>
+    <a href="/admin/vms" class="nav-link">VMs</a>
   </div>
 </div>
 
@@ -200,6 +201,65 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
       <label>Pitch: active-count weight</label>
       <input type="range" id="dm-active-mult" min="0" max="10" step="1" value="{{ ((active_config.dealer_match or {}).pitch_weights or {}).active_count_multiplier if ((active_config.dealer_match or {}).pitch_weights or {}).active_count_multiplier is not none else 2 }}">
       <div class="readout" id="dm-active-mult-readout">×{{ ((active_config.dealer_match or {}).pitch_weights or {}).active_count_multiplier if ((active_config.dealer_match or {}).pitch_weights or {}).active_count_multiplier is not none else 2 }}</div>
+    </div>
+  </div>
+
+  {% set vel = active_config.velocity or {} %}
+  {% set v_lookback   = vel.lookback_days|default(90) %}
+  {% set v_years      = vel.year_tolerance|default(2) %}
+  {% set v_miles      = vel.mileage_band|default(25000) %}
+  {% set v_hot        = vel.hot_max_days|default(21) %}
+  {% set v_steady     = vel.steady_max_days|default(45) %}
+  {% set v_slow       = vel.slow_max_days|default(75) %}
+  {% set v_stale_dol  = vel.stale_dol_floor|default(60) %}
+  {% set v_min_samp   = vel.min_sample_size|default(3) %}
+  <!-- Partner Network Velocity -->
+  <div class="global-card">
+    <h3>Partner Network Velocity</h3>
+    <div style="font-size:12px;color:#7a9bb5;margin-bottom:14px;line-height:1.5">
+      Days-to-sell distribution for the YMM band over a lookback window. Emits a labeled signal
+      (HOT / STEADY / SLOW / STALE / NO_SIGNAL) that Gemini uses to lean its adjustment up on
+      fast movers or down on stale inventory. Tighter bands = stronger signal but smaller samples.
+    </div>
+    <div class="global-row">
+      <label>Lookback window (days)</label>
+      <input type="range" id="vel-lookback" min="14" max="365" step="1" value="{{ v_lookback }}">
+      <div class="readout" id="vel-lookback-readout">{{ v_lookback }}d</div>
+    </div>
+    <div class="global-row">
+      <label>Year tolerance (± years)</label>
+      <input type="range" id="vel-years" min="0" max="5" step="1" value="{{ v_years }}">
+      <div class="readout" id="vel-years-readout">±{{ v_years }} yr</div>
+    </div>
+    <div class="global-row">
+      <label>Mileage band (± miles)</label>
+      <input type="range" id="vel-miles" min="5000" max="100000" step="2500" value="{{ v_miles }}">
+      <div class="readout" id="vel-miles-readout">±{{ '{:,}'.format(v_miles) }} mi</div>
+    </div>
+    <div class="global-row">
+      <label>HOT — median days-to-sell ≤</label>
+      <input type="range" id="vel-hot" min="1" max="60" step="1" value="{{ v_hot }}">
+      <div class="readout" id="vel-hot-readout">≤ {{ v_hot }}d</div>
+    </div>
+    <div class="global-row">
+      <label>STEADY — median ≤</label>
+      <input type="range" id="vel-steady" min="14" max="120" step="1" value="{{ v_steady }}">
+      <div class="readout" id="vel-steady-readout">≤ {{ v_steady }}d</div>
+    </div>
+    <div class="global-row">
+      <label>SLOW — median ≤ (above this = STALE)</label>
+      <input type="range" id="vel-slow" min="30" max="180" step="1" value="{{ v_slow }}">
+      <div class="readout" id="vel-slow-readout">≤ {{ v_slow }}d</div>
+    </div>
+    <div class="global-row">
+      <label>STALE override — active median DOL &gt;</label>
+      <input type="range" id="vel-stale-dol" min="30" max="180" step="1" value="{{ v_stale_dol }}">
+      <div class="readout" id="vel-stale-dol-readout">&gt; {{ v_stale_dol }}d</div>
+    </div>
+    <div class="global-row">
+      <label>Minimum sample size for any label</label>
+      <input type="range" id="vel-min-samples" min="1" max="20" step="1" value="{{ v_min_samp }}">
+      <div class="readout" id="vel-min-samples-readout">≥ {{ v_min_samp }}</div>
     </div>
   </div>
 
@@ -591,6 +651,29 @@ document.getElementById('dm-active-mult').addEventListener('input', e => {
   const v = parseInt(e.target.value);
   ensureDealerMatch().pitch_weights.active_count_multiplier = v;
   document.getElementById('dm-active-mult-readout').textContent = '×' + v;
+});
+
+// Velocity settings — all feed into workingConfig.velocity
+function ensureVelocity() {
+  if (!workingConfig.velocity) workingConfig.velocity = {};
+  return workingConfig.velocity;
+}
+const _velBindings = [
+  ['vel-lookback',     'lookback_days',     v => v + 'd',                        parseInt],
+  ['vel-years',        'year_tolerance',    v => '±' + v + ' yr',                parseInt],
+  ['vel-miles',        'mileage_band',      v => '±' + v.toLocaleString() + ' mi', parseInt],
+  ['vel-hot',          'hot_max_days',      v => '≤ ' + v + 'd',                 parseInt],
+  ['vel-steady',       'steady_max_days',   v => '≤ ' + v + 'd',                 parseInt],
+  ['vel-slow',         'slow_max_days',     v => '≤ ' + v + 'd',                 parseInt],
+  ['vel-stale-dol',    'stale_dol_floor',   v => '> ' + v + 'd',                 parseInt],
+  ['vel-min-samples',  'min_sample_size',   v => '≥ ' + v,                       parseInt],
+];
+_velBindings.forEach(([id, key, fmt, parse]) => {
+  document.getElementById(id).addEventListener('input', e => {
+    const v = parse(e.target.value);
+    ensureVelocity()[key] = v;
+    document.getElementById(id + '-readout').textContent = fmt(v);
+  });
 });
 
 async function runPreview() {

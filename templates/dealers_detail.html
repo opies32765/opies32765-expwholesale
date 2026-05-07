@@ -194,8 +194,9 @@ a.veh-link:hover{text-decoration:underline}
         Last scan · {{ dealer.last_scan_at|time_ago }} ({{ dealer.last_scan_status or '—' }})
       </span>
       <span class="meta-chip" id="spChip" style="cursor:pointer;background:rgba(168,139,250,.12);border-color:rgba(168,139,250,.4);color:#c4b5fd"
-            onclick="editSalesperson()" title="Click to edit — partner-portal bids get tagged with this name">
+            onclick="editSalesperson()" title="Click to edit — partner bids get tagged with this name + SMS this phone when the dealer submits">
         👤 Salesperson · <b style="color:#f1f5f9;margin-left:4px" id="spVal">{{ dealer.salesperson or '— set —' }}</b>
+        {% if dealer.salesperson_phone %}<span style="color:#7a9bb5;margin-left:6px;font-size:11px" id="spPhone">📱 {{ dealer.salesperson_phone }}</span>{% else %}<span style="color:#475569;margin-left:6px;font-size:11px" id="spPhone">📱 no SMS</span>{% endif %}
       </span>
     </div>
   </div>
@@ -209,6 +210,147 @@ a.veh-link:hover{text-decoration:underline}
     <a href="/dealers" class="btn">← All Dealers</a>
   </div>
 </div>
+
+{# ── Partner shareable links · password-less dashboard + mobile ── #}
+{% if partner_links %}
+  {% set _dash = request.host_url.rstrip('/') ~ '/partner/' ~ partner_links.slug ~ '/d/' ~ partner_links.dashboard_token %}
+  {% set _mob  = request.host_url.rstrip('/') ~ '/mobile?p=' ~ partner_links.mobile_token %}
+  <div style="background:#243447;border:1px solid #344f68;border-radius:12px;padding:20px 24px;margin:0 0 20px">
+    <div style="display:flex;align-items:center;gap:8px;font-size:14px;color:#cbd5e1;font-weight:700;margin-bottom:14px">
+      🔗 Partner shareable links
+    </div>
+
+    <div style="font-size:12px;color:#94a3b8;font-weight:600;text-transform:uppercase;letter-spacing:.4px;margin:0 0 4px">Dashboard access (password-less)</div>
+    <div style="font-size:12px;color:#7a9bb5;margin-bottom:8px">Send to the dealer — they land on their portal with no login required. Anyone with the link has full dashboard access.</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input type="text" id="dlDashUrl" readonly value="{{ _dash }}"
+             style="flex:1;min-width:280px;padding:9px 12px;border:1px solid #344f68;background:#1a2838;color:#e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace"
+             onclick="this.select()">
+      <button class="btn" type="button" onclick="dlCopy('dlDashUrl', this)">Copy</button>
+      <button class="btn" type="button"
+              onclick="dlRotate('dashboard', '{{ dealer.dealer_id }}')"
+              style="background:#7f1d1d;color:#fecaca;border-color:#991b1b" title="Generate a new token (invalidates old link)">Rotate</button>
+    </div>
+
+    <div style="font-size:12px;color:#94a3b8;font-weight:600;text-transform:uppercase;letter-spacing:.4px;margin:18px 0 4px">Mobile submission link</div>
+    <div style="font-size:12px;color:#7a9bb5;margin-bottom:8px">Bid-submission only — narrower scope. Anyone with this can submit bids tagged to {{ dealer.name }}.</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input type="text" id="dlMobUrl" readonly value="{{ _mob }}"
+             style="flex:1;min-width:280px;padding:9px 12px;border:1px solid #344f68;background:#1a2838;color:#e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace"
+             onclick="this.select()">
+      <button class="btn" type="button" onclick="dlCopy('dlMobUrl', this)">Copy</button>
+      <button class="btn" type="button"
+              onclick="dlRotate('mobile', '{{ dealer.dealer_id }}')"
+              style="background:#7f1d1d;color:#fecaca;border-color:#991b1b">Rotate</button>
+    </div>
+  </div>
+  <script>
+    async function dlCopy(id, btn){
+      const i = document.getElementById(id);
+      try { await navigator.clipboard.writeText(i.value); }
+      catch(e){ i.select(); document.execCommand('copy'); }
+      const t = btn.textContent; btn.textContent = '✓ Copied';
+      setTimeout(()=>btn.textContent = t, 1400);
+    }
+    async function dlRotate(kind, dealerId){
+      const verb = kind === 'dashboard' ? 'dashboard access' : 'mobile';
+      if (!confirm('Rotate the ' + verb + ' link? The old one will stop working immediately.')) return;
+      const fd = new FormData();
+      fd.append('action', kind === 'dashboard' ? 'rotate_dashboard_token' : 'rotate_mobile_token');
+      const r = await fetch('/admin/partner/' + dealerId + '/config', {method:'POST', body: fd, redirect:'manual'});
+      // The /config POST flashes + redirects; we just reload to pick up the new token here.
+      location.reload();
+    }
+  </script>
+
+  {# ── Per-dealer branding for the partner portal header ── #}
+  {% set _brand = partner_links.brand or {} %}
+  <div style="background:#243447;border:1px solid #344f68;border-radius:12px;padding:20px 24px;margin:0 0 20px">
+    <div style="display:flex;align-items:center;gap:8px;font-size:14px;color:#cbd5e1;font-weight:700;margin-bottom:14px">
+      🎨 Partner portal branding
+    </div>
+    <div style="font-size:12px;color:#7a9bb5;margin-bottom:14px">
+      Skin the top of {{ dealer.name }}'s partner dashboard with their logo and brand color.
+      The "Powered by Experience Wholesale" sublabel stays so it reads as a tool, not a clone.
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr 140px;gap:12px;align-items:end">
+      <div>
+        <label style="display:block;font-size:11px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Logo URL</label>
+        <input type="text" id="brandLogo" value="{{ _brand.logo_url or '' }}"
+               placeholder="https://www.dealersite.com/logo.png"
+               style="width:100%;padding:9px 12px;border:1px solid #344f68;background:#1a2838;color:#e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace">
+      </div>
+      <div>
+        <label style="display:block;font-size:11px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Primary color</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input type="color" id="brandColorPick" value="{{ _brand.primary_color or '#1e3a8a' }}"
+                 onchange="document.getElementById('brandColor').value=this.value;brandPreview();"
+                 style="width:42px;height:38px;border:1px solid #344f68;background:#1a2838;border-radius:6px;cursor:pointer;padding:0">
+          <input type="text" id="brandColor" value="{{ _brand.primary_color or '' }}" placeholder="#1e3a8a"
+                 oninput="if(/^#[0-9A-Fa-f]{6}$/.test(this.value)){document.getElementById('brandColorPick').value=this.value;}brandPreview();"
+                 style="flex:1;padding:9px 12px;border:1px solid #344f68;background:#1a2838;color:#e2e8f0;border-radius:6px;font-size:12px;font-family:ui-monospace,monospace">
+        </div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" type="button" onclick="brandSave({{ dealer.dealer_id }})">Save</button>
+        <button class="btn" type="button" onclick="brandClear({{ dealer.dealer_id }})" style="background:#7f1d1d;color:#fecaca;border-color:#991b1b">Clear</button>
+      </div>
+    </div>
+
+    <div style="margin-top:16px">
+      <div style="font-size:11px;color:#7a9bb5;font-weight:600;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Live preview</div>
+      <div id="brandPreview" style="border-radius:8px;overflow:hidden;border:1px solid #344f68">
+        <div id="brandPreviewBar" style="padding:14px 18px;display:flex;align-items:center;gap:14px;background:linear-gradient(135deg,{{ _brand.primary_color or '#1e3a8a' }} 0%,{{ _brand.primary_color or '#1e3a8a' }}cc 100%)">
+          <img id="brandPreviewLogo" src="{{ _brand.logo_url or '' }}" alt="logo"
+               onerror="this.style.display='none'"
+               style="height:36px;max-width:180px;object-fit:contain;background:#fff;padding:5px 9px;border-radius:5px;{% if not _brand.logo_url %}display:none;{% endif %}">
+          <div>
+            <div style="font-size:15px;font-weight:700;color:#fff">{{ dealer.name }}</div>
+            <div style="font-size:10px;color:rgba(255,255,255,.7);text-transform:uppercase;letter-spacing:.5px">Partner Portal · powered by Experience Wholesale</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    function brandPreview() {
+      const c = document.getElementById('brandColor').value || '#1e3a8a';
+      const l = document.getElementById('brandLogo').value;
+      document.getElementById('brandPreviewBar').style.background =
+        `linear-gradient(135deg, ${c} 0%, ${c}cc 100%)`;
+      const img = document.getElementById('brandPreviewLogo');
+      if (l) { img.src = l; img.style.display = 'block'; }
+      else   { img.style.display = 'none'; }
+    }
+    document.getElementById('brandLogo').addEventListener('input', brandPreview);
+
+    async function brandSave(dealerId) {
+      const body = {
+        logo_url: document.getElementById('brandLogo').value.trim(),
+        primary_color: document.getElementById('brandColor').value.trim(),
+      };
+      const r = await fetch('/api/dealer/' + dealerId + '/brand', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) { alert('Save failed: ' + (j.error || r.status)); return; }
+      alert('Saved.');
+    }
+    async function brandClear(dealerId) {
+      if (!confirm('Clear the branding for this dealer? Their portal will show the default header.')) return;
+      const r = await fetch('/api/dealer/' + dealerId + '/brand', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({logo_url:'', primary_color:''}),
+      });
+      if (!r.ok) { alert('Clear failed'); return; }
+      location.reload();
+    }
+  </script>
+{% endif %}
 
 {# Partner-account setup modal — only relevant when no account exists yet. #}
 {% if not partner_account %}
@@ -542,19 +684,36 @@ const DEALER_ID = {{ dealer.dealer_id }};
 let pollTimer = null;
 
 async function editSalesperson(){
-  const cur = document.getElementById('spVal').textContent.trim();
-  const placeholder = (cur === '— set —') ? '' : cur;
-  const v = prompt('EW salesperson assigned to this dealer\n(blank to clear):', placeholder);
-  if (v === null) return;
-  const name = (v || '').trim();
+  const curName = document.getElementById('spVal').textContent.trim();
+  const namePh = (curName === '— set —') ? '' : curName;
+  const name = prompt('EW salesperson assigned to this dealer\n(blank to clear):', namePh);
+  if (name === null) return;
+  // Phone — for SMS alerts when partner submits a bid
+  const curPhone = (document.getElementById('spPhone').textContent || '').replace(/[^\d+]/g,'');
+  const phonePh = curPhone || '';
+  const phone = prompt(
+    'Salesperson phone (for SMS bid-alerts) — blank to skip\n' +
+    'Format: 5613024567 or +15613024567',
+    phonePh
+  );
+  if (phone === null) return;
   try {
     const r = await fetch('/api/dealer/' + DEALER_ID + '/salesperson', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({salesperson: name}),
+      body: JSON.stringify({salesperson: name.trim(), salesperson_phone: phone.trim()}),
     });
-    if (!r.ok) throw new Error('Save failed (HTTP ' + r.status + ')');
-    document.getElementById('spVal').textContent = name || '— set —';
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    document.getElementById('spVal').textContent = (name.trim() || '— set —');
+    const phEl = document.getElementById('spPhone');
+    if (j.dealer && j.dealer.salesperson_phone) {
+      phEl.style.color = '#7a9bb5';
+      phEl.textContent = '📱 ' + j.dealer.salesperson_phone;
+    } else {
+      phEl.style.color = '#475569';
+      phEl.textContent = '📱 no SMS';
+    }
   } catch(e) {
     alert('Could not save salesperson: ' + e.message);
   }

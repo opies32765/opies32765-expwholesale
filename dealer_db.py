@@ -98,6 +98,8 @@ def dealer_detail(dealer_id):
 
     # Partner-account state — drives the "Set up Partner Account" button
     # visibility on the dealer detail page (only show if no account exists yet).
+    # Also fetch + auto-provision the dashboard / mobile tokens so the
+    # Shareable-links card on this page is always actionable.
     with _db() as conn, conn.cursor() as cur:
         cur.execute('''SELECT id, email, full_name, phone,
                               sms_opt_in, email_bid_alerts, last_login_at
@@ -106,10 +108,44 @@ def dealer_detail(dealer_id):
                        ORDER BY id LIMIT 1''', (dealer_id,))
         partner_account = cur.fetchone()
 
+        cur.execute('SELECT portal_slug, dashboard_token, mobile_token, name, brand '
+                    'FROM dealers WHERE id = %s', (dealer_id,))
+        d_links = cur.fetchone()
+        updates = {}
+        if d_links and not d_links['dashboard_token']:
+            import secrets
+            updates['dashboard_token'] = secrets.token_urlsafe(20)
+        if d_links and not d_links['mobile_token']:
+            import secrets
+            updates['mobile_token'] = secrets.token_urlsafe(16)
+        if updates:
+            sets = ', '.join(f'{k} = %s' for k in updates)
+            cur.execute(f'UPDATE dealers SET {sets} WHERE id = %s',
+                        (*updates.values(), dealer_id))
+            conn.commit()
+            d_links = dict(d_links)
+            d_links.update(updates)
+
+        if d_links:
+            slug = d_links.get('portal_slug')
+            if not slug:
+                import re
+                slug = re.sub(r'[^a-z0-9]+', '',
+                              (d_links['name'] or '').lower())[:32]
+            partner_links = {
+                'slug': slug,
+                'dashboard_token': d_links['dashboard_token'],
+                'mobile_token': d_links['mobile_token'],
+                'brand': d_links.get('brand') or {},
+            }
+        else:
+            partner_links = None
+
     return render_template('dealers_detail.html',
                            dealer=dealer, tree=tree, buckets=buckets,
                            scans=scans, pipeline=pipeline,
-                           partner_account=partner_account)
+                           partner_account=partner_account,
+                           partner_links=partner_links)
 
 
 @bp.route('/api/dealer/<int:dealer_id>/sold')
@@ -741,22 +777,83 @@ def delete_dealer(dealer_id):
     return jsonify({'ok': True})
 
 
+@bp.route('/api/dealer/<int:dealer_id>/brand', methods=['POST'])
+def set_dealer_brand(dealer_id):
+    """Persist per-dealer branding (logo URL + primary color) used to skin
+    the partner portal header. JSON body: {logo_url, primary_color}.
+    Empty/missing values clear that field."""
+    import json
+    data = request.get_json(silent=True) or {}
+    logo_url = (data.get('logo_url') or '').strip()
+    primary_color = (data.get('primary_color') or '').strip()
+    # Light validation — primary_color must look like a hex code, logo
+    # must look like an http(s) URL. Reject otherwise so we don't store
+    # broken data that breaks the partner header render.
+    import re
+    if primary_color and not re.match(r'^#[0-9A-Fa-f]{3,8}$', primary_color):
+        return jsonify({'ok': False, 'error': 'primary_color must be a hex like #1e3a8a'}), 400
+    if logo_url and not re.match(r'^https?://', logo_url):
+        return jsonify({'ok': False, 'error': 'logo_url must be an http(s) URL'}), 400
+    brand = {}
+    if logo_url:      brand['logo_url'] = logo_url
+    if primary_color: brand['primary_color'] = primary_color
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE dealers SET brand = %s::jsonb WHERE id = %s "
+                    "RETURNING id, brand",
+                    (json.dumps(brand) if brand else None, dealer_id))
+        row = cur.fetchone()
+        conn.commit()
+    if not row:
+        return jsonify({'ok': False, 'error': 'dealer not found'}), 404
+    return _json_response({'ok': True, 'dealer': dict(row)})
+
+
 @bp.route('/api/dealer/<int:dealer_id>/salesperson', methods=['POST'])
 def set_dealer_salesperson(dealer_id):
     """Assign or update the EW salesperson responsible for a dealer.
-    The value is copied onto bids.salesperson at partner-portal submit time
-    (frozen on the bid even if the dealer is later reassigned). Empty string
-    or null clears the assignment.
-    Reachable by admin login only (gated by app.py before_request)."""
+    Accepts both `salesperson` (name) and `salesperson_phone` (E.164/10-
+    digit, normalized server-side). Phone drives SMS alerts when the
+    dealer's partner submits a bid. Empty values clear that field."""
     data = request.get_json(silent=True) or request.form
+    print(f'[salesperson API] dealer={dealer_id} payload-keys={list(data.keys()) if hasattr(data,"keys") else "?"} '
+          f'name={data.get("salesperson")!r} phone={data.get("salesperson_phone")!r}',
+          flush=True)
     name = (data.get('salesperson') or '').strip() or None
+    # Phone is only updated when the key is present in the request body.
+    # Without this, an old cached JS that only sends `salesperson` would
+    # wipe whatever phone is on file. Send `salesperson_phone: ""` to
+    # explicitly clear; omit the key to leave existing phone untouched.
+    phone_provided = ('salesperson_phone' in data)
+    phone_raw = (data.get('salesperson_phone') or '').strip() if phone_provided else ''
+    phone = None
+    if phone_provided and phone_raw:
+        digits = ''.join(c for c in phone_raw if c.isdigit())
+        if len(digits) == 10:
+            phone = f'+1{digits}'
+        elif len(digits) == 11 and digits.startswith('1'):
+            phone = f'+{digits}'
+        elif phone_raw.startswith('+') and 10 <= len(digits) <= 15:
+            phone = f'+{digits}'
+        else:
+            return jsonify({'ok': False, 'error': 'Invalid phone format. Use 10-digit US (e.g. 5613024567).'}), 400
     with _db() as conn, conn.cursor() as cur:
-        cur.execute("""UPDATE dealers
-                       SET salesperson = %s,
-                           salesperson_set_at = CASE WHEN %s IS NULL THEN NULL ELSE NOW() END
-                       WHERE id = %s
-                       RETURNING id, name, salesperson, salesperson_set_at""",
-                    (name, name, dealer_id))
+        if phone_provided:
+            cur.execute("""UPDATE dealers
+                           SET salesperson = %s,
+                               salesperson_phone = %s,
+                               salesperson_set_at = CASE WHEN %s IS NULL THEN NULL ELSE NOW() END
+                           WHERE id = %s
+                           RETURNING id, name, salesperson, salesperson_phone,
+                                     salesperson_set_at""",
+                        (name, phone, name, dealer_id))
+        else:
+            cur.execute("""UPDATE dealers
+                           SET salesperson = %s,
+                               salesperson_set_at = CASE WHEN %s IS NULL THEN NULL ELSE NOW() END
+                           WHERE id = %s
+                           RETURNING id, name, salesperson, salesperson_phone,
+                                     salesperson_set_at""",
+                        (name, name, dealer_id))
         row = cur.fetchone()
         conn.commit()
     if not row:

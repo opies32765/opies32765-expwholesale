@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{ dealer.name }} — Aged Inventory Portal</title>
+<title>{{ dealer.name }} — Partner Portal</title>
 <style>
   :root{--bg:#0f172a;--panel:#1e293b;--mute:#94a3b8;--text:#e2e8f0;
         --line:#334155;--accent:#2563eb;--good:#22c55e;--warn:#f59e0b;--bad:#ef4444}
@@ -60,6 +60,125 @@
   .bucket-legend .e60::before{background:var(--warn)}
   .bucket-legend .e90::before{background:var(--bad)}
   .bucket-legend .edrop::before{background:#a78bfa}
+
+  /* ── Mobile-first responsive overrides ─────────────────────────────
+     Branded header collides on phones (logo + dealer name + Settings/Sign
+     out compete for the same row). Switch to wrap + smaller chips at
+     ≤720px. Reduce body padding, make tables horizontally scrollable
+     inside their bucket sections, and shrink the Quick Drop card. */
+  .branded-header{display:flex;align-items:center;gap:18px;padding:18px 28px;border-bottom:1px solid rgba(255,255,255,.08);flex-wrap:wrap}
+  .branded-header .branded-actions{display:flex;gap:10px;align-items:center;margin-left:auto}
+  .branded-header .branded-name{font-size:18px;font-weight:700;color:#fff;letter-spacing:.2px;line-height:1.2}
+  .branded-header .branded-sub{font-size:11px;color:rgba(255,255,255,.7);font-weight:500;letter-spacing:.6px;text-transform:uppercase;margin-top:2px}
+  @media (max-width: 720px) {
+    body{font-size:15px}
+    main{padding:14px}
+    header{padding:14px 16px}
+    header h1{font-size:18px}
+    .intro{padding:14px}
+    .branded-header{padding:12px 14px;gap:10px}
+    .branded-header img{height:34px !important;max-width:120px !important;padding:4px 6px !important}
+    .branded-header .branded-name{font-size:14px}
+    .branded-header .branded-sub{font-size:9px;letter-spacing:.4px}
+    .branded-header .branded-actions{gap:6px;width:100%;margin-left:0;justify-content:flex-end;margin-top:6px}
+    .branded-header .branded-actions a{font-size:12px !important;padding:5px 10px !important}
+    .car-ymmt{font-size:15px;line-height:1.25}
+    .car-meta{font-size:12px}
+    input[type=text],input[type=number]{width:120px;padding:8px 10px;font-size:15px}
+    .submit-bar{padding:14px 16px;flex-direction:column;gap:10px;align-items:stretch}
+    .submit-bar button{padding:14px;font-size:16px;width:100%}
+    /* Bucket count cards hidden on mobile — the collapsible bucket
+       sections below already show the count in their header row. */
+    .age-buckets{display:none !important}
+
+    /* Inventory row leftmost cell on mobile: swap the numbered counter
+       for a days-on-lot pill so age is visible without scrolling. */
+    .row-num{display:none !important}
+    .row-age-mobile{display:inline-block !important}
+    /* Mobile YMM links to the per-car bid-detail page (vs. desktop which
+       opens the dealer's external listing). Swap visibility. */
+    .ymm-desktop{display:none !important}
+    .ymm-mobile{display:inline !important}
+    /* Hide in-bucket has-req rows on mobile — those bids now appear in
+       the Bid Requests stack at the top of the page. Avoids duplication. */
+    .bucket-section tr.has-req{display:none !important}
+    /* Mobile inventory rows show only: days-pill / Vehicle / VIN / Miles.
+       Checkbox + Our Ask + Age + Your-price + Your-message + Status are
+       hidden — those actions live on the per-car bid-detail page now
+       (tap the YMM to open). Rows with an existing bid (.has-req)
+       stack as cards via the block above and ignore these rules. */
+    .bucket-section thead th:nth-child(2),
+    .bucket-section thead th:nth-child(5),
+    .bucket-section thead th:nth-child(6),
+    .bucket-section thead th:nth-child(7),
+    .bucket-section thead th:nth-child(8),
+    .bucket-section thead th:nth-child(9),
+    .bucket-section tbody tr:not(.has-req) td:nth-child(2),
+    .bucket-section tbody tr:not(.has-req) td:nth-child(5),
+    .bucket-section tbody tr:not(.has-req) td:nth-child(6),
+    .bucket-section tbody tr:not(.has-req) td:nth-child(7),
+    .bucket-section tbody tr:not(.has-req) td:nth-child(8),
+    .bucket-section tbody tr:not(.has-req) td:nth-child(9){display:none}
+    .mobile-ask{display:none !important}
+    /* Tighten padding so the remaining columns fit */
+    .bucket-section thead th{padding:10px 6px;font-size:10px}
+    .bucket-section tbody td{padding:12px 6px;font-size:14px;vertical-align:top}
+
+    /* Quick Drop Requests table AND inventory rows that already have a
+       bid request → stacked cards on mobile so the user doesn't have
+       to scroll right to read the thread / status / counter form.
+       Inventory rows WITHOUT a bid keep the table layout (per spec). */
+    .qd-requests-table,
+    .qd-requests-table tbody,
+    .qd-requests-table tr,
+    .qd-requests-table td,
+    .bucket-section tr.has-req,
+    .bucket-section tr.has-req td { display: block; box-sizing: border-box; width: 100%; }
+    .qd-requests-table { background: transparent; box-shadow: none; }
+    .qd-requests-table thead { display: none; }
+    .qd-requests-table tr,
+    .bucket-section tr.has-req {
+      background: var(--panel, #1e293b);
+      border: 1px solid var(--line, #334155);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin: 0 0 12px;
+    }
+    .qd-requests-table tr:last-child { margin-bottom: 0; }
+    .qd-requests-table td,
+    .bucket-section tr.has-req td { padding: 6px 0; border: 0; }
+    /* Inventory has-req: hide the # number cell + the un-needed Miles
+       and Our Ask cells inside the card (info is already in your-price /
+       thread). */
+    .bucket-section tr.has-req td:nth-child(1),
+    .bucket-section tr.has-req td:nth-child(2),
+    .bucket-section tr.has-req td:nth-child(4),
+    .bucket-section tr.has-req td:nth-child(5) { display: none; }
+    .qd-requests-table .bid-thread,
+    .bucket-section tr.has-req .bid-thread { white-space: normal; word-break: break-word; }
+    .qd-requests-table .counter-form,
+    .bucket-section tr.has-req .counter-form { flex-wrap: wrap !important; }
+    .qd-requests-table .counter-form > input,
+    .qd-requests-table .counter-form > button,
+    .bucket-section tr.has-req .counter-form > input,
+    .bucket-section tr.has-req .counter-form > button { width: 100% !important; min-width: 0 !important; }
+    /* Quick Drop card */
+    #qdCard summary{padding:16px 18px;font-size:17px}
+    #qdCard summary::before{width:28px;height:28px;font-size:20px}
+    #qdCard .qd-body{padding:14px}
+    /* Reorder children on mobile so the Quick Drop card lands BELOW the
+       Submit-bid bar (still ABOVE the Mobile QR card). The user works
+       through buckets → submit first; Quick Drop is a secondary path. */
+    main{display:flex;flex-direction:column}
+    main > #qdCard{order:50}
+    main > #mobileQrCard{order:60}
+
+    /* Floating EW banners */
+    .ew-banner{padding:12px 14px !important;gap:10px !important}
+    .ew-banner > div > div:first-child{font-size:14px !important}
+    /* Flow chart cards already stack via @media in their own block */
+    /* Mobile QR card stacks on its own via flex-wrap */
+  }
 </style>
 </head>
 <body>
@@ -69,9 +188,114 @@
   <a href="{{ url_for('partner.exit_view_as', slug=slug) }}" style="color:#fff;text-decoration:underline;font-weight:700">exit &amp; return to EW admin</a>
 </div>
 {% endif %}
+{# ── Dealer-branded header bar — shown when dealer.brand is set.
+     Settings + Sign out moved here from the legacy <header> below. ── #}
+{% if dealer.brand and (dealer.brand.logo_url or dealer.brand.primary_color) %}
+  {% set _bc = dealer.brand.primary_color or '#1e3a8a' %}
+  <div class="branded-header" style="background:linear-gradient(135deg,{{ _bc }} 0%,{{ _bc }}cc 100%)">
+    {% if dealer.brand.logo_url %}
+      {# Route through the /thumb proxy so the browser fetches it from
+         our origin — many dealer sites (Hostinger/LiteSpeed) hotlink-
+         block image loads with a Referer from experience-wholesale.net. #}
+      {# Try the direct CDN URL first (full-quality, transparency-aware)
+         and fall back to the /thumb proxy only if the dealer's host
+         hotlink-blocks (e.g. TXT Charlie's Hostinger LiteSpeed). The
+         proxy is JPEG-only so it loses sharpness on small wide logos —
+         so direct-first preserves quality where possible. #}
+      <img src="{{ dealer.brand.logo_url }}" alt="{{ dealer.name }}"
+           onerror="this.onerror=null;this.src='/thumb?url={{ dealer.brand.logo_url|urlencode }}&size=full'"
+           style="height:44px;max-width:220px;object-fit:contain;background:#fff;padding:6px 10px;border-radius:6px">
+    {% endif %}
+    <div style="flex:1;min-width:0">
+      <div class="branded-name">{{ dealer.name }}</div>
+      <div class="branded-sub">Partner Portal · powered by Experience Wholesale</div>
+    </div>
+    <div class="branded-actions">
+      {# Carry the dashboard_token into Settings via ?d=<token> so any URL
+         the dealer copies from the address bar — including from a sub-
+         page like /settings — still works login-free for whoever they
+         share it with. The before_request hook auto-resolves it. #}
+      {% set _qtok = '?d=' ~ dealer.dashboard_token if dealer.dashboard_token else '' %}
+      <a href="{{ url_for('partner.settings_page', slug=slug) }}{{ _qtok }}"
+         style="font-size:13px;color:rgba(255,255,255,.85);text-decoration:none;padding:7px 14px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);border-radius:6px;font-weight:600">⚙ Settings</a>
+      <a href="{{ url_for('partner.logout', slug=slug) }}"
+         style="font-size:13px;color:rgba(255,255,255,.7);text-decoration:none;padding:7px 14px;border-radius:6px">Sign out</a>
+    </div>
+  </div>
+{% endif %}
+
+{# ── Floating EW-response banners — one per unread EW reply, stacked.
+     Click body to jump to the row; click ✕ to dismiss (server-side
+     mark-seen for that pbr). Banners auto-clear when the dealer
+     submits a counter on that bid (server updates seen-ts on counter). #}
+{% if unread_responses %}
+<div id="ewBanners" style="position:fixed;bottom:0;left:0;right:0;z-index:90;display:flex;flex-direction:column-reverse;gap:8px;padding:8px 20px calc(env(safe-area-inset-bottom,0) + 14px);background:linear-gradient(180deg,rgba(15,23,42,0) 0%,rgba(15,23,42,.95) 60%,rgba(15,23,42,.95) 100%);pointer-events:none">
+<style>
+  /* Banner cards keep clickable; only the wrapper is pointer-events:none
+     so users can still tap content above/below the banner stack. */
+  #ewBanners > .ew-banner{pointer-events:auto}
+</style>
+  {% for r in unread_responses %}
+    <div class="ew-banner" data-pbr-id="{{ r.pbr_id }}" data-bid-id="{{ r.bid_id }}"
+         style="display:flex;align-items:center;gap:14px;background:linear-gradient(90deg,#fbbf24,#f59e0b);color:#1e293b;padding:14px 18px;border-radius:10px;font-weight:700;box-shadow:0 8px 24px rgba(251,191,36,.35);animation:ewBannerIn .35s ease-out">
+      <span style="font-size:24px;animation:qdStarPulse 1.2s ease-in-out infinite">&#9733;</span>
+      <div style="flex:1;cursor:pointer" onclick="ewBannerJump({{ r.pbr_id }})">
+        <div style="font-size:15px">Experience Wholesale responded to <span style="font-family:ui-monospace,monospace">Bid #{{ r.bid_id }}</span></div>
+        <div style="font-size:12px;font-weight:600;color:rgba(30,41,59,.75);margin-top:2px">
+          {% if r.year or r.make or r.model %}{{ r.year or '' }} {{ r.make or '' }} {{ r.model or '' }} · {% endif %}{% if r.bid_amount %}Offer: <b>${{ '{:,.0f}'.format(r.bid_amount) }}</b>{% endif %}
+        </div>
+      </div>
+      <button type="button" onclick="ewBannerDismiss({{ r.pbr_id }})"
+              title="Dismiss"
+              style="background:rgba(0,0,0,.12);color:#1e293b;border:0;border-radius:50%;width:30px;height:30px;font-size:16px;font-weight:800;cursor:pointer;line-height:1">✕</button>
+    </div>
+  {% endfor %}
+</div>
+<style>
+  @keyframes ewBannerIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes ewBannerOut {
+    from { opacity: 1; transform: translateY(0); max-height: 100px; margin-top: 0; padding-top: 0; padding-bottom: 0; }
+    to   { opacity: 0; transform: translateY(-12px); max-height: 0; margin-top: 0; padding-top: 0; padding-bottom: 0; }
+  }
+  .ew-banner.dismissing { animation: ewBannerOut .25s ease-in forwards; overflow: hidden; }
+</style>
+<script>
+  async function ewBannerDismiss(pbrId) {
+    const el = document.querySelector('.ew-banner[data-pbr-id="' + pbrId + '"]');
+    if (el) el.classList.add('dismissing');
+    const fd = new FormData();
+    fd.append('pbr_id', pbrId);
+    try { await fetch('{{ url_for("partner.mark_seen", slug=slug) }}', { method:'POST', body: fd }); } catch(e){}
+    setTimeout(() => { if (el) el.remove(); }, 260);
+  }
+  function ewBannerJump(pbrId) {
+    // Scroll to the matching row in either Quick Drop or aged-inventory section.
+    const row = document.querySelector('tr[data-pbr-id="' + pbrId + '"]')
+             || document.querySelector('.counter-form[data-pbr-id="' + pbrId + '"]');
+    if (row) {
+      row.scrollIntoView({behavior:'smooth', block:'center'});
+      // Brief highlight so it's obvious which row matched.
+      const tr = row.tagName === 'TR' ? row : row.closest('tr');
+      if (tr) {
+        tr.style.transition = 'background .4s';
+        tr.style.background = 'rgba(251,191,36,.18)';
+        setTimeout(() => { tr.style.background = ''; }, 1800);
+      }
+    }
+  }
+</script>
+{% endif %}
+
+{# Legacy header (dealer name + signed-in + Settings/Sign out) only shown
+   when no brand is configured — when a brand is set, the branded bar
+   above already carries the dealer name + Settings + Sign out. #}
+{% if not (dealer.brand and (dealer.brand.logo_url or dealer.brand.primary_color)) %}
 <header>
   <div>
-    <h1>{{ dealer.name }} — Aged Inventory</h1>
+    <h1>{{ dealer.name }}</h1>
     <div class="sub">Signed in as {{ user.email }}{% if viewing_as_admin %} (admin view){% endif %}</div>
   </div>
   <div>
@@ -80,58 +304,552 @@
     <span style="font-size:10px;color:#475569;margin-left:12px" title="build">v4</span>
   </div>
 </header>
+{% endif %}
 <main>
   {% with msgs = get_flashed_messages(with_categories=true) %}
     {% for cat, m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}
   {% endwith %}
 
-  <div class="intro">
-    Below are cars from your inventory that Experience Wholesale has identified as
-    <strong>aging</strong>. Check the ones you'd like us to bid, enter the price
-    you want, add a note if you have specifics, then hit <strong>Submit</strong>.
-    Our team will respond directly in this dashboard and you'll get an
-    <strong>email or text</strong> based on your
-    <a href="{{ url_for('partner.settings_page', slug=slug) }}" style="color:#7dd3fc">settings</a>.
-    <br><br>
-    <strong>Bookmark this page:</strong>
-    <code style="padding:4px 8px;background:#0f172a;border-radius:4px;user-select:all;font-size:12px">{{ request.host_url }}partner/{{ slug }}</code>
-  </div>
+  {# ── 3-way flow chart · how to get a bid from EW ── #}
+  {% set _flowAccent = (dealer.brand and dealer.brand.primary_color) or '#2563eb' %}
+  <div class="flowchart" style="background:linear-gradient(180deg,rgba(37,99,235,.06) 0%,rgba(37,99,235,0) 100%);border:1px solid var(--line,#334155);border-radius:14px;padding:22px 24px;margin:0 0 22px">
+    <div style="font-size:13px;color:#94a3b8;font-weight:700;text-transform:uppercase;letter-spacing:.7px;margin-bottom:14px">{{ '2 Ways to Get a Bid from Experience Wholesale' if wholesaler_mode else '3 Ways to Get a Bid from Experience Wholesale' }}</div>
+    <div class="flow-grid" style="display:grid;grid-template-columns:{{ '1fr 1fr' if wholesaler_mode else '1fr 1fr 1fr' }};gap:14px">
 
-  <div class="bucket-legend">
-    {% if enabled_buckets.get('30_60') %}<span class="e30">30–60 days</span>{% endif %}
-    {% if enabled_buckets.get('60_90') %}<span class="e60">60–90 days</span>{% endif %}
-    {% if enabled_buckets.get('90_plus') %}<span class="e90">90+ days</span>{% endif %}
-    {% if enabled_buckets.get('price_drop') %}<span class="edrop">Price drop</span>{% endif %}
-  </div>
+      <!-- Step 1 -->
+      <div style="background:var(--panel,#1e293b);border:1px solid var(--line,#334155);border-radius:10px;padding:18px;display:flex;flex-direction:column;align-items:flex-start;gap:8px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:{{ _flowAccent }};color:#fff;font-weight:800;font-size:15px">1</span>
+          <span style="font-size:24px">💻</span>
+        </div>
+        <div style="font-size:16px;font-weight:700;color:#e2e8f0">Pictures on Your Computer?</div>
+        <div style="font-size:13px;color:#94a3b8;line-height:1.5;flex:1">Use the <b>Quick Drop</b> below. Drag your photos in, fill in <b>VIN, miles, your ask</b>, and submit.</div>
+        <a href="#qdCard" onclick="document.getElementById('qdCard').open=true;document.getElementById('qdCard').scrollIntoView({behavior:'smooth',block:'start'});return false;"
+           style="font-size:12px;color:#7dd3fc;font-weight:600;text-decoration:none;margin-top:auto">Open Quick Drop ↓</a>
+      </div>
 
-  {% if not rows %}
-    <div class="empty">
-      <h2 style="margin:0 0 8px;">You're clean.</h2>
-      <p>No cars currently hit any of your enabled age or price-drop thresholds. Come back after the next daily digest.</p>
+      <!-- Step 2 -->
+      <div style="background:var(--panel,#1e293b);border:1px solid var(--line,#334155);border-radius:10px;padding:18px;display:flex;flex-direction:column;align-items:flex-start;gap:8px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:{{ _flowAccent }};color:#fff;font-weight:800;font-size:15px">2</span>
+          <span style="font-size:24px">📱</span>
+        </div>
+        <div style="font-size:16px;font-weight:700;color:#e2e8f0">Not at Your Computer?</div>
+        <div style="font-size:13px;color:#94a3b8;line-height:1.5;flex:1">Use our <b>Mobile App</b>. Snap photos on the lot — the app reads the VIN + odometer automatically. Share the link with your team.</div>
+        <a href="#mobileQrCard" onclick="document.getElementById('mobileQrCard').scrollIntoView({behavior:'smooth',block:'center'});return false;"
+           style="font-size:12px;color:#7dd3fc;font-weight:600;text-decoration:none;margin-top:auto">Open the Mobile App ↓</a>
+      </div>
+
+      {% if not wholesaler_mode %}
+      <!-- Step 3 -->
+      <div style="background:var(--panel,#1e293b);border:1px solid var(--line,#334155);border-radius:10px;padding:18px;display:flex;flex-direction:column;align-items:flex-start;gap:8px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:{{ _flowAccent }};color:#fff;font-weight:800;font-size:15px">3</span>
+          <span style="font-size:24px">📋</span>
+        </div>
+        <div style="font-size:16px;font-weight:700;color:#e2e8f0">Select Cars From Your Inventory List Below</div>
+        <div style="font-size:13px;color:#94a3b8;line-height:1.5;flex:1">Cars from your inventory. Check the ones you want offers on, set <b>your price</b>, hit <b>Submit</b>.</div>
+      </div>
+      {% endif %}
     </div>
-  {% else %}
-  <form method="post" action="{{ url_for('partner.submit_requests', slug=slug) }}" id="bidForm">
-    <table>
+
+  </div>
+  <style>
+    @media (max-width: 720px) {
+      .flowchart .flow-grid { grid-template-columns: 1fr !important; }
+    }
+  </style>
+
+  {# ── Quick Drop · request a bid on a car NOT in your inventory ── #}
+  <style>
+    #qdCard{background:var(--panel,#1e293b);border:2px solid #2563eb;border-radius:12px;margin:0 0 18px;overflow:hidden;box-shadow:0 4px 14px rgba(37,99,235,.18)}
+    #qdCard summary{cursor:pointer;padding:22px 26px;font-weight:700;font-size:20px;color:#dbeafe;background:linear-gradient(90deg,rgba(37,99,235,.18),rgba(37,99,235,.05));list-style:none;display:flex;align-items:center;gap:12px;user-select:none;letter-spacing:.2px}
+    #qdCard summary::-webkit-details-marker{display:none}
+    #qdCard summary::before{content:'+';display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;background:#2563eb;color:#fff;border-radius:50%;font-size:24px;font-weight:800;line-height:1;flex-shrink:0;transition:transform .2s}
+    #qdCard[open] summary::before{transform:rotate(45deg)}
+    #qdCard summary:hover{background:linear-gradient(90deg,rgba(37,99,235,.28),rgba(37,99,235,.10))}
+    #qdCard[open] summary{border-bottom:1px solid var(--line,#334155)}
+    #qdCard .qd-body{padding:18px}
+    #qdCard h2{margin:0 0 4px;font-size:20px;color:#f1f5f9}
+    #qdCard .qd-sub{margin:0 0 16px;color:#94a3b8;font-size:13px}
+    #qdDrop{border:2px dashed #334155;border-radius:8px;padding:22px;text-align:center;color:#7a9bb5;background:#0f172a;cursor:pointer;transition:border-color .15s,background .15s}
+    #qdDrop.dragover,#qdDrop:hover{border-color:#3b82f6;background:rgba(59,130,246,.06);color:#cbd5e1}
+    #qdDrop input[type=file]{display:none}
+    #qdThumbs{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+    #qdThumbs .qt{position:relative;width:64px;height:64px;border-radius:6px;overflow:hidden;border:1px solid #334155}
+    #qdThumbs .qt img{width:100%;height:100%;object-fit:cover}
+    #qdThumbs .qt button{position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;border:0;background:#0f172a;color:#f87171;font-size:11px;cursor:pointer;line-height:1;padding:0}
+    .qd-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:14px}
+    @media(max-width:640px){.qd-grid{grid-template-columns:1fr}}
+    #qdCard label{display:block;font-size:11px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
+    #qdCard input[type=text],#qdCard input[type=number],#qdCard textarea{width:100%;padding:10px 12px;border:1px solid #334155;background:#0f172a;color:#f1f5f9;border-radius:6px;font-size:15px;box-sizing:border-box;font-family:inherit}
+    #qdCard textarea{resize:vertical;min-height:80px;line-height:1.5}
+    #qdSubmit{margin-top:14px;width:100%;padding:13px;background:#2563eb;color:#fff;border:0;border-radius:7px;font-weight:600;font-size:15px;cursor:pointer}
+    #qdSubmit:hover{background:#1d4ed8}
+    #qdSubmit:disabled{background:#334155;color:#94a3b8;cursor:not-allowed}
+    #qdMsg{margin-top:10px;padding:10px 14px;border-radius:6px;font-size:14px;display:none}
+    #qdMsg.ok{display:block;background:#064e3b;color:#bbf7d0}
+    #qdMsg.err{display:block;background:#7f1d1d;color:#fecaca}
+  </style>
+  <details id="qdCard">
+    <summary>Quick Drop</summary>
+    <div class="qd-body">
+      <h2>Quick Drop</h2>
+      <p class="qd-sub">Drop pictures (optional). We just need a VIN, miles, and what you want for the car.</p>
+
+      <form id="qdForm">
+        <div id="qdDrop" onclick="document.getElementById('qdFile').click()">
+          📎 Drag photos here, paste, or click to browse
+          <input type="file" id="qdFile" name="photos" accept="image/*" multiple>
+        </div>
+        <div id="qdThumbs"></div>
+
+        <div class="qd-grid">
+          <div style="grid-column:1/-1">
+            <label for="qdVin">VIN <span style="color:#f87171">*</span></label>
+            <input type="text" id="qdVin" name="vin" maxlength="17"
+                   pattern="[A-HJ-NPR-Za-hj-npr-z0-9]{17}"
+                   placeholder="17-character VIN" required
+                   style="font-family:ui-monospace,monospace;text-transform:uppercase;letter-spacing:1px">
+          </div>
+          <div>
+            <label for="qdMiles">Mileage <span style="color:#f87171">*</span></label>
+            <input type="text" id="qdMiles" name="mileage" inputmode="numeric"
+                   placeholder="e.g. 45,000" required>
+          </div>
+          <div style="grid-column:span 2">
+            <label for="qdAsk">Asking price <span style="color:#f87171">*</span></label>
+            <input type="text" id="qdAsk" name="asking_price" inputmode="decimal"
+                   placeholder="$0" required>
+          </div>
+          <div style="grid-column:1/-1">
+            <label for="qdNotes">Notes (optional)</label>
+            <textarea id="qdNotes" name="notes" rows="3"
+                      placeholder="Any extra context — title status, accidents, recent service…"></textarea>
+          </div>
+        </div>
+
+        <div id="qdMsg"></div>
+        <button type="submit" id="qdSubmit">Submit bid request</button>
+      </form>
+    </div>
+  </details>
+
+  <script>
+  (function(){
+    const drop = document.getElementById('qdDrop');
+    const fileInput = document.getElementById('qdFile');
+    const thumbs = document.getElementById('qdThumbs');
+    const form = document.getElementById('qdForm');
+    const msg = document.getElementById('qdMsg');
+    const submitBtn = document.getElementById('qdSubmit');
+    const vinIn = document.getElementById('qdVin');
+    const milesIn = document.getElementById('qdMiles');
+    const askIn = document.getElementById('qdAsk');
+    let files = [];
+
+    function refreshThumbs(){
+      thumbs.innerHTML = '';
+      files.forEach((f, i) => {
+        const url = URL.createObjectURL(f);
+        const w = document.createElement('div');
+        w.className = 'qt';
+        w.innerHTML = `<img src="${url}"><button type="button" data-i="${i}" title="Remove">×</button>`;
+        thumbs.appendChild(w);
+      });
+    }
+    thumbs.addEventListener('click', e => {
+      if (e.target.tagName === 'BUTTON') {
+        files.splice(+e.target.dataset.i, 1);
+        refreshThumbs();
+      }
+    });
+    function addFiles(list){
+      for (const f of list){
+        if (f.type.startsWith('image/')) files.push(f);
+        if (files.length >= 10) break;
+      }
+      refreshThumbs();
+    }
+    fileInput.addEventListener('change', e => addFiles(e.target.files));
+    ['dragenter','dragover'].forEach(ev =>
+      drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('dragover'); }));
+    ['dragleave','drop'].forEach(ev =>
+      drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('dragover'); }));
+    drop.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+    document.addEventListener('paste', e => {
+      if (!document.getElementById('qdCard').open) return;
+      const items = (e.clipboardData||{}).items || [];
+      const imgs = [];
+      for (const it of items) if (it.type && it.type.startsWith('image/')) imgs.push(it.getAsFile());
+      if (imgs.length) addFiles(imgs);
+    });
+
+    function fmtNum(v){ return v.replace(/[^\d]/g,'').replace(/\B(?=(\d{3})+(?!\d))/g,','); }
+    milesIn.addEventListener('input', e => e.target.value = fmtNum(e.target.value));
+    askIn.addEventListener('input', e => {
+      const raw = e.target.value.replace(/[^\d]/g,'');
+      e.target.value = raw ? '$' + fmtNum(raw) : '';
+    });
+    vinIn.addEventListener('input', e => e.target.value = e.target.value.toUpperCase().replace(/[^A-HJ-NPR-Z0-9]/g,'').slice(0,17));
+
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      msg.className = ''; msg.textContent = '';
+      submitBtn.disabled = true; submitBtn.textContent = 'Submitting…';
+      const fd = new FormData();
+      fd.append('vin', vinIn.value.trim());
+      fd.append('mileage', milesIn.value.replace(/,/g,''));
+      fd.append('asking_price', askIn.value.replace(/[^\d.]/g,''));
+      fd.append('notes', document.getElementById('qdNotes').value.trim());
+      files.forEach(f => fd.append('photos', f));
+      try {
+        const r = await fetch('{{ url_for("partner.quick_drop", slug=slug) }}', { method:'POST', body: fd });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+        msg.className = 'ok'; msg.textContent = `Submitted — bid #${j.bid_id}. Our team will respond on this dashboard.`;
+        form.reset(); files = []; refreshThumbs();
+        setTimeout(() => location.reload(), 1500);
+      } catch(err) {
+        msg.className = 'err'; msg.textContent = 'Error: ' + err.message;
+      } finally {
+        submitBtn.disabled = false; submitBtn.textContent = 'Submit bid request';
+      }
+    });
+  })();
+  </script>
+
+  {# ── Quick Drop Requests (cars not in scraped inventory) — pinned above
+       the aged-inventory table so the dealer doesn't have to scroll past
+       it to see EW responses on dropped vehicles. ── #}
+  {% if quick_drop_rows %}
+    <h2 style="margin:8px 0 12px;font-size:18px;color:#cbd5e1;font-weight:600">
+      Quick Drop Requests <span style="color:#7a9bb5;font-weight:400">· {{ quick_drop_rows|length }}</span>
+    </h2>
+    <table class="qd-requests-table" style="margin-bottom:24px">
       <thead>
         <tr>
           <th style="width:36px">#</th>
-          <th style="width:30px"></th>
           <th>Vehicle</th>
           <th>Miles</th>
-          <th>Our Ask</th>
-          <th>Age</th>
-          <th style="width:130px">Your price</th>
-          <th style="width:240px">Your message</th>
+          <th>Your ask</th>
+          <th>Thread</th>
           <th>Status</th>
         </tr>
       </thead>
       <tbody>
-        {% for v in rows %}
+        {% for req in quick_drop_rows %}
+          {% set _has_reply = req.ew_counter or req.ew_message %}
+          <tr data-pbr-id="{{ req.pbr_id }}">
+            <td>
+              <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+                <span style="display:inline-block;min-width:28px;padding:4px 10px;background:#a78bfa;color:#fff;border-radius:14px;font-size:14px;font-weight:800;text-align:center">QD</span>
+                <span class="qd-star-row"
+                      title="{% if _has_reply %}EW responded — review the thread{% else %}Active Quick Drop request — awaiting EW{% endif %}"
+                      style="font-size:22px;line-height:1;color:{% if _has_reply %}#fbbf24{% else %}#475569{% endif %};{% if _has_reply %}animation:qdStarPulse 1.2s ease-in-out infinite;{% endif %}">&#9733;</span>
+              </div>
+            </td>
+            <td>
+              {% if req.year or req.make or req.model %}
+                <div class="car-ymmt">{{ req.year or '' }} {{ req.make or '' }} {{ req.model or '' }} {{ req.trim or '' }}</div>
+              {% endif %}
+              <div class="car-meta">
+                VIN <span style="font-family:ui-monospace,monospace">{{ req.vin }}</span>
+              </div>
+            </td>
+            <td>{{ req.mileage|miles if req.mileage else '—' }}</td>
+            <td><span class="price-you">${{ '{:,.0f}'.format(req.target_price) if req.target_price else '—' }}</span></td>
+            <td>
+              <div class="bid-thread">
+                {% if req.partner_message %}<em>You said:</em> {{ req.partner_message }}<br>{% endif %}
+                {% if req.ew_counter %}<span class="msg-ew"><em>EW offer:</em> ${{ '{:,.0f}'.format(req.ew_counter) }}</span>{% endif %}
+                {% if req.ew_message %}<br><span class="msg-ew">{{ req.ew_message }}</span>{% endif %}
+                {% if not req.partner_message and not req.ew_counter and not req.ew_message %}<em>Awaiting EW response…</em>{% endif %}
+              </div>
+              {% if req.ew_counter or req.ew_message %}
+                <div class="counter-form" data-pbr-id="{{ req.pbr_id }}"
+                     style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+                  <input type="text" class="counter-price" inputmode="numeric" placeholder="Counter $"
+                         style="width:120px;font-size:14px"
+                         oninput="var d=this.value.replace(/[^0-9]/g,'');this.value=d?parseInt(d,10).toLocaleString('en-US'):'';">
+                  <input type="text" class="counter-msg" placeholder="Reply…" style="flex:1;min-width:120px;font-size:14px;width:auto">
+                  <button type="button" onclick="sendCounter(this.parentElement)"
+                          style="padding:6px 14px;background:#2563eb;color:#fff;border:0;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer">Respond</button>
+                </div>
+              {% endif %}
+            </td>
+            <td>
+              {% if _has_reply %}
+                <span class="status-chip status-responded">EW Replied</span>
+              {% else %}
+                <span class="status-chip status-waiting">Awaiting EW</span>
+              {% endif %}
+              {% if req.bid_id %}<div style="font-size:18px;color:#fbbf24;margin-top:12px;font-family:ui-monospace,monospace;font-weight:800;letter-spacing:.5px">Bid #{{ req.bid_id }}</div>{% endif %}
+              <button type="button" class="qd-del" data-pbr-id="{{ req.pbr_id }}"
+                      title="Withdraw this Quick Drop request"
+                      style="margin-top:10px;padding:5px 12px;background:transparent;color:#7a9bb5;border:1px solid #475569;border-radius:5px;font-size:12px;font-weight:600;cursor:pointer">
+                ✕ Delete
+              </button>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <style>
+      @keyframes qdStarPulse {
+        0%, 100% { transform: scale(1); opacity: 1; }
+        50%      { transform: scale(1.25); opacity: 0.7; }
+      }
+    </style>
+    <script>
+    (function(){
+      document.querySelectorAll('.qd-del').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          if (!confirm('Withdraw this Quick Drop request? This cannot be undone.')) return;
+          const id = btn.dataset.pbrId;
+          btn.disabled = true; btn.textContent = 'Deleting…';
+          try {
+            const r = await fetch('/partner/{{ slug }}/qd/' + id + '/delete', { method:'POST' });
+            const j = await r.json();
+            if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+            const tr = btn.closest('tr');
+            if (tr) tr.remove();
+          } catch(e) {
+            alert('Could not delete: ' + e.message);
+            btn.disabled = false; btn.textContent = '✕ Delete';
+          }
+        });
+      });
+    })();
+    </script>
+  {% endif %}
+
+  {# ── Inventory Bid Requests — same card layout as Quick Drop, listed
+       right below so all open bid requests are visible in one stack
+       without expanding bucket sections. NO ✕ Delete (inventory bids
+       can't be withdrawn the same way QD bids can). ── #}
+  {% if inventory_bid_rows %}
+    <h2 style="margin:8px 0 12px;font-size:18px;color:#cbd5e1;font-weight:600">
+      Bid Requests <span style="color:#7a9bb5;font-weight:400">· {{ inventory_bid_rows|length }}</span>
+    </h2>
+    <table class="qd-requests-table" style="margin-bottom:24px">
+      <thead>
+        <tr>
+          <th style="width:36px">#</th>
+          <th>Vehicle</th>
+          <th>Miles</th>
+          <th>Your ask</th>
+          <th>Thread</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for req in inventory_bid_rows %}
+          {% set _has_reply = req.ew_counter or req.ew_message %}
+          <tr data-pbr-id="{{ req.pbr_id }}">
+            <td>
+              <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+                <span style="display:inline-block;min-width:28px;padding:4px 10px;background:#2563eb;color:#fff;border-radius:14px;font-size:14px;font-weight:800;text-align:center">BID</span>
+                <span title="{% if _has_reply %}EW responded — review the thread{% else %}Active bid request — awaiting EW{% endif %}"
+                      style="font-size:22px;line-height:1;color:{% if _has_reply %}#fbbf24{% else %}#475569{% endif %};{% if _has_reply %}animation:qdStarPulse 1.2s ease-in-out infinite;{% endif %}">&#9733;</span>
+              </div>
+            </td>
+            <td>
+              {% if req.year or req.make or req.model %}
+                <div class="car-ymmt">{{ req.year or '' }} {{ req.make or '' }} {{ req.model or '' }} {{ req.trim or '' }}</div>
+              {% endif %}
+              <div class="car-meta">
+                VIN <span style="font-family:ui-monospace,monospace">{{ req.vin }}</span>
+              </div>
+            </td>
+            <td>{{ req.mileage|miles if req.mileage else '—' }}</td>
+            <td><span class="price-you">${{ '{:,.0f}'.format(req.target_price) if req.target_price else '—' }}</span></td>
+            <td>
+              <div class="bid-thread">
+                {% if req.partner_message %}<em>You said:</em> {{ req.partner_message }}<br>{% endif %}
+                {% if req.ew_counter %}<span class="msg-ew"><em>EW offer:</em> ${{ '{:,.0f}'.format(req.ew_counter) }}</span>{% endif %}
+                {% if req.ew_message %}<br><span class="msg-ew">{{ req.ew_message }}</span>{% endif %}
+                {% if not req.partner_message and not req.ew_counter and not req.ew_message %}<em>Awaiting EW response…</em>{% endif %}
+              </div>
+              {% if req.ew_counter or req.ew_message %}
+                <div class="counter-form" data-pbr-id="{{ req.pbr_id }}"
+                     style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+                  <input type="text" class="counter-price" inputmode="numeric" placeholder="Counter $"
+                         style="width:120px;font-size:14px"
+                         oninput="var d=this.value.replace(/[^0-9]/g,'');this.value=d?parseInt(d,10).toLocaleString('en-US'):'';">
+                  <input type="text" class="counter-msg" placeholder="Reply…" style="flex:1;min-width:120px;font-size:14px;width:auto">
+                  <button type="button" onclick="sendCounter(this.parentElement)"
+                          style="padding:6px 14px;background:#2563eb;color:#fff;border:0;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer">Respond</button>
+                </div>
+              {% endif %}
+            </td>
+            <td>
+              {% if _has_reply %}
+                <span class="status-chip status-responded">EW Replied</span>
+              {% else %}
+                <span class="status-chip status-waiting">Awaiting EW</span>
+              {% endif %}
+              {% if req.bid_id %}<div style="font-size:18px;color:#fbbf24;margin-top:12px;font-family:ui-monospace,monospace;font-weight:800;letter-spacing:.5px">Bid #{{ req.bid_id }}</div>{% endif %}
+              <button type="button" class="qd-del" data-pbr-id="{{ req.pbr_id }}"
+                      title="Withdraw this bid request"
+                      style="margin-top:10px;padding:5px 12px;background:transparent;color:#7a9bb5;border:1px solid #475569;border-radius:5px;font-size:12px;font-weight:600;cursor:pointer">
+                ✕ Delete
+              </button>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <script>
+    // Inventory-bid delete uses the /req/<id>/delete alias (same handler
+    // as QD delete on the server, just routed via different URL for
+    // semantic clarity).
+    (function(){
+      document.querySelectorAll('.qd-requests-table .qd-del').forEach(btn => {
+        if (btn.dataset.bound) return; btn.dataset.bound = '1';
+        btn.addEventListener('click', async () => {
+          if (!confirm('Withdraw this bid request? This cannot be undone.')) return;
+          const id = btn.dataset.pbrId;
+          btn.disabled = true; btn.textContent = 'Deleting…';
+          try {
+            const r = await fetch('/partner/{{ slug }}/req/' + id + '/delete', { method:'POST' });
+            const j = await r.json();
+            if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+            const tr = btn.closest('tr');
+            if (tr) tr.remove();
+          } catch(e) {
+            alert('Could not delete: ' + e.message);
+            btn.disabled = false; btn.textContent = '✕ Delete';
+          }
+        });
+      });
+    })();
+    </script>
+  {% endif %}
+
+  {# Wholesalers (no scraped site) skip the entire aged-inventory section.
+     Their submission paths are Quick Drop + mobile only. #}
+  {% if wholesaler_mode %}
+    {# noop — inventory blocks suppressed in wholesaler mode #}
+  {% elif not rows %}
+    <div class="empty">
+      <h2 style="margin:0 0 8px;">You're clean.</h2>
+      <p>No active inventory right now. Come back after the next daily scan.</p>
+    </div>
+  {% else %}
+
+  {# ── Bucket-count cards · click to scroll/expand the matching section ── #}
+  <style>
+    .age-buckets{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin:0 0 18px}
+    .age-bucket-card{background:var(--panel,#1e293b);border:1px solid var(--line,#334155);border-radius:12px;padding:18px 20px;cursor:pointer;transition:transform .15s,border-color .15s;text-decoration:none;display:block}
+    .age-bucket-card:hover{transform:translateY(-2px);border-color:#475569}
+    .age-bucket-card .num{font-size:38px;font-weight:800;line-height:1;margin-bottom:4px}
+    .age-bucket-card .label{font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.7px}
+    .age-bucket-card.under_30{background:linear-gradient(135deg,rgba(34,197,94,.10) 0%,rgba(34,197,94,.02) 100%);border-color:rgba(34,197,94,.25)}
+    .age-bucket-card.under_30 .num{color:#34d399}
+    .age-bucket-card.b30_60{background:linear-gradient(135deg,rgba(59,130,246,.10) 0%,rgba(59,130,246,.02) 100%);border-color:rgba(59,130,246,.25)}
+    .age-bucket-card.b30_60 .num{color:#60a5fa}
+    .age-bucket-card.b60_90{background:linear-gradient(135deg,rgba(245,158,11,.10) 0%,rgba(245,158,11,.02) 100%);border-color:rgba(245,158,11,.25)}
+    .age-bucket-card.b60_90 .num{color:#fbbf24}
+    .age-bucket-card.b90_plus{background:linear-gradient(135deg,rgba(239,68,68,.10) 0%,rgba(239,68,68,.02) 100%);border-color:rgba(239,68,68,.25)}
+    .age-bucket-card.b90_plus .num{color:#f87171}
+    .bucket-section{background:var(--panel,#1e293b);border:1px solid var(--line,#334155);border-radius:12px;margin:0 0 14px;overflow:hidden}
+    .bucket-section summary{cursor:pointer;padding:14px 20px;font-weight:700;font-size:16px;display:flex;align-items:center;gap:10px;list-style:none;user-select:none}
+    .bucket-section summary::-webkit-details-marker{display:none}
+    .bucket-section summary::before{content:'▶';color:#64748b;font-size:11px;transition:transform .2s}
+    .bucket-section[open] summary::before{transform:rotate(90deg)}
+    .bucket-section[open] summary{border-bottom:1px solid var(--line,#334155)}
+    .bucket-section .count{margin-left:auto;font-size:13px;color:#94a3b8;font-weight:600}
+    .bucket-section table{margin:0}
+  </style>
+  {# under_30 has no admin toggle and is always shown. 30/60/90 each
+     respect the partner_alert_config flag so admin can hide individual
+     buckets per-dealer (same toggle that drives the daily digest). #}
+  <div class="age-buckets">
+    <a class="age-bucket-card under_30"  href="#bucket-under_30" onclick="return bucketToggle('under_30', event);">
+      <div class="num">{{ bucket_rows.under_30|length }}</div><div class="label">&lt; 30 Days</div>
+    </a>
+    {% if enabled_buckets.get('30_60', True) %}
+    <a class="age-bucket-card b30_60"    href="#bucket-30_60" onclick="return bucketToggle('30_60', event);">
+      <div class="num">{{ bucket_rows['30_60']|length }}</div><div class="label">30 – 60 Days</div>
+    </a>
+    {% endif %}
+    {% if enabled_buckets.get('60_90', True) %}
+    <a class="age-bucket-card b60_90"    href="#bucket-60_90" onclick="return bucketToggle('60_90', event);">
+      <div class="num">{{ bucket_rows['60_90']|length }}</div><div class="label">60 – 90 Days</div>
+    </a>
+    {% endif %}
+    {% if enabled_buckets.get('90_plus', True) %}
+    <a class="age-bucket-card b90_plus"  href="#bucket-90_plus" onclick="return bucketToggle('90_plus', event);">
+      <div class="num">{{ bucket_rows['90_plus']|length }}</div><div class="label">90+ Days</div>
+    </a>
+    {% endif %}
+  </div>
+  <script>
+    function bucketToggle(key, evt){
+      const d = document.getElementById('bucket-' + key);
+      if (!d) return false;
+      const wasOpen = d.open;
+      d.open = !wasOpen;
+      // Only scroll when opening — closing should stay where you are.
+      if (!wasOpen) d.scrollIntoView({behavior:'smooth', block:'start'});
+      if (evt) evt.preventDefault();
+      return false;
+    }
+  </script>
+
+  <form method="post" action="{{ url_for('partner.submit_requests', slug=slug) }}" id="bidForm">
+
+  {% set _bucket_meta = [
+    ('under_30', '< 30 Days', '#34d399'),
+    ('30_60',   '30 – 60 Days', '#60a5fa'),
+    ('60_90',   '60 – 90 Days', '#fbbf24'),
+    ('90_plus', '90+ Days', '#f87171')
+  ] %}
+  {% for _key, _label, _color in _bucket_meta %}
+    {% set _b_rows = bucket_rows[_key] %}
+    {# under_30 always shows; 30/60/90 obey the partner_alert_config toggle #}
+    {% set _allowed = (_key == 'under_30') or enabled_buckets.get(_key, True) %}
+    {% if _b_rows and _allowed %}
+      {# Auto-open bucket sections that contain at least one row with an
+         active bid request — so the dealer doesn't have to expand every
+         bucket to find their pending bids. #}
+      {% set _has_any_req = namespace(v=false) %}
+      {% for v in _b_rows %}{% if already_requested_vins.get(v.vin) %}{% set _has_any_req.v = true %}{% endif %}{% endfor %}
+      <details class="bucket-section" id="bucket-{{ _key }}"{% if _has_any_req.v %} open{% endif %}>
+        <summary>
+          <span style="color:{{ _color }};font-size:18px;font-weight:800">{{ _b_rows|length }}</span>
+          {{ _label }}
+          <span class="count">{{ _b_rows|length }} car{{ '' if _b_rows|length == 1 else 's' }}</span>
+        </summary>
+        <table>
+          <thead>
+            <tr>
+              <th style="width:36px">#</th>
+              <th style="width:30px"></th>
+              <th>Vehicle</th>
+              <th>Miles</th>
+              <th>Our Ask</th>
+              <th>Age</th>
+              <th style="width:130px">Your price</th>
+              <th style="width:240px">Your message</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+        {% for v in _b_rows %}
           {% set age = v|best_age_days %}
           {% set src = v|age_source %}
           {% set req = already_requested_vins.get(v.vin) %}
-          <tr>
-            <td><span style="display:inline-block;min-width:28px;padding:4px 10px;background:#2563eb;color:#fff;border-radius:14px;font-size:15px;font-weight:800;text-align:center">{{ loop.index }}</span></td>
+          <tr{% if req %} class="has-req"{% endif %}>
+            <td>
+              {# Desktop: numbered counter pill. Mobile: days-on-lot pill
+                 (red 90+, amber 60+, blue otherwise). CSS swaps which
+                 one is visible. #}
+              <span class="row-num" style="display:inline-block;min-width:28px;padding:4px 10px;background:#2563eb;color:#fff;border-radius:14px;font-size:15px;font-weight:800;text-align:center">{{ loop.index }}</span>
+              <span class="row-age-mobile"
+                    style="display:none;min-width:44px;padding:4px 8px;border-radius:14px;font-size:13px;font-weight:800;text-align:center;background:{% if age|int >= 90 %}#7f1d1d;color:#fecaca{% elif age|int >= 60 %}#78350f;color:#fde68a{% else %}#1e3a8a;color:#dbeafe{% endif %}">{{ age }}d</span>
+            </td>
             <td>
               {% if req %}
                 <span title="Already submitted">–</span>
@@ -141,12 +859,23 @@
             </td>
             <td>
               <div class="car-ymmt">
-                {% if v.url %}<a href="{{ v.url }}" target="_blank" rel="noopener">{{ v.year }} {{ v.make }} {{ v.model }} {{ v.trim or '' }}</a>
-                {% else %}{{ v.year }} {{ v.make }} {{ v.model }} {{ v.trim or '' }}{% endif %}
+                {# YMM is a dual-link: desktop opens the dealer's listing
+                   in a new tab, mobile opens the per-car bid-detail
+                   page in this tab. CSS toggles which is visible. #}
+                <a class="ymm-mobile" href="{{ url_for('partner.bid_detail', slug=slug, inv_id=v.id) }}"
+                   style="display:none">{{ v.year }} {{ v.make }} {{ v.model }} {{ v.trim or '' }}</a>
+                <span class="ymm-desktop">{% if v.url %}<a href="{{ v.url }}" target="_blank" rel="noopener">{{ v.year }} {{ v.make }} {{ v.model }} {{ v.trim or '' }}</a>
+                {% else %}{{ v.year }} {{ v.make }} {{ v.model }} {{ v.trim or '' }}{% endif %}</span>
               </div>
               <div class="car-meta">
                 VIN <span style="font-family:ui-monospace,monospace">{{ v.vin }}</span>
                 {% if v.ext_color %} · {{ v.ext_color }}{% endif %}
+              </div>
+              {# Mobile-only: dealer's listed price + price-drop, inlined
+                 since the "Our Ask" column is hidden on phones. #}
+              <div class="mobile-ask" style="display:none;font-size:12px;color:#94a3b8;margin-top:4px">
+                ask {{ v.price|money if v.price else '—' }}
+                {% if v.price_drop_amount %}<span style="color:#a78bfa">↓ ${{ '{:,.0f}'.format(v.price_drop_amount) }}</span>{% endif %}
               </div>
             </td>
             <td>{{ v.mileage|miles if v.mileage else '—' }}</td>
@@ -196,6 +925,7 @@
             <td>
               {% if req %}
                 {% if req.ew_counter or req.ew_message %}
+                  <span class="qd-star" style="display:inline-block;color:#fbbf24;font-size:22px;vertical-align:middle;margin-right:6px;animation:qdStarPulse 1.2s ease-in-out infinite" title="EW responded — review the thread">&#9733;</span>
                   <span class="status-chip status-responded">EW Replied</span>
                 {% else %}
                   <span class="status-chip status-waiting">Awaiting EW</span>
@@ -205,8 +935,12 @@
             </td>
           </tr>
         {% endfor %}
-      </tbody>
-    </table>
+          </tbody>
+        </table>
+      </details>
+    {% endif %}
+  {% endfor %}
+
     <div class="submit-bar">
       <div class="sel-count">
         <b id="selCount">0</b> car<span id="selS">s</span> selected
@@ -215,6 +949,91 @@
     </div>
   </form>
   {% endif %}
+
+  {# ── Mobile QR + intro · moved below the inventory + submit so the dealer
+       sees buckets/Quick Drop first. QR is the only thing on the mobile
+       card now (no link/copy-link UI per spec). The 3-way flow chart's
+       step 2 deep-links to #mobileQrCard via Show me the QR ↓. ── #}
+  {% if dealer.mobile_token %}
+    {# Pass `back` so the mobile app can show a "← Back to Dashboard"
+       button — only present when the user came from the partner portal. #}
+    {% set _dash_url = request.host_url.rstrip('/') ~ '/partner/' ~ slug ~ '/d/' ~ dealer.dashboard_token %}
+    {% set mobile_url = request.host_url.rstrip('/') ~ '/mobile?p=' ~ dealer.mobile_token ~ '&back=' ~ _dash_url|urlencode %}
+    <div id="mobileQrCard" style="background:var(--panel,#1e293b);border:1px solid var(--line,#334155);border-radius:10px;padding:22px;margin:24px 0 18px;display:flex;align-items:center;gap:24px;flex-wrap:wrap;justify-content:center">
+      <div style="min-width:220px;flex:1">
+        <div style="font-size:18px;color:#cbd5e1;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:10px">
+          <span style="font-size:24px">📱</span>
+          Submit Cars from Anywhere
+        </div>
+        <div style="font-size:13px;color:#94a3b8;line-height:1.55">
+          For when you're <b style="color:#cbd5e1">walking the lot</b> or away from your computer. Open the app on a phone — snap a few photos of a car, the app reads the <b style="color:#cbd5e1">VIN and odometer automatically</b>, you set what you want for it, and we send the bid back here.
+          <br><br>
+          Every submission is tagged to <b style="color:#cbd5e1">{{ dealer.name }}</b>. No login needed — share with anyone on your team.
+        </div>
+      </div>
+      {# Desktop: render QR for phone-scan workflow.
+         Mobile: skip the QR (silly to scan with the device you're on)
+                 and show a tap-to-open button that goes straight to the
+                 mobile app on this same device. #}
+      <div class="qr-wrap-desktop" style="display:flex;flex-direction:column;align-items:center;gap:6px;background:#fff;padding:14px;border-radius:10px">
+        <canvas id="qrCanvas" data-url="{{ mobile_url }}" style="display:block"></canvas>
+        <div style="font-size:11px;color:#475569;font-weight:600;letter-spacing:.3px">SCAN WITH PHONE</div>
+      </div>
+      <div class="mobile-cta-stack" style="display:none;flex-direction:column;gap:10px;width:100%">
+        <a class="open-mobile-btn" href="{{ mobile_url }}"
+           style="padding:14px 22px;background:#2563eb;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;text-align:center;box-shadow:0 4px 14px rgba(37,99,235,.35)">
+          📱 Open Mobile App
+        </a>
+        <button type="button" class="share-mobile-btn"
+                onclick="shareMobileLink()"
+                style="padding:14px 22px;background:transparent;color:#7dd3fc;border:1px solid #475569;border-radius:10px;font-weight:700;font-size:15px;text-align:center;cursor:pointer">
+          ✉️ Share via Text
+        </button>
+      </div>
+    </div>
+    <style>
+      @media (max-width: 720px) {
+        #mobileQrCard .qr-wrap-desktop { display: none !important; }
+        #mobileQrCard .mobile-cta-stack { display: flex !important; }
+      }
+    </style>
+    <script>
+      // Mobile share — Web Share API (native share sheet w/ SMS, AirDrop,
+      // email, etc.) with sms: fallback. URL is the same one the QR
+      // encodes, so the recipient lands directly in the partner-tagged
+      // mobile app on their phone.
+      function shareMobileLink(){
+        const url = {{ mobile_url|tojson }};
+        const dealerName = {{ dealer.name|tojson }};
+        const txt = `Submit cars to ${dealerName}: ${url}`;
+        if (navigator.share) {
+          navigator.share({ title: 'Mobile bid submission', text: txt, url: url })
+                   .catch(()=>{ /* user cancelled, no-op */ });
+        } else {
+          window.location.href = 'sms:?body=' + encodeURIComponent(txt);
+        }
+      }
+    </script>
+    <script src="{{ url_for('static', filename='qrious.min.js') }}"></script>
+    <script>
+      (function(){
+        function draw(){
+          const canvas = document.getElementById('qrCanvas');
+          if (!canvas) return;
+          const url = canvas.dataset.url;
+          if (typeof QRious === 'undefined') {
+            canvas.outerHTML = '<div style="width:220px;padding:30px 12px;font-size:11px;color:#475569;text-align:center;line-height:1.4">QR library failed to load.</div>';
+            return;
+          }
+          new QRious({ element: canvas, value: url, size: 220, level: 'M',
+                       background: '#ffffff', foreground: '#0f172a' });
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', draw);
+        else draw();
+      })();
+    </script>
+  {% endif %}
+
 </main>
 
 <script>
@@ -377,13 +1196,25 @@ function showInventoryToast(delta) {
 
 let baselineCarCount = {{ rows|length }};
 
-// Initial load: capture baseline so we only chime on *new* responses
+// Initial load: capture baseline so the 15s poll only chimes on *new*
+// responses arriving AFTER this load. Note: we deliberately DO NOT
+// bulk-mark-seen here anymore — the floating banners need the unseen
+// state to persist so they stay on-screen until the dealer dismisses
+// them (✕) or responds. Each banner clears its own pbr_seen state on
+// dismiss; the chime suppression is handled by lastUnreadIds locally.
 fetch('{{ url_for("partner.poll_unread", slug=slug) }}').then(r=>r.json()).then(d => {
   if (d.responses) lastUnreadIds = new Set(d.responses.map(r => r.pbr_id));
   if (typeof d.total_displayable === 'number') baselineCarCount = d.total_displayable;
-  // Mark everything as seen on first load so we don't chime on the existing ones
-  fetch('{{ url_for("partner.mark_seen", slug=slug) }}', {method:'POST'});
 });
+
+// Chime on page load when one or more banners are present so the dealer
+// gets the audio cue even on a hard reload (not just on between-load
+// poll-detected new arrivals). Browsers gate audio behind a user
+// gesture — chime() is wrapped in try/catch so a silent fail just means
+// the banners are still visible without sound.
+{% if unread_responses %}
+  setTimeout(() => { try { chime(); } catch(e) {} }, 250);
+{% endif %}
 
 setInterval(() => {
   fetch('{{ url_for("partner.poll_unread", slug=slug) }}')
@@ -412,6 +1243,24 @@ setInterval(() => {
     })
     .catch(()=>{});
 }, 15000);
+
+// Silent periodic refresh every 30s — pulls fresh data without chime or
+// star. The chime + gold star are reserved exclusively for real EW
+// responses (fired from the 15s /poll handler above), so the dealer
+// only gets an alert when there's actually something new from EW.
+// Skips when:
+//   • Any form field is focused (don't blow away a half-typed counter
+//     or Quick Drop submission)
+//   • The Quick Drop card is currently expanded (likely composing)
+function _safeToReload() {
+  const a = document.activeElement;
+  if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' ||
+            a.tagName === 'SELECT' || a.isContentEditable)) return false;
+  const qd = document.getElementById('qdCard');
+  if (qd && qd.open) return false;
+  return true;
+}
+setInterval(() => { if (_safeToReload()) location.reload(); }, 30 * 1000);
 </script>
 </body>
 </html>

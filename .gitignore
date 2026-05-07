@@ -6,3 +6,7 @@ venv/
 static/uploads/
 *.log
 curl.txt
+*-credentials.json
+*.dump
+google_vision_key.json
+service-account*.json
