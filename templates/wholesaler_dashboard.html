@@ -208,6 +208,13 @@ tr:last-child td{border-bottom:none}
     <div class="stat-num blue" id="stat-wholesalers">{{ stats.wholesalers or 0 }}</div>
     <div class="stat-label">Active Wholesalers</div>
   </div>
+  <div class="stat-divider"></div>
+  <a href="{{ url_for('wholesaler_review.signup_visits', reviewer=reviewer_slug) }}"
+     class="stat-item" style="text-decoration:none;color:inherit;cursor:pointer"
+     title="Click for full visitor list, IPs, and locations">
+    <div class="stat-num" style="color:#fbbf24" id="stat-signup-hits">{{ stats.signup_hits_today or 0 }}</div>
+    <div class="stat-label">Signup Page · {{ stats.signup_unique_today or 0 }} unique · {{ stats.signup_submits_today or 0 }} submit{{ '' if stats.signup_submits_today == 1 else 's' }} today</div>
+  </a>
 </div>
 
 <div class="filters">
