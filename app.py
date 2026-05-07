@@ -1668,11 +1668,13 @@ def bid_detail(bid_id):
         market_intel = None
 
     # ── ML model second opinion (per-make XGBoost) ────────────────────
-    # Built from existing market_intel + bid attrs. Lazy-loads the model
-    # on first call per gunicorn worker, kept in-memory after that.
-    # Returns None for makes without a trained model — silent skip.
+    # TEMPORARILY DISABLED 2026-05-07 — ml_predict module import + first
+    # XGBoost inference adds 100-700ms per page load. Need to pre-warm at
+    # startup or refactor before re-enabling on hot path. The Gemini-side
+    # ML wiring (in _run_assessment) keeps working — that is a once-per-bid
+    # cost during the 30-60s Gemini call, where 200ms is invisible.
     ml_prediction = None
-    try:
+    if False:  # was: try:
         from ml_predict import predict_for_bid
         _mi = market_intel or {}
         _manheim = _mi.get('manheim') or {}
@@ -3781,6 +3783,8 @@ def _run_assessment(bid_id):
 
     # ML model second opinion — feeds Gemini as a calibration anchor.
     # Same predict_for_bid call as the bid card uses.
+    # Note: in _run_assessment scope the locals are 'vauto' and 'ipacket'
+    # (not 'vauto_data' and 'ipacket_data' as in bid_detail).
     _ml_pred_assess = None
     try:
         from ml_predict import predict_for_bid as _ml_predict_fn
@@ -3788,10 +3792,10 @@ def _run_assessment(bid_id):
         _mh = _mi_for_ml.get('manheim') or {}
         _rb = _mi_for_ml.get('rbook') or {}
         _est_w = (_mh.get('adjusted_mmr') or _mh.get('base_mmr')
-                  or (vauto_data or {}).get('mmr'))
+                  or (vauto or {}).get('mmr'))
         _mkt_a = (_rb.get('avg_price') or _rb.get('median')
-                  or (vauto_data or {}).get('rbook'))
-        _ipkt_msrp = (ipacket_data or {}).get('total_msrp')
+                  or (vauto or {}).get('rbook'))
+        _ipkt_msrp = (ipacket or {}).get('total_msrp')
         if _est_w and bid.get('make'):
             _ml_pred_assess = _ml_predict_fn({
                 'make_name':           bid.get('make') or '',
