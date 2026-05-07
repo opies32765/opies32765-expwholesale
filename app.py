@@ -1668,13 +1668,11 @@ def bid_detail(bid_id):
         market_intel = None
 
     # ── ML model second opinion (per-make XGBoost) ────────────────────
-    # TEMPORARILY DISABLED 2026-05-07 — ml_predict module import + first
-    # XGBoost inference adds 100-700ms per page load. Need to pre-warm at
-    # startup or refactor before re-enabling on hot path. The Gemini-side
-    # ML wiring (in _run_assessment) keeps working — that is a once-per-bid
-    # cost during the 30-60s Gemini call, where 200ms is invisible.
+    # Built from existing market_intel + bid attrs. Models are pre-warmed
+    # at gunicorn startup (see ml_predict.preload_all() called from wsgi.py),
+    # so each bid card render hits warm cache (~5-30ms typical).
     ml_prediction = None
-    if False:  # was: try:
+    try:
         from ml_predict import predict_for_bid
         _mi = market_intel or {}
         _manheim = _mi.get('manheim') or {}

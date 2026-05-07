@@ -75,20 +75,24 @@ def _build_feature_row(bid: dict, meta: dict) -> np.ndarray | None:
             row[col] = float(v) if v is not None else 0.0
         except (TypeError, ValueError):
             row[col] = 0.0
-    # Sold-year / month from sold_at if not set
-    if not row.get('sold_year') and bid.get('sold_at'):
-        try:
-            ts = pd.to_datetime(bid['sold_at'], utc=True, errors='coerce')
-            if pd.notna(ts):
-                row['sold_year'] = ts.year
-                row['sold_month'] = ts.month
-        except Exception:
-            pass
-    # If still no sold_year, use today (we're predicting "what we'd pay now")
+    # Sold-year / month: stdlib datetime (pd.to_datetime adds ~50ms per call).
+    # If sold_at provided, parse it; else use today (predicting "what we would pay now").
     if not row.get('sold_year'):
+        sa = bid.get('sold_at')
         from datetime import datetime
-        row['sold_year'] = datetime.utcnow().year
-        row['sold_month'] = datetime.utcnow().month
+        if isinstance(sa, datetime):
+            row['sold_year'] = sa.year
+            row['sold_month'] = sa.month
+        elif isinstance(sa, str) and len(sa) >= 7:
+            try:
+                row['sold_year'] = int(sa[:4])
+                row['sold_month'] = int(sa[5:7])
+            except (ValueError, TypeError):
+                pass
+        if not row.get('sold_year'):
+            now = datetime.utcnow()
+            row['sold_year'] = now.year
+            row['sold_month'] = now.month
 
     # Categoricals — replay top-K + OTHER
     cats = meta.get('categories', {})
@@ -193,3 +197,39 @@ def predict_for_bid(bid: dict) -> dict | None:
         'make_name': make,
         'baseline_prediction': base_pred,
     }
+
+
+
+def preload_all() -> int:
+    """Pre-warm: just import xgboost/numpy + load ONE model so the
+    XGBoost JIT/import cost is paid at gunicorn boot, not on the first
+    bid card render. Other models lazy-load on first request per make.
+
+    Earlier version loaded ALL 31 models per worker — with 10 workers
+    spawning simultaneously after HUP, that hammered CPU (30s * 10 = load
+    avg 51). This version keeps each worker boot under 5s.
+    """
+    if not MODELS_DIR.exists():
+        return 0
+    metas = list(MODELS_DIR.glob('*.meta.json'))
+    if not metas:
+        return 0
+    # Load ONE model — the largest one — so we exercise the full import path
+    metas.sort(key=lambda p: p.stat().st_size, reverse=True)
+    try:
+        import json as _json
+        with open(metas[0]) as fp:
+            meta = _json.load(fp)
+        make = meta.get('make_name')
+        if make:
+            _load_make(make)
+            # Warm xgboost JIT with one dummy predict
+            sample = _cache.get(make.upper())
+            if sample and sample.get('model'):
+                import numpy as _np
+                X = _np.zeros((1, len(sample['meta']['feature_columns'])), dtype=float)
+                sample['model'].predict(X)
+            return 1
+    except Exception:
+        pass
+    return 0

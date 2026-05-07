@@ -23,3 +23,17 @@ try:
         print('[wsgi] wholesaler_review blueprint registered (drift recovery)', flush=True)
 except Exception as _e:
     print(f'[wsgi] wholesaler_review register failed: {_e}', flush=True)
+
+
+# Pre-warm ML models so the first bid card render doesn't pay the
+# 5s pandas/xgboost import + 700-1900ms per-make cold load. Each worker
+# imports this module once on boot via gunicorn.
+try:
+    import time as _t
+    _t0 = _t.monotonic()
+    from ml_predict import preload_all as _ml_preload
+    _n_models = _ml_preload()
+    print(f'[wsgi] ml_predict pre-warmed: {_n_models} models in '
+          f'{(_t.monotonic()-_t0)*1000:.0f}ms', flush=True)
+except Exception as _ml_e:
+    print(f'[wsgi] ml_predict preload failed: {_ml_e}', flush=True)
