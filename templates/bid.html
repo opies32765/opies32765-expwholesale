@@ -239,10 +239,22 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
   <div class="vehicle-banner">
     <div class="vb-left">
       <div class="vb-meta">
-        <div class="bid-id">Bid #{{ bid.id }} · {{ time_ago(bid.created_at) }}</div>
+        <div class="bid-id">Bid #{{ bid.id }} · {{ time_ago(bid.created_at) }} <a href="#" onclick="forceReprocess(event, {{ bid.id }})" style="margin-left:10px;font-size:11px;color:#a78bfa;text-decoration:none;border:1px solid rgba(167,139,250,.3);border-radius:4px;padding:2px 8px;font-weight:600" title="Hard reset: wipe all 3 lookups + claim, queue for fresh worker pick-up">↻ Force re-process</a></div>
         <div class="vin-big">{{ bid.vin or 'No VIN' }}</div>
+        {% if vin_candidate %}
+        <div style="margin-top:6px;padding:6px 10px;background:rgba(251,191,36,.10);border:1px solid rgba(251,191,36,.4);border-radius:6px;font-size:12px;color:#fbbf24;display:inline-flex;align-items:center;gap:8px;font-family:'JetBrains Mono',ui-monospace,monospace">
+          <span style="font-family:'Inter',sans-serif;font-weight:600">Photo VIN (verify):</span>
+          <span>{{ vin_candidate }}</span>
+          <button onclick="applyVinCandidate('{{ vin_candidate }}')" style="background:#fbbf24;color:#0b0f19;border:none;border-radius:4px;padding:3px 8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif">Use</button>
+        </div>
+        {% endif %}
         {% if bid.year or bid.make %}
         <div class="vehicle-desc-big">{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }} {{ bid.trim or '' }}</div>
+        {% endif %}
+        {% if bid.salesperson %}
+        <div style="margin-top:8px;display:inline-flex;align-items:center;gap:6px;padding:4px 10px;background:rgba(168,139,250,.12);border:1px solid rgba(168,139,250,.4);border-radius:14px;font-size:12px;color:#c4b5fd;font-weight:600" title="EW salesperson tagged from dealer assignment when this bid was submitted">
+          <span>👤</span><span>via {{ bid.salesperson }}</span>
+        </div>
         {% endif %}
       </div>
       <span class="badge badge-{{ bid.status }}">{{ bid.status.replace('_',' ') }}</span>
@@ -301,11 +313,12 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
     </div>
     <div class="photos-scroll" id="photos-scroll">
       {% for photo in photos %}
+      {% set _src = photo.local_path or photo.url %}
       <div class="photo-thumb{% if loop.index > max_visible %} photo-hidden{% endif %}{% if not photo.include_in_share %} photo-excluded{% endif %}"
            id="photo-tile-{{ photo.id }}"
-           onclick="openLightbox('{{ photo.url|thumb_url('full') }}')"
+           onclick="openLightbox('{{ _src|thumb_url('full') }}')"
            style="position:relative">
-        <img src="{{ photo.url|thumb_url('strip') }}" alt="Vehicle photo" loading="lazy" referrerpolicy="no-referrer">
+        <img src="{{ _src|thumb_url('strip') }}" alt="Vehicle photo" loading="lazy" referrerpolicy="no-referrer">
         <label onclick="event.stopPropagation()"
                style="position:absolute;bottom:4px;left:4px;right:4px;background:rgba(0,0,0,.75);color:#fff;padding:4px 6px;border-radius:5px;font-size:11px;font-weight:600;display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none">
           <input type="checkbox"
@@ -443,23 +456,22 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
             {% endif %}
             {% endif %}
 
+            {# Legacy v1 — adjustment percent (kept for old rows pre-pivot) #}
             {% if ai_log.llm_adjustment_pct is not none %}
             <div style="display:flex;justify-content:space-between;align-items:baseline;padding:8px 0;margin-top:6px;border-top:1px dashed #1e293b">
-              <span style="font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px">AI Adjustment</span>
+              <span style="font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px">AI Adjustment (legacy v1)</span>
               {% set adj = ai_log.llm_adjustment_pct | float %}
               <span style="font-size:14px;font-weight:700;font-family:monospace;color:{% if adj >= 0 %}#4ade80{% else %}#fbbf24{% endif %}">
                 {{ '%+.1f' % adj }}%
               </span>
             </div>
-            {% if ai_log.llm_reasoning %}
-            <div style="font-size:12px;color:#94a3b8;line-height:1.5;padding:6px 0 2px;font-style:italic">{{ ai_log.llm_reasoning }}</div>
-            {% endif %}
             {% endif %}
 
+            {# Recommended buy — v2 stores target_buy directly into final_price #}
             {% if ai_log.final_price %}
             <div style="display:flex;justify-content:space-between;align-items:baseline;padding:10px 0 4px;margin-top:6px;border-top:1px solid #1e293b">
               <span style="font-size:11px;font-weight:700;color:#c084fc;text-transform:uppercase;letter-spacing:.5px">Recommended Buy</span>
-              <span style="font-size:18px;font-weight:800;color:#c084fc;font-family:monospace">${{ '{:,}'.format(ai_log.final_price) }}</span>
+              <span style="font-size:22px;font-weight:800;color:#c084fc;font-family:monospace">${{ '{:,}'.format(ai_log.final_price) }}</span>
             </div>
             {% if ai_log.confidence_low and ai_log.confidence_high %}
             <div style="text-align:right;font-size:11px;color:#64748b;font-family:monospace;margin-top:-2px">
@@ -468,15 +480,34 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
             {% endif %}
             {% endif %}
 
+            {# Reasoning — surfaced for both v1 and v2 #}
+            {% if ai_log.llm_reasoning %}
+            <div style="margin-top:10px;padding:10px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:6px">
+              <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Reasoning</div>
+              <div style="font-size:13px;color:#cbd5e1;line-height:1.5;font-style:italic">{{ ai_log.llm_reasoning }}</div>
+            </div>
+            {% endif %}
+
+            {# v2 flag chips — Gemini's own tags for what drove the call #}
+            {% if ai_log.flags_v2 %}
+            <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">
+              {% for flag in ai_log.flags_v2 %}
+              {% set positive = flag in ('clean_carfax','low_miles','low_miles_vs_comps','options_premium','strong_retail_spread','healthy_spread','hot_velocity','high_lsl_demand','scarce_unit','one_owner') %}
+              {% set negative = flag in ('accident_history','accidents','high_miles','high_miles_vs_comps','stale_market','soft_retail','rough_condition','salvage_title','rebuilt_title','fleet_title','total_loss','airbag_deployment') %}
+              <span style="font-size:11px;font-family:monospace;padding:3px 8px;border-radius:4px;{% if positive %}background:rgba(34,197,94,.12);color:#86efac;border:1px solid rgba(34,197,94,.3){% elif negative %}background:rgba(239,68,68,.12);color:#fca5a5;border:1px solid rgba(239,68,68,.3){% else %}background:rgba(148,163,184,.10);color:#94a3b8;border:1px solid rgba(148,163,184,.25){% endif %}">{{ flag }}</span>
+              {% endfor %}
+            </div>
+            {% endif %}
+
             <div style="margin-top:10px;font-size:9px;color:#334155;text-align:right;text-transform:uppercase;letter-spacing:.4px">
-              Config v{{ ai_log.config_version }} · {{ time_ago(ai_log.created_at) }}
+              {% if ai_log.bucket %}Legacy v1{% else %}v2 single-shot synthesis{% endif %} · {{ time_ago(ai_log.created_at) }}
             </div>
           </div>
           {% endif %}
 
           <div id="assess-output">
             {% if not ai_assessment %}
-            <div style="font-size:13px;color:#334155;font-style:italic">Gemini reviews all photos, mileage, notes, DIA dealer history, auction comps, and market listings — then applies bucket-weighted math + qualitative adjustment.</div>
+            <div style="font-size:13px;color:#334155;font-style:italic">Gemini reviews photos, Carfax, AutoCheck, iPacket, market stack (rBook + MMR + LSL history) — then synthesizes a target buy with confidence range and flags.</div>
             {% endif %}
           </div>
         </div>
@@ -565,6 +596,431 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
         <div style="margin-top:10px;font-size:9px;color:#334155;text-align:right;text-transform:uppercase;letter-spacing:.4px">
           Year ±{{ di.config_used.year_tolerance or 2 }} · {{ di.config_used.recent_days or 90 }}d window
+        </div>
+      </div>
+      {% endif %}
+
+      {# ─────────────────── Past Deals — Same Make/Model (LSL Sales Ledger) ─────────────────── #}
+      {# Raw rows from /opt/livesaleslog/crm.db (mirror of LSL deals).  All columns mirror
+         LSL field labels verbatim — no derived buckets, no pitch scores. #}
+      {% set bi = (ai_log.buyer_intel if ai_log else None) or None %}
+      {% if bi and bi.patterns and bi.patterns.total_deals %}
+      <div class="card" style="border-color:#10b981;flex-shrink:0" id="buyer-intel-card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          Past Deals — Same Make/Model
+          <span style="font-size:10px;font-weight:700;color:#34d399;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.25);border-radius:4px;padding:2px 8px;letter-spacing:.4px">
+            LSL SALES LEDGER
+          </span>
+        </div>
+
+        {# Rolling 3 / 6 / 12-month windows — count + avg sale + avg gross at each. #}
+        {% set _wins = bi.patterns.windows or {} %}
+        <div style="margin-top:10px;display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+          {% for _key, _label in [('90d','3 mo'), ('180d','6 mo'), ('365d','12 mo')] %}
+          {% set _w = _wins.get(_key) or {} %}
+          <div style="padding:10px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:7px">
+            <div style="font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Last {{ _label }}</div>
+            <div style="margin-top:6px;font-family:monospace">
+              <div><span style="color:#34d399;font-size:18px;font-weight:700">{{ _w.n or 0 }}</span> <span style="font-size:11px;color:#94a3b8">Deals</span></div>
+              <div style="margin-top:2px"><span style="color:#e2e8f0;font-size:12px;font-weight:600">{{ _w.unique_buyers or 0 }}</span> <span style="font-size:10px;color:#94a3b8">customers</span></div>
+              {% if _w.avg_sale_price %}
+              <div style="margin-top:4px"><span style="color:#fbbf24;font-size:13px;font-weight:600">${{ '{:,}'.format(_w.avg_sale_price|int) }}</span> <span style="font-size:10px;color:#94a3b8">avg Sale</span></div>
+              {% endif %}
+              {% if _w.avg_front_value %}
+              <div><span style="color:#a78bfa;font-size:13px;font-weight:600">${{ '{:,}'.format(_w.avg_front_value|int) }}</span> <span style="font-size:10px;color:#64748b">avg Front Value</span></div>
+              {% endif %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+
+        {# Top buyer candidates (ranked by 12mo activity × recency × gross × lifetime) #}
+        {% if bi.top_pitch_buyers %}
+        <div style="margin-top:14px">
+          <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+            Top buyer candidates
+          </div>
+          {% for b in bi.top_pitch_buyers %}
+          <div style="padding:8px 12px;background:linear-gradient(90deg,rgba(16,185,129,.10),rgba(16,185,129,.02));border-left:3px solid #10b981;border-radius:4px;margin-bottom:6px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">
+              <span style="font-size:13px;font-weight:700;color:#34d399">💰 {{ b.buyer_name }}</span>
+              <span style="font-size:10px;color:#94a3b8;font-family:monospace">score {{ b.pitch_score }}{% if b.bucket %} · {{ b.bucket }}{% endif %}</span>
+            </div>
+            {% if b.best_phone or b.cust_email or b.active_rep %}
+            <div style="margin-top:4px;font-size:10px;color:#64748b;font-family:monospace">
+              {% if b.active_rep %}rep: {{ b.active_rep }}{% endif %}{% if b.active_rep and (b.best_phone or b.cust_email) %} · {% endif %}{% if b.best_phone %}{{ b.best_phone }}{% endif %}{% if b.best_phone and b.cust_email %} · {% endif %}{% if b.cust_email %}{{ b.cust_email }}{% endif %}
+            </div>
+            {% endif %}
+
+            {# Actual vehicles this buyer bought from us — same YMM #}
+            {% if b.deals %}
+            <div style="margin-top:8px;padding-top:6px;border-top:1px dashed rgba(16,185,129,.20);font-family:monospace">
+              <div style="display:grid;grid-template-columns:90px 80px 1fr 90px 80px;gap:10px;font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:.4px;padding:2px 0;font-weight:700">
+                <span>Date</span>
+                <span>Stock #</span>
+                <span>Vehicle</span>
+                <span style="text-align:right">Sale</span>
+                <span style="text-align:right">Gross</span>
+              </div>
+              {% for d in b.deals %}
+              <div style="display:grid;grid-template-columns:90px 80px 1fr 90px 80px;gap:10px;font-size:10px;color:#cbd5e1;padding:2px 0;align-items:center">
+                <span style="color:#94a3b8">{{ (d.sold_at or '')[:10] }}</span>
+                <span style="color:#cbd5e1">{{ d.stock_no or '?' }}</span>
+                <span style="color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ d.vehicle_info or '' }}">{{ d.vehicle_info or '' }}</span>
+                <span style="color:#fbbf24;text-align:right">${{ '{:,}'.format((d.sale_price or 0)|int) }}</span>
+                <span style="color:#a78bfa;text-align:right">${{ '{:,}'.format((d.front_value or 0)|int) }}</span>
+              </div>
+              {% endfor %}
+            </div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+
+        {# Long tail — other recent buyers not already in top_pitch #}
+        {% set pitched_names = bi.top_pitch_buyers | map(attribute='buyer_name') | list if bi.top_pitch_buyers else [] %}
+        {% set tail = bi.recent_buyers | rejectattr('buyer_name','in',pitched_names) | list if bi.recent_buyers else [] %}
+        {% if tail %}
+        <details style="margin-top:10px">
+          <summary style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;cursor:pointer;padding:6px 0">
+            Other recent buyers ({{ tail | length }})
+          </summary>
+          <div style="margin-top:6px">
+            {% for r in tail %}
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b;margin-bottom:5px">
+              <span style="font-size:12px;color:#e2e8f0">{{ r.buyer_name }}</span>
+              <span style="font-size:11px;color:#94a3b8;font-family:monospace">
+                {{ r.deals_window }} deals{% if r.avg_sale_price %} · paid ${{ '{:,}'.format(r.avg_sale_price|int) }}{% endif %}{% if r.avg_gross %} · gross ${{ '{:,}'.format(r.avg_gross|int) }}{% endif %}{% if r.days_since_last is not none %} · {{ r.days_since_last }}d ago{% endif %}
+              </span>
+            </div>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
+
+        <div style="margin-top:10px;font-size:9px;color:#334155;text-align:right;text-transform:uppercase;letter-spacing:.4px">
+          LSL ledger · Year ±{{ bi.config_used.year_tolerance or 2 }} · {{ bi.config_used.recent_days or 365 }}d window
+        </div>
+      </div>
+      {% endif %}
+
+      {# ─────────────────── rBook Retail Comps ─────────────────── #}
+      {# Prefer the freshly-computed market_intel (always current). Fall back
+         to ai_log.market_intel if the bid view didn't populate it. #}
+      {% set mi = market_intel or (ai_log.market_intel if ai_log else None) or None %}
+      {% set rb = (mi.rbook if mi else None) or {} %}
+      {% if rb.n_visible or rb.retail_median or rb.stocking_report %}
+      <div class="card" style="border-color:#22c55e;flex-shrink:0" id="rbook-card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          rBook Retail Comps
+          <span style="font-size:10px;font-weight:700;color:#86efac;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.30);border-radius:4px;padding:2px 8px;letter-spacing:.4px">RETAIL</span>
+        </div>
+
+        {% if rb.retail_median %}
+        <div style="margin-top:10px;padding:12px;background:rgba(34,197,94,.10);border:1px solid rgba(34,197,94,.30);border-radius:8px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+            <span style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Asking price</span>
+            <span style="font-size:11px;color:#64748b;font-family:monospace">{{ rb.n_visible }} comps{% if rb.count_text %} · vAuto reports {{ rb.count_text }}{% endif %}</span>
+          </div>
+          <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;font-family:monospace">
+            <span style="color:#86efac;font-size:24px;font-weight:800">${{ '{:,}'.format(rb.retail_median) }}</span>
+            <span style="font-size:11px;color:#94a3b8">median</span>
+            {% if rb.retail_min and rb.retail_max %}
+            <span style="font-size:11px;color:#64748b">range ${{ '{:,}'.format(rb.retail_min) }}&ndash;${{ '{:,}'.format(rb.retail_max) }}</span>
+            {% endif %}
+          </div>
+          {% if rb.median_days_on_lot or rb.avg_mileage %}
+          <div style="margin-top:6px;display:flex;gap:14px;flex-wrap:wrap;font-family:monospace;font-size:11px;color:#94a3b8">
+            {% if rb.median_days_on_lot %}<div>median {{ rb.median_days_on_lot }}d on lot</div>{% endif %}
+            {% if rb.avg_mileage %}<div>avg {{ '{:,}'.format(rb.avg_mileage) }} mi in comps</div>{% endif %}
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+
+        {% if rb.stocking_report %}
+        {% set sr = rb.stocking_report %}
+        <div style="margin-top:10px;padding:8px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;font-family:monospace;font-size:11px;color:#94a3b8">
+          <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Stocking Report Card (vAuto)</div>
+          <div style="display:flex;gap:14px;flex-wrap:wrap">
+            {% if sr.demand %}<div>Demand <span style="color:#86efac;font-weight:700">{{ sr.demand }}</span></div>{% endif %}
+            {% if sr.interest %}<div>Interest <span style="color:#e2e8f0;font-weight:700">{{ sr.interest }}</span></div>{% endif %}
+            {% if sr.volume %}<div>Volume <span style="color:#e2e8f0;font-weight:700">{{ sr.volume }}</span></div>{% endif %}
+            {% if sr.days_supply %}<div>Days Supply <span style="color:#fbbf24;font-weight:700">{{ sr.days_supply }}</span></div>{% endif %}
+            {% if sr.availability %}<div>Availability <span style="color:#e2e8f0;font-weight:700">{{ sr.availability }}</span></div>{% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        {# Top-3 closest-in-miles rBook comps. #1 highlighted (closest). #}
+        {% if rb.closest_3 and bid.mileage %}
+        <div style="margin-top:10px">
+          <div style="font-size:10px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">
+            Closest-mile comps · subject {{ '{:,}'.format(bid.mileage) }} mi
+          </div>
+          {% for c in rb.closest_3 %}
+          {% set delta = (c.mileage or 0) - bid.mileage %}
+          {% set sign = '+' if delta >= 0 else '' %}
+          {% set is_top = loop.index == 1 %}
+          <div style="margin-bottom:6px;padding:10px 12px;
+                      background:{% if is_top %}rgba(34,197,94,.16){% else %}rgba(34,197,94,.06){% endif %};
+                      border:1px solid {% if is_top %}rgba(34,197,94,.55){% else %}rgba(34,197,94,.20){% endif %};
+                      border-radius:6px;
+                      {% if is_top %}box-shadow:0 0 0 1px rgba(34,197,94,.18){% endif %}">
+            <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-family:monospace">
+              <span style="font-size:11px;color:{% if is_top %}#86efac{% else %}#94a3b8{% endif %};font-weight:700">#{{ loop.index }}{% if is_top %} &#9733; CLOSEST{% endif %}</span>
+              <span style="font-size:14px;font-weight:700;color:#e2e8f0">{{ '{:,}'.format(c.mileage|int) }} mi</span>
+              <span style="font-size:11px;color:#64748b">({{ sign }}{{ '{:,}'.format(delta|int) }})</span>
+              {% if c.price %}<span style="font-size:14px;font-weight:700;color:#86efac">${{ '{:,}'.format(c.price|int) }}</span>{% endif %}
+              {% if c.days_on_lot is not none %}
+                {% set dol = c.days_on_lot|int %}
+                <span style="font-size:11px;font-weight:700;
+                             color:{% if dol <= 15 %}#86efac{% elif dol <= 45 %}#fbbf24{% else %}#fca5a5{% endif %}">
+                  {{ dol }}d on lot
+                </span>
+              {% endif %}
+              {% if c.is_certified %}<span style="font-size:9px;font-weight:700;color:#a78bfa;background:rgba(167,139,250,.15);border-radius:3px;padding:1px 5px">CPO</span>{% endif %}
+              {% if c.pending_sale %}<span style="font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.15);border-radius:3px;padding:1px 5px">PENDING</span>{% endif %}
+            </div>
+            <div style="margin-top:3px;font-size:11px;color:#64748b;font-family:monospace">
+              {{ c.dealer or 'unknown dealer' }}{% if c.dealer_city %} &middot; {{ c.dealer_city }}{% if c.dealer_state %}, {{ c.dealer_state }}{% endif %}{% endif %}{% if c.distance %} &middot; {{ c.distance|int }} mi away{% endif %}
+              {% if c.msrp_lookup %}
+                {% if c.msrp_lookup.msrp %}
+                  &middot; <span style="color:#cbd5e1;font-weight:700">MSRP ${{ '{:,}'.format(c.msrp_lookup.msrp|int) }}</span>
+                  {% if c.price %}
+                    {% set markdown_pct = ((c.msrp_lookup.msrp - c.price) / c.msrp_lookup.msrp * 100)|round(1) %}
+                    <span style="color:#94a3b8">({{ markdown_pct }}% off MSRP)</span>
+                  {% endif %}
+                {% elif c.msrp_lookup.status == 'pending' or c.msrp_lookup.status == 'in_progress' %}
+                  &middot; <span style="color:#fbbf24">MSRP pending&hellip;</span>
+                {% elif c.msrp_lookup.status == 'failed' %}
+                  &middot; <span style="color:#64748b">MSRP unavailable</span>
+                {% endif %}
+              {% else %}
+                &middot; <span style="color:#fbbf24">MSRP queued</span>
+              {% endif %}
+            </div>
+          </div>
+          {% endfor %}
+          <div style="font-size:10px;color:#475569;text-align:right;font-family:monospace">
+            green DOL &le;15d (correct price) &middot; yellow 16-45d &middot; red &gt;45d (overpriced)
+          </div>
+        </div>
+        {% endif %}
+
+        {% if not rb.retail_median %}
+        <div style="margin-top:10px;padding:10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#64748b;font-size:12px;font-style:italic">
+          rBook scraped but no comparable retail listings extracted. Either rare/exotic with thin retail or virtualized table didn't yield rows on this run.
+        </div>
+        {% endif %}
+
+        <div style="margin-top:10px;font-size:9px;color:#334155;text-align:right;text-transform:uppercase;letter-spacing:.4px">
+          scraped from saved appraisal · oscar-worker rBook
+        </div>
+      </div>
+      {% endif %}
+
+      {# ─────────────────── MMR Auction Floor ─────────────────── #}
+      {% set mh = (mi.manheim if mi else None) or {} %}
+      {% if mh.n_transactions or mh.base_mmr or mh.adjusted_mmr %}
+      <div class="card" style="border-color:#f59e0b;flex-shrink:0" id="mmr-card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          MMR Auction Floor
+          <span style="font-size:10px;font-weight:700;color:#fbbf24;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.30);border-radius:4px;padding:2px 8px;letter-spacing:.4px">WHOLESALE</span>
+        </div>
+
+        {% if mh.mmr_median %}
+        <div style="margin-top:10px;padding:12px;background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.30);border-radius:8px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+            <span style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Hammer prices</span>
+            <span style="font-size:11px;color:#64748b;font-family:monospace">{{ mh.n_transactions }} transactions{% if mh.date_range %} · {{ mh.date_range }}{% endif %}</span>
+          </div>
+          <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;font-family:monospace">
+            <span style="color:#fbbf24;font-size:24px;font-weight:800">${{ '{:,}'.format(mh.mmr_median) }}</span>
+            <span style="font-size:11px;color:#94a3b8">median</span>
+            {% if mh.mmr_min and mh.mmr_max %}
+            <span style="font-size:11px;color:#64748b">range ${{ '{:,}'.format(mh.mmr_min) }}&ndash;${{ '{:,}'.format(mh.mmr_max) }}</span>
+            {% endif %}
+          </div>
+          {% if mh.mmr_p25 and mh.mmr_p75 %}
+          <div style="margin-top:6px;font-family:monospace;font-size:11px;color:#94a3b8">
+            p25–p75 ${{ '{:,}'.format(mh.mmr_p25) }}&ndash;${{ '{:,}'.format(mh.mmr_p75) }}
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+
+        {% if mh.base_mmr or mh.adjusted_mmr %}
+        <div style="margin-top:10px;padding:8px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;font-family:monospace;font-size:11px;color:#94a3b8">
+          <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">vAuto MMR</div>
+          {% if mh.base_mmr %}<div>Base: <span style="color:#e2e8f0">${{ '{:,}'.format(mh.base_mmr) }}</span></div>{% endif %}
+          {% if mh.adjusted_mmr %}<div>Adjusted: <span style="color:#e2e8f0">${{ '{:,}'.format(mh.adjusted_mmr) }}</span>{% if mh.avg_cr_grade %} <span style="color:#64748b">&middot; avg grade {{ mh.avg_cr_grade }}</span>{% endif %}</div>{% endif %}
+          {% if mh.avg_odometer %}<div>Avg odometer in comps: <span style="color:#e2e8f0">{{ '{:,}'.format(mh.avg_odometer) }}</span></div>{% endif %}
+          {% if mh.pricing_date %}<div style="color:#64748b">Pricing date: {{ mh.pricing_date }}</div>{% endif %}
+        </div>
+        {% endif %}
+
+        {# Closest-in-miles MMR sale — highlights the single most comparable hammer price. #}
+        {% if mh.closest_1 and bid.mileage %}
+        {% set cm = mh.closest_1 %}
+        {% set cm_delta = (cm.odometer or 0) - bid.mileage %}
+        {% set cm_sign = '+' if cm_delta >= 0 else '' %}
+        <div style="margin-top:10px;padding:10px 12px;background:rgba(245,158,11,.16);border:1px solid rgba(245,158,11,.55);border-radius:6px;box-shadow:0 0 0 1px rgba(245,158,11,.18)">
+          <div style="font-size:10px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">
+            &#9733; Closest-mile MMR sale &middot; subject {{ '{:,}'.format(bid.mileage) }} mi
+          </div>
+          <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-family:monospace">
+            <span style="font-size:14px;font-weight:700;color:#e2e8f0">{{ '{:,}'.format(cm.odometer|int) }} mi</span>
+            <span style="font-size:11px;color:#64748b">({{ cm_sign }}{{ '{:,}'.format(cm_delta|int) }})</span>
+            {% if cm.sale_price %}<span style="font-size:14px;font-weight:700;color:#fbbf24">${{ '{:,}'.format(cm.sale_price|int) }}</span>{% endif %}
+            {% if cm.date_sold %}<span style="font-size:11px;color:#94a3b8">sold {{ cm.date_sold }}</span>{% endif %}
+            {% if cm.cr_grade %}<span style="font-size:11px;color:#94a3b8">CR {{ cm.cr_grade }}</span>{% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        {% if mi.implied_buyer_gross %}
+        <div style="margin-top:8px;padding:6px 10px;background:#0f172a;border:1px dashed #475569;border-radius:5px;text-align:center;font-family:monospace;font-size:11px">
+          {% if mi.implied_buyer_gross > 5000 %}
+          <span style="color:#86efac">retail−MMR spread <span style="font-weight:700">${{ '{:,}'.format(mi.implied_buyer_gross) }}</span> · strong demand cushion</span>
+          {% elif mi.implied_buyer_gross < 2000 %}
+          <span style="color:#fca5a5">retail−MMR spread <span style="font-weight:700">${{ '{:,}'.format(mi.implied_buyer_gross) }}</span> · soft retail</span>
+          {% else %}
+          <span style="color:#cbd5e1">retail−MMR spread <span style="font-weight:700">${{ '{:,}'.format(mi.implied_buyer_gross) }}</span> · typical demand</span>
+          {% endif %}
+        </div>
+        {% endif %}
+
+        {% if not mh.n_transactions and not mh.base_mmr %}
+        <div style="margin-top:10px;padding:10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#64748b;font-size:12px;font-style:italic">
+          No recent Manheim transactions for this YMM — rare/exotic.
+        </div>
+        {% endif %}
+
+        <div style="margin-top:10px;font-size:9px;color:#334155;text-align:right;text-transform:uppercase;letter-spacing:.4px">
+          scraped from saved appraisal · oscar-worker MMR
+        </div>
+      </div>
+      {% endif %}
+
+      {# Legacy combined Market Anchors card kept disabled — replaced by 2 split cards above #}
+      {% if false %}
+      {% set _legacy_mh = mi.manheim or {} %}
+      {% set rb = mi.rbook or {} %}
+      <div class="card" style="border-color:#a855f7;flex-shrink:0" id="market-intel-card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          Market Work-Back
+          <span style="font-size:10px;font-weight:700;color:#c084fc;background:rgba(168,85,247,.12);border:1px solid rgba(168,85,247,.25);border-radius:4px;padding:2px 8px;letter-spacing:.4px">
+            STACK
+          </span>
+        </div>
+
+        {# ── The vertical stack: retail → MMR → our buy ── #}
+        <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px" id="market-anchors-stack">
+
+          {% if rb.retail_median %}
+          <div style="padding:10px 12px;background:rgba(34,197,94,.10);border:1px solid rgba(34,197,94,.30);border-radius:7px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline">
+              <span style="font-size:10px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.5px">Retail asking (rBook)</span>
+              <span style="font-size:11px;color:#64748b;font-family:monospace">{{ rb.n_visible }} comps{% if rb.count_text %} · vAuto reports {{ rb.count_text }}{% endif %}</span>
+            </div>
+            <div style="margin-top:4px;display:flex;align-items:baseline;gap:14px;font-family:monospace">
+              <span style="color:#86efac;font-size:22px;font-weight:800">${{ '{:,}'.format(rb.retail_median) }}</span>
+              <span style="font-size:11px;color:#94a3b8">median</span>
+              {% if rb.retail_min and rb.retail_max %}
+              <span style="font-size:11px;color:#64748b">${{ '{:,}'.format(rb.retail_min) }}&ndash;${{ '{:,}'.format(rb.retail_max) }}</span>
+              {% endif %}
+              {% if rb.median_days_on_lot %}
+              <span style="font-size:11px;color:#64748b">· {{ rb.median_days_on_lot }}d med on lot</span>
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
+
+          {% if mi.implied_buyer_gross %}
+          <div style="padding:6px 12px;background:#0f172a;border:1px dashed #475569;border-radius:6px;text-align:center">
+            <span style="font-size:11px;color:#fbbf24;font-family:monospace">↓ Retail − MMR Spread
+              <span style="font-weight:700">&minus;${{ '{:,}'.format(mi.implied_buyer_gross) }}</span>
+              {% if mi.buyer_margin_pct %}<span style="color:#64748b">({{ mi.buyer_margin_pct }}% of retail)</span>{% endif %}
+              ↓
+            </span>
+          </div>
+          {% endif %}
+
+          {% if mh.mmr_median %}
+          <div style="padding:10px 12px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);border-radius:7px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline">
+              <span style="font-size:10px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:.5px">MMR auction floor</span>
+              <span style="font-size:11px;color:#64748b;font-family:monospace">{{ mh.n_transactions }} hammer prices{% if mh.date_range %} · {{ mh.date_range }}{% endif %}</span>
+            </div>
+            <div style="margin-top:4px;display:flex;align-items:baseline;gap:14px;font-family:monospace">
+              <span style="color:#fbbf24;font-size:22px;font-weight:800">${{ '{:,}'.format(mh.mmr_median) }}</span>
+              <span style="font-size:11px;color:#94a3b8">median</span>
+              {% if mh.mmr_p25 and mh.mmr_p75 %}
+              <span style="font-size:11px;color:#64748b">p25–p75 ${{ '{:,}'.format(mh.mmr_p25) }}&ndash;${{ '{:,}'.format(mh.mmr_p75) }}</span>
+              {% endif %}
+            </div>
+          </div>
+          {% endif %}
+
+          {% if mi.lsl_avg_front_value %}
+          <div style="padding:10px 12px;background:rgba(167,139,250,.08);border:1px solid rgba(167,139,250,.25);border-radius:7px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline">
+              <span style="font-size:10px;font-weight:700;color:#a78bfa;text-transform:uppercase;letter-spacing:.5px">LSL 12mo Avg Front Value</span>
+            </div>
+            <div style="margin-top:4px;display:flex;align-items:baseline;gap:14px;font-family:monospace">
+              <span style="color:#a78bfa;font-size:18px;font-weight:700">${{ '{:,}'.format(mi.lsl_avg_front_value|int) }}</span>
+              <span style="font-size:11px;color:#94a3b8">avg Front Value on like-deals</span>
+            </div>
+          </div>
+          {% endif %}
+
+        </div>
+
+        {% if mi.implied_buyer_gross %}
+        <div style="margin-top:8px;padding:6px 10px;background:#0f172a;border-radius:5px;text-align:center;font-family:monospace;font-size:11px">
+          {% if mi.implied_buyer_gross > 5000 %}
+          <span style="color:#86efac">Strong retail spread (${{ '{:,}'.format(mi.implied_buyer_gross) }}) — buyer has cushion above MMR</span>
+          {% elif mi.implied_buyer_gross < 2000 %}
+          <span style="color:#fca5a5">Thin retail spread (${{ '{:,}'.format(mi.implied_buyer_gross) }}) — soft retail, conservative bid</span>
+          {% else %}
+          <span style="color:#cbd5e1">Moderate retail spread (${{ '{:,}'.format(mi.implied_buyer_gross) }}) — typical demand</span>
+          {% endif %}
+        </div>
+        {% endif %}
+
+        {# ── Stocking Report Card from rBook ── #}
+        {% if rb.stocking_report %}
+        {% set sr = rb.stocking_report %}
+        <div style="margin-top:10px;padding:8px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;font-family:monospace;font-size:11px;color:#94a3b8">
+          <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Stocking Report Card (vAuto)</div>
+          <div style="display:flex;gap:14px;flex-wrap:wrap">
+            {% if sr.demand %}<div>Demand <span style="color:#86efac;font-weight:700">{{ sr.demand }}</span></div>{% endif %}
+            {% if sr.interest %}<div>Interest <span style="color:#e2e8f0;font-weight:700">{{ sr.interest }}</span></div>{% endif %}
+            {% if sr.volume %}<div>Volume <span style="color:#e2e8f0;font-weight:700">{{ sr.volume }}</span></div>{% endif %}
+            {% if sr.days_supply %}<div>Days Supply <span style="color:#fbbf24;font-weight:700">{{ sr.days_supply }}</span></div>{% endif %}
+            {% if sr.availability %}<div>Availability <span style="color:#e2e8f0;font-weight:700">{{ sr.availability }}</span></div>{% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        {# ── vAuto book context ── #}
+        {% if mh.base_mmr or mh.adjusted_mmr %}
+        <div style="margin-top:8px;padding:8px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;font-family:monospace;font-size:11px;color:#94a3b8">
+          {% if mh.base_mmr %}<div>vAuto Base MMR: <span style="color:#e2e8f0">${{ '{:,}'.format(mh.base_mmr) }}</span></div>{% endif %}
+          {% if mh.adjusted_mmr %}<div>vAuto Adjusted MMR: <span style="color:#e2e8f0">${{ '{:,}'.format(mh.adjusted_mmr) }}</span>{% if mh.avg_cr_grade %} <span style="color:#64748b">· avg grade {{ mh.avg_cr_grade }}</span>{% endif %}</div>{% endif %}
+        </div>
+        {% endif %}
+
+        {% if not mh.n_transactions and not rb.n_visible %}
+        <div style="margin-top:10px;padding:10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#64748b;font-size:12px;font-style:italic">
+          No recent Manheim or rBook data for this YMM — rare/exotic. Target relies on baseline + LSL only.
+        </div>
+        {% endif %}
+
+        <div style="margin-top:10px;font-size:9px;color:#334155;text-align:right;text-transform:uppercase;letter-spacing:.4px">
+          rbook retail · mmr floor · lsl pvr · synthesized in AI Assessment above
         </div>
       </div>
       {% endif %}
@@ -1195,6 +1651,20 @@ async function decodeVin() {
   }
 }
 
+function applyVinCandidate(candidate) {
+  // Drop the candidate into the VIN field, expand Vehicle Details so the user
+  // can eyeball-correct against the photo, scroll to it, and focus the input.
+  // No auto-save — wrong-length / misread VINs would just replay the bug.
+  const f = document.getElementById('f-vin');
+  if (f) f.value = (candidate || '').toUpperCase();
+  const body = document.getElementById('vehicle-details-body');
+  if (body && body.style.display === 'none') {
+    if (typeof toggleVehicleDetails === 'function') toggleVehicleDetails();
+    else body.style.display = 'block';
+  }
+  if (f) { f.scrollIntoView({behavior:'smooth', block:'center'}); f.focus(); f.select(); }
+}
+
 async function saveVehicle() {
   const data = {
     vin: document.getElementById('f-vin').value.trim().toUpperCase() || null,
@@ -1651,6 +2121,20 @@ async function submitShare(action) {
   _assessPoll = setInterval(checkAssess, 5000);
 })();
 {% endif %}
+
+
+function forceReprocess(e, bid_id){
+  e.preventDefault();
+  if(!confirm("Wipe vAuto/AccuTrade/iPacket lookups + claim and re-queue?")) return;
+  fetch("/api/admin/bid/" + bid_id + "/force-reprocess", {method:"POST"})
+    .then(r => r.json())
+    .then(d => {
+      if(d.ok){
+        alert("Reset queued. A worker will pick it up on next poll.");
+        setTimeout(() => location.reload(), 800);
+      } else { alert("Failed: " + (d.error||"unknown")); }
+    });
+}
 </script>
 
 </body>
