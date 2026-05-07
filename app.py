@@ -1034,7 +1034,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
         # gets the 23,576 candidate rejected because "ZIP" appears in the 50-char
         # context window of the unlabeled fallback.
         labeled_before = re.findall(
-            r'\b(?:MILEAGE|ODOMETER|ODO|MILES)\b[\s:]+(\d{1,3}(?:,\d{3})+|\d{3,7})\b',
+            r'\b(?:MILEAGE|ODOMETER|ODO|MILES)\b[\s:\*\-\.#\(\)]+(\d{1,3}(?:,\d{3})+|\d{3,7})\b',
             up)
         if labeled_before:
             for c in labeled_before:
@@ -1615,10 +1615,17 @@ def bid_detail(bid_id):
                     return None
             return x
 
-        if vauto_data and vauto_data.get('market_intel_cached'):
-            cached = vauto_data['market_intel_cached']
-            market_intel = _maybe_parse(cached) if isinstance(cached, str) else cached
-        elif vauto_data:
+        # market_intel_cached_complete check — direct API enrichment only
+        # caches rbook (manheim arrives later via VM 120). If manheim has
+        # since completed, the cache is stale; force recompute.
+        _cached_mi = vauto_data.get('market_intel_cached') if vauto_data else None
+        if _cached_mi:
+            _parsed_cache = _maybe_parse(_cached_mi) if isinstance(_cached_mi, str) else _cached_mi
+            _cache_has_manheim = bool((_parsed_cache or {}).get('manheim'))
+            _mh_done = vauto_data and vauto_data.get('manheim_completed_at')
+            if _cache_has_manheim or not _mh_done:
+                market_intel = _parsed_cache
+        if (market_intel is None) and vauto_data:
             # Lazy fill: compute live and persist for next render.
             # One-shot extra fetch of the heavy JSONB columns.
             _db2 = get_db()
@@ -2277,6 +2284,9 @@ def twilio_webhook():
     """, (contact_id, from_phone, vin, miles, body, driver_token, from_phone))
     bid_id = cur.fetchone()['id']
 
+    # Direct API kick — supersedes legacy VM 120 polling for this bid.
+    _kick_direct_for_intake(bid_id)
+
     # Apply AI-extracted fields (color, int_color, year/make/model/trim, asking_price).
     # Only fills NULL columns — never overwrites regex-extracted values above.
     if text_ai:
@@ -2871,6 +2881,28 @@ def _run_assessment(bid_id):
     if not bid:
         db.close()
         return {'error': 'Not found'}
+
+    # Mileage guardrail — refuse to assess if mileage is NULL.
+    # Without an odometer reading, the AI hallucinates low_miles / high_miles
+    # flags and produces confident dollar figures with no basis. Bid 1012
+    # (no photo) and bid 1020 (OCR regex bug) both hit this on 2026-05-07.
+    # A human must confirm mileage before a buy recommendation is generated.
+    if bid.get('mileage') is None:
+        cur.execute(
+            "UPDATE bids SET ai_assessment=%s, ai_assessed_at=NOW(), ai_price=NULL "
+            "WHERE id=%s",
+            ('**MANUAL REVIEW NEEDED**\n\n'
+             'Mileage was not captured from the intake. Please add the odometer '
+             'reading and re-run the assessment. No buy recommendation will be '
+             'generated without verified mileage.',
+             bid_id)
+        )
+        db.commit()
+        db.close()
+        print(f'[ASSESS] Bid {bid_id} REFUSED -- mileage is NULL '
+              f'(human must confirm odometer before pricing)', flush=True)
+        return {'success': False, 'error': 'mileage_missing',
+                'message': 'Mileage required for assessment'}
 
     cur.execute("SELECT url FROM bid_photos WHERE bid_id = %s ORDER BY id LIMIT 8", (bid_id,))
     photos = cur.fetchall()
@@ -4846,6 +4878,9 @@ def mobile_submit():
           rep_name or None))
 
     bid_id = cur.fetchone()['id']
+
+    # Direct API kick — supersedes legacy VM 120 polling for this bid.
+    _kick_direct_for_intake(bid_id)
 
     if pbr_id:
         cur.execute("UPDATE partner_bid_requests SET bid_id=%s WHERE id=%s",
@@ -6959,6 +6994,51 @@ def _ensure_watchdog():
 # Maps EW worker_id -> Proxmox vmid. Hardcoded for now; future: small DB table.
 # vm-worker-1 currently runs in vmid 9000 (the original template VM).
 # Clones for workers 2-5 will be at vmids 100-103.
+def _kick_direct_for_intake(bid_id):
+    """Kick direct vAuto BFF API enrichment for a freshly-created bid.
+
+    Spawns a daemon thread that:
+      1. Inserts an idempotent vauto_lookups placeholder row (so the
+         UPDATE inside kick_direct_enrichment has a target).
+      2. Waits 2s — gives any in-flight AI vehicle-decode time to write
+         year/make/model into the bids row, since direct API needs them.
+      3. Calls kick_direct_enrichment(bid_id, get_db).
+
+    Idempotent: if VM 120 EWEnrichRbook also picks up the bid, the final
+    UPDATE filters on `rbook_completed_at IS NULL` so whoever finishes
+    second is a silent no-op. If direct API can't run (no vehicle data,
+    cookies stale, network), the legacy worker remains the fallback.
+
+    Use from every bid-intake INSERT site instead of the URL-capture-only
+    hook. Safe to call multiple times for the same bid_id.
+    """
+    def _go():
+        # No placeholder INSERT — that was breaking phase 1 worker
+        # eligibility (claim query says NOT EXISTS row, which our
+        # placeholder violated). kick_direct_enrichment now upserts
+        # the row itself on success.
+        # Wait 2s — gives AI vehicle decode time to populate
+        # year/make/model on the bids row before direct API tries.
+        import time as _t
+        _t.sleep(2)
+        try:
+            from vauto_enrichment import kick_direct_enrichment
+            kick_direct_enrichment(int(bid_id), get_db)
+        except Exception as _e:
+            print(f"[direct-intake] kick failed bid={bid_id}: {_e}",
+                  flush=True)
+
+    try:
+        import threading
+        threading.Thread(
+            target=_go, daemon=True, name=f"intake-direct-{bid_id}"
+        ).start()
+        print(f"[direct-intake] kicked bid={bid_id}", flush=True)
+    except Exception as _err:
+        print(f"[direct-intake] thread spawn failed bid={bid_id}: {_err}",
+              flush=True)
+
+
 _WORKER_VMID_MAP = {
     'vm-worker-1': 9000,
     'vm-worker-2': 100,
@@ -9528,6 +9608,9 @@ def api_bid_external():
           raw_message, data.get('asking_price'), notes_text))
     bid_id = cur.fetchone()['id']
 
+    # Direct API kick — supersedes legacy VM 120 polling for this bid.
+    _kick_direct_for_intake(bid_id)
+
     # Store listing photos (CDN URLs)
     for photo_url in (data.get('photos') or []):
         cur.execute("INSERT INTO bid_photos (bid_id, url) VALUES (%s, %s)",
@@ -9710,6 +9793,9 @@ def api_bid_quick_drop():
           year, make, model, trim, mileage, color,
           raw_message, asking_price, full_notes, _trim_confidence))
     bid_id = cur.fetchone()['id']
+
+    # Direct API kick — supersedes legacy VM 120 polling for this bid.
+    _kick_direct_for_intake(bid_id)
 
     # Save photos
     for photo_url in saved_photos:

@@ -149,6 +149,33 @@ def enrich_bid_direct(bid_id: int, vehicle: dict) -> dict:
 
     result['competitive_set'] = parse_competitive_set(rb_resp)
     result['price_guides'] = parse_price_guides(pg_resp)
+
+    # body-style fallback — vAuto BFF treats body-suffix model names
+    # ('RS 6 Avant', 'S550 Coupe') as strict filters that return ~1 row.
+    # When initial comp set is suspiciously small AND model contains a
+    # space, retry with the last word stripped. Use the larger result.
+    _initial_rows = len((result['competitive_set'] or {}).get('rows') or [])
+    _model = vehicle.get('model') or ''
+    if _initial_rows < 5 and ' ' in _model:
+        _stripped = _model.rsplit(' ', 1)[0].strip()
+        if _stripped and _stripped != _model:
+            log.info('bid %d rbook %d rows on model=%r; retry with %r',
+                     bid_id, _initial_rows, _model, _stripped)
+            try:
+                _v_retry = dict(vehicle)
+                _v_retry['model'] = _stripped
+                _rb_retry = fetch_competitive_set(
+                    _v_retry, cookies, headers, appraisal_id=appraisal_id)
+                _retry_parsed = parse_competitive_set(_rb_retry)
+                _retry_rows = len(_retry_parsed.get('rows') or [])
+                if _retry_rows > _initial_rows:
+                    result['competitive_set'] = _retry_parsed
+                    log.info('bid %d retry won: %d rows (vs %d)',
+                             bid_id, _retry_rows, _initial_rows)
+            except Exception as _retry_e:
+                log.warning('bid %d body-strip retry err: %s',
+                            bid_id, _retry_e)
+
     result['ok'] = True
     result['fallback_legacy'] = False
     result['ms'] = int((time.monotonic() - t0) * 1000)
@@ -290,23 +317,42 @@ def kick_direct_enrichment(bid_id: int, db_conn_factory) -> None:
                         'finished_at': time.strftime('%Y-%m-%dT%H:%M:%S+00:00',
                                                      time.gmtime()),
                     }}
+                    # UPSERT so direct API can complete even when no
+                    # vauto_lookups row exists yet (intake hook no longer
+                    # creates a placeholder; phase 1 workers now see the
+                    # bid as eligible until one path or the other writes).
+                    # Filter on rbook_completed_at IS NULL still applies
+                    # so we don't clobber a worker's completed result.
                     cur.execute("""
-                        UPDATE vauto_lookups
-                        SET rbook_competitive_set = %s::jsonb,
-                            rbook_completed_at = NOW(),
-                            api_price_guides = %s::jsonb,
-                            api_refreshed_at = NOW(),
-                            market_intel_cached = %s::jsonb,
-                            enrichment_state = COALESCE(enrichment_state,
-                                                        '{}'::jsonb) || %s::jsonb
-                        WHERE bid_id = %s
-                          AND rbook_completed_at IS NULL
+                        INSERT INTO vauto_lookups
+                            (bid_id, vin,
+                             rbook_competitive_set, rbook_completed_at,
+                             api_price_guides, api_refreshed_at,
+                             market_intel_cached, enrichment_state,
+                             looked_up_at)
+                        VALUES (%s,
+                                (SELECT vin FROM bids WHERE id=%s),
+                                %s::jsonb, NOW(),
+                                %s::jsonb, NOW(),
+                                %s::jsonb, %s::jsonb, NOW())
+                        ON CONFLICT (bid_id) DO UPDATE
+                          SET rbook_competitive_set =
+                                EXCLUDED.rbook_competitive_set,
+                              rbook_completed_at = NOW(),
+                              api_price_guides = EXCLUDED.api_price_guides,
+                              api_refreshed_at = NOW(),
+                              market_intel_cached =
+                                EXCLUDED.market_intel_cached,
+                              enrichment_state = COALESCE(
+                                vauto_lookups.enrichment_state,
+                                '{}'::jsonb) || EXCLUDED.enrichment_state
+                          WHERE vauto_lookups.rbook_completed_at IS NULL
                     """, (
+                        bid_id, bid_id,
                         json.dumps(cs),
                         json.dumps(pg) if pg else None,
                         market_intel_json,
                         json.dumps(state_patch),
-                        bid_id,
                     ))
                     rows = cur.rowcount
                 conn.commit()
