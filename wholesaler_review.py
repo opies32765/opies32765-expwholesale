@@ -901,13 +901,17 @@ def signup(reviewer):
                                reviewer_phone_display=cfg.get('phone_display', ''))
 
     # ── POST ─────────────────────────────────────────────────────────────
+    # Skip rate limit when the request is from an authenticated EW admin
+    # (so Oscar can test signups end-to-end without waiting an hour).
     import time
+    is_admin = bool(session.get('logged_in'))
     ip = _client_ip()
     now = time.time()
-    last = _signup_last_ip.get(ip, 0)
-    if now - last < _SIGNUP_RATE_LIMIT_SECONDS:
-        wait_min = int((_SIGNUP_RATE_LIMIT_SECONDS - (now - last)) / 60) + 1
-        return jsonify({'error': f'Too many signups from this network. Try again in {wait_min} min.'}), 429
+    if not is_admin:
+        last = _signup_last_ip.get(ip, 0)
+        if now - last < _SIGNUP_RATE_LIMIT_SECONDS:
+            wait_min = int((_SIGNUP_RATE_LIMIT_SECONDS - (now - last)) / 60) + 1
+            return jsonify({'error': f'Too many signups from this network. Try again in {wait_min} min.'}), 429
 
     full_name   = (request.form.get('full_name') or '').strip()
     business    = (request.form.get('business_name') or '').strip()
@@ -1006,7 +1010,8 @@ def signup(reviewer):
 
         conn.commit()
 
-    _signup_last_ip[ip] = now
+    if not is_admin:
+        _signup_last_ip[ip] = now
 
     portal_base = os.environ.get('PORTAL_BASE', 'https://experience-wholesale.net')
     dashboard_url = f'{portal_base}/partner/{portal_slug}/d/{dashboard_token}'
