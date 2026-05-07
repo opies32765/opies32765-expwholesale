@@ -63,6 +63,14 @@ except Exception as _e:
     notify_owners_new_bid = None
     print(f'[owner_portal] blueprint not loaded: {_e}', flush=True)
 
+# Enrichment API blueprint — claim/submit endpoints for the dedicated
+# enrichment workers on pve-pc1 (rbook + manheim transactions scrapers).
+try:
+    from enrichment_api import bp as _enrichment_bp
+    app.register_blueprint(_enrichment_bp)
+except Exception as _e:
+    print(f'[enrichment_api] blueprint not loaded: {_e}', flush=True)
+
 # ── Dashboard login ───────────────────────────────────────────────────────────
 EW_USERNAME = os.environ.get('EW_USERNAME', 'admin')
 EW_PASSWORD = os.environ.get('EW_PASSWORD', 'Sedecrem3')
@@ -74,6 +82,8 @@ _PUBLIC_PREFIXES = (
     '/api/mobile-submit', '/api/rep-bids', '/api/register-rep',
     '/api/vauto/', '/api/accutrade/', '/accutrade_reports/',
     '/api/ipacket/', '/ipacket_reports/',
+    '/api/enrichment/',  # rbook/manheim enrichment workers (oscar VMs)
+    '/api/comp_msrp/',   # VM 121 comp_msrp worker (claim, submit, jwt, status)
     '/api/worker/',  # progress, session_lost — worker-facing, no login
     '/api/dealer/vauto_verify', '/api/dealer/vauto_verify_queue',
     '/api/dealer/beelink_scrape_queue', '/api/dealer/beelink_scrape_result',
@@ -869,7 +879,14 @@ def _parse_sticker_text(text):
     if not text or len(text) < 50:
         return result
 
-    for pat in (r'TOTAL\s+(?:PREDICTED\s+)?PRICE\s*[:$]?\s*\$?\s*([\d,]+)',
+    for pat in (
+                # iPacket PDF window-sticker format
+                r"TOTAL\s+MANUFACTURER'?S?\s+SUGGESTED\s+RETAIL\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)",
+                r"AS\s+DELIVERED\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)",
+                r"TOTAL\s+VEHICLE\s+PRICE\*?\s*[:$]?\s*\$?\s*([\d,]+)",
+                r"Net\s+Total\s*[:$]?\s*\$?\s*([\d,]+)",  # Mercedes-Benz
+                # Common formats
+                r'TOTAL\s+(?:PREDICTED\s+)?PRICE\s*[:$]?\s*\$?\s*([\d,]+)',
                 r'TOTAL\s+MSRP\s*[:$]?\s*\$?\s*([\d,]+)',
                 r'(?<!BASE\s)MSRP\s*[:$]?\s*\$?\s*([\d,]+)'):
         m = re.search(pat, text, re.I)
@@ -882,7 +899,11 @@ def _parse_sticker_text(text):
             except ValueError:
                 pass
 
-    for pat in (r'BASE\s+SUGGESTED\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)',
+    for pat in (
+                # iPacket PDF window-sticker format
+                r"BASE\s+MANUFACTURER'?S?\s+SUGGESTED\s+RETAIL\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)",
+                # Common formats
+                r'BASE\s+SUGGESTED\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)',
                 r'BASE\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)',
                 r'BASE\s+MSRP\s*[:$]?\s*\$?\s*([\d,]+)'):
         m = re.search(pat, text, re.I)
@@ -1456,6 +1477,18 @@ def bid_detail(bid_id):
                     ai_log['dealer_intel'] = json.loads(di)
                 except Exception:
                     ai_log['dealer_intel'] = None
+            bi = ai_log.get('buyer_intel')
+            if isinstance(bi, str):
+                try:
+                    ai_log['buyer_intel'] = json.loads(bi)
+                except Exception:
+                    ai_log['buyer_intel'] = None
+            mi = ai_log.get('market_intel')
+            if isinstance(mi, str):
+                try:
+                    ai_log['market_intel'] = json.loads(mi)
+                except Exception:
+                    ai_log['market_intel'] = None
     except Exception as _aelog_err:
         print(f'ai_assessment_log read error: {_aelog_err}', flush=True)
 
@@ -1520,6 +1553,53 @@ def bid_detail(bid_id):
         if m:
             vin_candidate = m.group(1)
 
+    # Compute market_intel for the rBook Retail Comps card + MMR closest sale.
+    # Uses the same fn the AI assessment uses, on the same data — so the
+    # numbers shown match what the model sees.
+    market_intel = None
+    try:
+        from market_intel import compute_market_intel as _mi
+        def _maybe_parse(x):
+            if isinstance(x, str):
+                try:
+                    import json as _j
+                    return _j.loads(x)
+                except Exception:
+                    return None
+            return x
+        _manheim = _maybe_parse((vauto_data or {}).get('manheim_transactions')) if vauto_data else None
+        _rbook   = _maybe_parse((vauto_data or {}).get('rbook_competitive_set')) if vauto_data else None
+        market_intel = _mi(
+            {'year': bid.get('year'), 'make': bid.get('make'),
+             'model': bid.get('model'), 'mileage': bid.get('mileage'),
+             'vin': bid.get('vin')},
+            _manheim, _rbook, None,  # buyer_intel optional here
+        )
+        # Phase 2: enqueue MSRP lookups for the top-3 closest comp VINs and
+        # merge any cached MSRPs into the closest_3 rows so both the UI and
+        # (downstream) the AI prompt see them. Idempotent — repeat visits
+        # don't re-queue done VINs.
+        if market_intel:
+            _enqueue_comp_msrps_for_bid(bid_id, market_intel)
+            # Make sure the background iPacket-MSRP processor is running.
+            # Daemon thread, idempotent — only spawns once per worker.
+            try: _start_comp_msrp_processor()
+            except Exception: pass
+            _closest = (market_intel.get('rbook') or {}).get('closest_3') or []
+            _vins = [c.get('vin') for c in _closest if c.get('vin')]
+            _msrps = _load_comp_msrps(_vins)
+            for c in _closest:
+                v = (c.get('vin') or '').upper()
+                if v in _msrps:
+                    c['msrp_lookup'] = {
+                        'msrp':       _msrps[v].get('msrp'),
+                        'base_price': _msrps[v].get('base_price'),
+                        'status':     _msrps[v].get('status'),
+                    }
+    except Exception as _mi_err:
+        print(f'[bid view] market_intel compute err: {_mi_err}', flush=True)
+        market_intel = None
+
     return render_template('bid.html', bid=bid, photos=photos,
                            messages=messages, valuations=valuations,
                            vauto_data=vauto_data,
@@ -1530,6 +1610,7 @@ def bid_detail(bid_id):
                            ai_log=ai_log,
                            partner_info=partner_info,
                            vin_candidate=vin_candidate,
+                           market_intel=market_intel,
                            time_ago=time_ago)
 
 
@@ -2740,11 +2821,27 @@ def _run_assessment(bid_id):
         find_dealer_matches = None
         format_for_prompt = None
 
+    try:
+        from lsl_buyer_match import find_lsl_buyers, format_for_prompt as _lsl_format
+    except Exception as _imp_err:
+        print(f'lsl_buyer_match import failed: {_imp_err}', flush=True)
+        find_lsl_buyers = None
+        _lsl_format = None
+
+    try:
+        from market_intel import compute_market_intel, format_for_prompt as _mi_format
+    except Exception as _imp_err:
+        print(f'market_intel import failed: {_imp_err}', flush=True)
+        compute_market_intel = None
+        _mi_format = None
+
     _ai_ver, _ai_cfg = (0, DEFAULT_AI_CONFIG)
     _bucket = None
     _baseline_result = None
     _ai_cap = 15.0
     _dealer_intel = None
+    _buyer_intel = None
+    _market_intel = None
     if classify_bucket and compute_baseline:
         try:
             _ai_ver, _ai_cfg = get_active_ai_config()
@@ -2789,6 +2886,90 @@ def _run_assessment(bid_id):
             print(f'dealer intel lookup error: {_dm_err}', flush=True)
             _dealer_intel = None
 
+    # ── LSL Sales-Ledger Buyer Intel — who has actually bought like-vehicles ──
+    # from EW over the last 12 months. Reads /opt/livesaleslog/crm.db read-only.
+    # 5 years of wholesale ledger data joined with dealer_profile aggregates.
+    if find_lsl_buyers:
+        try:
+            _buyer_intel = find_lsl_buyers(
+                bid.get('year'), bid.get('make'), bid.get('model'),
+                mileage=bid.get('mileage'),
+                config=_ai_cfg,
+            )
+            _bn_n = (_buyer_intel.get('patterns') or {}).get('total_deals', 0)
+            _bu_n = (_buyer_intel.get('patterns') or {}).get('unique_buyers', 0)
+            _bd_n = len(_buyer_intel.get('deals') or [])
+            print(f'[ASSESS] Bid {bid_id} same-YMM deals: '
+                  f'{_bn_n} total · {_bu_n} unique customers · '
+                  f'{_bd_n} rows shown',
+                  flush=True)
+        except Exception as _bi_err:
+            print(f'lsl buyer intel error: {_bi_err}', flush=True)
+            _buyer_intel = None
+
+    # ── Market Intel — full stack work-back ──────────────────────────────
+    # Combines vauto_lookups.manheim_transactions (wholesale auction floor),
+    # vauto_lookups.rbook_competitive_set (retail asking from other dealers),
+    # and lsl_buyer_match.patterns.avg_gross (our PVR target). All three are
+    # populated live per bid by the enrichment fleet on pve-pc1.
+    # Derivation is pure: no hard-coded buyer-margin percentage.
+    if compute_market_intel:
+        try:
+            def _maybe_parse(x):
+                """JSONB may come back as dict or JSON string from the driver."""
+                if isinstance(x, str):
+                    try:
+                        import json as _mij
+                        return _mij.loads(x)
+                    except Exception:
+                        return None
+                return x
+            _manheim_data = _maybe_parse(vauto.get('manheim_transactions')) if vauto else None
+            _rbook_data   = _maybe_parse(vauto.get('rbook_competitive_set')) if vauto else None
+            _market_intel = compute_market_intel(
+                {'year': bid.get('year'), 'make': bid.get('make'),
+                 'model': bid.get('model'), 'mileage': bid.get('mileage'),
+                 'vin': bid.get('vin')},
+                _manheim_data, _rbook_data, _buyer_intel,
+            )
+            if _market_intel:
+                _ntx  = (_market_intel.get('manheim') or {}).get('n_transactions', 0)
+                _nrb  = (_market_intel.get('rbook') or {}).get('n_visible', 0)
+                _tgt  = _market_intel.get('target_buy')
+                _med  = (_market_intel.get('manheim') or {}).get('mmr_median')
+                _rmed = (_market_intel.get('rbook') or {}).get('retail_median')
+                _spread = _market_intel.get('implied_buyer_gross')
+                print(f'[ASSESS] Bid {bid_id} market intel: '
+                      f'{_ntx} mmr_tx (med ${_med or 0:,}) · '
+                      f'{_nrb} rbook (med ${_rmed or 0:,}) · '
+                      f'implied_buyer_gross ${_spread or 0:,} · '
+                      f'target_buy ${_tgt or 0:,}', flush=True)
+                # Phase 2: enqueue + merge MSRPs onto closest_3 so Gemini
+                # sees them in the prompt. Same flow as the bid view.
+                try:
+                    _enqueue_comp_msrps_for_bid(bid_id, _market_intel)
+                    _closest = (_market_intel.get('rbook') or {}).get('closest_3') or []
+                    _vins = [c.get('vin') for c in _closest if c.get('vin')]
+                    _msrps = _load_comp_msrps(_vins)
+                    _msrp_hits = 0
+                    for c in _closest:
+                        v = (c.get('vin') or '').upper()
+                        if v in _msrps:
+                            c['msrp_lookup'] = {
+                                'msrp':       _msrps[v].get('msrp'),
+                                'base_price': _msrps[v].get('base_price'),
+                                'status':     _msrps[v].get('status'),
+                            }
+                            if _msrps[v].get('msrp'):
+                                _msrp_hits += 1
+                    print(f'[ASSESS] Bid {bid_id} comp_msrps merged: '
+                          f'{_msrp_hits}/{len(_closest)} have MSRP', flush=True)
+                except Exception as _cmsrp_err:
+                    print(f'[ASSESS] comp_msrp merge err: {_cmsrp_err}', flush=True)
+        except Exception as _mi_err:
+            print(f'market intel error: {_mi_err}', flush=True)
+            _market_intel = None
+
     # ── Partner-Network Velocity Score ───────────────────────────────────────
     # Days-to-sell distribution for this YMM band over the last 90d. Labels:
     # HOT / STEADY / SLOW / STALE / NO_SIGNAL. Gemini uses the label to lean
@@ -2829,6 +3010,7 @@ def _run_assessment(bid_id):
     # trim is ambiguous (Ford/GM/Chrysler etc. don't encode trim in VDS),
     # this block tells Gemini explicitly what the alternatives are so it can
     # pick the right one from photos + iPacket sticker + Carfax.
+    _nhtsa = {}  # hoisted for v2 prompt builder
     if bid.get('vin') and len(bid['vin']) == 17:
         try:
             _nhtsa = decode_vin(bid['vin']) or {}
@@ -2949,102 +3131,17 @@ def _run_assessment(bid_id):
                 found = mc[key].get('found')
                 ctx += f"  {label}: {'found listed' if found else 'not listed'}\n"
 
-    # DIA data — exact VIN history
-    dia = dia_vin_lookup(bid['vin']) if bid['vin'] else None
-    if dia and dia['dealers']:
-        ctx += f"\nTHIS VEHICLE — DEALER HISTORY ({len(dia['dealers'])} records):\n"
-        for d in dia['dealers'][:6]:
-            price = '${:,.0f}'.format(d['price']) if d['price'] else 'N/A'
-            ctx += f"  {d['dealer_name']} ({d['city']}, {d['state']}) — {d['status']} — {price} — last seen {d['last_seen'] or '?'}\n"
-    if dia and dia['auctions']:
-        ctx += f"\nTHIS VEHICLE — AUCTION HISTORY ({len(dia['auctions'])} records):\n"
-        for a in dia['auctions'][:6]:
-            price = '${:,.0f}'.format(a['hammer_price']) if a['hammer_price'] else 'N/A'
-            sold = 'Sold' if a['sold'] else 'Not sold'
-            ctx += f"  {a['house_name']} — {sold} at {price} — {a['sale_date'] or '?'}\n"
-
-    # DIA data — comparable vehicles (same make/model, ±1 year, active with prices)
-    if bid['make'] and bid['model']:
-        try:
-            dia_conn = psycopg2.connect(DIA_DB_URL,
-                                        cursor_factory=psycopg2.extras.RealDictCursor,
-                                        connect_timeout=5)
-            dia_cur = dia_conn.cursor()
-            bid_year = bid['year'] or 2023
-            bid_miles = bid['mileage'] or 50000
-            mile_low = max(0, bid_miles - 25000)
-            mile_high = bid_miles + 25000
-
-            # Dealer comps — VIN prefix match (same model/body/trim), same year, must have URL
-            vin_prefix = (bid['vin'] or '')[:8]
-            dia_cur.execute("""
-                SELECT i.vin, i.price, i.mileage, i.year, i.trim, i.url,
-                       d.city, d.state, d.name as dealer_name
-                FROM inventory i
-                JOIN dealers d ON i.dealer_id = d.dealer_id
-                WHERE LEFT(i.vin, 8) = %s
-                  AND i.year::int = %s
-                  AND i.status = 'active' AND i.price > 0
-                  AND i.url IS NOT NULL AND i.url != ''
-                ORDER BY ABS(i.mileage - %s) ASC
-                LIMIT 10
-            """, (vin_prefix, bid_year, bid_miles))
-            comps = dia_cur.fetchall()
-
-            # Fall back to make/model if VIN prefix found < 3
-            if len(comps) < 3:
-                dia_cur.execute("""
-                    SELECT i.vin, i.price, i.mileage, i.year, i.trim, i.url,
-                           d.city, d.state, d.name as dealer_name
-                    FROM inventory i
-                    JOIN dealers d ON i.dealer_id = d.dealer_id
-                    WHERE i.make ILIKE %s AND i.model ILIKE %s
-                      AND i.year::int = %s
-                      AND i.status = 'active' AND i.price > 0
-                      AND i.url IS NOT NULL AND i.url != ''
-                    ORDER BY ABS(i.mileage - %s) ASC
-                    LIMIT 10
-                """, (bid['make'], bid['model'], bid_year, bid_miles))
-                comps = dia_cur.fetchall()
-
-            # Auction comps — VIN prefix, same year
-            dia_cur.execute("""
-                SELECT al.hammer_price::numeric as hammer_price, al.sale_date,
-                       al.year, al.mileage, ah.name as house_name
-                FROM auction_lots al
-                JOIN auction_houses ah ON al.house_id = ah.id
-                WHERE LEFT(al.vin, 8) = %s
-                  AND al.year ~ '^\d+$' AND al.year::int = %s
-                  AND al.sold = 'true' AND al.hammer_price ~ '^\d+\.?\d*$'
-                  AND al.hammer_price::numeric > 0
-                ORDER BY al.sale_date DESC NULLS LAST
-                LIMIT 10
-            """, (vin_prefix, bid_year))
-            auction_comps = dia_cur.fetchall()
-
-            dia_conn.close()
-
-            if comps:
-                prices = [float(c['price']) for c in comps]
-                avg_price = sum(prices) / len(prices)
-                ctx += f"\nRETAIL COMPS — {len(comps)} similar {bid['make']} {bid['model']} (±1 year, ±25K miles):\n"
-                ctx += f"  Price range: ${min(prices):,.0f} — ${max(prices):,.0f} (avg ${avg_price:,.0f})\n"
-                for c in comps:
-                    trim = f" {c['trim']}" if c.get('trim') else ''
-                    miles = f"{int(c['mileage']):,} mi" if c.get('mileage') else '? mi'
-                    ctx += f"  VIN: {c.get('vin','?')} | {c['year']}{trim} | {c.get('city','')}, {c.get('state','')} | {miles} | ${float(c['price']):,.0f}\n"
-
-            if auction_comps:
-                auc_prices = [float(a['hammer_price']) for a in auction_comps]
-                avg_auc = sum(auc_prices) / len(auc_prices)
-                ctx += f"\nAUCTION COMPS — {len(auction_comps)} similar, recently sold:\n"
-                ctx += f"  Hammer range: ${min(auc_prices):,.0f} — ${max(auc_prices):,.0f} (avg ${avg_auc:,.0f})\n"
-                for a in auction_comps:
-                    miles_str = f"{int(float(a['mileage'])):,} mi" if a.get('mileage') else '? mi'
-                    ctx += f"  {a.get('year','')} | {a['house_name']} | ${float(a['hammer_price']):,.0f} | {a.get('sale_date','?')} | {miles_str}\n"
-
-        except Exception as e:
-            print(f'DIA comps error: {e}')
+    # ── DIA RETAIL/AUCTION COMPS — DISABLED 2026-05-06 ─────────────────
+    # Per direction, retail/auction comp data should ONLY come from:
+    #   1. EW partner-scan dealer_inventory (already injected via the
+    #      Dealer Network Intel block above — find_dealer_matches in
+    #      dealer_match.py reads /opt/expwholesale's local dealer_inventory)
+    #   2. vAuto rBook competitive set ("show my vehicle") — pending the
+    #      enrichment_rbook scraper (PR coming once spike lands selectors)
+    # vAuto Like-Vehicle MMR auction comps + the new Market Work-Back block
+    # (market_intel.py) cover wholesale auction signal.
+    # DIA cross-server queries (formerly here) intentionally removed; do
+    # NOT re-add without explicit approval — see project_ew_market_workback.md.
 
     # iPacket sticker data
     ipacket = None
@@ -3096,6 +3193,131 @@ def _run_assessment(bid_id):
                         ipacket['raw_json'] = _raw
             except Exception as _ocr_err:
                 print(f'iPacket canvas-OCR error for bid {bid_id}: {_ocr_err}')
+
+    # Level-2 fallback: when canvas-OCR (screenshot) didn't yield MSRP,
+    # pull the full iPacket PDF directly and re-parse. The screenshot is
+    # often partial (~1.2k chars) while the PDF holds the full sticker
+    # (~6-7k chars including the TOTAL MSRP line). Same regex; no new
+    # patterns. Triggers only when subject MSRP is still missing.
+    if ipacket and bid.get('vin') and not ipacket.get('total_msrp'):
+        try:
+            _pdf_res = _ipacket_lookup_msrp_for_vin(bid['vin'])
+            if (_pdf_res and _pdf_res.get('ok')
+                and _pdf_res.get('msrp')):
+                ipacket['total_msrp'] = _pdf_res['msrp']
+                if _pdf_res.get('base_price') and not ipacket.get('base_price'):
+                    ipacket['base_price'] = _pdf_res['base_price']
+                # Replace the broken screenshot with a render of the actual
+                # PDF page. The worker's screenshot sometimes captures the
+                # iPacket UI before the sticker loads — leaving a blank
+                # white viewer. Re-pulling here gives us the real sticker
+                # image to display on the bid card.
+                # GATE: only swap if the existing screenshot is actually
+                # blank/missing. A valid canvas screenshot of the iPacket
+                # UI looks familiar to users; replacing it with a raw PDF
+                # page render confused them ("978 showing something
+                # totally different than your normal msrp sticker").
+                _existing_blank = True
+                try:
+                    _existing_path = _ipacket_screenshot_path(ipacket.get('screenshot'))
+                    if _existing_path and os.path.exists(_existing_path):
+                        # Cheap signal first: real iPacket screenshots are
+                        # 100-400KB; blank-white captures are <30KB.
+                        _sz = os.path.getsize(_existing_path)
+                        if _sz >= 30 * 1024:
+                            # Big enough to be real — sample pixels to be sure.
+                            try:
+                                from PIL import Image as _PILImg
+                                with _PILImg.open(_existing_path) as _exi:
+                                    _exi = _exi.convert('RGB')
+                                    _w, _h = _exi.size
+                                    _near_white = 0
+                                    _samples = 0
+                                    for _gy in range(10):
+                                        for _gx in range(10):
+                                            _px = _exi.getpixel((
+                                                int(_w * (_gx + 0.5) / 10),
+                                                int(_h * (_gy + 0.5) / 10),
+                                            ))
+                                            _samples += 1
+                                            if (_px[0] >= 240 and _px[1] >= 240
+                                                    and _px[2] >= 240):
+                                                _near_white += 1
+                                    if _samples and (_near_white / _samples) <= 0.95:
+                                        _existing_blank = False
+                            except Exception:
+                                # If PIL choke, trust the size signal alone.
+                                _existing_blank = False
+                except Exception:
+                    # Any resolution error — fall through and allow the swap
+                    # (preserves prior behavior when screenshot is missing).
+                    _existing_blank = True
+
+                _new_screenshot_path = None
+                if _existing_blank:
+                    try:
+                        import requests as _rr2
+                        import pdfplumber as _pp2
+                        import io as _io2
+                        # Re-fetch the PDF (already done inside _ipacket_lookup_msrp_for_vin
+                        # but not stored); use the viewer URL it returned.
+                        _viewer = _pdf_res.get('viewer_url')
+                        if _viewer:
+                            _vr = _rr2.get(_viewer, timeout=30,
+                                           headers={'User-Agent': 'Mozilla/5.0'})
+                            if _vr.status_code == 200:
+                                with _pp2.open(_io2.BytesIO(_vr.content)) as _pdf:
+                                    _pil = _pdf.pages[0].to_image(resolution=200).original
+                                    _ts = int(time.time())
+                                    _fname = f'ipacket_{bid["vin"]}_{_ts}_pdf.png'
+                                    _full = os.path.join(IPACKET_REPORTS_DIR, _fname)
+                                    _pil.save(_full, format='PNG')
+                                    _new_screenshot_path = f'/ipacket_reports/{_fname}'
+                    except Exception as _img_err:
+                        print(f'[ASSESS] PDF-fallback image render err: {_img_err}',
+                              flush=True)
+                # Persist MSRP + (optional) new screenshot to DB
+                try:
+                    _pdb = get_db()
+                    _pcur = _pdb.cursor()
+                    if _new_screenshot_path:
+                        _pcur.execute("""
+                            UPDATE ipacket_lookups
+                               SET total_msrp = COALESCE(total_msrp, %s),
+                                   base_price = COALESCE(base_price, %s),
+                                   screenshot = %s,
+                                   looked_up_at = NOW()
+                             WHERE bid_id = %s
+                        """, (_pdf_res.get('msrp'),
+                              _pdf_res.get('base_price'),
+                              _new_screenshot_path, bid_id))
+                        ipacket['screenshot'] = _new_screenshot_path
+                    else:
+                        _pcur.execute("""
+                            UPDATE ipacket_lookups
+                               SET total_msrp = COALESCE(total_msrp, %s),
+                                   base_price = COALESCE(base_price, %s),
+                                   looked_up_at = NOW()
+                             WHERE bid_id = %s
+                        """, (_pdf_res.get('msrp'),
+                              _pdf_res.get('base_price'), bid_id))
+                    _pdb.commit()
+                    _pdb.close()
+                except Exception as _persist_err:
+                    print(f'[ASSESS] PDF-fallback persist err: {_persist_err}',
+                          flush=True)
+                if _new_screenshot_path:
+                    _swap_note = ' · sticker.png replaced (canvas blank)'
+                else:
+                    _swap_note = ' · kept canvas (MSRP-only update)'
+                print(f'[ASSESS] Bid {bid_id} iPacket PDF-fallback: '
+                      f'MSRP=${_pdf_res["msrp"]:,} '
+                      f'(base ${_pdf_res.get("base_price") or 0:,})'
+                      + _swap_note,
+                      flush=True)
+        except Exception as _pdf_err:
+            print(f'[ASSESS] iPacket PDF-fallback err: {_pdf_err}',
+                  flush=True)
 
     # AccuTrade values section
     if accutrade:
@@ -3242,6 +3464,9 @@ def _run_assessment(bid_id):
             print(f'assess photo error: {e}')
 
     # ── Load Carfax/AutoCheck: OCR to TEXT (avoids Gemini hallucinating details) ─
+    # Hoisted vars: also captured below for v2 prompt builder consumption
+    _carfax_ocr_text = ''
+    _autocheck_ocr_text = ''
     report_count = 0
     max_history_odometer = 0   # highest mileage reading we've seen in Carfax/AutoCheck
     if vauto:
@@ -3264,6 +3489,11 @@ def _run_assessment(bid_id):
                         clean_text = re.sub(r'[ \t]+', ' ', ocr_text)
                         clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
                         ctx += f"\n--- {label} (OCR text) ---\n{clean_text}\n"
+                        # Also capture into hoisted vars for v2 prompt builder
+                        if 'CARFAX' in label.upper():
+                            _carfax_ocr_text = clean_text
+                        elif 'AUTOCHECK' in label.upper():
+                            _autocheck_ocr_text = clean_text
                         report_count += 1
                         # Track the highest odometer reading in the OCR text so
                         # we can flag rollback / listing-understatement after
@@ -3381,6 +3611,29 @@ def _run_assessment(bid_id):
         except Exception as _di_fmt_err:
             print(f'dealer intel format error: {_di_fmt_err}', flush=True)
 
+    # Inject LSL sales-ledger buyer intel — real EW transaction history. This
+    # is the strongest demand signal for the offset (we know who buys this
+    # YMM from us, how often, at what gross). Sits below dealer_intel
+    # (retail-side proxy) and above velocity (turnover label).
+    if _buyer_intel and _lsl_format:
+        try:
+            _bi_block = _lsl_format(_buyer_intel)
+            if _bi_block:
+                ctx += '\n\n' + _bi_block
+        except Exception as _bi_fmt_err:
+            print(f'lsl buyer intel format error: {_bi_fmt_err}', flush=True)
+
+    # Inject market work-back — Manheim auction floor + LSL gross history.
+    # This is the formula-driven target buy price (mmr_median - lsl_avg_gross).
+    # Acts as a SECONDARY anchor alongside the bucket-weighted baseline.
+    if _market_intel and _mi_format:
+        try:
+            _mi_block = _mi_format(_market_intel)
+            if _mi_block:
+                ctx += '\n\n' + _mi_block
+        except Exception as _mi_fmt_err:
+            print(f'market intel format error: {_mi_fmt_err}', flush=True)
+
     # Inject partner-network velocity score (HOT/STEADY/SLOW/STALE/NO_SIGNAL)
     if _velocity:
         try:
@@ -3394,121 +3647,58 @@ def _run_assessment(bid_id):
         except Exception as _vel_fmt_err:
             print(f'velocity format error: {_vel_fmt_err}', flush=True)
 
-    # Inject bucket + baseline context (if we could compute one)
-    _hybrid_mode = bool(_baseline_result and _baseline_result.get('baseline_price'))
-    if _hybrid_mode:
-        ctx += f"\n\n═══ SEGMENT CLASSIFICATION ═══\n"
-        ctx += f"Bucket: {_bucket.get('display_name', _bucket.get('name'))}\n"
-        ctx += f"Description: {_bucket.get('description', '')}\n"
-        ctx += f"\n═══ DETERMINISTIC BASELINE (weighted books) ═══\n"
-        ctx += f"Baseline price: ${_baseline_result['baseline_price']:,}\n"
-        ctx += "Breakdown:\n"
-        for r in _baseline_result.get('breakdown', []):
-            if r.get('available'):
-                ctx += (f"  - {r['source']}: ${r['value']:,} "
-                        f"(weight {r.get('effective_pct', r['weight_pct'])}%) "
-                        f"= ${r['contribution']:,}\n")
-            else:
-                ctx += f"  - {r['source']}: N/A — skipped (weight redistributed)\n"
-        if _baseline_result.get('note'):
-            ctx += f"Note: {_baseline_result['note']}\n"
+    # ── v2 single-shot synthesis prompt (replaces bucket-baseline + ±cap offset) ──
+    # Pivoted 2026-05-06: Gemini receives the full market stack + qualitative
+    # data and returns an absolute target_buy in dollars. No bucket
+    # classification, no percentage offsets, no hard-coded margins.
+    _hybrid_mode = False  # legacy flag — kept for downstream readers, always False now
+    try:
+        from ai_assessment_v2 import build_prompt as _v2_build_prompt
+    except Exception as _v2_imp_err:
+        print(f'[ASSESS] v2 import failed: {_v2_imp_err}', flush=True)
+        _v2_build_prompt = None
 
-    if _hybrid_mode:
-        prompt = f"""{ctx}
+    # Phase 4b (v2): per-YMM retrieval against ai_accuracy. Replaces
+    # XGBoost — with only 146 samples a tabular regressor was too noisy.
+    # Tiered SQL: tries (Y+M+M+miles) → (M+M) → (M alone), returns first
+    # tier with at least one match. Gemini sees sample rows + summary stats.
+    _purchase_history = None
+    try:
+        _purchase_history = _retrieve_purchase_history(
+            bid.get('year'), bid.get('make'),
+            bid.get('model'), bid.get('mileage'),
+            exclude_bid_id=bid_id)
+        if _purchase_history:
+            print(f'[ASSESS] Bid {bid_id} purchase history: '
+                  f'{_purchase_history["n"]} matches at "{_purchase_history["tier"]}" '
+                  f'mean=${_purchase_history.get("mean") or 0:,} '
+                  f'median=${_purchase_history.get("median") or 0:,}',
+                  flush=True)
+    except Exception as _ph_e:
+        print(f'[ASSESS] purchase history err: {_ph_e}', flush=True)
 
-{img_line}
-
-═══ YOUR JOB ═══
-You are a wholesale vehicle buyer. A deterministic baseline price has already
-been calculated above from weighted book values for this vehicle's segment.
-Your job is to adjust that baseline by a PERCENTAGE based on the qualitative
-data (Carfax, AutoCheck, photos, iPacket, AccuTrade, DIA history, market comps).
-
-Stay within ±{_ai_cap}%. Favorable factors adjust UP (clean Carfax, low miles
-for age, pristine photos, desirable options, rare build). Unfavorable factors
-adjust DOWN (accidents, fleet/rental title, rough condition, over-miles,
-salvage/rebuilt branding).
-
-IMPORTANT — read Carfax/AutoCheck carefully and be FACTUALLY ACCURATE:
-- If the report says "sideswipe" / "left/right side impact", that is a SIDE
-  collision — do NOT call it a front-end or rear-end accident
-- If it says "minor damage", do not describe it as major
-- Quote the exact damage description from the report when possible
-- Do NOT invent facts not in the reports
-
-RECALLS ARE NEUTRAL — DO NOT DEDUCT FOR THEM:
-- Open safety recalls are repaired for FREE by any franchise dealer of that
-  brand (Ford recalls at any Ford dealer, GM at any GM dealer, etc.). They
-  are NOT a cost to the buyer and NOT a condition defect.
-- Do not mention open recalls as a negative factor in reasoning.
-- Do not apply any downward adjustment for recall count.
-- Only mention recalls if a specific recall is UNUSUALLY severe AND explicitly
-  described in the reports as "do not drive" or safety-grounding (rare).
-
-"MILEAGE INCONSISTENCY" ≠ ODOMETER ROLLBACK:
-- Carfax/AutoCheck flag any single data-entry typo (e.g. a clerk entering
-  "75,323" instead of "7,532" at a service visit) as a "Mileage Inconsistency".
-  The report itself says this is probably a "clerical error" or "typographical
-  error" — not fraud. Treat it as NEUTRAL by default.
-- Only treat as a real negative when BOTH of these are true:
-  (a) Multiple declining odometer readings across several independent reports
-      (actual rollback pattern — not a one-off typo), AND
-  (b) An odometer BRAND ("Not Actual Miles", "Exceeds Mechanical Limits") that
-      originated from a DMV TITLE RECORD — not from a one-line auction-clerk
-      flag on a single auction run.
-- If the reports explicitly say "may be a clerical error" or "could be due to
-  typographical, clerical, or rounding error" — those are the reports telling
-  you it's noise. Do not deduct for it.
-
-PRIOR OWNER COUNT IS NEUTRAL FOR WHOLESALE:
-- We are pricing WHOLESALE BUY, not retail sale. Retail buyers prefer 1-2
-  owner cars; that preference is NOT our pricing concern.
-- "Owner count" on Carfax/AutoCheck includes fleet registrations, lease
-  returns, dealer-to-dealer transfers, and short-term commercial
-  registrations — not just retail consumer owners. A 2021 vehicle with
-  4 listed owners has commonly just passed through lease-return → auction →
-  dealer → auction → dealer networks, which is normal wholesale flow.
-- Do NOT apply a downward adjustment for owner count alone.
-- Do NOT mention "N owners on a YYYY-year-old vehicle" as a negative factor.
-- The ONLY time owner history matters is when paired with specific red flags:
-  (a) Lemon-law buyback branded on the title, OR
-  (b) An unusually short ownership period (<60 days) suggesting a problematic
-      flip due to undisclosed defects, OR
-  (c) Gaps in ownership suggesting theft recovery, flood history, or salvage
-      reconstruction. These show up as separate title brands — rely on those,
-      not the raw owner count.
-
-Return ONLY this JSON (no markdown fences, no commentary):
-{{
-  "adjustment_pct": -5.0,
-  "confidence_low_pct": -8.0,
-  "confidence_high_pct": -2.0,
-  "reasoning": "1-3 sentences citing the KEY factors that drove the adjustment"
-}}
-
-Rules:
-- adjustment_pct must be between -{_ai_cap} and +{_ai_cap}
-- confidence_low_pct <= adjustment_pct <= confidence_high_pct
-- reasoning must reference SPECIFIC facts from the data (2 owners, 1 accident,
-  fleet title, pristine interior photos, etc.) — not generic statements
-- Do NOT include $ figures in reasoning — only factor references"""
+    if _v2_build_prompt:
+        prompt = _v2_build_prompt(
+            dict(bid),
+            vauto=dict(vauto) if vauto else None,
+            accutrade=dict(accutrade) if accutrade else None,
+            ipacket=dict(ipacket) if ipacket else None,
+            photos=list(photos) if photos else None,
+            carfax_text=_carfax_ocr_text,
+            autocheck_text=_autocheck_ocr_text,
+            dealer_intel=_dealer_intel,
+            buyer_intel=_buyer_intel,
+            market_intel=_market_intel,
+            velocity=_velocity,
+            nhtsa=_nhtsa,
+            tesla=tesla_data,
+            purchase_history=_purchase_history,
+        )
     else:
-        # Fallback: no baseline (missing book values) — use the legacy cold-pricing
-        # prompt so we still return something useful.
-        prompt = f"""{ctx}
-
-{img_line}
-
-Based on all the data above — book values, photos, Carfax, AutoCheck, AccuTrade, iPacket OEM sticker, history, and market listings — what should we pay for this vehicle at wholesale?
-
-IMPORTANT — read Carfax/AutoCheck carefully and be FACTUALLY ACCURATE:
-- If the report says "sideswipe" or "left/right side impact", that is a SIDE collision — do NOT call it a front-end or rear-end accident
-- If it says "minor damage", do not describe it as major
-- Quote the exact damage description from the report when possible
-- Do not invent facts that are not in the reports
-
-Keep it under 200 words. End with:
-Max wholesale buy price: **$X,XXX**"""
+        # Module unavailable — emit a minimal prompt so we still return something
+        prompt = (f"{ctx}\n\n{img_line}\n\nReturn JSON: "
+                  '{"target_buy": <int>, "confidence_low": <int>, '
+                  '"confidence_high": <int>, "reasoning": "<text>", "flags": []}')
 
     content.append({'type': 'text', 'text': prompt})
 
@@ -3530,7 +3720,7 @@ Max wholesale buy price: **$X,XXX**"""
         resp = gc.models.generate_content(
             model='gemini-2.5-pro',
             contents=gemini_parts,
-            config=_gtypes.GenerateContentConfig(max_output_tokens=3000, temperature=0.4),
+            config=_gtypes.GenerateContentConfig(max_output_tokens=8000, temperature=0.4),
         )
         assessment = (resp.text or '').strip()
         if not assessment:
@@ -3541,111 +3731,98 @@ Max wholesale buy price: **$X,XXX**"""
         import json as _json
 
         buy_price = None
-        adjustment_result = None
-        applied = None
 
-        # ── Hybrid path: parse JSON adjustment, apply to baseline ───────────
-        if _hybrid_mode and apply_adjustment:
-            raw = assessment
-            # Strip markdown fences if Gemini added them despite instructions
-            if raw.startswith('```'):
-                raw = _re.sub(r'^```(?:json)?\s*', '', raw)
-                raw = _re.sub(r'\s*```$', '', raw)
-            try:
-                adjustment_result = _json.loads(raw)
-            except Exception as _je:
-                # Try to find a JSON object inside the text
-                m = _re.search(r'\{[^{}]*"adjustment_pct"[^{}]*\}', raw, _re.DOTALL)
-                if m:
-                    try:
-                        adjustment_result = _json.loads(m.group(0))
-                    except Exception:
-                        pass
-                if not adjustment_result:
-                    print(f'[ASSESS] JSON parse failed: {_je}; raw head={raw[:200]!r}', flush=True)
+        # ── v2 path: parse JSON target_buy + INSERT ────────────────────────
+        try:
+            from ai_assessment_v2 import parse_response as _v2_parse
+        except Exception as _v2pe:
+            print(f'[ASSESS] v2 parse import failed: {_v2pe}', flush=True)
+            _v2_parse = None
 
-        if _hybrid_mode and adjustment_result:
-            applied = apply_adjustment(
-                _baseline_result['baseline_price'],
-                float(adjustment_result.get('adjustment_pct') or 0),
-                float(adjustment_result.get('confidence_low_pct') or 0),
-                float(adjustment_result.get('confidence_high_pct') or 0),
-                _ai_cap,
-            )
-            buy_price = applied.get('final_price')
-            reasoning = (adjustment_result.get('reasoning') or '').strip()
+        v2_result = _v2_parse(assessment) if _v2_parse else None
+        if v2_result:
+            buy_price = v2_result['target_buy']
+            v2_low   = v2_result.get('confidence_low')
+            v2_high  = v2_result.get('confidence_high')
+            v2_reason = v2_result.get('reasoning', '')
+            v2_flags = v2_result.get('flags', [])
 
-            # Render a human-readable narrative for the assessment card. The
-            # structured data lives in ai_assessment_log for the UI to render
-            # its own breakdown — this string is a concise fallback.
-            narrative = [
-                f"**SEGMENT**: {_bucket.get('display_name', _bucket.get('name'))}",
-                f"**BASELINE** (weighted books): ${_baseline_result['baseline_price']:,}",
-                "**BREAKDOWN**:",
-            ]
-            for r in _baseline_result.get('breakdown', []):
-                if r.get('available'):
-                    narrative.append(
-                        f"  • {r['source']}: ${r['value']:,} × "
-                        f"{r.get('effective_pct', r['weight_pct'])}% = ${r['contribution']:,}"
-                    )
-                else:
-                    narrative.append(f"  • {r['source']}: N/A (weight redistributed)")
-            adj = applied.get('effective_adjustment_pct', 0)
-            narrative.append(
-                f"**AI ADJUSTMENT**: {adj:+.1f}%"
-                + (" (clamped to cap)" if applied.get('clamped') else "")
-            )
-            if reasoning:
-                narrative.append(f"**REASONING**: {reasoning}")
-            if applied.get('confidence_low') is not None:
-                narrative.append(
-                    f"**CONFIDENCE RANGE**: ${applied['confidence_low']:,} – ${applied['confidence_high']:,}"
-                )
-            narrative.append("")
-            narrative.append(f"Max wholesale buy price: **${buy_price:,}**")
+            # Build a simple narrative for the bid card legacy field
+            narrative = [f"**RECOMMENDED BUY**: ${buy_price:,}"]
+            if v2_low and v2_high:
+                narrative.append(f"**RANGE**: ${v2_low:,} – ${v2_high:,}")
+            if v2_reason:
+                narrative.append(f"**REASONING**: {v2_reason}")
+            if v2_flags:
+                narrative.append(f"**FLAGS**: {', '.join(v2_flags)}")
             assessment = "\n".join(narrative)
 
-            # Audit log — one row per assessment, keyed by bid + created_at
+            print(f'[ASSESS] Bid {bid_id} v2 target_buy=${buy_price:,} '
+                  f'range ${v2_low or 0:,}-${v2_high or 0:,} '
+                  f'flags={v2_flags}', flush=True)
+
+            # Audit log — one row per assessment.
+            # New schema: bucket/baseline/llm_adjustment_pct columns stay NULL.
+            # final_price = target_buy. reasoning + range stored in their
+            # existing columns. flags_v2 + raw v2 result land in JSONB.
             try:
                 _db3 = get_db()
                 _cur3 = _db3.cursor()
                 _cur3.execute("""
                     INSERT INTO ai_assessment_log
-                        (bid_id, config_version, bucket, bucket_display, baseline_price,
-                         breakdown, llm_adjustment_pct, llm_reasoning,
+                        (bid_id, config_version, llm_reasoning,
                          confidence_low, confidence_high, final_price, raw_response,
-                         dealer_intel)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         dealer_intel, buyer_intel, market_intel, flags_v2)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
-                    bid_id, _ai_ver, _bucket.get('name'), _bucket.get('display_name'),
-                    _baseline_result['baseline_price'],
-                    _json.dumps(_baseline_result.get('breakdown', [])),
-                    adj,
-                    reasoning,
-                    applied.get('confidence_low'),
-                    applied.get('confidence_high'),
-                    buy_price,
-                    # Attach any server-detected flags alongside the raw LLM
-                    # payload so bid detail / audit views can surface them
-                    # without re-scanning OCR text.
+                    bid_id, 0, v2_reason,
+                    v2_low, v2_high, buy_price,
                     _json.dumps({
-                        **(adjustment_result if isinstance(adjustment_result, dict) else {}),
+                        'v2': v2_result,
                         '_server_flags': (
                             {'odometer_discrepancy': _odo_flag} if _odo_flag else None
                         ),
                     }),
-                    _json.dumps(_dealer_intel) if _dealer_intel else None,
+                    _json.dumps(_dealer_intel, default=str) if _dealer_intel else None,
+                    _json.dumps(_buyer_intel, default=str) if _buyer_intel else None,
+                    _json.dumps(_market_intel, default=str) if _market_intel else None,
+                    _json.dumps(v2_flags, default=str) if v2_flags else None,
                 ))
                 _db3.commit()
                 _db3.close()
             except Exception as _log_err:
-                print(f'ai_assessment_log write error: {_log_err}', flush=True)
+                print(f'ai_assessment_log v2 write error: {_log_err}', flush=True)
         else:
-            # Legacy path: regex-extract price from narrative
-            price_match = _re.search(
-                r'Max wholesale buy price[^\$]*\$([0-9,]+)', assessment, _re.IGNORECASE)
-            buy_price = int(price_match.group(1).replace(',', '')) if price_match else None
+            print(f'[ASSESS] v2 parse FAILED; raw head={assessment[:300]!r}',
+                  flush=True)
+            # Last-resort: try to extract target_buy from a partially-truncated
+            # JSON before regex-grepping any dollar amount. The $X,XXX grep
+            # was too aggressive — caught "$115k MSRP" type numbers in
+            # reasoning text and wrote $115 to ai_price (Raptor R bid 974).
+            buy_price = None
+            tb_match = _re.search(r'"target_buy"\s*:\s*(\d{4,7})', assessment)
+            if tb_match:
+                buy_price = int(tb_match.group(1))
+            else:
+                for m in _re.finditer(r'\$([0-9,]+)', assessment):
+                    try:
+                        v = int(m.group(1).replace(',', ''))
+                        if v >= 1000:           # ignore "$115k" etc.
+                            buy_price = v
+                            break
+                    except ValueError:
+                        pass
+            # Also try to surface a clean reasoning string from the partial
+            # JSON so the bid card doesn't display ```json markdown.
+            r_match = _re.search(r'"reasoning"\s*:\s*"([^"]+)', assessment)
+            partial_reason = r_match.group(1).strip() if r_match else ''
+            narrative = []
+            if buy_price:
+                narrative.append(f"**RECOMMENDED BUY**: ${buy_price:,}")
+            if partial_reason:
+                narrative.append(f"**REASONING** (partial — response was truncated): {partial_reason}")
+            if narrative:
+                assessment = "\n".join(narrative)
 
         db = get_db()
         try:
@@ -3957,7 +4134,7 @@ def api_bids():
     q = """
         SELECT b.id, b.phone, b.vin, b.year, b.make, b.model, b.mileage,
                b.raw_message, b.status, b.created_at, b.bid_amount, b.ai_price, b.asking_price,
-               b.has_unread, b.partner_dealer_id,
+               b.has_unread, b.partner_dealer_id, b.partner_request_id, b.salesperson,
                c.name as contact_name, c.company as contact_company, c.role as contact_role,
                d.name as partner_dealer_name
         FROM bids b
@@ -3991,6 +4168,8 @@ def api_bids():
             'is_db_push': r['phone'] == 'sys:db_push',
             'partner_dealer_id': r.get('partner_dealer_id'),
             'partner_dealer_name': r.get('partner_dealer_name'),
+            'partner_request_id': r.get('partner_request_id'),
+            'salesperson': r.get('salesperson'),
             'is_new': r['id'] > since_id,
             'has_unread': bool(r.get('has_unread'))
         })
@@ -4297,7 +4476,42 @@ def send_push_to_rep(rep_phone, title, body, url='/mobile'):
 @app.route('/mobile')
 def mobile():
     force_setup = 'reset' in request.args
-    return render_template('mobile.html', rep_name='', force_setup=force_setup)
+    # Partner-dealer mobile link — `?p=<token>` resolves to a dealer +
+    # their EW salesperson. Template stashes the token in localStorage so
+    # subsequent visits stay tagged even if the URL is opened without ?p.
+    partner_ctx = None
+    token = (request.args.get('p') or '').strip()
+    if token:
+        try:
+            db = get_db()
+            cur = db.cursor()
+            cur.execute("""SELECT id, name, salesperson, brand FROM dealers
+                            WHERE mobile_token = %s AND active = TRUE
+                            LIMIT 1""", (token,))
+            row = cur.fetchone()
+            db.close()
+            if row:
+                partner_ctx = {'token': token, 'name': row['name'],
+                               'salesperson': row['salesperson'],
+                               'brand': row.get('brand') or {}}
+        except Exception:
+            partner_ctx = None
+    # `back` URL — sent by the partner portal's "Open Mobile App" button.
+    # Only honored when it points at our own host so the back-button
+    # can't be used to redirect to an arbitrary external URL.
+    back_url = (request.args.get('back') or '').strip()
+    if back_url:
+        from urllib.parse import urlparse
+        try:
+            host_ok = urlparse(back_url).netloc == urlparse(request.host_url).netloc
+        except Exception:
+            host_ok = False
+        if not host_ok:
+            back_url = None
+    return render_template('mobile.html', rep_name='',
+                           force_setup=force_setup,
+                           partner_ctx=partner_ctx,
+                           back_url=back_url)
 
 
 @app.route('/api/mobile-submit', methods=['POST'])
@@ -4310,12 +4524,17 @@ def mobile_submit():
     manual_vin = request.form.get('manual_vin', '').strip().upper()
     manual_mileage_raw = request.form.get('manual_mileage', '').strip()
 
+    # Asking price is required server-side too — defends against the JS
+    # validation being bypassed (curl / older cached bundle / dev tools).
     asking_price = None
     if asking_price_raw:
         try:
             asking_price = float(asking_price_raw)
         except ValueError:
             pass
+    if not asking_price or asking_price <= 0:
+        return jsonify({'success': False,
+                        'error': 'Asking price is required.'}), 400
 
     manual_mileage = None
     if manual_mileage_raw:
@@ -4396,33 +4615,93 @@ def mobile_submit():
         parts.append(notes)
     raw_message = ' | '.join(parts) if parts else 'Mobile field submission'
 
+    # --- Partner-tagged mobile submissions ─────────────────────────────
+    # When the mobile PWA is opened via /mobile?p=<token>, the form sends
+    # the token back here. If it resolves to a dealer, the bid lands with
+    # partner_dealer_id + salesperson snapshot + a partner_bid_requests
+    # row (so it shows up in the partner's own dashboard like Quick Drop).
+    partner_token = (request.form.get('partner_token') or '').strip()
+    partner_dealer = None
+    if partner_token:
+        db_lookup = get_db()
+        lookup_cur = db_lookup.cursor()
+        lookup_cur.execute("""SELECT id, name, salesperson FROM dealers
+                              WHERE mobile_token = %s AND active = TRUE
+                              LIMIT 1""", (partner_token,))
+        partner_dealer = lookup_cur.fetchone()
+        db_lookup.close()
+
     # --- DB insert ---
     db = get_db()
     cur = db.cursor()
 
-    # Use a placeholder phone for field reps (no phone number)
-    rep_phone = f'field:{rep_name.replace(" ", "_").lower() or "rep"}'
-
-    cur.execute("""
-        INSERT INTO contacts (phone, name)
-        VALUES (%s, %s)
-        ON CONFLICT (phone) DO UPDATE SET name = EXCLUDED.name
-        RETURNING id
-    """, (rep_phone, rep_name or None))
+    # Phone routing depends on whether this is a partner-tagged submission.
+    # Partner mobile bids must look identical to Quick Drop bids on the EW
+    # dashboard — same `PARTNER{id}` phone sentinel, same shared dealer
+    # contact (with company=salesperson driving the blue chip). The rep
+    # name still surfaces in raw_message + notes so we know who submitted.
+    if partner_dealer:
+        rep_phone = f'PARTNER{partner_dealer["id"]}'
+        cur.execute("""
+            INSERT INTO contacts (phone, name, company)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (phone) DO UPDATE
+              SET name = EXCLUDED.name, company = EXCLUDED.company
+            RETURNING id
+        """, (rep_phone,
+              f'{partner_dealer["name"]} (Partner Portal)',
+              (partner_dealer.get('salesperson') or '').strip() or None))
+    else:
+        rep_phone = f'field:{rep_name.replace(" ", "_").lower() or "rep"}'
+        cur.execute("""
+            INSERT INTO contacts (phone, name)
+            VALUES (%s, %s)
+            ON CONFLICT (phone) DO UPDATE SET name = EXCLUDED.name
+            RETURNING id
+        """, (rep_phone, rep_name or None))
     contact_id = cur.fetchone()['id']
+
+    pbr_id = None
+    if partner_dealer:
+        # partner_bid_requests row first so the bid can FK back via
+        # partner_request_id. inventory_id is NULL (mobile submit isn't
+        # tied to scraped inventory).
+        cur.execute("""INSERT INTO partner_bid_requests
+                         (dealer_id, partner_user_id, inventory_id, vin,
+                          target_price, partner_message)
+                       VALUES (%s, NULL, NULL, %s, %s, %s)
+                       RETURNING id""",
+                    (partner_dealer['id'], vin or '', asking_price,
+                     f'Mobile by {rep_name}' if rep_name else 'Mobile submission'))
+        pbr_id = cur.fetchone()['id']
+
+    notes_full = (f'[Partner Mobile · {partner_dealer["name"]} · Rep: {rep_name or "—"}] {notes}'.strip()
+                  if partner_dealer
+                  else (f'[Field: {rep_name}] {notes}'.strip() if notes
+                        else f'[Field: {rep_name}]'))
 
     cur.execute("""
         INSERT INTO bids (contact_id, phone, vin, mileage, year, make, model, trim, color,
-                          raw_message, asking_price, notes, status, has_unread)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new', TRUE) RETURNING id
+                          raw_message, asking_price, notes, status, has_unread,
+                          partner_dealer_id, partner_request_id, salesperson,
+                          field_rep_name)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new', TRUE,
+                %s, %s, %s, %s) RETURNING id
     """, (contact_id, rep_phone, vin, mileage,
           decoded_vin.get('year'), decoded_vin.get('make'),
           decoded_vin.get('model'), decoded_vin.get('trim'),
           detected_color,
-          raw_message, asking_price,
-          f'[Field: {rep_name}] {notes}'.strip() if notes else f'[Field: {rep_name}]'))
+          raw_message, asking_price, notes_full,
+          (partner_dealer['id'] if partner_dealer else None),
+          pbr_id,
+          (partner_dealer['salesperson'] if partner_dealer else None),
+          rep_name or None))
 
     bid_id = cur.fetchone()['id']
+
+    if pbr_id:
+        cur.execute("UPDATE partner_bid_requests SET bid_id=%s WHERE id=%s",
+                    (bid_id, pbr_id))
 
     # Store all photos in bid_photos
     all_photos = [(u, None) for u in car_photo_urls]
@@ -4449,6 +4728,35 @@ def mobile_submit():
     # Background market check
     if vin:
         trigger_market_check(bid_id, vin)
+
+    # Telegram alert for partner-tagged mobile submissions so admin sees
+    # them land in real time (mirrors the Quick Drop alert format).
+    if partner_dealer:
+        try:
+            from partner_portal import _tg_alert, _notify_salesperson
+            _tg_alert(f'📱 <b>{partner_dealer["name"]}</b> mobile · Bid #{bid_id}\n'
+                      f'Rep: {rep_name or "—"}\n'
+                      f'{vin or "(no VIN)"}'
+                      + (f' · {mileage:,} mi' if mileage else '')
+                      + (f' · ask ${int(asking_price):,}' if asking_price else ''))
+        except Exception:
+            pass
+        # Re-fetch dealer with salesperson_phone (the partner_dealer dict
+        # from earlier didn't include it).
+        try:
+            from partner_portal import _notify_salesperson
+            db_n = get_db()
+            cur_n = db_n.cursor()
+            cur_n.execute('SELECT name, salesperson, salesperson_phone '
+                          'FROM dealers WHERE id = %s', (partner_dealer['id'],))
+            dealer_full = cur_n.fetchone()
+            db_n.close()
+            _notify_salesperson(dealer_full, bid_id, vin,
+                                decoded_vin.get('year'), decoded_vin.get('make'),
+                                decoded_vin.get('model'), asking_price,
+                                source='mobile bid')
+        except Exception as e:
+            print(f'[salesperson sms] mobile path: {e}')
 
     return jsonify({
         'success': True,
@@ -4552,14 +4860,19 @@ def rep_bids():
         client_ip = client_ip.split(',')[0].strip()
     cur.execute("UPDATE contacts SET last_seen = NOW(), last_ip = %s WHERE phone = %s", (client_ip, rep_phone))
     db.commit()
+    # Match either the legacy field:rep_name phone OR the dedicated
+    # field_rep_name column. Partner-tagged mobile bids store phone as
+    # PARTNER<id> (so they render like Quick Drop on EW dashboard) but
+    # still belong to a specific rep — field_rep_name carries that.
     cur.execute("""
         SELECT b.id, b.vin, b.year, b.make, b.model, b.mileage, b.status,
                b.created_at, b.bid_amount, b.bid_response,
                (SELECT url FROM bid_photos WHERE bid_id = b.id ORDER BY id LIMIT 1) AS first_photo
         FROM bids b
         WHERE b.phone = %s
+           OR LOWER(b.field_rep_name) = LOWER(%s)
         ORDER BY b.created_at DESC LIMIT 30
-    """, (rep_phone,))
+    """, (rep_phone, rep_name))
     rows = cur.fetchall()
     db.close()
     bids = []
@@ -4608,10 +4921,14 @@ def register_rep():
 
 @app.route('/api/active-reps')
 def active_reps():
-    """Return dashboard visitors and field reps seen in the last 2 minutes."""
+    """Active EW-admin viewers (last 2 minutes). The legacy version of
+    this endpoint also surfaced field-rep mobile users by name+IP, but
+    that leaked partner-mobile and field-rep names+IPs onto the EW
+    dashboard top bar. Reps are no longer returned — the pill now only
+    shows authenticated admins (entries land in dashboard_visitors only
+    when someone hits /api/bids, which is admin-gated)."""
     db = get_db()
     cur = db.cursor()
-    # Dashboard viewers (by IP)
     cur.execute("""
         SELECT ip, last_seen FROM dashboard_visitors
         WHERE last_seen > NOW() - INTERVAL '2 minutes'
@@ -4620,17 +4937,8 @@ def active_reps():
     viewers = [{'ip': r['ip'],
                 'last_seen': r['last_seen'].isoformat() if r['last_seen'] else None}
                for r in cur.fetchall()]
-    # Field reps online
-    cur.execute("""
-        SELECT name, last_ip, last_seen FROM contacts
-        WHERE phone LIKE 'field:%%' AND last_seen > NOW() - INTERVAL '2 minutes'
-        ORDER BY name
-    """)
-    reps = [{'name': r['name'], 'ip': r.get('last_ip', ''),
-             'last_seen': r['last_seen'].isoformat() if r['last_seen'] else None}
-            for r in cur.fetchall()]
     db.close()
-    return jsonify({'viewers': viewers, 'reps': reps})
+    return jsonify({'viewers': viewers, 'reps': []})
 
 
 @app.route('/api/bid/<int:bid_id>/messages-poll')
@@ -5146,6 +5454,18 @@ def _ensure_ai_assessment_log_table():
             cur.execute("""
                 ALTER TABLE ai_assessment_log
                 ADD COLUMN IF NOT EXISTS dealer_intel JSONB
+            """)
+            cur.execute("""
+                ALTER TABLE ai_assessment_log
+                ADD COLUMN IF NOT EXISTS buyer_intel JSONB
+            """)
+            cur.execute("""
+                ALTER TABLE ai_assessment_log
+                ADD COLUMN IF NOT EXISTS market_intel JSONB
+            """)
+            cur.execute("""
+                ALTER TABLE ai_assessment_log
+                ADD COLUMN IF NOT EXISTS flags_v2 JSONB
             """)
             db.commit()
         finally:
@@ -5763,7 +6083,7 @@ def share_ipacket(bid_id):
             body = pr.json() if pr.status_code in (200, 201) else {}
             state = body.get('state')
             if state == 'SUCCESS':
-                viewer_url = body.get('ipacket_viewer') or body.get('pdf')
+                viewer_url = body.get('pdf') or body.get('ipacket_viewer')
                 break
             if state in ('FAILED', 'ERROR'):
                 return (f'iPacket pull failed: {body.get("detail", "unknown")}', 502)
@@ -5863,6 +6183,11 @@ def api_vauto_heartbeat():
     """
     data = request.get_json(silent=True) or {}
     worker_id = (data.get('worker_id') or 'trainer').strip()
+    # === EW_REJECT_OSCAR_WORKERS ===
+    # oscar-* workers belong to oscar_intake project and must not poll EW.
+    if worker_id.startswith('oscar-'):
+        return jsonify({'error': 'wrong_project',
+                        'reason': 'oscar-* workers should poll oscar_intake, not EW'}), 410
     priority = (data.get('priority') or 'primary').strip()
     role = (data.get('role') or 'ew_worker').strip()
     chrome_alive = bool(data.get('chrome_alive', True))
@@ -6709,6 +7034,160 @@ def _get_proxmox_snapshot_cached():
         _PROXMOX_CACHE['data'] = result
         return result
 # ─── end Proxmox enrichment helpers ───
+
+
+@app.route('/admin/ai-accuracy')
+def admin_ai_accuracy():
+    """AI vs actual purchase reconciliation dashboard. Reads from
+    `ai_accuracy` table populated by /opt/expwholesale/reconcile_ai_accuracy.py
+    (cron daily at 6 AM ET, matches bids by VIN to LSL deals.purchase_cost)."""
+    return render_template('admin_ai_accuracy.html')
+
+
+@app.route('/api/admin/ai-accuracy/data')
+def api_admin_ai_accuracy_data():
+    """Aggregated data for the AI accuracy dashboard.
+    Query params: from=YYYY-MM-DD, to=YYYY-MM-DD (inclusive). Falls back to
+    last 30 days if not provided.
+    Filters on COALESCE(actual_purchased_at, ai_assessed_at)."""
+    import re as _re
+    DATE_RE = _re.compile(r'^\d{4}-\d{2}-\d{2}$')
+    f_arg = request.args.get('from', '').strip()
+    t_arg = request.args.get('to', '').strip()
+    if DATE_RE.match(f_arg) and DATE_RE.match(t_arg):
+        date_from = f_arg
+        date_to   = t_arg
+    else:
+        # Default last 30 days
+        from datetime import datetime as _dt, timedelta as _td
+        date_to   = _dt.utcnow().date().isoformat()
+        date_from = (_dt.utcnow().date() - _td(days=30)).isoformat()
+
+    db = get_db()
+    cur = db.cursor()
+    try:
+        # Use ai_assessed_at when actual_purchased_at is null (rare).
+        # Inclusive of both endpoints — date_to is treated as end-of-day.
+        cur.execute("""
+            SELECT bid_id, vin, year, make, model, mileage,
+                   ai_recommendation, ai_confidence_low, ai_confidence_high,
+                   ai_assessed_at, actual_purchase_cost, actual_purchased_at,
+                   delta, delta_pct, abs_delta_pct, in_confidence_range,
+                   lsl_deal_code
+            FROM ai_accuracy
+            WHERE COALESCE(actual_purchased_at, ai_assessed_at)::date BETWEEN %s::date AND %s::date
+            ORDER BY actual_purchased_at DESC NULLS LAST, ai_assessed_at DESC
+        """, (date_from, date_to))
+        rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            for k, v in r.items():
+                if hasattr(v, 'isoformat'):
+                    r[k] = v.isoformat()
+                elif hasattr(v, '__float__') and v is not None and not isinstance(v, bool):
+                    try: r[k] = float(v)
+                    except (TypeError, ValueError): pass
+
+        # Top-line stats
+        n = len(rows)
+        if n > 0:
+            abs_pcts = sorted(r['abs_delta_pct'] for r in rows
+                              if r.get('abs_delta_pct') is not None)
+            signed_pcts = [r['delta_pct'] for r in rows if r.get('delta_pct') is not None]
+            in_range = sum(1 for r in rows if r.get('in_confidence_range'))
+            # Total $ implications. delta = actual - AI rec.
+            #   delta > 0 = actual paid MORE than AI rec  → if we'd bid at AI's
+            #              number we would have lost the deal (UNDERBID by Δ).
+            #   delta < 0 = actual paid LESS than AI rec  → if we'd followed AI
+            #              we would have OVERPAID by |Δ|.
+            total_underbid = sum(r['delta'] for r in rows
+                                 if r.get('delta') is not None and r['delta'] > 0)
+            total_overpaid = sum(-r['delta'] for r in rows
+                                 if r.get('delta') is not None and r['delta'] < 0)
+            n_underbid = sum(1 for r in rows
+                             if r.get('delta') is not None and r['delta'] > 0)
+            n_overpaid = sum(1 for r in rows
+                             if r.get('delta') is not None and r['delta'] < 0)
+            stats = {
+                'n_matches': n,
+                'median_abs_pct':  round(abs_pcts[len(abs_pcts)//2], 2) if abs_pcts else None,
+                'mean_signed_pct': round(sum(signed_pcts)/len(signed_pcts), 2) if signed_pcts else None,
+                'in_confidence_count': in_range,
+                'in_confidence_pct': round(100.0 * in_range / n, 1),
+                'p25_abs_pct': round(abs_pcts[len(abs_pcts)//4], 2) if len(abs_pcts) >= 4 else None,
+                'p75_abs_pct': round(abs_pcts[(3*len(abs_pcts))//4], 2) if len(abs_pcts) >= 4 else None,
+                'within_5pct':  sum(1 for p in abs_pcts if p <= 5),
+                'within_10pct': sum(1 for p in abs_pcts if p <= 10),
+                'total_underbid_dollars': int(total_underbid),
+                'total_overpaid_dollars': int(total_overpaid),
+                'n_underbid':            n_underbid,
+                'n_overpaid':            n_overpaid,
+                'net_dollars':           int(total_underbid - total_overpaid),
+            }
+        else:
+            stats = {'n_matches': 0}
+
+        # Per-make leaderboard
+        cur.execute("""
+            SELECT make,
+                   COUNT(*) AS n,
+                   ROUND(AVG(abs_delta_pct), 2) AS mean_abs_pct,
+                   ROUND(AVG(delta_pct), 2) AS mean_signed_pct,
+                   SUM(CASE WHEN in_confidence_range THEN 1 ELSE 0 END) AS in_range_n
+            FROM ai_accuracy
+            WHERE COALESCE(actual_purchased_at, ai_assessed_at)::date BETWEEN %s::date AND %s::date
+              AND make IS NOT NULL
+            GROUP BY make
+            HAVING COUNT(*) >= 1
+            ORDER BY n DESC, mean_abs_pct ASC
+        """, (date_from, date_to))
+        per_make = [dict(r) for r in cur.fetchall()]
+        for m in per_make:
+            for k, v in m.items():
+                if hasattr(v, '__float__') and v is not None and not isinstance(v, bool):
+                    try: m[k] = float(v)
+                    except (TypeError, ValueError): pass
+
+        # Histogram bins for abs_delta_pct (0-2, 2-5, 5-10, 10-20, 20+)
+        bins = [(0, 2), (2, 5), (5, 10), (10, 20), (20, 999)]
+        histogram = []
+        for lo, hi in bins:
+            c = sum(1 for r in rows
+                    if r.get('abs_delta_pct') is not None
+                    and lo <= float(r['abs_delta_pct']) < hi)
+            histogram.append({'range': f'{lo}-{hi if hi < 999 else "+"}%',
+                              'count': c})
+
+        # Trend: rolling 7-day median abs_delta_pct (within selected range)
+        cur.execute("""
+            WITH per_day AS (
+                SELECT date_trunc('day', actual_purchased_at)::date AS day,
+                       abs_delta_pct
+                FROM ai_accuracy
+                WHERE actual_purchased_at IS NOT NULL
+                  AND actual_purchased_at::date BETWEEN %s::date AND %s::date
+            )
+            SELECT day,
+                   COUNT(*) AS n,
+                   ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY abs_delta_pct)::numeric, 2)
+                     AS median_abs_pct
+            FROM per_day GROUP BY day ORDER BY day
+        """, (date_from, date_to))
+        trend = [{'day': r['day'].isoformat() if r['day'] else None,
+                  'n': r['n'],
+                  'median_abs_pct': float(r['median_abs_pct']) if r['median_abs_pct'] is not None else None}
+                 for r in cur.fetchall()]
+
+        return jsonify({
+            'date_from': date_from,
+            'date_to':   date_to,
+            'stats':     stats,
+            'rows':      rows,
+            'per_make':  per_make,
+            'histogram': histogram,
+            'trend':     trend,
+        })
+    finally:
+        db.close()
 
 
 @app.route('/admin/workers')
@@ -7725,6 +8204,638 @@ def api_ipacket_upload_report():
 def serve_ipacket_report(filename):
     """Serve iPacket screenshot images."""
     return send_from_directory(IPACKET_REPORTS_DIR, filename)
+
+
+# ─────────────────────── Comp MSRP queue (Phase 2) ──────────────────────────
+# When a bid's rBook competitive set lands, we want MSRP for the top-3 closest-
+# in-miles comps so the UI + Gemini prompt can compare retail price vs original
+# MSRP. iPacket scraping by VIN is slow (~60s) so we queue per-VIN with a
+# CACHED result table — same comp VIN seen across multiple bids only triggers
+# ONE iPacket call ever. VM 121 (vm-oscar-worker-2) polls + scrapes.
+
+@app.route('/api/comp_msrp/enqueue', methods=['POST'])
+def api_comp_msrp_enqueue():
+    """Add a list of VINs to the comp_msrps queue. Idempotent — only inserts
+    rows that don't already exist. Body: {vins: [...], trigger_bid_id: 123}"""
+    data = request.json or {}
+    vins = [v for v in (data.get('vins') or []) if isinstance(v, str) and len(v) == 17]
+    trigger = data.get('trigger_bid_id')
+    if not vins:
+        return jsonify({'enqueued': 0, 'reason': 'no valid vins'})
+    db = get_db()
+    cur = db.cursor()
+    try:
+        rows = [(v.upper(), trigger) for v in vins]
+        cur.executemany("""
+            INSERT INTO comp_msrps (vin, trigger_bid_id, status)
+            VALUES (%s, %s, 'pending')
+            ON CONFLICT (vin) DO NOTHING
+        """, rows)
+        db.commit()
+        return jsonify({'enqueued': len(vins)})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': f'{type(e).__name__}: {e}'}), 500
+    finally:
+        db.close()
+
+
+@app.route('/api/comp_msrp/jwt')
+def api_comp_msrp_jwt():
+    """Return the iPacket JWT for distributed comp_msrp workers (e.g.
+    VM 121's worker_comp_msrp.py)."""
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT cookies FROM vauto_session WHERE label='ipacket'")
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'no ipacket jwt seeded'}), 404
+        blob = row['cookies']
+        if isinstance(blob, str):
+            blob = json.loads(blob)
+        jwt = (blob or {}).get('jwt')
+        if not jwt:
+            return jsonify({'error': 'jwt missing in session'}), 404
+        return jsonify({'jwt': jwt})
+    finally:
+        db.close()
+
+
+@app.route('/api/comp_msrp/claim', methods=['POST'])
+def api_comp_msrp_claim():
+    """Worker claims one pending VIN. Body: {worker_id: 'oscar-worker-2'}"""
+    data = request.json or {}
+    worker_id = (data.get('worker_id') or '').strip()
+    if not worker_id:
+        return jsonify({'error': 'worker_id required'}), 400
+    db = get_db()
+    cur = db.cursor()
+    try:
+        # Atomic claim: SELECT FOR UPDATE SKIP LOCKED so concurrent workers
+        # don't pick the same VIN. Lease times out after 600s.
+        cur.execute("""
+            UPDATE comp_msrps
+            SET status='in_progress', claimed_by=%s, claimed_at=NOW(),
+                updated_at=NOW()
+            WHERE vin = (
+                SELECT vin FROM comp_msrps
+                WHERE status='pending'
+                   OR (status='in_progress'
+                       AND claimed_at < NOW() - INTERVAL '10 minutes')
+                ORDER BY created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING vin, trigger_bid_id
+        """, (worker_id,))
+        row = cur.fetchone()
+        db.commit()
+        if not row:
+            return jsonify({'job': None})
+        return jsonify({'job': {'vin': row['vin'], 'trigger_bid_id': row['trigger_bid_id']}})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': f'{type(e).__name__}: {e}'}), 500
+    finally:
+        db.close()
+
+
+@app.route('/api/comp_msrp/submit', methods=['POST'])
+def api_comp_msrp_submit():
+    """Worker submits result. Body:
+       {worker_id, vin, status: 'done'|'failed', msrp, base_price, error, raw}"""
+    data = request.json or {}
+    vin = (data.get('vin') or '').strip().upper()
+    if not vin:
+        return jsonify({'error': 'vin required'}), 400
+    status = data.get('status', 'done')
+    if status not in ('done', 'failed'):
+        return jsonify({'error': "status must be 'done' or 'failed'"}), 400
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            UPDATE comp_msrps
+            SET status=%s, msrp=%s, base_price=%s,
+                error=%s, raw_json=%s::jsonb,
+                completed_at=NOW(), updated_at=NOW()
+            WHERE vin=%s
+            RETURNING vin
+        """, (
+            status, data.get('msrp'), data.get('base_price'),
+            data.get('error'),
+            json.dumps(data.get('raw')) if data.get('raw') else None,
+            vin,
+        ))
+        if not cur.fetchone():
+            db.rollback()
+            return jsonify({'error': f'vin {vin} not in queue'}), 404
+        db.commit()
+        return jsonify({'ok': True, 'vin': vin, 'status': status})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': f'{type(e).__name__}: {e}'}), 500
+    finally:
+        db.close()
+
+
+@app.route('/api/comp_msrp/status')
+def api_comp_msrp_status():
+    """Queue stats for monitoring."""
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            SELECT status, COUNT(*) AS n FROM comp_msrps GROUP BY status
+        """)
+        return jsonify({'queue': {r['status']: r['n'] for r in cur.fetchall()}})
+    finally:
+        db.close()
+
+
+# ── Historical purchase retrieval (Phase 4b — per-YMM, replaces XGBoost) ──
+# Per the 2026-05-06 decision: with only 146 reconciled samples spread across
+# 20+ makes, an XGBoost regressor was too noisy. Replaced with tiered SQL
+# retrieval against ai_accuracy. Returns mean/median/stddev of actual paid
+# for cars matching subject's year/make/model + mileage band, with broader
+# fallbacks when tier 1 is sparse. Honest, explainable, tightens as more
+# data accumulates without retraining.
+
+def _retrieve_purchase_history(year, make, model, mileage, exclude_bid_id=None):
+    """Tiered query against ai_accuracy. Returns dict with stats + tier used,
+    or None if no matches at all. exclude_bid_id prevents self-reference
+    when reassessing a bid that's already reconciled.
+    Also computes AI-accuracy stats over the same matches so Gemini sees
+    its own track record (mean signed error %, median |error| %)."""
+    if not (make and model):
+        return None
+    db = get_db()
+    cur = db.cursor()
+    try:
+        miles_lo = int(mileage * 0.7) if mileage else None
+        miles_hi = int(mileage * 1.3) if mileage else None
+        excl_clause = ' AND bid_id != %s' if exclude_bid_id else ''
+        excl_param  = (exclude_bid_id,) if exclude_bid_id else ()
+
+        tiers = []
+        if year and make and model and mileage:
+            tiers.append(('YMM + ±30% miles',
+                "year = %s AND UPPER(make) = UPPER(%s) AND UPPER(model) = UPPER(%s) "
+                "AND mileage BETWEEN %s AND %s" + excl_clause,
+                (year, make, model, miles_lo, miles_hi) + excl_param))
+        if make and model:
+            tiers.append((f'{make} {model} (any year/miles)',
+                "UPPER(make) = UPPER(%s) AND UPPER(model) = UPPER(%s)" + excl_clause,
+                (make, model) + excl_param))
+        if make:
+            tiers.append((f'{make} (any model — fallback)',
+                "UPPER(make) = UPPER(%s)" + excl_clause,
+                (make,) + excl_param))
+
+        MIN_TIER_N = 3  # require >=3 reconciled deals to avoid anchoring Gemini on 1-2 outliers
+        for tier_name, where_clause, params in tiers:
+            cur.execute(f"""
+                SELECT
+                    COUNT(*) AS n,
+                    AVG(actual_purchase_cost)::int AS mean,
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY actual_purchase_cost) AS median,
+                    STDDEV(actual_purchase_cost) AS stddev,
+                    MIN(actual_purchase_cost) AS p_min,
+                    MAX(actual_purchase_cost) AS p_max,
+                    AVG(mileage)::int AS avg_mileage,
+                    AVG(year)::numeric(6,1) AS avg_year,
+                    AVG(delta_pct)::numeric(7,2) AS ai_mean_signed_pct,
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY abs_delta_pct) AS ai_median_abs_pct,
+                    SUM(CASE WHEN in_confidence_range THEN 1 ELSE 0 END) AS ai_in_range_n
+                FROM ai_accuracy
+                WHERE {where_clause}
+                  AND actual_purchase_cost > 0
+            """, params)
+            r = cur.fetchone()
+            n_here = int(r['n']) if (r and r['n']) else 0
+            if n_here and n_here < MIN_TIER_N:
+                print(f"[purchase_history] tier={tier_name} skipped (n={n_here}<{MIN_TIER_N})", flush=True)
+                continue
+            if r and r['n'] and r['n'] >= MIN_TIER_N:
+                cur.execute(f"""
+                    SELECT bid_id, year, make, model, mileage,
+                           actual_purchase_cost, ai_recommendation,
+                           delta_pct,
+                           actual_purchased_at::date AS purchased_date
+                    FROM ai_accuracy
+                    WHERE {where_clause}
+                      AND actual_purchase_cost > 0
+                    ORDER BY actual_purchased_at DESC NULLS LAST
+                    LIMIT 5
+                """, params)
+                samples = [dict(s) for s in cur.fetchall()]
+                for s in samples:
+                    if hasattr(s.get('purchased_date'), 'isoformat'):
+                        s['purchased_date'] = s['purchased_date'].isoformat()
+                    if s.get('delta_pct') is not None:
+                        try: s['delta_pct'] = float(s['delta_pct'])
+                        except (TypeError, ValueError): pass
+                return {
+                    'tier':              tier_name,
+                    'n':                 int(r['n']),
+                    'mean':              int(r['mean']) if r['mean'] else None,
+                    'median':            int(r['median']) if r['median'] else None,
+                    'stddev':            int(r['stddev']) if r['stddev'] else None,
+                    'min':               int(r['p_min']) if r['p_min'] else None,
+                    'max':               int(r['p_max']) if r['p_max'] else None,
+                    'avg_mileage':       int(r['avg_mileage']) if r['avg_mileage'] else None,
+                    # AI track record for THIS YMM tier — calibration anchor
+                    'ai_mean_signed_pct':  float(r['ai_mean_signed_pct']) if r['ai_mean_signed_pct'] is not None else None,
+                    'ai_median_abs_pct':   float(r['ai_median_abs_pct']) if r['ai_median_abs_pct'] is not None else None,
+                    'ai_in_range_n':       int(r['ai_in_range_n']) if r['ai_in_range_n'] is not None else 0,
+                    'samples':           samples,
+                }
+        return None
+    except Exception as e:
+        print(f'[retrieval] err: {e}', flush=True)
+        return None
+    finally:
+        db.close()
+
+
+# ── XGBoost path retired 2026-05-06 — kept stub so callers don't break ────
+def _load_ml_predictor():
+    import time as _tt
+    # Refresh from disk every 10 minutes to pick up retrained models
+    if (_ML_MODEL_CACHE['model'] is not None
+        and _tt.time() - _ML_MODEL_CACHE['loaded_at'] < 600):
+        return _ML_MODEL_CACHE['model'], _ML_MODEL_CACHE['meta']
+    try:
+        import xgboost as _xgb
+        import os as _os
+        model_dir = '/opt/expwholesale/ml_models'
+        model_path = _os.path.join(model_dir, 'purchase_predictor.json')
+        meta_path  = _os.path.join(model_dir, 'purchase_predictor_meta.json')
+        if not _os.path.exists(model_path):
+            return None, None
+        m = _xgb.XGBRegressor()
+        m.load_model(model_path)
+        with open(meta_path) as f:
+            meta = json.load(f)
+        _ML_MODEL_CACHE['model'] = m
+        _ML_MODEL_CACHE['meta']  = meta
+        _ML_MODEL_CACHE['loaded_at'] = _tt.time()
+        return m, meta
+    except Exception as e:
+        print(f'[ml_predictor] load err: {e}', flush=True)
+        return None, None
+
+
+def _ml_purchase_predict(bid: dict, vauto: dict | None,
+                         ipacket: dict | None, buyer_intel: dict | None) -> dict | None:
+    """Run the XGBoost predictor for one bid. Returns:
+       {prediction, confidence_low, confidence_high, mape_pct, n_train}
+       or None if model not loaded / features missing."""
+    model, meta = _load_ml_predictor()
+    if not model or not meta:
+        return None
+    try:
+        import numpy as _np
+        feat_names = meta.get('features') or []
+        numeric_features = meta.get('numeric_features') or []
+        top_makes = meta.get('top_makes') or []
+
+        # Build feature row using SAME ordering as training
+        # Pull values from bid + linked tables
+        vals = {}
+        vals['year']    = bid.get('year')
+        vals['mileage'] = bid.get('mileage')
+
+        # Manheim
+        mh_summary = ((vauto or {}).get('manheim_transactions') or {}).get('summary') or {}
+        if isinstance((vauto or {}).get('manheim_transactions'), str):
+            try:
+                _t = json.loads(vauto['manheim_transactions'])
+                mh_summary = _t.get('summary') or {}
+                mh_txns = _t.get('transactions') or []
+            except Exception:
+                mh_txns = []
+        else:
+            mh_txns = ((vauto or {}).get('manheim_transactions') or {}).get('transactions') or []
+        vals['mmr_adjusted'] = mh_summary.get('adjusted_mmr')
+        vals['mmr_base']     = mh_summary.get('base_mmr')
+        vals['mmr_n_tx']     = len(mh_txns) if isinstance(mh_txns, list) else 0
+        if isinstance(mh_txns, list):
+            prices = sorted(t.get('sale_price') for t in mh_txns
+                            if isinstance(t, dict)
+                            and isinstance(t.get('sale_price'), (int, float))
+                            and 1000 < t['sale_price'] < 2_000_000)
+            vals['mmr_median'] = prices[len(prices)//2] if prices else None
+
+        # iPacket subject MSRP
+        vals['subject_msrp']       = (ipacket or {}).get('total_msrp')
+        vals['subject_base_price'] = (ipacket or {}).get('base_price')
+
+        # LSL aggregates
+        patterns = (buyer_intel or {}).get('patterns') or {}
+        vals['lsl_n_deals']      = patterns.get('total_deals') or 0
+        vals['lsl_avg_sale']     = patterns.get('avg_sale_price')
+        vals['lsl_avg_gross']    = patterns.get('avg_front_value')  # LSL native field; ML feature name retained for trained model
+        if vals['lsl_avg_sale'] and vals['lsl_avg_gross']:
+            vals['lsl_avg_purchase'] = int(vals['lsl_avg_sale'] - vals['lsl_avg_gross'])
+        else:
+            vals['lsl_avg_purchase'] = None
+
+        # rBook stats — currently mostly missing (we only get clean ones from
+        # competition_api source). Leave as None when not available.
+        rb_obj = (vauto or {}).get('rbook_competitive_set')
+        if isinstance(rb_obj, str):
+            try: rb_obj = json.loads(rb_obj)
+            except Exception: rb_obj = None
+        rb_rows = (rb_obj or {}).get('rows') or []
+        if rb_rows:
+            asks = sorted(v.get('price') for v in rb_rows
+                          if isinstance(v, dict)
+                          and isinstance(v.get('price'), (int, float))
+                          and 1000 < v['price'] < 2_000_000)
+            vals['rbook_median'] = asks[len(asks)//2] if asks else None
+            vals['rbook_n_clean'] = len(asks)
+        if vals.get('rbook_median') and vals.get('mmr_median'):
+            vals['retail_mmr_spread'] = vals['rbook_median'] - vals['mmr_median']
+
+        # Build vector in TRAIN order
+        row = []
+        for c in numeric_features:
+            v = vals.get(c)
+            try: v = float(v) if v is not None else -1.0
+            except (TypeError, ValueError): v = -1.0
+            row.append(v)
+        make_upper = (bid.get('make') or '').upper()
+        for m in top_makes:
+            row.append(1.0 if make_upper == m else 0.0)
+        row.append(0.0 if make_upper in top_makes else 1.0)  # make_other
+
+        X = _np.array([row], dtype=_np.float32)
+        pred = float(model.predict(X)[0])
+
+        # Confidence band from CV MAPE (~27% on first train; tightens over time)
+        mape_pct = meta.get('cv_mape_pct') or 25.0
+        spread = pred * (mape_pct / 100.0)
+        return {
+            'prediction':       int(round(pred)),
+            'confidence_low':   int(round(pred - spread)),
+            'confidence_high':  int(round(pred + spread)),
+            'mape_pct':         round(mape_pct, 2),
+            'n_train':          meta.get('n_train', 0),
+        }
+    except Exception as e:
+        print(f'[ml_predictor] predict err: {e}', flush=True)
+        return None
+
+
+def _ipacket_lookup_msrp_for_vin(vin):
+    """Pull iPacket sticker for ONE VIN and return parsed MSRP/base_price.
+    Uses the stored JWT in vauto_session label='ipacket'. Returns dict:
+      {ok: True, msrp, base_price, raw}
+      {ok: False, error}
+    Roughly 5-15s per call. Reused for both subject-vehicle iPacket and
+    comp-vehicle MSRP lookups (Phase 2).
+    """
+    import requests as _rr
+    import time as _tt
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT cookies FROM vauto_session WHERE label='ipacket'")
+    sess = cur.fetchone()
+    db.close()
+    if not sess:
+        return {'ok': False, 'error': 'no jwt seeded'}
+    blob = sess['cookies']
+    if isinstance(blob, str):
+        blob = json.loads(blob)
+    jwt = (blob or {}).get('jwt')
+    if not jwt:
+        return {'ok': False, 'error': 'jwt missing'}
+
+    H = {
+        'Authorization': f'bearer {jwt}',
+        'Origin': 'https://dpapp.autoipacket.com',
+        'Referer': 'https://dpapp.autoipacket.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+    }
+    try:
+        r = _rr.put(f'https://djapi.autoipacket.com/v2/sticker-puller/pull/{vin}',
+                    headers=H, timeout=15)
+        if r.status_code == 401:
+            return {'ok': False, 'error': 'jwt expired'}
+        if r.status_code not in (200, 201):
+            return {'ok': False, 'error': f'pull rc={r.status_code}: {r.text[:200]}'}
+        job_id = r.json().get('id')
+        if not job_id:
+            return {'ok': False, 'error': 'no job_id in pull response'}
+        viewer = None
+        for _ in range(25):
+            pr = _rr.get(f'https://djapi.autoipacket.com/v2/sticker-puller/poll/{job_id}',
+                         headers=H, timeout=10)
+            body = pr.json() if pr.status_code in (200, 201) else {}
+            state = body.get('state')
+            if state == 'SUCCESS':
+                viewer = body.get('pdf') or body.get('ipacket_viewer')
+                break
+            if state in ('FAILED', 'ERROR'):
+                return {'ok': False, 'error': f'pull state={state} {body.get("detail","")}'}
+            _tt.sleep(1)
+        if not viewer:
+            return {'ok': False, 'error': 'pull timed out 25s'}
+        # Fetch viewer — content-type can be PDF or HTML depending on
+        # the iPacket account. PDFs are text-extractable directly.
+        try:
+            vr = _rr.get(viewer, headers=H, timeout=30)
+            ct = (vr.headers.get('content-type') or '').lower()
+            if vr.status_code != 200:
+                return {'ok': False, 'error': f'viewer rc={vr.status_code}'}
+            text = ''
+            ocr_used = False
+            if 'pdf' in ct:
+                try:
+                    import pdfplumber, io as _io
+                    with pdfplumber.open(_io.BytesIO(vr.content)) as pdf:
+                        text = '\n'.join((p.extract_text() or '') for p in pdf.pages)
+                        # OCR fallback for image-only PDFs (Porsche, Cadillac
+                        # Escalade dealer-uploaded scans, etc.) where text
+                        # layer is empty. Render each page → PNG → Vision.
+                        if len(text.strip()) < 200:
+                            ocr_chunks = []
+                            for page in pdf.pages:
+                                try:
+                                    pil_img = page.to_image(resolution=200).original
+                                    buf = _io.BytesIO()
+                                    pil_img.save(buf, format='PNG')
+                                    ocr_text = _google_vision_ocr(buf.getvalue())
+                                    if ocr_text:
+                                        ocr_chunks.append(ocr_text)
+                                except Exception as _pe:
+                                    pass
+                            if ocr_chunks:
+                                text = '\n'.join(ocr_chunks)
+                                ocr_used = True
+                except Exception as _pdf_e:
+                    return {'ok': False, 'error': f'pdf parse: {_pdf_e}'}
+            else:
+                text = vr.text
+        except Exception as _vex:
+            return {'ok': False, 'error': f'viewer fetch: {_vex}'}
+        parsed = _parse_sticker_text(text) if text else {}
+        return {'ok': True,
+                'msrp':       parsed.get('total_msrp'),
+                'base_price': parsed.get('base_price'),
+                'viewer_url': viewer,
+                'ocr_used':   ocr_used,
+                'raw':        {'options':        parsed.get('options'),
+                               'exterior_color': parsed.get('exterior_color'),
+                               'interior_color': parsed.get('interior_color'),
+                               'text_chars':     len(text)}}
+    except Exception as e:
+        return {'ok': False, 'error': f'{type(e).__name__}: {e}'}
+
+
+def _comp_msrp_processor_loop():
+    """Background daemon: claims one pending comp_msrps row at a time and
+    processes it via iPacket. Started by app boot. Sequential processing
+    (avoid rate-limiting iPacket API), but sleeps short when work is
+    pending and longer when idle."""
+    import time as _tt
+    import requests as _rr  # noqa: F401
+    print('[comp_msrp processor] starting daemon', flush=True)
+    consecutive_empty = 0
+    while True:
+        try:
+            db = get_db()
+            cur = db.cursor()
+            cur.execute("""
+                UPDATE comp_msrps
+                SET status='in_progress', claimed_by='ew-server-bg',
+                    claimed_at=NOW(), updated_at=NOW()
+                WHERE vin = (
+                    SELECT vin FROM comp_msrps
+                    WHERE status='pending'
+                       OR (status='in_progress'
+                           AND claimed_at < NOW() - INTERVAL '10 minutes')
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING vin
+            """)
+            row = cur.fetchone()
+            db.commit()
+            db.close()
+            if not row:
+                # Idle: ramp up sleep so we're not hammering the DB. First
+                # empty poll: 5s, then 10s, then 30s, capped at 60s.
+                consecutive_empty += 1
+                _tt.sleep(min(60, 5 * (2 ** min(consecutive_empty - 1, 3))))
+                continue
+            consecutive_empty = 0
+            vin = row['vin']
+            print(f'[comp_msrp processor] claim {vin}', flush=True)
+            res = _ipacket_lookup_msrp_for_vin(vin)
+            db = get_db()
+            cur = db.cursor()
+            try:
+                if res.get('ok'):
+                    cur.execute("""
+                        UPDATE comp_msrps
+                        SET status='done', msrp=%s, base_price=%s,
+                            raw_json=%s::jsonb,
+                            completed_at=NOW(), updated_at=NOW()
+                        WHERE vin=%s
+                    """, (res.get('msrp'), res.get('base_price'),
+                          json.dumps(res.get('raw') or {}), vin))
+                    print(f'[comp_msrp processor] {vin} → MSRP=${res.get("msrp") or 0:,} '
+                          f'base=${res.get("base_price") or 0:,}', flush=True)
+                else:
+                    cur.execute("""
+                        UPDATE comp_msrps
+                        SET status='failed', error=%s,
+                            completed_at=NOW(), updated_at=NOW()
+                        WHERE vin=%s
+                    """, (str(res.get('error'))[:500], vin))
+                    print(f'[comp_msrp processor] {vin} FAILED: {res.get("error")}',
+                          flush=True)
+                db.commit()
+            finally:
+                db.close()
+            # No throttle when more work pending — back-to-back iPacket
+            # pulls. Each pull is rate-limited at the iPacket-API level
+            # already (PUT/poll has its own ~1-3s overhead).
+        except Exception as e:
+            print(f'[comp_msrp processor] loop err: {e}', flush=True)
+            _tt.sleep(30)
+
+
+def _start_comp_msrp_processor():
+    """Start the daemon thread once per gunicorn worker. Idempotent.
+    Gated by env COMP_MSRP_DAEMON=1 — default OFF since VM 121
+    (oscar-worker-2) is the canonical comp_msrp processor. Set the env
+    var only when VM 121 is offline and you need the server to fall
+    back to handling comp_msrp jobs."""
+    if os.environ.get('COMP_MSRP_DAEMON', '0') != '1':
+        return
+    import threading
+    global _COMP_MSRP_THREAD_STARTED
+    try:
+        _COMP_MSRP_THREAD_STARTED
+    except NameError:
+        _COMP_MSRP_THREAD_STARTED = False
+    if _COMP_MSRP_THREAD_STARTED:
+        return
+    _COMP_MSRP_THREAD_STARTED = True
+    t = threading.Thread(target=_comp_msrp_processor_loop,
+                         name='comp_msrp_processor', daemon=True)
+    t.start()
+    print('[comp_msrp processor] DAEMON STARTED (env COMP_MSRP_DAEMON=1)',
+          flush=True)
+
+
+def _enqueue_comp_msrps_for_bid(bid_id, market_intel_obj):
+    """Helper called from the bid view: take the closest-3 rBook comp VINs
+    and INSERT them into comp_msrps (idempotent). Worker on VM 121 picks up.
+    No-op if no closest_3 yet."""
+    try:
+        rb = (market_intel_obj or {}).get('rbook') or {}
+        closest = rb.get('closest_3') or []
+        vins = [(c.get('vin') or '').upper()
+                for c in closest if c.get('vin')]
+        vins = [v for v in vins if len(v) == 17]
+        if not vins: return
+        db = get_db()
+        cur = db.cursor()
+        try:
+            cur.executemany("""
+                INSERT INTO comp_msrps (vin, trigger_bid_id, status)
+                VALUES (%s, %s, 'pending')
+                ON CONFLICT (vin) DO NOTHING
+            """, [(v, bid_id) for v in vins])
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        print(f'[comp_msrp enqueue] bid={bid_id} err: {e}', flush=True)
+
+
+def _load_comp_msrps(vins):
+    """Lookup MSRPs for a list of VINs. Returns dict {vin: {msrp, status}}."""
+    if not vins:
+        return {}
+    vins = [v.upper() for v in vins if v]
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            SELECT vin, msrp, base_price, status, error
+            FROM comp_msrps
+            WHERE vin = ANY(%s)
+        """, (vins,))
+        return {r['vin']: dict(r) for r in cur.fetchall()}
+    finally:
+        db.close()
 
 
 @app.route('/api/ipacket/status/<int:bid_id>')
