@@ -176,7 +176,10 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None)
     min_deals = int(_cfg(config, 'min_deals_for_pitch', 1))
 
     make_pat = _norm_make_pattern(make)
-    model_pat = f'%{str(model).strip()}%'
+    # Hyphens in model names ("GLE-Class", "F-150") aren't consistent in LSL —
+    # stored both with and without the hyphen. Replace `-` with wildcard so
+    # "GLE-Class" matches "GLE Class" too.
+    model_pat = '%' + str(model).strip().replace('-', '%').replace('_', '%') + '%'
     try:
         y = int(year)
     except (ValueError, TypeError):
