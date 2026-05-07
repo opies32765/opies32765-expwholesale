@@ -3779,6 +3779,39 @@ def _run_assessment(bid_id):
     except Exception as _ph_e:
         print(f'[ASSESS] purchase history err: {_ph_e}', flush=True)
 
+    # ML model second opinion — feeds Gemini as a calibration anchor.
+    # Same predict_for_bid call as the bid card uses.
+    _ml_pred_assess = None
+    try:
+        from ml_predict import predict_for_bid as _ml_predict_fn
+        _mi_for_ml = _market_intel or {}
+        _mh = _mi_for_ml.get('manheim') or {}
+        _rb = _mi_for_ml.get('rbook') or {}
+        _est_w = (_mh.get('adjusted_mmr') or _mh.get('base_mmr')
+                  or (vauto_data or {}).get('mmr'))
+        _mkt_a = (_rb.get('avg_price') or _rb.get('median')
+                  or (vauto_data or {}).get('rbook'))
+        _ipkt_msrp = (ipacket_data or {}).get('total_msrp')
+        if _est_w and bid.get('make'):
+            _ml_pred_assess = _ml_predict_fn({
+                'make_name':           bid.get('make') or '',
+                'model_name':          bid.get('model'),
+                'year':                bid.get('year'),
+                'odometer':            bid.get('mileage'),
+                'est_wholesale_price': _est_w,
+                'market_asking_price': _mkt_a,
+                'original_msrp':       _ipkt_msrp,
+                'base_appraised_value': _mkt_a,
+                'sale_type':           'Wholesale',
+                'vehicle_sale_type':   'Used',
+            })
+            if _ml_pred_assess and _ml_pred_assess.get('prediction'):
+                print(f'[ASSESS] Bid {bid_id} ML model ({_ml_pred_assess["source"]}): '
+                      f'${_ml_pred_assess["prediction"]:,} '
+                      f'(MAPE {_ml_pred_assess.get("mape_pct", "?")}%)', flush=True)
+    except Exception as _ml_e:
+        print(f'[ASSESS] ml_predict err: {_ml_e}', flush=True)
+
     if _v2_build_prompt:
         prompt = _v2_build_prompt(
             dict(bid),
@@ -3795,6 +3828,7 @@ def _run_assessment(bid_id):
             nhtsa=_nhtsa,
             tesla=tesla_data,
             purchase_history=_purchase_history,
+            ml_prediction=_ml_pred_assess,
         )
     else:
         # Module unavailable — emit a minimal prompt so we still return something

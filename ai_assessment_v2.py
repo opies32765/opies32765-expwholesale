@@ -43,6 +43,8 @@ EW buys cars and resells them to retail dealers, who then retail them to consume
 
 {purchase_history_section}
 
+{ml_section}
+
 {velocity_section}
 
 ═══ KEY QUESTIONS TO ASK YOURSELF ═══
@@ -320,6 +322,35 @@ def _book_values_section(vauto: dict | None, accutrade: dict | None) -> str:
     return '\n'.join(out)
 
 
+def _ml_section(ml: dict | None) -> str:
+    """Per-make XGBoost prediction as a calibration anchor for Gemini.
+    Source: ml_predict.predict_for_bid() against trained models in
+    /opt/expwholesale/ml/models/per_make/. Returns empty string if no
+    model exists for the make (silent skip — Gemini reasons without it)."""
+    if not ml or not ml.get('prediction'):
+        return ''
+    out = ['═══ ML MODEL CALIBRATION ANCHOR ═══']
+    pred = ml['prediction']
+    src_label = 'XGBoost' if ml.get('source') == 'xgboost' else 'baseline ratio'
+    n_train = ml.get('n_train') or 0
+    out.append(f'  Model: {src_label}, trained on n={n_train:,} historical '
+               f'EW {ml.get("make_name", "?")} purchases')
+    out.append(f'  Predicted EW purchase price: ${pred:,}')
+    if ml.get('mape_pct') is not None:
+        out.append(f'  Holdout MAPE: {ml["mape_pct"]:.1f}%'
+                   + (f'  (within ±10% on {ml["within_10pct"]:.0f}% of recent test bids)'
+                      if ml.get('within_10pct') else ''))
+    if ml.get('baseline_prediction') and ml.get('baseline_prediction') != pred:
+        out.append(f'  (Simple per-make baseline ratio said: ${ml["baseline_prediction"]:,})')
+    out.append('')
+    out.append('  Use this as a CALIBRATION ANCHOR — it is what a model trained on')
+    out.append('  EW past purchases of this make predicts. Treat as a strong prior,')
+    out.append('  but override if your reasoning surfaces vehicle-specific factors')
+    out.append('  (carfax, options, miles vs comp set, scarcity) that this model')
+    out.append('  cannot see. State your reasoning if you diverge >10% from this.')
+    return '\n'.join(out)
+
+
 def _purchase_history_section(ph: dict | None) -> str:
     """Per-YMM retrieval. Shows EW's actual reconciled purchase history AND
     the AI's own track record on this YMM (mean signed error, median |error|).
@@ -408,7 +439,8 @@ def build_prompt(bid: dict, *, vauto: dict | None = None,
                  velocity: dict | None = None,
                  nhtsa: dict | None = None,
                  tesla: dict | None = None,
-                 purchase_history: dict | None = None) -> str:
+                 purchase_history: dict | None = None,
+                 ml_prediction: dict | None = None) -> str:
     """Compose the v2 assessment prompt. All inputs optional; sections render
     with placeholders when data is missing."""
     asking = bid.get('asking_price')
@@ -426,6 +458,7 @@ def build_prompt(bid: dict, *, vauto: dict | None = None,
                                    subject_miles=bid.get('mileage')),
         book_values_section=_book_values_section(vauto, accutrade),
         purchase_history_section=_purchase_history_section(purchase_history),
+        ml_section=_ml_section(ml_prediction),
         velocity_section=_velocity_section(velocity),
         asking_constraint=asking_constraint,
     )
