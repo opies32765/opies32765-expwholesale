@@ -1,0 +1,4 @@
+# Refresh lsl_training PG table from LSL crm.db nightly at 4 AM ET.
+# Source of truth for ML training scripts (per-make GBDT, embedding
+# retrieval, LoRA fine-tune).
+0 4 * * * root /opt/expwholesale/venv/bin/python3 /opt/expwholesale/lsl_training_export.py >> /var/log/lsl_training.log 2>&1
