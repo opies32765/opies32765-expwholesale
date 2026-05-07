@@ -786,10 +786,6 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
               {% if c.msrp_lookup %}
                 {% if c.msrp_lookup.msrp %}
                   &middot; <span style="color:#cbd5e1;font-weight:700">MSRP ${{ '{:,}'.format(c.msrp_lookup.msrp|int) }}</span>
-                  {% if c.price %}
-                    {% set markdown_pct = ((c.msrp_lookup.msrp - c.price) / c.msrp_lookup.msrp * 100)|round(1) %}
-                    <span style="color:#94a3b8">({{ markdown_pct }}% off MSRP)</span>
-                  {% endif %}
                 {% elif c.msrp_lookup.status == 'pending' or c.msrp_lookup.status == 'in_progress' %}
                   &middot; <span style="color:#fbbf24">MSRP pending&hellip;</span>
                 {% elif c.msrp_lookup.status == 'failed' %}
