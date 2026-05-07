@@ -102,6 +102,39 @@ def _body_style_patterns(trim_text: str | None) -> list[str]:
     return []
 
 
+# Stopwords / body-style-derived tokens we should NOT enforce as trim filters
+# (single-letter packages like "S", drive-train acronyms, body-style words).
+_TRIM_STOPWORDS = {
+    'awd', 'fwd', 'rwd', '4wd', '2wd', '4x4', '4x2',
+    'crew', 'cab', 'extended', 'regular', 'super', 'quad', 'pickup', 'truck',
+    'sedan', 'coupe', 'convertible', 'cabriolet', 'spider', 'spyder',
+    'roadster', 'targa', 'wagon', 'hatchback', 'suv', 'sport', 'utility',
+    'crossover', 'minivan', 'van',
+    '2d', '4d', 'auto', 'manual', 'and', 'with', 'edition', 'package', 'pkg',
+}
+
+
+def _trim_filter_token(trim_text: str | None) -> str | None:
+    """Pick the most distinguishing trim word (e.g. 'XLT', 'Raptor', 'Carrera',
+    'Lariat') so LSL matches a same-trim deal — not a Raptor when subject is
+    an XLT.  Returns the first non-stopword, non-body-style token of length
+    >=3 from the trim string, or None if nothing usable."""
+    if not trim_text:
+        return None
+    for raw in trim_text.replace('-', ' ').replace('/', ' ').split():
+        token = raw.strip().strip('.,').lower()
+        if len(token) < 2:
+            continue
+        if token in _TRIM_STOPWORDS:
+            continue
+        # 2-letter tokens only kept if upper-case (likely an actual trim like
+        # 'GT', 'SS', 'RS', 'XL'). Single letter ('S') is too noisy.
+        if len(token) == 2 and not raw.isupper():
+            continue
+        return token
+    return None
+
+
 def _open_lsl_ro():
     uri = f'file:{LSL_DB_PATH}?mode=ro&immutable=1'
     conn = sqlite3.connect(uri, uri=True, timeout=5.0)
@@ -162,6 +195,16 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None)
         body_clause = '1=1'
         body_args = []
 
+    # Trim filter — F-150 XLT shouldn't match F-150 Raptor/Tremor/Limited.
+    # Pick the most distinguishing trim word and require it in vehicle_info.
+    trim_tok = _trim_filter_token(trim)
+    if trim_tok:
+        trim_clause = 'UPPER(vehicle_info) LIKE UPPER(?)'
+        trim_args = [f'%{trim_tok}%']
+    else:
+        trim_clause = '1=1'
+        trim_args = []
+
     try:
         conn = _open_lsl_ro()
         cur = conn.cursor()
@@ -182,6 +225,7 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None)
           AND UPPER(vehicle_info) LIKE UPPER(?)
           AND ({year_prefix_clause})
           AND {body_clause}
+          AND {trim_clause}
           AND sold_at > date('now', ? || ' days')
           AND sale_price > 0
           AND customer_name IS NOT NULL AND TRIM(customer_name) != ''
@@ -189,7 +233,7 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None)
         LIMIT ?
         """
         cur.execute(sql_deals, (
-            make_pat, model_pat, *year_prefix_args, *body_args, f'-{recent_days}', max_deals,
+            make_pat, model_pat, *year_prefix_args, *body_args, *trim_args, f'-{recent_days}', max_deals,
         ))
         deals = [dict(r) for r in cur.fetchall()]
 
@@ -208,11 +252,12 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None)
           AND UPPER(vehicle_info) LIKE UPPER(?)
           AND ({year_prefix_clause})
           AND {body_clause}
+          AND {trim_clause}
           AND sold_at > date('now', ? || ' days')
           AND sale_price > 0
         """
         cur.execute(sql_patterns,
-                    (make_pat, model_pat, *year_prefix_args, *body_args, f'-{recent_days}'))
+                    (make_pat, model_pat, *year_prefix_args, *body_args, *trim_args, f'-{recent_days}'))
         patterns = dict(cur.fetchone() or {})
 
         # 3/6/12-month rolling windows — count + avg sale + avg gross at each.
@@ -233,12 +278,13 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None)
                   AND UPPER(vehicle_info) LIKE UPPER(?)
                   AND ({year_prefix_clause})
                   AND {body_clause}
+                  AND {trim_clause}
                   AND sold_at > date('now', ? || ' days')
                   AND sale_price > 0
                   AND purchase_cost > 0
                   AND customer_name IS NOT NULL
                   AND TRIM(customer_name) != ''
-            """, (make_pat, model_pat, *year_prefix_args, *body_args, f'-{days}'))
+            """, (make_pat, model_pat, *year_prefix_args, *body_args, *trim_args, f'-{days}'))
             windows[label] = dict(cur.fetchone() or {})
         patterns['windows'] = windows
         # Backwards-compat: keep the old flat key the existing card reads.
@@ -277,6 +323,7 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None)
           AND UPPER(d.vehicle_info) LIKE UPPER(?)
           AND ({year_prefix_clause})
           AND {body_clause.replace('vehicle_info', 'd.vehicle_info')}
+          AND {trim_clause.replace('vehicle_info', 'd.vehicle_info')}
           AND d.sold_at > date('now', ? || ' days')
           AND d.sale_price > 0 AND d.purchase_cost > 0
           AND d.customer_name IS NOT NULL AND TRIM(d.customer_name) != ''
@@ -289,6 +336,7 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None)
             make_pat, model_pat,
             *year_prefix_args,
             *body_args,
+            *trim_args,
             f'-{recent_days}',
             max_recent,
         ))
@@ -309,13 +357,14 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None)
               AND UPPER(vehicle_info) LIKE UPPER(?)
               AND ({year_prefix_clause})
               AND {body_clause}
+              AND {trim_clause}
               AND sold_at > date('now', ? || ' days')
               AND sale_price > 0 AND purchase_cost > 0
             ORDER BY customer_name, sold_at DESC
             """
             cur.execute(sql_buyer_deals, (
                 *buyer_names, make_pat, model_pat,
-                *year_prefix_args, *body_args, f'-{recent_days}',
+                *year_prefix_args, *body_args, *trim_args, f'-{recent_days}',
             ))
             deals_by_buyer = {}
             for d in cur.fetchall():
