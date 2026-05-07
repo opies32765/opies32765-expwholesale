@@ -16,7 +16,7 @@
 //                  manifest + templates; force iOS Safari to re-fetch.
 // v2 (2026-05-02): added /owner + /admin skip rules; routed
 //                  notificationclick by URL prefix between /mobile and /owner.
-const CACHE_NAME = 'ew-field-v7';
+const CACHE_NAME = 'ew-field-v8';
 const STATIC_ASSETS = [
   '/mobile',
   '/static/manifest.json',
@@ -60,7 +60,8 @@ self.addEventListener('fetch', event => {
   if (url.pathname.startsWith('/partner/')
       || url.pathname.startsWith('/admin/')
       || url.pathname === '/owner'
-      || url.pathname.startsWith('/owner/')) {
+      || url.pathname.startsWith('/owner/')
+      || url.pathname.startsWith('/wholesaler-')) {
     return;
   }
 
