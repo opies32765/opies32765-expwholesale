@@ -3920,7 +3920,7 @@ def _notify_driver_if_pending(bid_id):
 # Assessment should only fire ONCE all three book-value sources (vAuto,
 # AccuTrade, iPacket) have posted — otherwise the baseline is computed from
 # ~30-40% of the intended weight and skews toward whichever sources arrived
-# first. A 90s fallback timer fires the assessment with whatever's present
+# first. A 5-minute fallback timer fires the assessment with whatever's present
 # in case a worker is dead or the VIN is ultra-rare.
 
 def _release_assessment_claim(bid_id):
@@ -3974,7 +3974,7 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
         if require_all:
             # Wait for the full market stack — rbook + manheim must finish
             # so Gemini gets retail comps + auction floor in the prompt.
-            # The 90s fallback timer (_schedule_assessment_fallback) will fire
+            # The 5-minute fallback timer (_schedule_assessment_fallback) will fire
             # with require_all=False if rbook/manheim never land (rare/exotic).
             ready = has_vauto and has_accu and has_ipkt and rb_done and mh_done
         else:
@@ -4008,7 +4008,7 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
     return True
 
 
-def _schedule_assessment_fallback(bid_id, delay_sec=90):
+def _schedule_assessment_fallback(bid_id, delay_sec=300):
     """Arm a one-shot timer that fires assessment with require_all=False if
     AccuTrade/iPacket never landed. Safe to call on every vAuto submit —
     the gate bails if assessment already fired."""
@@ -7844,9 +7844,9 @@ def api_vauto_submit():
     db.close()
 
     # Gate assessment on all three books (vAuto+AccuTrade+iPacket) — fire now
-    # if they're all present, otherwise arm a 90s fallback timer.
+    # if they're all present, otherwise arm a 5-minute fallback timer.
     _maybe_fire_assessment(bid_id, require_all=True, source='vauto')
-    _schedule_assessment_fallback(bid_id, delay_sec=90)
+    _schedule_assessment_fallback(bid_id, delay_sec=300)
 
     return jsonify({'ok': True, 'bid_id': bid_id})
 
