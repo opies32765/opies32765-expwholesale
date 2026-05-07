@@ -886,7 +886,7 @@ def _parse_sticker_text(text):
                 r"TOTAL\s+VEHICLE\s+PRICE\*?\s*[:$]?\s*\$?\s*([\d,]+)",
                 r"Net\s+Total\s*[:$]?\s*\$?\s*([\d,]+)",  # Mercedes-Benz
                 # Common formats
-                r'TOTAL\s+(?:PREDICTED\s+)?PRICE\s*[:$]?\s*\$?\s*([\d,]+)',
+                r'TOTAL\s+(?:PREDICTED\s+)?PRICE\s*[:$]?\s*\*?\s*\$?\s*([\d,]+)',  # RAM puts * between : and $
                 r'TOTAL\s+MSRP\s*[:$]?\s*\$?\s*([\d,]+)',
                 r'(?<!BASE\s)MSRP\s*[:$]?\s*\$?\s*([\d,]+)'):
         m = re.search(pat, text, re.I)
