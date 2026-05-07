@@ -3951,21 +3951,31 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
             db.close()
             return False
 
-        cur.execute("SELECT 1 FROM vauto_lookups WHERE bid_id=%s LIMIT 1", (bid_id,))
-        has_vauto = cur.fetchone() is not None
+        cur.execute("SELECT 1, rbook_completed_at IS NOT NULL AS rb_done, "
+                    "manheim_completed_at IS NOT NULL AS mh_done "
+                    "FROM vauto_lookups WHERE bid_id=%s LIMIT 1", (bid_id,))
+        _vrow = cur.fetchone()
+        has_vauto = _vrow is not None
+        rb_done   = bool(_vrow and _vrow.get('rb_done'))
+        mh_done   = bool(_vrow and _vrow.get('mh_done'))
         cur.execute("SELECT 1 FROM accutrade_lookups WHERE bid_id=%s LIMIT 1", (bid_id,))
         has_accu = cur.fetchone() is not None
         cur.execute("SELECT 1 FROM ipacket_lookups WHERE bid_id=%s LIMIT 1", (bid_id,))
         has_ipkt = cur.fetchone() is not None
 
         if require_all:
-            ready = has_vauto and has_accu and has_ipkt
+            # Wait for the full market stack — rbook + manheim must finish
+            # so Gemini gets retail comps + auction floor in the prompt.
+            # The 90s fallback timer (_schedule_assessment_fallback) will fire
+            # with require_all=False if rbook/manheim never land (rare/exotic).
+            ready = has_vauto and has_accu and has_ipkt and rb_done and mh_done
         else:
             ready = has_vauto  # fallback: fire with what we have
 
         if not ready:
             print(f'assess-gate bid={bid_id} source={source} require_all={require_all} '
-                  f'vauto={has_vauto} accu={has_accu} ipkt={has_ipkt} → wait', flush=True)
+                  f'vauto={has_vauto} accu={has_accu} ipkt={has_ipkt} '
+                  f'rb_done={rb_done} mh_done={mh_done} → wait', flush=True)
             db.close()
             return False
 
