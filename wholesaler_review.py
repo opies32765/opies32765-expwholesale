@@ -44,12 +44,29 @@ REVIEWERS = {
     'oscar': {
         'display_name': 'Oscar',
         'salesperson_match': ['oscar'],
+        # Public signup-page contact card + outbound salesperson_phone on
+        # auto-provisioned wholesaler dealers (so this reviewer gets the
+        # SMS when one of their wholesalers submits a bid).
+        'full_name': 'Oscar Pastrana',
+        'email': 'oscar@experience-wholesale.com',
+        'phone': '+14074309675',
+        'phone_display': '(407) 430-9675',
     },
     # 'jordan': {
     #     'display_name': 'Jordan',
     #     'salesperson_match': ['jordan'],
+    #     'full_name': 'Jordan ...',
+    #     'email': '...',
+    #     'phone': '+1...',
+    #     'phone_display': '(...) ...-....',
     # },
 }
+
+
+# In-process IP rate limit for the public /signup endpoint. One signup per
+# IP per hour. Cheap, dies on restart — fine for a low-traffic public form.
+_SIGNUP_RATE_LIMIT_SECONDS = 3600
+_signup_last_ip = {}  # {ip: epoch_seconds}
 
 
 def _db():
@@ -699,7 +716,12 @@ def onboard(reviewer):
     if not name or len(name) > 200:
         return jsonify({'error': 'Name is required (max 200 chars).'}), 400
 
-    phone = _normalize_phone(request.form.get('phone'))
+    # salesperson_phone is the number that gets SMS'd on every wholesaler
+    # bid submission (via partner_portal._notify_salesperson). Default to
+    # the reviewer's own phone from REVIEWERS so the alert reaches the
+    # reviewer, not the wholesaler. Form override still works if the
+    # reviewer wants to delegate to another rep.
+    phone = _normalize_phone(request.form.get('phone')) or cfg.get('phone')
     primary_color = (request.form.get('primary_color') or '').strip() or '#0D68C5'
     if not re.match(r'^#[0-9a-fA-F]{3,6}$', primary_color):
         primary_color = '#0D68C5'
@@ -785,3 +807,181 @@ def onboard(reviewer):
     # Otherwise redirect to the wholesaler list with a flash highlight.
     return redirect(url_for('wholesaler_review.wholesaler_list',
                             reviewer=reviewer) + f'#dealer-{dealer_id}')
+
+
+# ── Public self-serve signup ─────────────────────────────────────────────
+# Anyone with the link can sign up — no admin auth. App.py adds
+# `/wholesaler-` to _PUBLIC_PREFIXES; the rest of the routes in this file
+# remain admin-only via _require_admin().
+
+_EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+
+def _client_ip() -> str:
+    # nginx in front: prefer X-Forwarded-For first hop. Fall back to remote_addr.
+    xff = (request.headers.get('X-Forwarded-For') or '').split(',')[0].strip()
+    return xff or (request.remote_addr or '0.0.0.0')
+
+
+@bp.route('/wholesaler-<reviewer>/signup', methods=['GET', 'POST'])
+def signup(reviewer):
+    cfg = _resolve_reviewer(reviewer)
+    if not cfg:
+        abort(404)
+
+    if request.method == 'GET':
+        return render_template('wholesaler_signup.html',
+                               reviewer_slug=reviewer,
+                               reviewer_name=cfg['display_name'],
+                               reviewer_full_name=cfg.get('full_name', cfg['display_name']),
+                               reviewer_email=cfg.get('email', ''),
+                               reviewer_phone_display=cfg.get('phone_display', ''))
+
+    # ── POST ─────────────────────────────────────────────────────────────
+    import time
+    ip = _client_ip()
+    now = time.time()
+    last = _signup_last_ip.get(ip, 0)
+    if now - last < _SIGNUP_RATE_LIMIT_SECONDS:
+        wait_min = int((_SIGNUP_RATE_LIMIT_SECONDS - (now - last)) / 60) + 1
+        return jsonify({'error': f'Too many signups from this network. Try again in {wait_min} min.'}), 429
+
+    full_name   = (request.form.get('full_name') or '').strip()
+    business    = (request.form.get('business_name') or '').strip()
+    email       = (request.form.get('email') or '').strip().lower()
+    phone_raw   = (request.form.get('phone') or '').strip()
+    contact_pref = (request.form.get('contact_pref') or 'both').strip().lower()
+
+    if not full_name or len(full_name) > 120:
+        return jsonify({'error': 'Your name is required.'}), 400
+    if not email or not _EMAIL_RE.match(email) or len(email) > 200:
+        return jsonify({'error': 'A valid email is required.'}), 400
+    phone = _normalize_phone(phone_raw)
+    if not phone:
+        return jsonify({'error': 'A valid US phone number is required.'}), 400
+    if contact_pref not in ('sms', 'email', 'both'):
+        contact_pref = 'both'
+    if business and len(business) > 200:
+        return jsonify({'error': 'Business name is too long.'}), 400
+
+    # Dealer name = business if provided, otherwise the person's name.
+    dealer_name = business or full_name
+
+    sms_opt_in       = contact_pref in ('sms', 'both')
+    email_bid_alerts = contact_pref in ('email', 'both')
+
+    base_slug = _slugify(dealer_name)
+    portal_slug = base_slug
+    dashboard_token = secrets.token_urlsafe(16)
+    mobile_token = secrets.token_urlsafe(16)
+
+    # Pull reviewer SMS routing from REVIEWERS — this is what makes the
+    # auto-provisioned dealer notify the reviewer (not the wholesaler) on
+    # new bid submissions, via dealers.salesperson_phone in
+    # partner_portal._notify_salesperson.
+    reviewer_phone = cfg.get('phone') or None
+
+    with _db() as conn, conn.cursor() as cur:
+        # Dedupe: if either phone or email already exists on a partner_user,
+        # return their existing portal link instead of failing. Friendlier
+        # for re-signups + prevents accidental dupe dealer rows.
+        cur.execute("""
+            SELECT pu.dealer_id, d.portal_slug, d.dashboard_token, d.mobile_token, d.name
+            FROM partner_users pu
+            JOIN dealers d ON d.id = pu.dealer_id
+            WHERE LOWER(pu.email) = %s OR pu.phone = %s
+            LIMIT 1
+        """, (email, phone))
+        existing = cur.fetchone()
+        if existing and existing.get('dashboard_token'):
+            portal_base = os.environ.get('PORTAL_BASE', 'https://experience-wholesale.net')
+            return jsonify({
+                'ok': True,
+                'returning': True,
+                'name': existing['name'],
+                'portal_slug': existing['portal_slug'],
+                'dashboard_url': f'{portal_base}/partner/{existing["portal_slug"]}/d/{existing["dashboard_token"]}',
+                'mobile_url':    f'{portal_base}/mobile?p={existing["mobile_token"]}',
+            })
+
+        # Slug uniqueness — append short hex on collision.
+        for _ in range(5):
+            cur.execute("SELECT id FROM dealers WHERE LOWER(portal_slug) = %s",
+                        (portal_slug.lower(),))
+            if cur.fetchone() is None:
+                break
+            portal_slug = f'{base_slug}{secrets.token_hex(2)}'
+        else:
+            return jsonify({'error': 'Could not generate a unique portal URL — please try again.'}), 500
+
+        cur.execute("""
+            INSERT INTO dealers
+                (name, url, active, portal_mode, portal_slug,
+                 salesperson, salesperson_phone,
+                 dashboard_token, mobile_token, brand,
+                 salesperson_set_at)
+            VALUES (%s, NULL, TRUE, 'wholesaler', %s,
+                    %s, %s, %s, %s, %s::jsonb, NOW())
+            RETURNING id
+        """, (dealer_name, portal_slug,
+              cfg['display_name'], reviewer_phone,
+              dashboard_token, mobile_token,
+              psycopg2.extras.Json({'primary_color': '#0D68C5'})))
+        dealer_id = cur.fetchone()['id']
+
+        # Real partner_user — full_name + phone + comms prefs all set so the
+        # wholesaler doesn't need to visit /settings to start receiving
+        # bid responses on their preferred channel.
+        cur.execute("""
+            INSERT INTO partner_users
+                (dealer_id, email, full_name, phone,
+                 sms_opt_in, sms_verified_at, email_bid_alerts)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (dealer_id, email, full_name, phone,
+              sms_opt_in, datetime.now(timezone.utc) if sms_opt_in else None,
+              email_bid_alerts))
+
+        conn.commit()
+
+    _signup_last_ip[ip] = now
+
+    portal_base = os.environ.get('PORTAL_BASE', 'https://experience-wholesale.net')
+    dashboard_url = f'{portal_base}/partner/{portal_slug}/d/{dashboard_token}'
+    mobile_url    = f'{portal_base}/mobile?p={mobile_token}'
+
+    try:
+        from partner_portal import _tg_alert
+        _tg_alert(
+            f'\U0001f195 <b>New wholesaler signup</b> ({cfg["display_name"]})\n'
+            f'<b>{full_name}</b>'
+            + (f' · {business}' if business else '')
+            + f'\n{phone} · {email}'
+            f'\nContact pref: <b>{contact_pref.upper()}</b>'
+            f'\nDashboard: {dashboard_url}'
+        )
+    except Exception:
+        pass
+
+    # SMS to the reviewer too (in addition to Telegram). Best-effort —
+    # failure here never blocks the signup.
+    if reviewer_phone:
+        try:
+            from app import send_sms
+            sms_body = (
+                f'New EW wholesaler signup: {full_name}'
+                + (f' ({business})' if business else '')
+                + f' — {phone} — pref {contact_pref.upper()}'
+            )
+            send_sms(reviewer_phone, sms_body[:300])
+        except Exception:
+            pass
+
+    return jsonify({
+        'ok': True,
+        'returning': False,
+        'name': dealer_name,
+        'portal_slug': portal_slug,
+        'dashboard_url': dashboard_url,
+        'mobile_url': mobile_url,
+        'contact_pref': contact_pref,
+    })

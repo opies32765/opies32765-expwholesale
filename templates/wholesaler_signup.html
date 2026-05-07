@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wholesaler Signup — {{ reviewer_full_name }} · Experience Wholesale</title>
+<style>
+  :root{--bg:#0b1220;--panel:#13203a;--panel2:#1b2a4a;--mute:#94a3b8;
+        --text:#e2e8f0;--line:#2a3a5e;--accent:#3b82f6;--good:#22c55e;
+        --warn:#facc15}
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:var(--bg);
+       color:var(--text);font-size:15px;line-height:1.45;min-height:100vh}
+  .wrap{max-width:680px;margin:0 auto;padding:22px 18px 80px}
+
+  .hero{background:linear-gradient(135deg,#1e3a8a 0%,#0d68c5 100%);
+        border-radius:14px;padding:22px 22px 18px;margin-bottom:20px;
+        box-shadow:0 8px 24px rgba(0,0,0,.35)}
+  .hero h1{margin:0 0 4px;font-size:22px;letter-spacing:-.2px}
+  .hero p{margin:0;color:#dbeafe;font-size:14px}
+  .hero .ew-badge{display:inline-block;font-size:10px;font-weight:800;
+                  letter-spacing:1px;background:rgba(255,255,255,.15);
+                  padding:3px 8px;border-radius:99px;margin-bottom:10px}
+
+  .contact{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+           padding:16px 18px;margin-bottom:20px;display:flex;flex-direction:column;gap:6px}
+  .contact .label{font-size:10px;font-weight:800;letter-spacing:1.2px;
+                  color:var(--mute);text-transform:uppercase;margin-bottom:2px}
+  .contact .name{font-size:17px;font-weight:700;color:#fff}
+  .contact .info{display:flex;flex-wrap:wrap;gap:14px;font-size:14px;color:#cbd5e1}
+  .contact .info a{color:#93c5fd;text-decoration:none}
+  .contact .info a:hover{text-decoration:underline}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+        padding:22px;margin-bottom:18px}
+  .card h2{margin:0 0 4px;font-size:16px;color:#fff}
+  .card .sub{color:var(--mute);font-size:13px;margin:0 0 18px}
+
+  label{display:block;font-size:11px;font-weight:800;color:var(--mute);
+        text-transform:uppercase;letter-spacing:.6px;margin:14px 0 6px}
+  label .req{color:var(--warn);margin-left:3px}
+  input[type=text],input[type=tel],input[type=email]{
+    width:100%;padding:12px 13px;border:1px solid var(--line);background:#0a1124;
+    color:var(--text);border-radius:8px;font-size:15px;font-weight:500;
+    font-family:inherit}
+  input:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.2)}
+  .help{font-size:12px;color:var(--mute);margin-top:4px}
+
+  .pref{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:6px}
+  .pref label{margin:0;cursor:pointer;background:#0a1124;border:1px solid var(--line);
+              border-radius:8px;padding:13px 8px;text-align:center;font-size:13px;
+              font-weight:700;color:#cbd5e1;letter-spacing:0;text-transform:none}
+  .pref input{position:absolute;opacity:0;pointer-events:none}
+  .pref label:has(input:checked){background:#1e40af;border-color:#3b82f6;color:#fff}
+  .pref label .ico{display:block;font-size:22px;margin-bottom:4px}
+
+  .btn{width:100%;padding:15px 18px;background:var(--good);color:#062b16;
+       border:0;border-radius:9px;font-weight:800;font-size:16px;cursor:pointer;
+       margin-top:24px;letter-spacing:.2px}
+  .btn:disabled{opacity:.55;cursor:not-allowed}
+  .btn:hover:not(:disabled){background:#16a34a}
+
+  .err{margin-top:14px;padding:12px 14px;background:#7f1d1d;color:#fecaca;
+       border-radius:8px;font-size:14px;display:none}
+  .err.show{display:block}
+
+  .ok{padding:24px;background:linear-gradient(135deg,#064e3b 0%,#022c22 100%);
+      border:1px solid #14532d;border-radius:14px}
+  .ok h2{margin:0 0 6px;color:#bbf7d0;font-size:20px}
+  .ok p{margin:0 0 18px;color:#a7f3d0;font-size:14px}
+  .link-row{margin:10px 0;background:#022c22;padding:10px 12px;border-radius:8px;
+            display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .link-row .lbl{font-size:10px;font-weight:800;color:#86efac;
+                 text-transform:uppercase;letter-spacing:1px;min-width:74px}
+  .link-row a{color:#86efac;text-decoration:none;font-size:13px;flex:1;
+              font-family:ui-monospace,Menlo,monospace;word-break:break-all}
+  .link-row button{padding:8px 14px;background:#14532d;color:#bbf7d0;border:0;
+                   border-radius:6px;font-size:12px;font-weight:800;cursor:pointer}
+  .link-row button:hover{background:#166534}
+  .link-row button.copied{background:#22c55e;color:#062b16}
+
+  .ok .footer-tip{margin-top:18px;padding:12px 14px;background:rgba(0,0,0,.25);
+                  border-radius:8px;font-size:13px;color:#a7f3d0;line-height:1.5}
+  .ok .footer-tip strong{color:#bbf7d0}
+
+  @media (max-width:480px){
+    .wrap{padding:14px 12px 60px}
+    .hero{padding:18px}
+    .hero h1{font-size:19px}
+    .pref{grid-template-columns:repeat(3,1fr)}
+    .pref label{padding:11px 4px;font-size:12px}
+    .pref label .ico{font-size:20px}
+    .contact .info{flex-direction:column;gap:4px}
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <div class="hero">
+    <span class="ew-badge">EXPERIENCE WHOLESALE</span>
+    <h1>Submit cars to {{ reviewer_full_name }}</h1>
+    <p>Sign up below and we'll spin up your private portal in seconds. No password — your link works forever. Drag in Carfax screenshots, drop a VIN, snap photos from your phone — we'll bid on the ones that fit.</p>
+  </div>
+
+  <div class="contact">
+    <div class="label">Your contact</div>
+    <div class="name">{{ reviewer_full_name }}</div>
+    <div class="info">
+      {% if reviewer_phone_display %}<span>📞 <a href="tel:{{ reviewer_phone_display | replace('(','') | replace(')','') | replace(' ','-') }}">{{ reviewer_phone_display }}</a></span>{% endif %}
+      {% if reviewer_email %}<span>✉️ <a href="mailto:{{ reviewer_email }}">{{ reviewer_email }}</a></span>{% endif %}
+    </div>
+  </div>
+
+  <div class="card" id="formCard">
+    <h2>Tell us about you</h2>
+    <p class="sub">Takes 30 seconds. Your portal opens as soon as you submit.</p>
+
+    <form id="signupForm" autocomplete="on">
+      <label for="full_name">Your name<span class="req">*</span></label>
+      <input type="text" id="full_name" name="full_name" required maxlength="120"
+             autocomplete="name" autofocus placeholder="First and last">
+
+      <label for="business_name">Business name <span style="color:var(--mute);font-weight:600;text-transform:none;letter-spacing:0">(optional)</span></label>
+      <input type="text" id="business_name" name="business_name" maxlength="200"
+             autocomplete="organization" placeholder="e.g. Mike's Auto Group">
+      <div class="help">Skip if you're independent — we'll use your name.</div>
+
+      <label for="phone">Mobile phone<span class="req">*</span></label>
+      <input type="tel" id="phone" name="phone" required autocomplete="tel"
+             placeholder="(555) 555-5555">
+
+      <label for="email">Email<span class="req">*</span></label>
+      <input type="email" id="email" name="email" required maxlength="200"
+             autocomplete="email" placeholder="you@example.com">
+
+      <label>How should we send you bid responses?<span class="req">*</span></label>
+      <div class="pref">
+        <label><input type="radio" name="contact_pref" value="sms"><span class="ico">💬</span>SMS</label>
+        <label><input type="radio" name="contact_pref" value="email"><span class="ico">✉️</span>Email</label>
+        <label><input type="radio" name="contact_pref" value="both" checked><span class="ico">📱</span>Both</label>
+      </div>
+      <div class="help">You can change this anytime in your portal settings.</div>
+
+      <button type="submit" class="btn" id="submitBtn">Create my portal →</button>
+      <div class="err" id="errMsg"></div>
+    </form>
+  </div>
+
+  <div id="okBlock" style="display:none"></div>
+
+</div>
+
+<script>
+const form = document.getElementById('signupForm');
+const btn = document.getElementById('submitBtn');
+const err = document.getElementById('errMsg');
+
+form.addEventListener('submit', async ev => {
+  ev.preventDefault();
+  err.classList.remove('show');
+  btn.disabled = true; btn.textContent = 'Creating your portal…';
+
+  try {
+    const fd = new FormData(form);
+    const r = await fetch(window.location.pathname, {
+      method: 'POST', body: fd,
+      headers: { 'X-Requested-With': 'fetch', 'Accept': 'application/json' }
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || ('Signup failed (HTTP ' + r.status + ')'));
+
+    document.getElementById('formCard').style.display = 'none';
+    const ok = document.getElementById('okBlock');
+    ok.style.display = 'block';
+    const heading = j.returning
+      ? `👋 Welcome back, ${j.name}`
+      : `✅ Portal ready for ${j.name}`;
+    const subline = j.returning
+      ? "We already had you on file — here's your existing portal:"
+      : "Save these links — no password needed, they work forever.";
+    ok.innerHTML = `
+      <div class="ok">
+        <h2>${heading}</h2>
+        <p>${subline}</p>
+        <div class="link-row">
+          <span class="lbl">Dashboard</span>
+          <a href="${j.dashboard_url}" target="_blank">${j.dashboard_url}</a>
+          <button data-copy="${j.dashboard_url}">Copy</button>
+        </div>
+        <div class="link-row">
+          <span class="lbl">Mobile</span>
+          <a href="${j.mobile_url}" target="_blank">${j.mobile_url}</a>
+          <button data-copy="${j.mobile_url}">Copy</button>
+        </div>
+        <div style="margin-top:18px;text-align:center">
+          <a href="${j.dashboard_url}" style="display:inline-block;padding:14px 26px;background:#22c55e;color:#062b16;text-decoration:none;border-radius:9px;font-weight:800;font-size:15px">Open my portal →</a>
+        </div>
+        <div class="footer-tip">
+          <strong>Tip:</strong> Bookmark your dashboard link or text it to yourself. Anyone who has it can submit on your behalf, so don't share it publicly.
+        </div>
+      </div>`;
+    ok.scrollIntoView({behavior:'smooth', block:'start'});
+
+    ok.querySelectorAll('[data-copy]').forEach(b => {
+      b.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(b.dataset.copy);
+          b.textContent = 'Copied!'; b.classList.add('copied');
+          setTimeout(() => { b.textContent = 'Copy'; b.classList.remove('copied'); }, 1500);
+        } catch (_) {
+          window.prompt('Copy this link:', b.dataset.copy);
+        }
+      });
+    });
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.add('show');
+    btn.disabled = false; btn.textContent = 'Create my portal →';
+  }
+});
+</script>
+
+</body>
+</html>

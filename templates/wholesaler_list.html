@@ -60,6 +60,49 @@
 </header>
 
 <main>
+
+  {# Public self-serve signup — share this link in communities/forums and
+     wholesalers can spin up their own portal. #}
+  {% set _signup = portal_base ~ '/wholesaler-' ~ reviewer_slug ~ '/signup' %}
+  <div style="background:linear-gradient(135deg,#1e3a8a 0%,#0d68c5 100%);
+              border:1px solid #1e40af;border-radius:12px;padding:16px 18px;
+              margin-bottom:18px;display:flex;align-items:center;gap:14px;
+              flex-wrap:wrap">
+    <div style="flex:1;min-width:240px">
+      <div style="font-size:11px;font-weight:800;color:#bfdbfe;
+                  text-transform:uppercase;letter-spacing:1px;margin-bottom:3px">
+        Public signup link
+      </div>
+      <div style="font-size:13px;color:#dbeafe;line-height:1.45">
+        Share this in communities — anyone who signs up gets their own portal
+        instantly, no approval needed. Their submissions still land in
+        <b style="color:#fff">your review queue</b>.
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.25);
+                padding:8px 10px;border-radius:8px;flex:1;min-width:280px">
+      <a href="{{ _signup }}" target="_blank"
+         style="color:#bbf7d0;text-decoration:none;font-size:12px;flex:1;
+                font-family:ui-monospace,monospace;overflow:hidden;
+                text-overflow:ellipsis;white-space:nowrap">{{ _signup }}</a>
+      <button id="copySignupBtn"
+              style="padding:8px 14px;background:#22c55e;color:#062b16;border:0;
+                     border-radius:6px;font-size:12px;font-weight:800;cursor:pointer">
+        Copy
+      </button>
+    </div>
+  </div>
+  <script>
+    document.getElementById('copySignupBtn').addEventListener('click', async () => {
+      const url = '{{ _signup }}';
+      try { await navigator.clipboard.writeText(url); } catch (_) { window.prompt('Copy:', url); }
+      const b = document.getElementById('copySignupBtn');
+      const orig = b.textContent;
+      b.textContent = 'Copied!';
+      setTimeout(() => b.textContent = orig, 1500);
+    });
+  </script>
+
   {% if not wholesalers %}
     <div class="empty">
       <h2>No wholesalers yet.</h2>
