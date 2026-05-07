@@ -238,14 +238,29 @@ def submit_job():
             new_state[jtype]['error'] = str(err)[:500]
 
         if status == 'done':
+            # Guard: for rbook jobs, skip the write if direct_api has
+            # already populated this bid. Without this, a legacy
+            # EWEnrichRbook scrape that started before the direct_api
+            # kick would later overwrite the fresher direct_api data
+            # with its 99s+ result. Manheim has no parallel direct path,
+            # so it's unaffected.
+            guard = ''
+            if jtype == 'rbook':
+                guard = (" AND (rbook_completed_at IS NULL OR "
+                         "COALESCE(enrichment_state->'rbook'->>'source', '') "
+                         "!= 'direct_api')")
             cur.execute(f"""
                 UPDATE vauto_lookups
                 SET {data_col} = %s::jsonb,
                     {completed_col} = NOW(),
                     enrichment_state = %s::jsonb
-                WHERE id = %s
+                WHERE id = %s{guard}
             """, (json.dumps(data) if data is not None else None,
                   json.dumps(new_state), vl_id))
+            if jtype == 'rbook' and cur.rowcount == 0:
+                print(f'[enrichment submit] bid={body.get("bid_id")} '
+                      f'rbook from {worker_id} skipped — direct_api owns this bid',
+                      flush=True)
             cur.execute("""
                 UPDATE enrichment_workers
                 SET jobs_completed = jobs_completed + 1

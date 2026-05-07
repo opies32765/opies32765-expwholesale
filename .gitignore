@@ -6,3 +6,17 @@ venv/
 static/uploads/
 *.log
 curl.txt
+google_vision_key.json
+*.dump
+service-account*.json
+*-credentials.json
+
+# Session secrets — do NOT commit
+state/
+
+# Pre-patch backups (timestamped)
+*.bak.*
+
+# Local pull/scratch dirs
+_backups/
+_patches/

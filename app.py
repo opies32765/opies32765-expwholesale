@@ -1028,7 +1028,22 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
             print('[OCR] Google Vision: detected VIN plate (not odometer), returning None', flush=True)
             return None
 
-        # First try: numbers explicitly labeled "mi" / "miles" / "km"
+        # First: "Mileage NNN" / "Odometer: NNN" / "ODO NNN" — label BEFORE number.
+        # Common in VIN-scanner app screenshots (Carbly, vAuto, Carfax, AutoCheck).
+        # Without this, a Carbly screenshot with "In ZIP Code 33426\nMileage 23,576"
+        # gets the 23,576 candidate rejected because "ZIP" appears in the 50-char
+        # context window of the unlabeled fallback.
+        labeled_before = re.findall(
+            r'\b(?:MILEAGE|ODOMETER|ODO|MILES)\b[\s:]+(\d{1,3}(?:,\d{3})+|\d{3,7})\b',
+            up)
+        if labeled_before:
+            for c in labeled_before:
+                n = int(c.replace(',', ''))
+                if 100 <= n <= 999999:
+                    print(f'[OCR] Mileage via Google Vision (label-before): {n}', flush=True)
+                    return n
+
+        # Then: numbers explicitly labeled "mi" / "miles" / "km" — label AFTER number
         labeled = re.findall(r'(\d{1,3}(?:,\d{3})+|\d{3,7})\s*(?:MI|MILES|KM)\b', up)
         if labeled:
             for c in labeled:
@@ -7634,6 +7649,25 @@ def api_vauto_url_capture_result():
                     "WHERE bid_id=%s AND appraisal_url IS NULL", (bid_id,))
     db.commit()
     db.close()
+
+    # Direct vAuto BFF enrichment — replaces VM 120's 99s rbook scrape with
+    # a ~2s API call. Fires only when a real URL is captured. Best-effort:
+    # any failure (auth, timeout, missing session) falls through and legacy
+    # EWEnrichRbook on VM 120 picks up the bid via /api/enrichment/claim.
+    if url:
+        try:
+            import threading
+            from vauto_enrichment import kick_direct_enrichment
+            threading.Thread(
+                target=kick_direct_enrichment,
+                args=(int(bid_id), get_db),
+                daemon=True,
+                name=f'direct-enrich-{bid_id}',
+            ).start()
+        except Exception as _direct_err:
+            print(f'[direct-enrich] kick failed bid={bid_id}: '
+                  f'{_direct_err}', flush=True)
+
     return jsonify({'ok': True, 'url': url or None})
 
 
@@ -7843,6 +7877,25 @@ def api_vauto_submit():
 
     db.commit()
     db.close()
+
+    # Direct vAuto BFF enrichment — replaces VM 120's slow rbook scrape.
+    # Wave-1 worker writes appraisal_url here on the saved vAuto submit;
+    # we fire direct API in a daemon thread. Idempotent on rbook_completed_at
+    # IS NULL (legacy claim path will pick up bids we don't reach in time).
+    _ap_url = (data.get('appraisal_url') or '').strip()
+    if _ap_url.startswith('https://provision.vauto.app.coxautoinc.com/Va/Appraisal/Default.aspx'):
+        try:
+            import threading
+            from vauto_enrichment import kick_direct_enrichment
+            threading.Thread(
+                target=kick_direct_enrichment,
+                args=(int(bid_id), get_db),
+                daemon=True,
+                name=f'direct-enrich-{bid_id}',
+            ).start()
+        except Exception as _direct_err:
+            print(f'[direct-enrich] submit-kick failed bid={bid_id}: '
+                  f'{_direct_err}', flush=True)
 
     # Gate assessment on all three books (vAuto+AccuTrade+iPacket) — fire now
     # if they're all present, otherwise arm a 5-minute fallback timer.
@@ -8397,22 +8450,16 @@ def _retrieve_purchase_history(year, make, model, mileage, exclude_bid_id=None):
         excl_clause = ' AND bid_id != %s' if exclude_bid_id else ''
         excl_param  = (exclude_bid_id,) if exclude_bid_id else ()
 
+        # STRICT_YMM_ONLY — exact year+make+model match only. No mileage
+        # restriction (mileage variance is fine — same model is same model).
+        # No make-only fallback. No year fallback. Empty if no exact match.
         tiers = []
-        if year and make and model and mileage:
-            tiers.append(('YMM + ±30% miles',
-                "year = %s AND UPPER(make) = UPPER(%s) AND UPPER(model) = UPPER(%s) "
-                "AND mileage BETWEEN %s AND %s" + excl_clause,
-                (year, make, model, miles_lo, miles_hi) + excl_param))
-        if make and model:
-            tiers.append((f'{make} {model} (any year/miles)',
-                "UPPER(make) = UPPER(%s) AND UPPER(model) = UPPER(%s)" + excl_clause,
-                (make, model) + excl_param))
-        if make:
-            tiers.append((f'{make} (any model — fallback)',
-                "UPPER(make) = UPPER(%s)" + excl_clause,
-                (make,) + excl_param))
+        if year and make and model:
+            tiers.append(('YMM (any miles)',
+                "year = %s AND UPPER(make) = UPPER(%s) AND UPPER(model) = UPPER(%s)" + excl_clause,
+                (year, make, model) + excl_param))
 
-        MIN_TIER_N = 3  # require >=3 reconciled deals to avoid anchoring Gemini on 1-2 outliers
+        MIN_TIER_N = 1  # any exact YMM match is meaningful
         for tier_name, where_clause, params in tiers:
             cur.execute(f"""
                 SELECT
