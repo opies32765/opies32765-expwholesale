@@ -1,0 +1,1780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bid #{{ bid.id }} — Experience Wholesale</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(.85)}}
+body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100vh;overflow:hidden}
+
+/* ---- App header ---- */
+.header{background:#111827;border-bottom:1px solid #1e293b;padding:0 24px;height:60px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100;flex-shrink:0}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-mark{width:34px;height:34px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;color:#fff}
+.logo-text{font-size:15px;font-weight:700;color:#f1f5f9}
+.back-btn{display:flex;align-items:center;gap:6px;color:#64748b;font-size:13px;font-weight:500;text-decoration:none;padding:6px 12px;border-radius:6px;border:1px solid #1e293b;transition:all .15s}
+.back-btn:hover{border-color:#334155;color:#e2e8f0}
+
+/* ---- Page shell: 3 rows (banner, photos, columns) ---- */
+.page{width:100%;height:calc(100vh - 60px);display:flex;flex-direction:column;overflow:hidden}
+
+/* ---- Row 1: Vehicle Banner ---- */
+.vehicle-banner{background:#111827;border-bottom:1px solid #1e293b;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;flex-shrink:0}
+.vb-left{display:flex;align-items:center;gap:16px;min-width:0;flex:1}
+.vb-meta{min-width:0}
+.bid-id{font-size:12px;color:#475569;font-weight:500;margin-bottom:2px}
+.vin-big{font-size:22px;font-weight:800;color:#fff;font-family:monospace;letter-spacing:1px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vehicle-desc-big{font-size:14px;color:#94a3b8;font-weight:500;margin-top:2px}
+.vb-right{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.quick-status-group{display:flex;gap:6px}
+.qs-btn{padding:7px 14px;border-radius:7px;border:1px solid #1e293b;background:transparent;color:#64748b;font-size:12px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;white-space:nowrap}
+.qs-btn:hover{border-color:#334155;color:#94a3b8}
+.qs-btn.active{border-color:transparent}
+
+/* ---- Row 2: Photos Strip ---- */
+.photos-strip{background:#0e1420;border-bottom:1px solid #1e293b;padding:8px 24px;flex-shrink:0}
+.photos-top{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.photos-label{font-size:11px;color:#475569;font-weight:600;text-transform:uppercase;letter-spacing:.8px}
+.photos-toggle{background:none;border:1px solid #1e293b;border-radius:5px;color:#64748b;font-size:11px;padding:3px 8px;cursor:pointer;font-family:'Inter',sans-serif}
+.photos-toggle:hover{color:#94a3b8;border-color:#334155}
+.photos-scroll{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin;scrollbar-color:#1e293b transparent}
+.photos-scroll::-webkit-scrollbar{height:4px}
+.photos-scroll::-webkit-scrollbar-track{background:transparent}
+.photos-scroll::-webkit-scrollbar-thumb{background:#1e293b;border-radius:2px}
+.photo-thumb{flex-shrink:0;width:140px;height:100px;border-radius:6px;overflow:hidden;background:#0f172a;cursor:pointer;border:1px solid #1e293b;transition:border .15s}
+.photo-thumb:hover{border-color:#3b82f6}
+.photo-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.photo-thumb.photo-hidden{display:none}
+.photo-more{flex-shrink:0;width:80px;height:100px;border-radius:6px;background:#1e293b;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#94a3b8;font-size:14px;font-weight:700;border:1px solid #334155}
+.photo-more:hover{background:#334155;color:#e2e8f0}
+
+/* ---- Row 3: Columns ---- */
+.columns-area{display:grid;grid-template-columns:1fr 1fr 1.3fr 0.7fr;grid-template-rows:1fr;gap:12px;padding:12px 20px;overflow:hidden;flex:1;min-height:0}
+.col{overflow-y:auto;display:flex;flex-direction:column;gap:12px;padding:14px;background:#0d1220;border:1px solid #1e293b;border-radius:12px;scrollbar-width:thin;scrollbar-color:#1e293b transparent}
+.col::-webkit-scrollbar{width:4px}
+.col::-webkit-scrollbar-track{background:transparent}
+.col::-webkit-scrollbar-thumb{background:#1e293b;border-radius:2px}
+
+/* ---- Cards ---- */
+.card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:18px 20px}
+.card-title{font-size:12px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.8px;margin-bottom:16px}
+
+/* ---- AI Assessment: elevated card ---- */
+.card-assess{background:#0f1624;border-color:#2d1b69;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.card-assess.expanded{flex:0 0 auto}
+.assess-header{display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}
+.assess-chevron{font-size:13px;color:#475569;transition:transform .2s;margin-left:8px;flex-shrink:0}
+.assess-chevron.open{transform:rotate(180deg)}
+#assess-summary-bar{display:none;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.2);border-radius:7px;padding:8px 12px;font-size:13px;color:#4ade80;font-weight:600;margin-top:10px;cursor:pointer}
+#assess-body{margin-top:8px}
+#assess-body.collapsed{display:none !important}
+#assess-body.expanded{display:block !important}
+#assess-output{overflow-y:auto;scrollbar-width:thin;scrollbar-color:#1e293b transparent;min-height:0;max-height:400px;padding-right:4px}
+.card-assess.expanded #assess-output{max-height:none}
+.assess-section{font-size:11px;font-weight:700;color:#818cf8;text-transform:uppercase;letter-spacing:.7px;margin-top:14px;margin-bottom:6px;padding-bottom:5px;border-bottom:1px solid #1e2a45}
+.assess-section:first-child{margin-top:2px}
+.assess-line{font-size:13px;line-height:1.7;color:#94a3b8;margin-bottom:2px}
+.assess-bold{color:#e2e8f0;font-weight:600}
+.assess-list{list-style:none;padding:0;margin:0 0 2px 0;display:flex;flex-direction:column;gap:5px}
+.assess-list li{font-size:13px;line-height:1.6;color:#94a3b8;padding-left:14px;position:relative}
+.assess-list li::before{content:'›';position:absolute;left:0;color:#475569;font-weight:700}
+.assess-gap{height:8px}
+.assess-buyprice{margin:12px 0 4px;padding:10px 14px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.25);border-radius:8px;font-size:14px;font-weight:700;color:#4ade80;text-align:center;cursor:pointer}
+
+/* ---- Action column: compact sizing ---- */
+.col-action .card{padding:13px 16px}
+.col-action .card-title{font-size:11px;margin-bottom:12px}
+.col-action .field input{padding:8px 11px;font-size:14px}
+.col-action .field label{font-size:11px}
+.col-action .field{gap:4px}
+.col-action .contact-phone-big{font-size:17px}
+.col-action .save-btn{padding:9px;font-size:13px;margin-top:10px}
+.col-action .reply-tab{padding:8px;font-size:13px}
+.col-action .reply-tabs{margin-bottom:10px}
+.col-action .bid-amount-wrap label{font-size:11px;margin-bottom:4px}
+.col-action .bid-amount-input input{padding:9px 0;font-size:16px}
+.col-action .bid-amount-input span{font-size:15px}
+.col-action .reply-textarea{min-height:62px;font-size:13px;padding:9px 12px;margin-bottom:10px}
+.col-action .btn-send-bid{padding:11px;font-size:14px;margin-bottom:6px}
+.col-action .btn-pass{padding:9px;font-size:13px}
+
+/* ---- Fields grid ---- */
+.fields{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:4px}
+.field{display:flex;flex-direction:column;gap:6px}
+.field label{font-size:12px;color:#475569;font-weight:600;text-transform:uppercase;letter-spacing:.6px}
+.field input{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:12px 14px;color:#e2e8f0;font-size:16px;font-family:'Inter',sans-serif;transition:border .15s;outline:none}
+.field input:focus{border-color:#3b82f6}
+.save-btn{margin-top:18px;width:100%;padding:13px;background:#1e3a5f;border:1px solid #2563eb;border-radius:8px;color:#60a5fa;font-size:15px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s}
+.save-btn:hover{background:#1d4ed8;color:#fff}
+
+/* ---- Messages ---- */
+.messages{display:flex;flex-direction:column;gap:10px;margin-top:4px}
+.msg{padding:12px 16px;border-radius:10px;font-size:15px;line-height:1.55}
+.msg.inbound{background:#1e293b;color:#e2e8f0;border-bottom-left-radius:3px;align-self:flex-start;max-width:85%}
+.msg.outbound{background:#1e3a5f;color:#93c5fd;border-bottom-right-radius:3px;align-self:flex-end;max-width:85%}
+.msg-meta{font-size:12px;color:#475569;margin-top:4px}
+
+/* ---- Contact ---- */
+.contact-phone-big{font-size:22px;font-weight:700;color:#f1f5f9}
+.contact-fields{display:flex;flex-direction:column;gap:10px;margin-top:14px}
+
+/* ---- Reply ---- */
+.reply-section{margin-top:4px}
+.reply-tabs{display:flex;gap:8px;margin-bottom:14px}
+.reply-tab{flex:1;padding:11px;border-radius:7px;border:1px solid #1e293b;background:transparent;color:#64748b;font-size:15px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-align:center}
+.reply-tab:hover{border-color:#334155;color:#94a3b8}
+.reply-tab.active-bid{background:rgba(34,197,94,.1);border-color:#22c55e;color:#4ade80}
+.reply-tab.active-pass{background:rgba(239,68,68,.1);border-color:#ef4444;color:#f87171}
+.bid-amount-wrap{margin-bottom:12px}
+.bid-amount-wrap label{font-size:11px;color:#475569;font-weight:600;text-transform:uppercase;letter-spacing:.6px;display:block;margin-bottom:6px}
+.bid-amount-input{display:flex;align-items:center;background:#0f172a;border:1px solid #1e293b;border-radius:7px;overflow:hidden}
+.bid-amount-input span{padding:0 14px;color:#64748b;font-size:18px;font-weight:600}
+.bid-amount-input input{flex:1;background:transparent;border:none;padding:13px 0;color:#e2e8f0;font-size:20px;font-weight:700;font-family:'Inter',sans-serif;outline:none}
+.reply-textarea{width:100%;background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:13px 16px;color:#e2e8f0;font-size:15px;font-family:'Inter',sans-serif;resize:vertical;min-height:100px;outline:none;transition:border .15s;margin-bottom:14px}
+.reply-textarea:focus{border-color:#3b82f6}
+.btn-send-bid{width:100%;padding:15px;border:none;border-radius:8px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;font-size:16px;font-weight:700;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;margin-bottom:10px}
+.btn-send-bid:hover{background:linear-gradient(135deg,#16a34a,#15803d);transform:translateY(-1px)}
+.btn-pass{width:100%;padding:13px;border:1px solid #334155;border-radius:8px;background:transparent;color:#64748b;font-size:15px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s}
+.btn-pass:hover{border-color:#ef4444;color:#f87171}
+
+/* ---- Valuations ---- */
+.val-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #0f172a;font-size:14px}
+.val-row:last-child{border-bottom:none}
+.val-label{color:#64748b;font-weight:500}
+.val-value{color:#e2e8f0;font-weight:600}
+.val-source{font-size:11px;color:#475569;font-weight:600;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px;margin-top:14px}
+
+/* ---- Status badges ---- */
+.badge{display:inline-block;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;flex-shrink:0}
+.badge-new{background:rgba(59,130,246,.15);color:#60a5fa;border:1px solid rgba(59,130,246,.25)}
+.badge-reviewing{background:rgba(245,158,11,.12);color:#fbbf24;border:1px solid rgba(245,158,11,.2)}
+.badge-bid_sent{background:rgba(34,197,94,.12);color:#4ade80;border:1px solid rgba(34,197,94,.2)}
+.badge-passed{background:rgba(127,29,29,.3);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
+.badge-bought{background:rgba(34,197,94,.18);color:#34d399;border:1px solid rgba(34,197,94,.35)}
+
+/* ---- Lightbox ---- */
+.lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:1000;align-items:center;justify-content:center}
+.lightbox.open{display:flex}
+.lightbox img{max-width:90vw;max-height:90vh;object-fit:contain;border-radius:8px}
+.lightbox-close{position:fixed;top:20px;right:24px;color:#fff;font-size:28px;cursor:pointer;opacity:.7;line-height:1}
+.lightbox-close:hover{opacity:1}
+.toast{position:fixed;bottom:24px;right:24px;background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:12px 20px;border-radius:8px;font-size:13px;font-weight:500;display:none;z-index:999}
+
+/* ====== RESPONSIVE ====== */
+
+/* Tablet 1024-1439: single column */
+@media(max-width:1439px){
+  .columns-area{grid-template-columns:1fr}
+}
+
+/* Tablet 640-1023: single column, page scrolls */
+@media(max-width:1023px){
+  body{height:auto;overflow-y:auto}
+  .page{height:auto;overflow:visible;grid-template-rows:auto auto auto}
+  .columns-area{grid-template-columns:1fr;overflow:visible;padding:12px 16px}
+  .col{height:auto;overflow:visible}
+  .col-action{order:-1}
+  .vehicle-banner{padding:10px 16px}
+  .photos-strip{padding:8px 16px}
+}
+
+/* Mobile <640: compact everything */
+@media(max-width:639px){
+  .header{padding:0 12px;height:50px}
+  .logo-text{display:none}
+  .page{height:auto}
+  .vehicle-banner{flex-direction:column;align-items:flex-start;padding:10px 12px;gap:8px}
+  .vin-big{font-size:17px}
+  .vb-right{width:100%}
+  .quick-status-group{display:grid;grid-template-columns:1fr 1fr;width:100%;gap:6px}
+  .qs-btn{text-align:center}
+  .photo-thumb{width:110px;height:78px}
+  .photo-more{width:60px;height:78px;font-size:12px}
+  .photos-strip{padding:8px 12px}
+  .columns-area{padding:10px 12px;gap:10px}
+  .fields{grid-template-columns:1fr}
+  .card{padding:14px}
+  .col-action .btn-send-bid,.col-action .btn-pass{padding:13px}
+}
+
+/* Share toast */
+.share-toast{position:fixed;top:20px;left:50%;transform:translateX(-50%) translateY(-80px);background:#0d2d1a;border:1px solid rgba(34,197,94,.4);color:#4ade80;padding:12px 24px;border-radius:10px;font-size:14px;font-weight:600;z-index:9999;transition:transform .3s ease;box-shadow:0 8px 24px rgba(0,0,0,.4);white-space:nowrap}
+.share-toast.show{transform:translateX(-50%) translateY(0)}
+
+/* Share modal */
+.share-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:500;align-items:center;justify-content:center}
+.share-overlay.show{display:flex}
+.share-modal{background:#111827;border:1px solid #1e293b;border-radius:14px;padding:28px;width:420px;max-width:92vw;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+.share-modal h3{font-size:18px;font-weight:700;color:#f1f5f9;margin-bottom:4px}
+.share-modal .desc{font-size:13px;color:#64748b;margin-bottom:20px}
+.share-modal label{display:block;font-size:12px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.share-modal input,.share-modal textarea{width:100%;padding:10px 14px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;color:#e2e8f0;font-size:14px;font-family:'Inter',sans-serif}
+.share-modal input:focus,.share-modal textarea:focus{outline:none;border-color:#3b82f6}
+.share-modal textarea{resize:vertical;min-height:80px}
+.share-modal .field{margin-bottom:16px}
+.share-modal .actions{display:flex;gap:10px;margin-top:20px}
+.share-modal .btn-share{flex:1;padding:12px;background:#3b82f6;border:none;border-radius:8px;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif}
+.share-modal .btn-share:hover{background:#2563eb}
+.share-modal .btn-share:disabled{background:#1e3a5f;color:#5a7a96;cursor:not-allowed}
+.share-modal .btn-cancel{padding:12px 20px;background:transparent;border:1px solid #1e293b;border-radius:8px;color:#64748b;font-size:14px;cursor:pointer;font-family:'Inter',sans-serif}
+.share-modal .btn-cancel:hover{border-color:#334155;color:#94a3b8}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <div class="logo-mark">EW</div>
+    <div class="logo-text">Experience Wholesale</div>
+  </div>
+  <a href="/" class="back-btn">← All Bids</a>
+</div>
+
+<div class="page">
+
+  <!-- ROW 1: Vehicle Banner (always visible) -->
+  <div class="vehicle-banner">
+    <div class="vb-left">
+      <div class="vb-meta">
+        <div class="bid-id">Bid #{{ bid.id }} · {{ time_ago(bid.created_at) }} <a href="#" onclick="forceReprocess(event, {{ bid.id }})" style="margin-left:10px;font-size:11px;color:#a78bfa;text-decoration:none;border:1px solid rgba(167,139,250,.3);border-radius:4px;padding:2px 8px;font-weight:600" title="Hard reset: wipe all 3 lookups + claim, queue for fresh worker pick-up">↻ Force re-process</a></div>
+        <div class="vin-big">{{ bid.vin or 'No VIN' }}</div>
+        {% if vin_candidate %}
+        <div style="margin-top:6px;padding:6px 10px;background:rgba(251,191,36,.10);border:1px solid rgba(251,191,36,.4);border-radius:6px;font-size:12px;color:#fbbf24;display:inline-flex;align-items:center;gap:8px;font-family:'JetBrains Mono',ui-monospace,monospace">
+          <span style="font-family:'Inter',sans-serif;font-weight:600">Photo VIN (verify):</span>
+          <span>{{ vin_candidate }}</span>
+          <button onclick="applyVinCandidate('{{ vin_candidate }}')" style="background:#fbbf24;color:#0b0f19;border:none;border-radius:4px;padding:3px 8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'Inter',sans-serif">Use</button>
+        </div>
+        {% endif %}
+        {% if bid.year or bid.make %}
+        <div class="vehicle-desc-big">{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }} {{ bid.trim or '' }}</div>
+        {% endif %}
+        {% if bid.salesperson %}
+        <div style="margin-top:8px;display:inline-flex;align-items:center;gap:6px;padding:4px 10px;background:rgba(168,139,250,.12);border:1px solid rgba(168,139,250,.4);border-radius:14px;font-size:12px;color:#c4b5fd;font-weight:600" title="EW salesperson tagged from dealer assignment when this bid was submitted">
+          <span>👤</span><span>via {{ bid.salesperson }}</span>
+        </div>
+        {% endif %}
+      </div>
+      <span class="badge badge-{{ bid.status }}">{{ bid.status.replace('_',' ') }}</span>
+    </div>
+    <div class="vb-right">
+      <div class="quick-status-group">
+        {% for s, label, abg, ac in [
+          ('reviewing','Reviewing','#2d2000','#fbbf24'),
+          ('bid_sent','Bid Sent','#0d2d1a','#4ade80'),
+          ('passed','Passed','#2d0a0a','#fca5a5'),
+          ('bought','Bought','#053d1f','#34d399')
+        ] %}
+        <button class="qs-btn{% if bid.status==s %} active{% endif %}"
+                onclick="updateStatus('{{ s }}')"
+                {% if bid.status==s %}style="background:{{ abg }};color:{{ ac }}"{% endif %}>
+          {{ label }}
+        </button>
+        {% endfor %}
+      </div>
+      <button class="qs-btn" id="shareBtn" onclick="openShareModal()" style="background:rgba(59,130,246,.12);color:#60a5fa;border-color:#3b82f6;margin-left:8px">Share</button>
+    </div>
+    {% if bid.asking_price or bid.ai_price or (bid.bid_amount and bid.bid_sent_at) %}
+    <div style="width:100%;border-top:1px solid #1e293b;margin-top:8px;padding-top:8px;display:flex;gap:24px;font-size:13px">
+      {% if bid.asking_price %}
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="color:#7a9bb5">Asking:</span>
+        <span style="color:#94a3b8;font-weight:700">${{ '{:,.0f}'.format(bid.asking_price) }}</span>
+      </div>
+      {% endif %}
+      {% if bid.ai_price %}
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="color:#7a9bb5">AI Price:</span>
+        <span style="color:#c084fc;font-weight:700">${{ '{:,.0f}'.format(bid.ai_price) }}</span>
+      </div>
+      {% endif %}
+      {% if bid.bid_amount and bid.bid_sent_at %}
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="color:#7a9bb5">Bid Sent:</span>
+        <span style="color:#4ade80;font-weight:700">${{ '{:,.0f}'.format(bid.bid_amount) }}</span>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- ROW 2: Photos Strip (full-width, always visible) -->
+  {% if photos %}
+  {% set max_visible = 8 %}
+  {% set extra = photos|length - max_visible if photos|length > max_visible else 0 %}
+  <div class="photos-strip">
+    <div class="photos-top">
+      <span class="photos-label">Photos ({{ photos|length }})</span>
+      {% if extra > 0 %}
+      <button class="photos-toggle" id="photos-toggle-btn" onclick="toggleAllPhotos()">Show all {{ photos|length }}</button>
+      {% endif %}
+    </div>
+    <div class="photos-scroll" id="photos-scroll">
+      {% for photo in photos %}
+      {% set _src = photo.local_path or photo.url %}
+      <div class="photo-thumb{% if loop.index > max_visible %} photo-hidden{% endif %}{% if not photo.include_in_share %} photo-excluded{% endif %}"
+           id="photo-tile-{{ photo.id }}"
+           onclick="openLightbox('{{ _src|thumb_url('full') }}')"
+           style="position:relative">
+        <img src="{{ _src|thumb_url('strip') }}" alt="Vehicle photo" loading="lazy" referrerpolicy="no-referrer">
+        <label onclick="event.stopPropagation()"
+               style="position:absolute;bottom:4px;left:4px;right:4px;background:rgba(0,0,0,.75);color:#fff;padding:4px 6px;border-radius:5px;font-size:11px;font-weight:600;display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none">
+          <input type="checkbox"
+                 class="share-check"
+                 {% if photo.include_in_share %}checked{% endif %}
+                 onchange="setPhotoShare({{ photo.id }}, this.checked)"
+                 style="margin:0;cursor:pointer;width:14px;height:14px">
+          Include on share
+        </label>
+      </div>
+      {% endfor %}
+      {% if extra > 0 %}
+      <div class="photo-more" id="photo-more-btn" onclick="toggleAllPhotos()">+{{ extra }}</div>
+      {% endif %}
+    </div>
+    <style>
+      .photo-excluded img { opacity: .35; filter: grayscale(0.8); }
+      .photo-excluded label { background: rgba(127,29,29,.85) !important; }
+    </style>
+    <script>
+      // Explicit set (not toggle) — the checkbox.checked value IS the desired
+      // end state. POSTs the target value directly so multiple clicks can't
+      // leave the DB and UI out of sync.
+      function setPhotoShare(photoId, wantInclude) {
+        const tile = document.getElementById('photo-tile-' + photoId);
+        // Optimistic UI
+        if (wantInclude) tile.classList.remove('photo-excluded');
+        else tile.classList.add('photo-excluded');
+        fetch('/api/bid-photo/' + photoId + '/set-share', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({include: wantInclude})
+        })
+          .then(r => {
+            if (!r.ok) throw new Error('auth or server');
+            return r.json();
+          })
+          .then(d => {
+            if (!d.ok) throw new Error(d.error || 'unknown');
+            // Sync with server truth in case of race
+            if (d.include_in_share) tile.classList.remove('photo-excluded');
+            else tile.classList.add('photo-excluded');
+          })
+          .catch(e => {
+            alert('Could not save. You may need to log back in. Reloading…');
+            location.reload();
+          });
+      }
+    </script>
+  </div>
+  {% endif %}
+
+  <!-- ROW 3: Scrollable Columns -->
+  <div class="columns-area">
+
+    <!-- COL 1: Vehicle Details (collapsible) + Message Thread -->
+    <div class="col col-intel">
+
+      <div class="card" style="flex-shrink:0">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none" onclick="toggleVehicleDetails()">
+          <span>Vehicle Details <span id="vd-chevron" style="font-size:11px;color:#475569;margin-left:6px;transition:transform .2s;display:inline-block;transform:rotate(180deg)">&#9660;</span></span>
+          <div style="display:flex;gap:6px">
+            <button onclick="event.stopPropagation();decodeVin()" id="decode-btn" style="padding:5px 10px;background:#1e3a5f;border:1px solid #2563eb;border-radius:6px;color:#60a5fa;font-size:11px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer">
+              Decode VIN
+            </button>
+          </div>
+        </div>
+        <div id="vehicle-details-body">
+          <div class="fields" style="gap:10px">
+            <div class="field"><label>VIN</label><input id="f-vin" value="{{ bid.vin or '' }}" placeholder="17-char VIN" style="padding:8px 10px;font-size:14px"></div>
+            <div class="field"><label>Mileage</label><input id="f-mileage" type="number" value="{{ bid.mileage or '' }}" placeholder="Miles" style="padding:8px 10px;font-size:14px"></div>
+            <div class="field"><label>Year</label><input id="f-year" type="number" value="{{ bid.year or '' }}" placeholder="2022" style="padding:8px 10px;font-size:14px"></div>
+            <div class="field"><label>Make</label><input id="f-make" value="{{ bid.make or '' }}" placeholder="Ford" style="padding:8px 10px;font-size:14px"></div>
+            <div class="field"><label>Model</label><input id="f-model" value="{{ bid.model or '' }}" placeholder="F-150" style="padding:8px 10px;font-size:14px"></div>
+            <div class="field"><label>Trim</label><input id="f-trim" value="{{ bid.trim or '' }}" placeholder="XLT" style="padding:8px 10px;font-size:14px"></div>
+            <div class="field">
+              <label style="display:flex;align-items:center;justify-content:space-between">
+                Color
+                {% if photos %}<span onclick="event.stopPropagation();detectColor()" id="color-detect-btn" style="color:#60a5fa;font-size:11px;cursor:pointer;font-weight:600;text-transform:none;letter-spacing:0">Detect</span>{% endif %}
+              </label>
+              <input id="f-color" value="{{ bid.color or '' }}" placeholder="White" style="padding:8px 10px;font-size:14px">
+            </div>
+            <div class="field" style="grid-column:1/-1">
+              <label>Notes</label>
+              <textarea id="f-notes" placeholder="Any notes..." style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:8px 10px;color:#e2e8f0;font-size:14px;font-family:'Inter',sans-serif;resize:vertical;min-height:60px;outline:none;transition:border .15s;width:100%" onfocus="this.style.borderColor='#3b82f6'" onblur="this.style.borderColor='#1e293b'">{{ bid.notes or '' }}</textarea>
+            </div>
+          </div>
+          <button class="save-btn" style="margin-top:10px;padding:10px" onclick="saveVehicle()">Save Changes</button>
+        </div>
+      </div>
+
+      <!-- AI Assessment -->
+      <div class="card card-assess" id="assess-card" style="flex-shrink:0">
+        <div class="assess-header" onclick="toggleAssess()">
+          <span class="card-title" style="margin:0">AI Assessment</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            {% if ai_assessment %}
+            <span onclick="event.stopPropagation();rerunAssess()" title="Click to re-run assessment" style="cursor:pointer;padding:3px 8px;border-radius:5px;font-size:10px;font-weight:600;letter-spacing:.3px;color:#64748b;border:1px solid #334155;background:transparent">↻</span>
+            {% elif vauto_data %}
+            <span style="padding:5px 12px;border-radius:6px;font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:rgba(245,158,11,.12);color:#fbbf24;border:1px solid rgba(245,158,11,.2);animation:pulse 2s infinite">ANALYZING...</span>
+            {% else %}
+            <span style="padding:5px 12px;border-radius:6px;font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:rgba(100,116,139,.1);color:#64748b;border:1px solid rgba(100,116,139,.2)">WAITING FOR vAUTO</span>
+            {% endif %}
+            <span class="assess-chevron" id="assess-chevron">▼</span>
+          </div>
+        </div>
+        <div id="assess-summary-bar" onclick="toggleAssess()"></div>
+        <div id="assess-body" class="collapsed">
+          {% if ai_log %}
+          <!-- ── Hybrid breakdown: bucket + baseline + adjustment + final ── -->
+          <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:12px;margin-bottom:12px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+              <span style="font-size:10px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.6px">Segment</span>
+              <span style="font-size:12px;font-weight:700;color:#a78bfa;background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.25);border-radius:4px;padding:2px 8px;letter-spacing:.3px">{{ ai_log.bucket_display or ai_log.bucket }}</span>
+            </div>
+
+            {% if ai_log.baseline_price %}
+            <div style="display:flex;justify-content:space-between;align-items:baseline;padding:6px 0;border-bottom:1px dashed #1e293b">
+              <span style="font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px">Baseline (weighted books)</span>
+              <span style="font-size:15px;font-weight:700;color:#e2e8f0;font-family:monospace">${{ '{:,}'.format(ai_log.baseline_price) }}</span>
+            </div>
+            {% if ai_log.breakdown %}
+            <div style="margin-top:8px;display:flex;flex-direction:column;gap:3px">
+              {% for r in ai_log.breakdown %}
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:3px 8px;font-size:11px;font-family:monospace;{% if not r.available %}opacity:.4{% endif %}">
+                <span style="color:#64748b">{{ r.source }}</span>
+                {% if r.available %}
+                <span style="color:#94a3b8">${{ '{:,}'.format(r.value) }} × {{ r.effective_pct or r.weight_pct }}% = <span style="color:#cbd5e1">${{ '{:,}'.format(r.contribution) }}</span></span>
+                {% else %}
+                <span style="color:#475569;font-style:italic">N/A — skipped</span>
+                {% endif %}
+              </div>
+              {% endfor %}
+            </div>
+            {% endif %}
+            {% endif %}
+
+            {% if ai_log.llm_adjustment_pct is not none %}
+            <div style="display:flex;justify-content:space-between;align-items:baseline;padding:8px 0;margin-top:6px;border-top:1px dashed #1e293b">
+              <span style="font-size:11px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px">AI Adjustment</span>
+              {% set adj = ai_log.llm_adjustment_pct | float %}
+              <span style="font-size:14px;font-weight:700;font-family:monospace;color:{% if adj >= 0 %}#4ade80{% else %}#fbbf24{% endif %}">
+                {{ '%+.1f' % adj }}%
+              </span>
+            </div>
+            {% if ai_log.llm_reasoning %}
+            <div style="font-size:12px;color:#94a3b8;line-height:1.5;padding:6px 0 2px;font-style:italic">{{ ai_log.llm_reasoning }}</div>
+            {% endif %}
+            {% endif %}
+
+            {% if ai_log.final_price %}
+            <div style="display:flex;justify-content:space-between;align-items:baseline;padding:10px 0 4px;margin-top:6px;border-top:1px solid #1e293b">
+              <span style="font-size:11px;font-weight:700;color:#c084fc;text-transform:uppercase;letter-spacing:.5px">Recommended Buy</span>
+              <span style="font-size:18px;font-weight:800;color:#c084fc;font-family:monospace">${{ '{:,}'.format(ai_log.final_price) }}</span>
+            </div>
+            {% if ai_log.confidence_low and ai_log.confidence_high %}
+            <div style="text-align:right;font-size:11px;color:#64748b;font-family:monospace;margin-top:-2px">
+              range ${{ '{:,}'.format(ai_log.confidence_low) }} – ${{ '{:,}'.format(ai_log.confidence_high) }}
+            </div>
+            {% endif %}
+            {% endif %}
+
+            <div style="margin-top:10px;font-size:9px;color:#334155;text-align:right;text-transform:uppercase;letter-spacing:.4px">
+              Config v{{ ai_log.config_version }} · {{ time_ago(ai_log.created_at) }}
+            </div>
+          </div>
+          {% endif %}
+
+          <div id="assess-output">
+            {% if not ai_assessment %}
+            <div style="font-size:13px;color:#334155;font-style:italic">Gemini reviews all photos, mileage, notes, DIA dealer history, auction comps, and market listings — then applies bucket-weighted math + qualitative adjustment.</div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      {# ─────────────────── Dealer Network Intel ─────────────────── #}
+      {# Lives directly below AI Assessment so all AI / decisioning signal is in one column. #}
+      {% set di = (ai_log.dealer_intel if ai_log else None) or None %}
+      {% if di and (di.active or di.recent_sales or di.top_pitch) %}
+      <div class="card" style="border-color:#d97706;flex-shrink:0" id="dealer-intel-card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          Dealer Network Intel
+          <span style="font-size:10px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.25);border-radius:4px;padding:2px 8px;letter-spacing:.4px">
+            LIVE
+          </span>
+        </div>
+
+        {# Active listings at partner dealers #}
+        {% if di.active %}
+        <div style="margin-top:10px">
+          <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Currently at partner dealers</div>
+          {% for a in di.active %}
+          <div style="background:#0f172a;border:1px solid #1e293b;border-radius:7px;padding:10px 12px;margin-bottom:7px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+              <div>
+                <div style="font-size:13px;font-weight:700;color:#e2e8f0">{{ a.dealer_name }}</div>
+                <div style="font-size:11px;color:#64748b">{{ a.city or '' }}{{ ', ' if a.city and a.state }}{{ a.state or '' }}</div>
+              </div>
+              {% if a.price %}
+              <div style="font-size:15px;font-weight:700;color:#fbbf24;font-family:monospace">${{ '{:,}'.format(a.price) }}</div>
+              {% endif %}
+            </div>
+            <div style="margin-top:6px;display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px;color:#94a3b8">
+              <span>{{ a.year }} {{ a.make }} {{ a.model }}{% if a.trim %} · {{ a.trim }}{% endif %}{% if a.mileage %} · {{ '{:,}'.format(a.mileage) }} mi{% endif %}</span>
+              <span style="color:{% if a.days_on_lot and a.days_on_lot > 60 %}#ef4444{% elif a.days_on_lot and a.days_on_lot > 30 %}#fbbf24{% else %}#4ade80{% endif %};font-weight:600">
+                {{ a.days_on_lot }}d on lot
+              </span>
+            </div>
+            {% if a.price_drop_amount and a.price_drop_days_ago is not none %}
+            <div style="margin-top:4px;font-size:11px;color:#fbbf24;font-style:italic">⚠ Price dropped ${{ '{:,}'.format(a.price_drop_amount) }} · {{ a.price_drop_days_ago }}d ago</div>
+            {% endif %}
+            {% if a.url %}
+            <a href="{{ a.url }}" target="_blank" rel="noopener" style="display:inline-block;margin-top:6px;font-size:11px;color:#60a5fa;text-decoration:none">Open listing →</a>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+
+        {# Recent sales patterns #}
+        {% set sold_patterns = di.patterns | selectattr('sold_count', 'gt', 0) | list if di.patterns else [] %}
+        {% if sold_patterns %}
+        <div style="margin-top:14px">
+          <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+            Sold at partner dealers · last {{ di.config_used.recent_days if di.config_used else 90 }}d
+          </div>
+          {% for p in sold_patterns %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b;margin-bottom:5px">
+            <span style="font-size:12px;color:#e2e8f0;font-weight:600">{{ p.dealer_name }}</span>
+            <span style="font-size:12px;color:#94a3b8;font-family:monospace">
+              {{ p.sold_count }} sold · avg {{ p.avg_days_to_sell }}d
+              {% if p.avg_days_to_sell < 10 %}<span style="color:#f97316">🔥</span>{% endif %}
+            </span>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+
+        {# Top pitch candidates #}
+        {% if di.top_pitch %}
+        <div style="margin-top:14px">
+          <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+            Top pitch candidates
+          </div>
+          {% for tp in di.top_pitch %}
+          <div style="padding:8px 12px;background:linear-gradient(90deg,rgba(217,119,6,.1),rgba(217,119,6,0.02));border-left:3px solid #d97706;border-radius:4px;margin-bottom:6px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">
+              <span style="font-size:13px;font-weight:700;color:#fbbf24">🎯 {{ tp.dealer_name }}</span>
+              <span style="font-size:10px;color:#94a3b8;font-family:monospace">score {{ tp.pitch_score }}</span>
+            </div>
+            <div style="margin-top:2px;font-size:11px;color:#94a3b8">{{ tp.reason }}</div>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+
+        <div style="margin-top:10px;font-size:9px;color:#334155;text-align:right;text-transform:uppercase;letter-spacing:.4px">
+          Year ±{{ di.config_used.year_tolerance or 2 }} · {{ di.config_used.recent_days or 90 }}d window
+        </div>
+      </div>
+      {% endif %}
+
+      {# ─────────────────── EW Sales Ledger — Likely Buyers ─────────────────── #}
+      {# Real EW transaction history from LSL crm.db. Strongest demand signal. #}
+      {% set bi = (ai_log.buyer_intel if ai_log else None) or None %}
+      {% if bi and (bi.top_pitch_buyers or (bi.patterns and bi.patterns.total_deals)) %}
+      <div class="card" style="border-color:#10b981;flex-shrink:0" id="buyer-intel-card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          Likely Buyers
+          <span style="font-size:10px;font-weight:700;color:#34d399;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.25);border-radius:4px;padding:2px 8px;letter-spacing:.4px">
+            SALES LEDGER
+          </span>
+        </div>
+
+        {# Aggregate summary line #}
+        {% if bi.patterns and bi.patterns.total_deals %}
+        <div style="margin-top:10px;padding:10px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:7px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap">
+            <span style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Last 12 months</span>
+            <span style="font-size:11px;color:#64748b;font-family:monospace">90d: {{ bi.patterns.total_deals_90d or 0 }} · 24mo: {{ bi.patterns.total_deals_24mo or 0 }}</span>
+          </div>
+          <div style="margin-top:6px;display:flex;gap:14px;flex-wrap:wrap;font-family:monospace">
+            <div><span style="color:#34d399;font-size:18px;font-weight:700">{{ bi.patterns.total_deals }}</span> <span style="font-size:11px;color:#94a3b8">like-deals</span></div>
+            <div><span style="color:#e2e8f0;font-size:14px;font-weight:600">{{ bi.patterns.unique_buyers or 0 }}</span> <span style="font-size:11px;color:#94a3b8">buyers</span></div>
+            {% if bi.patterns.avg_gross %}
+            <div><span style="color:#fbbf24;font-size:14px;font-weight:600">${{ '{:,}'.format(bi.patterns.avg_gross|int) }}</span> <span style="font-size:11px;color:#94a3b8">avg gross</span></div>
+            {% endif %}
+            {% if bi.patterns.avg_sale_price %}
+            <div><span style="color:#94a3b8;font-size:13px">${{ '{:,}'.format(bi.patterns.avg_sale_price|int) }}</span> <span style="font-size:11px;color:#64748b">avg sale</span></div>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        {# Top buyer candidates (ranked) #}
+        {% if bi.top_pitch_buyers %}
+        <div style="margin-top:14px">
+          <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+            Top buyer candidates
+          </div>
+          {% for b in bi.top_pitch_buyers %}
+          <div style="padding:8px 12px;background:linear-gradient(90deg,rgba(16,185,129,.10),rgba(16,185,129,.02));border-left:3px solid #10b981;border-radius:4px;margin-bottom:6px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">
+              <span style="font-size:13px;font-weight:700;color:#34d399">💰 {{ b.buyer_name }}</span>
+              <span style="font-size:10px;color:#94a3b8;font-family:monospace">score {{ b.pitch_score }}{% if b.bucket %} · {{ b.bucket }}{% endif %}</span>
+            </div>
+            <div style="margin-top:2px;font-size:11px;color:#94a3b8">{{ b.reason }}</div>
+            {% if b.best_phone or b.cust_email or b.active_rep %}
+            <div style="margin-top:4px;font-size:10px;color:#64748b;font-family:monospace">
+              {% if b.active_rep %}rep: {{ b.active_rep }}{% endif %}{% if b.active_rep and (b.best_phone or b.cust_email) %} · {% endif %}{% if b.best_phone %}{{ b.best_phone }}{% endif %}{% if b.best_phone and b.cust_email %} · {% endif %}{% if b.cust_email %}{{ b.cust_email }}{% endif %}
+            </div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+
+        {# Long tail — other recent buyers not already in top_pitch #}
+        {% set pitched_names = bi.top_pitch_buyers | map(attribute='buyer_name') | list if bi.top_pitch_buyers else [] %}
+        {% set tail = bi.recent_buyers | rejectattr('buyer_name','in',pitched_names) | list if bi.recent_buyers else [] %}
+        {% if tail %}
+        <details style="margin-top:10px">
+          <summary style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;cursor:pointer;padding:6px 0">
+            Other recent buyers ({{ tail | length }})
+          </summary>
+          <div style="margin-top:6px">
+            {% for r in tail %}
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b;margin-bottom:5px">
+              <span style="font-size:12px;color:#e2e8f0">{{ r.buyer_name }}</span>
+              <span style="font-size:11px;color:#94a3b8;font-family:monospace">
+                {{ r.deals_window }} deals{% if r.avg_gross %} · ${{ '{:,}'.format(r.avg_gross|int) }} gross{% endif %}{% if r.days_since_last is not none %} · {{ r.days_since_last }}d ago{% endif %}
+              </span>
+            </div>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
+
+        <div style="margin-top:10px;font-size:9px;color:#334155;text-align:right;text-transform:uppercase;letter-spacing:.4px">
+          5 yrs LSL ledger · Year ±{{ bi.config_used.year_tolerance or 2 }} · {{ bi.config_used.recent_days or 365 }}d window
+        </div>
+      </div>
+      {% endif %}
+
+      <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:400px">
+        <div class="card-title">Message Thread</div>
+        <div class="messages" id="msg-thread-desktop" style="flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#1e293b transparent;min-height:250px">
+          {% for msg in messages %}
+          <div>
+            <div class="msg {{ msg.direction }}">{{ msg.message }}</div>
+            <div class="msg-meta" style="text-align:{{ 'right' if msg.direction=='outbound' else 'left' }}">
+              {{ time_ago(msg.created_at) }} · {{ 'Sent' if msg.direction=='outbound' else msg.from_phone }}
+            </div>
+          </div>
+          {% else %}
+          <div style="color:#475569;font-size:13px;font-style:italic">No messages yet</div>
+          {% endfor %}
+        </div>
+        <div style="border-top:1px solid #1e293b;padding-top:12px;margin-top:8px;display:flex;gap:8px">
+          <input type="text" id="thread-reply-input" placeholder="Type a reply..."
+                 style="flex:1;background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px 14px;color:#e2e8f0;font-size:14px;font-family:'Inter',sans-serif;outline:none"
+                 onfocus="this.style.borderColor='#3b82f6'" onblur="this.style.borderColor='#1e293b'"
+                 onkeydown="if(event.key==='Enter')sendThreadReply()">
+          <button onclick="sendThreadReply()" style="padding:10px 18px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border:none;border-radius:8px;color:#fff;font-size:14px;font-weight:700;font-family:'Inter',sans-serif;cursor:pointer;white-space:nowrap">Send</button>
+        </div>
+      </div>
+
+    </div><!-- /col 1 -->
+
+    <!-- COL 2: vAuto Book Values + Reports -->
+    <div class="col col-vauto">
+
+      <!-- vAuto Book Values + Reports -->
+      <div class="card" style="border-color:#1e3a5f;flex:1" id="vauto-card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          vAuto
+          {% if vauto_data %}
+          <span style="font-size:10px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">COMPLETE</span>
+          {% elif bid.vin %}
+          <span id="vauto-status-badge" style="font-size:10px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px;animation:pulse 2s infinite">PENDING</span>
+          {% else %}
+          <span style="font-size:10px;font-weight:700;color:#475569;background:rgba(71,85,105,.12);border:1px solid rgba(71,85,105,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">NO VIN</span>
+          {% endif %}
+        </div>
+
+        {% if vauto_data %}
+        <!-- Title Status -->
+        {% if vauto_data.title_status %}
+        <div style="margin-bottom:12px">
+          {% if vauto_data.title_status == 'clean' %}
+          <span style="display:inline-block;padding:4px 10px;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:6px;font-size:11px;font-weight:700;color:#4ade80;letter-spacing:.3px">CLEAN TITLE</span>
+          {% elif vauto_data.title_status == 'accident' %}
+          <span style="display:inline-block;padding:4px 10px;background:rgba(251,146,60,.12);border:1px solid rgba(251,146,60,.2);border-radius:6px;font-size:11px;font-weight:700;color:#fb923c;letter-spacing:.3px">ACCIDENT REPORTED</span>
+          {% elif vauto_data.title_status == 'salvage' %}
+          <span style="display:inline-block;padding:4px 10px;background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.2);border-radius:6px;font-size:11px;font-weight:700;color:#f87171;letter-spacing:.3px">SALVAGE TITLE</span>
+          {% else %}
+          <span style="display:inline-block;padding:4px 10px;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.2);border-radius:6px;font-size:11px;font-weight:700;color:#fbbf24;letter-spacing:.3px">{{ vauto_data.title_status|upper }}</span>
+          {% endif %}
+        </div>
+        {% endif %}
+
+        <!-- 6 Book Values -->
+        <div style="display:flex;flex-direction:column;gap:6px">
+          {% set books = [
+            ('rBook', vauto_data.rbook),
+            ('Black Book', vauto_data.black_book),
+            ('Manheim (MMR)', vauto_data.mmr),
+            ('KBB', vauto_data.kbb),
+            ('KBB.com', vauto_data.kbb_com),
+            ('J.D. Power', vauto_data.jd_power)
+          ] %}
+          {% for label, val in books %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
+            <span style="font-size:12px;font-weight:500;color:#94a3b8">{{ label }}</span>
+            {% if val %}
+            <span style="font-size:13px;font-weight:700;color:#e2e8f0;font-family:monospace">${{ '{:,}'.format(val) }}</span>
+            {% else %}
+            <span style="font-size:12px;color:#334155">—</span>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+
+        {% if vauto_data.appraisal_url and vauto_data.appraisal_url.startswith('http') %}
+        <div style="margin-top:12px;text-align:center">
+          <a href="{{ vauto_data.appraisal_url }}" target="_blank" rel="noopener"
+             style="display:inline-block;padding:9px 18px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.35);border-radius:6px;color:#60a5fa;text-decoration:none;font-size:13px;font-weight:600;letter-spacing:.2px"
+             title="Open the saved vAuto appraisal">
+            Saved vAuto on {{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }} ↗
+          </a>
+        </div>
+        {% endif %}
+
+        <!-- Carfax / AutoCheck screenshots -->
+        {% if vauto_data.carfax_screenshot or vauto_data.autocheck_screenshot %}
+        <div style="margin-top:14px;display:flex;gap:8px;flex:1">
+          {% if vauto_data.carfax_screenshot %}
+          <div style="flex:1;cursor:pointer;min-height:0" onclick="openReportLightbox('{{ vauto_data.carfax_screenshot }}')">
+            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Carfax</div>
+            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
+              <img src="{{ vauto_data.carfax_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="Carfax Report">
+            </div>
+          </div>
+          {% endif %}
+          {% if vauto_data.autocheck_screenshot %}
+          <div style="flex:1;cursor:pointer;min-height:0" onclick="openReportLightbox('{{ vauto_data.autocheck_screenshot }}')">
+            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AutoCheck</div>
+            <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
+              <img src="{{ vauto_data.autocheck_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AutoCheck Report">
+            </div>
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+
+        {% if vauto_data.looked_up_at %}
+        <div style="margin-top:10px;font-size:10px;color:#334155;text-align:right">Looked up {{ time_ago(vauto_data.looked_up_at) }}</div>
+        {% endif %}
+
+        {% elif bid.vin %}
+        <div id="vauto-pending-msg" style="font-size:13px;color:#475569;font-style:italic">vAuto lookup queued — waiting for worker...</div>
+        {% else %}
+        <div style="font-size:13px;color:#334155;font-style:italic">Submit a VIN to trigger vAuto lookup.</div>
+        {% endif %}
+      </div>
+
+    </div><!-- /col 2 -->
+
+    <!-- COL 3: AccuTrade -->
+    <div class="col col-accutrade">
+
+      <div class="card" style="border-color:#065f46;flex:1;display:flex;flex-direction:column" id="accutrade-card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          AccuTrade
+          {% if accutrade_data and accutrade_data.not_available %}
+          <span style="font-size:10px;font-weight:700;color:#64748b;background:rgba(100,116,139,.12);border:1px solid rgba(100,116,139,.25);border-radius:4px;padding:2px 8px;letter-spacing:.4px">NOT AVAILABLE</span>
+          {% elif accutrade_data %}
+          <span style="font-size:10px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">COMPLETE</span>
+          {% elif bid.vin %}
+          <span id="accutrade-status-badge" style="font-size:10px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px;animation:pulse 2s infinite">PENDING</span>
+          {% else %}
+          <span style="font-size:10px;font-weight:700;color:#475569;background:rgba(71,85,105,.12);border:1px solid rgba(71,85,105,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">NO VIN</span>
+          {% endif %}
+        </div>
+
+        {% if accutrade_data and accutrade_data.not_available %}
+        <div style="font-size:13px;color:#64748b;font-style:italic;line-height:1.5">
+          AccuTrade has no appraisal data for this VIN.
+          {% if accutrade_data.unavailable_reason %}
+          <div style="margin-top:4px;font-size:11px;color:#475569;font-style:normal">({{ accutrade_data.unavailable_reason }})</div>
+          {% endif %}
+        </div>
+        {% if accutrade_data.looked_up_at %}
+        <div style="margin-top:10px;font-size:10px;color:#334155;text-align:right">Checked {{ time_ago(accutrade_data.looked_up_at) }}</div>
+        {% endif %}
+
+        {% elif accutrade_data %}
+        <div style="display:flex;flex-direction:column;gap:6px">
+          {% set at_books = [
+            ('Instant Offer', accutrade_data.guaranteed_offer),
+            ('Target Auction', accutrade_data.trade_in),
+            ('Target Retail', accutrade_data.trade_market),
+            ('Manheim', accutrade_data.retail),
+            ('Wholesale / Avg', accutrade_data.market_avg)
+          ] %}
+          {% for label, val in at_books %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
+            <span style="font-size:12px;font-weight:500;color:#94a3b8">{{ label }}</span>
+            {% if val %}
+            <span style="font-size:13px;font-weight:700;color:#e2e8f0;font-family:monospace">${{ '{:,}'.format(val) }}</span>
+            {% else %}
+            <span style="font-size:12px;color:#334155">—</span>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+
+        {% if accutrade_data.appraisal_url %}
+        <div style="margin-top:12px;text-align:center">
+          {# URL is normalized server-side at /api/accutrade/submit so the
+             stored value already has backUrl pointing at the appraisal path.
+             Use the stored URL as-is. #}
+          <a href="{{ accutrade_data.appraisal_url }}" target="_blank" rel="noopener"
+             style="display:inline-block;padding:9px 18px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.35);border-radius:6px;color:#60a5fa;text-decoration:none;font-size:13px;font-weight:600;letter-spacing:.2px"
+             title="Open the saved AccuTrade appraisal to adjust odometer / options / condition, then re-run the assessment">
+            Saved AccuTrade on {{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }} ↗
+          </a>
+        </div>
+        {% endif %}
+
+        {% if accutrade_data.screenshot %}
+        <div style="margin-top:14px;cursor:pointer;flex:1;min-height:0" onclick="openReportLightbox('{{ accutrade_data.screenshot }}')">
+          <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AccuTrade Report</div>
+          <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
+            <img src="{{ accutrade_data.screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AccuTrade Report">
+          </div>
+        </div>
+        {% endif %}
+
+        {% if accutrade_data.looked_up_at %}
+        <div style="margin-top:10px;font-size:10px;color:#334155;text-align:right">Looked up {{ time_ago(accutrade_data.looked_up_at) }}</div>
+        {% endif %}
+
+        {% elif bid.vin %}
+        <div style="font-size:13px;color:#475569;font-style:italic">AccuTrade lookup queued — waiting for worker...</div>
+        {% else %}
+        <div style="font-size:13px;color:#334155;font-style:italic">Submit a VIN to trigger AccuTrade lookup.</div>
+        {% endif %}
+      </div>
+
+    </div><!-- /col 3 -->
+
+    <!-- COL 4: Send Bid + Contact -->
+    <div class="col col-action">
+
+      <div class="card">
+        <div class="card-title">Send Bid</div>
+        <div class="reply-section">
+          <div class="reply-tabs">
+            <button class="reply-tab active-bid" id="tab-bid" onclick="setTab('bid')">Send Bid</button>
+            <button class="reply-tab" id="tab-pass" onclick="setTab('pass')">Pass</button>
+          </div>
+          <div id="bid-section">
+            <div class="bid-amount-wrap">
+              <label>Bid Amount</label>
+              <div class="bid-amount-input">
+                <span>$</span>
+                <input type="text" id="bid-amount" inputmode="numeric" placeholder="0"
+                       oninput="var d=this.value.replace(/[^0-9]/g,'');this.value=d?parseInt(d,10).toLocaleString('en-US'):'';autofillBidText(d);">
+              </div>
+            </div>
+            <textarea class="reply-textarea" id="reply-text" placeholder="We're in at $XX,XXX. Let me know if you want to move forward."></textarea>
+
+            {% if partner_info %}
+            <div style="margin-top:10px;padding:10px 12px;background:rgba(167,139,250,.06);border:1px solid rgba(167,139,250,.18);border-radius:7px">
+              <div style="font-size:10px;font-weight:700;color:#a78bfa;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">
+                Notify {{ partner_info.dealer_name }} via:
+              </div>
+              <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:#cbd5e1">
+                <label style="display:flex;align-items:center;gap:6px;cursor:not-allowed;opacity:.85" title="Always sent — the dealer's partner dashboard is the canonical record">
+                  <input type="checkbox" id="notify-dashboard" checked disabled> Dashboard
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;{% if not partner_info.sms_ok %}opacity:.4;cursor:not-allowed{% else %}cursor:pointer{% endif %}"
+                       title="{% if not partner_info.sms_ok %}Dealer has not opted into SMS{% else %}SMS to {{ partner_info.sms_phones }}{% endif %}">
+                  <input type="checkbox" id="notify-text" {% if not partner_info.sms_ok %}disabled{% endif %}> Text
+                  {% if not partner_info.sms_ok %}<span style="font-size:10px;color:#64748b">(not opted in)</span>{% endif %}
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;{% if not partner_info.email_ok %}opacity:.4;cursor:not-allowed{% else %}cursor:pointer{% endif %}"
+                       title="{% if not partner_info.email_ok %}Dealer has email alerts disabled{% else %}Email to {{ partner_info.emails }}{% endif %}">
+                  <input type="checkbox" id="notify-email" {% if not partner_info.email_ok %}disabled{% endif %}> Email
+                  {% if not partner_info.email_ok %}<span style="font-size:10px;color:#64748b">(disabled)</span>{% endif %}
+                </label>
+              </div>
+            </div>
+            {% endif %}
+
+            <button class="btn-send-bid" onclick="sendReply('bid')">Send Bid</button>
+          </div>
+          <div id="pass-section" style="display:none">
+            <textarea class="reply-textarea" id="pass-text" placeholder="Thanks, but we're going to pass on this one."></textarea>
+            <button class="btn-pass" onclick="sendReply('pass')">Send & Mark Passed</button>
+          </div>
+          {% if bid.bid_sent_at %}
+          <div style="margin-top:12px;padding:10px 14px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.15);border-radius:7px;font-size:12px;color:#4ade80">
+            {% if bid.bid_amount %}Bid of ${{ '{:,.0f}'.format(bid.bid_amount) }} sent{% else %}Response sent{% endif %} · {{ time_ago(bid.bid_sent_at) }}
+          </div>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none" onclick="toggleContact()">
+          <span>Contact <span style="color:#64748b;font-weight:500;font-size:12px;margin-left:6px">{{ bid.contact_name or bid.phone or '' }}</span></span>
+          <span id="contact-chevron" style="font-size:11px;color:#475569;transition:transform .2s;display:inline-block;transform:rotate(0deg)">&#9660;</span>
+        </div>
+        <div id="contact-body" style="display:none">
+          <div class="contact-phone-big">{{ bid.phone }}</div>
+          <div class="contact-fields">
+            <div class="field"><label>Name</label><input id="c-name" value="{{ bid.contact_name or '' }}" placeholder="Full name"></div>
+            <div class="field"><label>Company</label><input id="c-company" value="{{ bid.contact_company or '' }}" placeholder="Dealership / Company"></div>
+          </div>
+          <button class="save-btn" onclick="saveContact()">Save Contact</button>
+        </div>
+      </div>
+
+      <!-- iPacket Window Sticker -->
+      <div class="card" style="border-color:#4338ca" id="ipacket-card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          iPacket Sticker
+          {% if ipacket_data and ipacket_data.not_available %}
+          <span style="font-size:10px;font-weight:700;color:#64748b;background:rgba(100,116,139,.12);border:1px solid rgba(100,116,139,.25);border-radius:4px;padding:2px 8px;letter-spacing:.4px">NOT AVAILABLE</span>
+          {% elif ipacket_data %}
+          <span style="font-size:10px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">COMPLETE</span>
+          {% elif bid.vin %}
+          <span id="ipacket-status-badge" style="font-size:10px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px;animation:pulse 2s infinite">PENDING</span>
+          {% else %}
+          <span style="font-size:10px;font-weight:700;color:#475569;background:rgba(71,85,105,.12);border:1px solid rgba(71,85,105,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">NO VIN</span>
+          {% endif %}
+        </div>
+
+        {% if ipacket_data and ipacket_data.not_available %}
+        <div style="font-size:13px;color:#64748b;font-style:italic;line-height:1.5">
+          OEM window sticker not available for this VIN.
+          {% if ipacket_data.unavailable_reason %}
+          <div style="margin-top:4px;font-size:11px;color:#475569;font-style:normal">({{ ipacket_data.unavailable_reason }})</div>
+          {% endif %}
+        </div>
+        {% if ipacket_data.looked_up_at %}
+        <div style="margin-top:10px;font-size:10px;color:#334155;text-align:right">Checked {{ time_ago(ipacket_data.looked_up_at) }}</div>
+        {% endif %}
+
+        {% elif ipacket_data %}
+        <div style="display:flex;flex-direction:column;gap:6px">
+          {% if ipacket_data.total_msrp %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
+            <span style="font-size:12px;font-weight:500;color:#94a3b8">Original MSRP</span>
+            <span style="font-size:13px;font-weight:700;color:#e2e8f0;font-family:monospace">${{ '{:,}'.format(ipacket_data.total_msrp) }}</span>
+          </div>
+          {% endif %}
+          {% if ipacket_data.base_price %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
+            <span style="font-size:12px;font-weight:500;color:#94a3b8">Base Price</span>
+            <span style="font-size:13px;font-weight:700;color:#e2e8f0;font-family:monospace">${{ '{:,}'.format(ipacket_data.base_price) }}</span>
+          </div>
+          {% endif %}
+          {% if ipacket_data.exterior_color %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
+            <span style="font-size:12px;font-weight:500;color:#94a3b8">Exterior</span>
+            <span style="font-size:12px;font-weight:600;color:#e2e8f0">{{ ipacket_data.exterior_color }}</span>
+          </div>
+          {% endif %}
+          {% if ipacket_data.interior_color %}
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;background:#0f172a;border-radius:6px;border:1px solid #1e293b">
+            <span style="font-size:12px;font-weight:500;color:#94a3b8">Interior</span>
+            <span style="font-size:12px;font-weight:600;color:#e2e8f0">{{ ipacket_data.interior_color }}</span>
+          </div>
+          {% endif %}
+        </div>
+
+        {% if ipacket_data.screenshot %}
+        <div style="margin-top:14px;cursor:pointer" onclick="openReportLightbox('{{ ipacket_data.screenshot }}')">
+          <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">OEM Window Sticker</div>
+          <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;max-height:300px">
+            <img src="{{ ipacket_data.screenshot }}" style="width:100%;object-fit:cover;object-position:top" alt="iPacket Sticker">
+          </div>
+        </div>
+        {% endif %}
+
+        {% if ipacket_data.looked_up_at %}
+        <div style="margin-top:10px;font-size:10px;color:#334155;text-align:right">Looked up {{ time_ago(ipacket_data.looked_up_at) }}</div>
+        {% endif %}
+
+        {% elif bid.vin %}
+        <div style="font-size:13px;color:#475569;font-style:italic">iPacket sticker queued — waiting for worker...</div>
+        {% else %}
+        <div style="font-size:13px;color:#334155;font-style:italic">Submit a VIN to trigger iPacket lookup.</div>
+        {% endif %}
+      </div>
+
+    </div><!-- /col 3 -->
+
+  </div><!-- /columns-area -->
+
+</div><!-- /page -->
+
+<!-- Photo Lightbox -->
+<div class="lightbox" id="lightbox" onclick="closeLightbox()">
+  <span class="lightbox-close" onclick="closeLightbox()">✕</span>
+  <img id="lightbox-img" src="" alt="">
+</div>
+
+<!-- Report Lightbox (scrollable, for tall Carfax/AutoCheck screenshots) -->
+<div id="report-lightbox" onclick="closeReportLightbox()" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.92);overflow-y:auto;cursor:pointer;padding:20px">
+  <span onclick="closeReportLightbox()" style="position:fixed;top:16px;right:20px;z-index:10000;font-size:28px;color:#fff;cursor:pointer;background:rgba(0,0,0,.6);width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center">✕</span>
+  <img id="report-lightbox-img" src="" alt="Report" style="max-width:100%;margin:0 auto;display:block;cursor:default" onclick="event.stopPropagation()">
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- Share Modal -->
+<div class="share-overlay" id="shareOverlay" onclick="if(event.target===this)closeShareModal()">
+  <div class="share-modal">
+    <h3>Share Vehicle</h3>
+    <div class="desc">Sends vehicle info + a link with all photos, Carfax, and reports.</div>
+    <div class="field">
+      <label>Asking Price</label>
+      <input type="text" id="shareAsking" placeholder="$0">
+    </div>
+    <div class="field">
+      <label>Notes</label>
+      <textarea id="shareNotes" placeholder="Add any notes..."></textarea>
+    </div>
+    <div class="field">
+      <label>Send To</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="shareContactSelect" onchange="shareContactPicked()" style="flex:1;padding:10px 14px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;color:#e2e8f0;font-size:14px;font-family:'Inter',sans-serif;appearance:none;cursor:pointer">
+          <option value="">-- Pick a contact or type below --</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+        <input type="tel" id="sharePhone" placeholder="(555) 123-4567" style="flex:1">
+        <button type="button" id="shareSaveContact" onclick="saveShareContact()" style="padding:8px 14px;background:#1e3a5f;border:1px solid #3b82f6;border-radius:8px;color:#60a5fa;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;font-family:'Inter',sans-serif;opacity:.3;pointer-events:none">Save Contact</button>
+      </div>
+      <div style="font-size:11px;color:#475569;margin-top:4px">Leave blank to just copy to clipboard</div>
+    </div>
+
+    <!-- Save contact name prompt (hidden until Save clicked) -->
+    <div id="saveContactRow" style="display:none;margin-bottom:12px">
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="text" id="saveContactName" placeholder="Contact name" style="flex:1;padding:8px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;color:#e2e8f0;font-size:13px;font-family:'Inter',sans-serif">
+        <button type="button" onclick="confirmSaveContact()" style="padding:8px 14px;background:#22c55e;border:none;border-radius:8px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif">Save</button>
+        <button type="button" onclick="cancelSaveContact()" style="padding:8px 10px;background:none;border:1px solid #1e293b;border-radius:8px;color:#64748b;font-size:12px;cursor:pointer;font-family:'Inter',sans-serif">X</button>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn-cancel" onclick="closeShareModal()">Cancel</button>
+      <button class="btn-share" id="shareCopyBtn" onclick="submitShare('copy')">Copy to Clipboard</button>
+      <button class="btn-share" id="shareSmsBtn" onclick="submitShare('sms')" style="display:none;background:#f97316;border:1px solid #f97316">Text It</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const BID_ID = {{ bid.id }};
+const BID_VIN = '{{ bid.vin or "" }}';
+const AI_ASSESSMENT = {{ ai_assessment | tojson if ai_assessment else 'null' }};
+let AI_PRICE = {{ bid.ai_price | tojson if bid.ai_price else 'null' }};
+
+function formatAssessment(text) {
+  const lines = text.split('\n');
+  let html = '';
+  let inList = false;
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+
+    // Bold-only line or ## line = section header
+    const hdr = line.match(/^#{1,2}\s+(.+)$/) || line.match(/^\*\*([^*]+)\*\*:?\s*$/);
+    if (hdr) {
+      if (inList) { html += '</ul>'; inList = false; }
+      html += `<div class="assess-section">${hdr[1]}</div>`;
+      continue;
+    }
+
+    // Buy price highlight
+    if (/max\s+wholesale\s+buy\s+price/i.test(line)) {
+      if (inList) { html += '</ul>'; inList = false; }
+      const clean = line.replace(/\*\*(.+?)\*\*/g, '$1');
+      html += `<div class="assess-buyprice" onclick="toggleAssess()" title="Click to collapse">${clean}</div>`;
+      continue;
+    }
+
+    // Bullet point
+    if (/^[-•]\s/.test(line)) {
+      if (!inList) { html += '<ul class="assess-list">'; inList = true; }
+      const content = line.slice(2).replace(/\*\*(.+?)\*\*/g, '<strong class="assess-bold">$1</strong>');
+      html += `<li>${content}</li>`;
+      continue;
+    }
+
+    // Empty line
+    if (line.trim() === '') {
+      if (inList) { html += '</ul>'; inList = false; }
+      html += '<div class="assess-gap"></div>';
+      continue;
+    }
+
+    // Regular line
+    if (inList) { html += '</ul>'; inList = false; }
+    const content = line.replace(/\*\*(.+?)\*\*/g, '<strong class="assess-bold">$1</strong>');
+    html += `<div class="assess-line">${content}</div>`;
+  }
+
+  if (inList) html += '</ul>';
+  return html;
+}
+
+// ── AI Assessment collapse/expand ───────────────────────────────────────────��
+
+let assessExpanded = false;
+
+function updateSummaryBar() {
+  const bar = document.getElementById('assess-summary-bar');
+  if (AI_PRICE) {
+    bar.style.display = 'block';
+    bar.innerHTML = `✦ Buy Price: $${Math.round(AI_PRICE).toLocaleString()} &nbsp;·&nbsp; <span style="color:#64748b;font-weight:400;font-size:12px">tap to expand</span>`;
+  } else if (AI_ASSESSMENT) {
+    bar.style.display = 'block';
+    bar.innerHTML = `✦ Assessment complete &nbsp;·&nbsp; <span style="color:#64748b;font-weight:400;font-size:12px">tap to expand</span>`;
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+function toggleAssess() {
+  assessExpanded = !assessExpanded;
+  const body    = document.getElementById('assess-body');
+  const chevron = document.getElementById('assess-chevron');
+  const bar     = document.getElementById('assess-summary-bar');
+  const hint = `<span style="color:#64748b;font-weight:400;font-size:12px">tap to ${assessExpanded ? 'collapse' : 'expand'}</span>`;
+  if (assessExpanded) {
+    body.classList.remove('collapsed');
+    body.classList.add('expanded');
+    chevron.classList.add('open');
+    if (AI_PRICE) bar.innerHTML = `✦ Buy Price: $${Math.round(AI_PRICE).toLocaleString()} &nbsp;·&nbsp; ${hint}`;
+    else if (AI_ASSESSMENT) bar.innerHTML = `✦ Assessment complete &nbsp;·&nbsp; ${hint}`;
+  } else {
+    body.classList.remove('expanded');
+    body.classList.add('collapsed');
+    chevron.classList.remove('open');
+    updateSummaryBar();
+  }
+}
+
+// Render existing assessment on page load (collapsed)
+if (AI_ASSESSMENT) {
+  document.getElementById('assess-output').innerHTML = formatAssessment(AI_ASSESSMENT);
+  updateSummaryBar();
+}
+
+function toast(msg, ok=true) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  t.style.borderColor = ok ? '#22c55e' : '#ef4444';
+  setTimeout(() => t.style.display='none', 2500);
+}
+
+function setTab(tab) {
+  document.getElementById('bid-section').style.display = tab==='bid' ? 'block' : 'none';
+  document.getElementById('pass-section').style.display = tab==='pass' ? 'block' : 'none';
+  document.getElementById('tab-bid').className = 'reply-tab' + (tab==='bid' ? ' active-bid' : '');
+  document.getElementById('tab-pass').className = 'reply-tab' + (tab==='pass' ? ' active-pass' : '');
+}
+
+function autofillBidText(val) {
+  const ta = document.getElementById('reply-text');
+  const num = parseFloat(val);
+  if (!isNaN(num) && num > 0) {
+    const formatted = '$' + Math.round(num).toLocaleString('en-US');
+    ta.value = `We're in at ${formatted}. Let me know if you want to move forward.`;
+  } else {
+    ta.value = '';
+  }
+}
+
+async function sendReply(action) {
+  const isPass = action === 'pass';
+  const message = document.getElementById(isPass ? 'pass-text' : 'reply-text').value.trim();
+  // Strip commas before parse — input is now comma-formatted text, not type=number.
+  const bidAmount = isPass ? null :
+    (parseFloat((document.getElementById('bid-amount').value || '').replace(/,/g, '')) || null);
+  if (!message) { toast('Enter a message first', false); return; }
+  // Channel selection (only present when bid is bound for a partner dealer)
+  const notifyText = !!document.getElementById('notify-text')?.checked;
+  const notifyEmail = !!document.getElementById('notify-email')?.checked;
+  const r = await fetch(`/api/bid/${BID_ID}/reply`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({message, action, bid_amount: bidAmount,
+                          notify_text: notifyText, notify_email: notifyEmail})
+  });
+  const d = await r.json();
+  if (d.success) {
+    // Immediately append to message thread
+    const thread = document.getElementById('msg-thread-desktop');
+    if (thread) {
+      const wrapper = document.createElement('div');
+      const bidTag = (!isPass && bidAmount) ? `<div style="font-size:11px;font-weight:700;color:#4ade80;margin-bottom:4px">BID: $${Math.round(bidAmount).toLocaleString()}</div>` : '';
+      const statusTag = isPass ? '<div style="font-size:11px;font-weight:700;color:#f87171;margin-bottom:4px">PASSED</div>' : '';
+      wrapper.innerHTML = `<div class="msg outbound">${statusTag}${bidTag}${message}</div><div class="msg-meta" style="text-align:right">just now · Sent</div>`;
+      thread.appendChild(wrapper);
+      thread.scrollTop = thread.scrollHeight;
+    }
+    // Clear inputs
+    document.getElementById(isPass ? 'pass-text' : 'reply-text').value = '';
+    if (!isPass) document.getElementById('bid-amount').value = '';
+    if (!isPass && d.sms_sent === false) {
+      toast('Saved — SMS pending (Twilio not active)', true);
+    } else {
+      toast(isPass ? 'Marked as passed' : 'Bid sent!');
+    }
+    setTimeout(() => location.reload(), 2000);
+  } else {
+    toast('Error: ' + (d.error || 'Unknown'), false);
+  }
+}
+
+
+async function detectColor() {
+  const btn = document.getElementById('color-detect-btn');
+  btn.textContent = '⏳';
+  const r = await fetch(`/api/bid/${BID_ID}/detect-color`, {method:'POST'});
+  const d = await r.json();
+  if (d.success) {
+    document.getElementById('f-color').value = d.color;
+    toast(`Color detected: ${d.color}`);
+    btn.textContent = '✓';
+    setTimeout(() => btn.textContent = '🎨 Detect', 3000);
+  } else {
+    toast(d.error || 'Could not detect color', false);
+    btn.textContent = '🎨 Detect';
+  }
+}
+
+async function decodeVin() {
+  const btn = document.getElementById('decode-btn');
+  const vin = document.getElementById('f-vin').value.trim().toUpperCase();
+  if (vin.length === 17) document.getElementById('f-vin').value = vin;
+  btn.textContent = '⏳ Decoding...'; btn.disabled = true;
+  await fetch(`/api/bid/${BID_ID}/update`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({vin: vin || null})
+  });
+  const r = await fetch(`/api/bid/${BID_ID}/decode-vin`, {method:'POST'});
+  const d = await r.json();
+  if (d.success) {
+    if (d.year)  document.getElementById('f-year').value  = d.year;
+    if (d.make)  document.getElementById('f-make').value  = d.make;
+    if (d.model) document.getElementById('f-model').value = d.model;
+    if (d.trim)  document.getElementById('f-trim').value  = d.trim;
+    toast(`Decoded: ${d.year || ''} ${d.make || ''} ${d.model || ''} ${d.trim || ''}`.trim());
+    btn.textContent = '✓ Decoded';
+    setTimeout(() => { btn.textContent = '🔍 Decode VIN'; btn.disabled = false; }, 3000);
+  } else {
+    toast(d.error || 'Could not decode VIN', false);
+    btn.textContent = '🔍 Decode VIN'; btn.disabled = false;
+  }
+}
+
+function applyVinCandidate(candidate) {
+  // Drop the candidate into the VIN field, expand Vehicle Details so the user
+  // can eyeball-correct against the photo, scroll to it, and focus the input.
+  // No auto-save — wrong-length / misread VINs would just replay the bug.
+  const f = document.getElementById('f-vin');
+  if (f) f.value = (candidate || '').toUpperCase();
+  const body = document.getElementById('vehicle-details-body');
+  if (body && body.style.display === 'none') {
+    if (typeof toggleVehicleDetails === 'function') toggleVehicleDetails();
+    else body.style.display = 'block';
+  }
+  if (f) { f.scrollIntoView({behavior:'smooth', block:'center'}); f.focus(); f.select(); }
+}
+
+async function saveVehicle() {
+  const data = {
+    vin: document.getElementById('f-vin').value.trim().toUpperCase() || null,
+    year: parseInt(document.getElementById('f-year').value) || null,
+    make: document.getElementById('f-make').value.trim() || null,
+    model: document.getElementById('f-model').value.trim() || null,
+    trim: document.getElementById('f-trim').value.trim() || null,
+    mileage: parseInt(document.getElementById('f-mileage').value) || null,
+    color: document.getElementById('f-color').value.trim() || null,
+    notes: document.getElementById('f-notes').value.trim() || null,
+  };
+  const r = await fetch(`/api/bid/${BID_ID}/update`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)
+  });
+  const d = await r.json();
+  toast(d.success ? 'Saved' : 'Error', d.success);
+}
+
+async function saveContact() {
+  const data = {
+    name: document.getElementById('c-name').value.trim() || null,
+    company: document.getElementById('c-company').value.trim() || null,
+  };
+  const r = await fetch(`/api/bid/${BID_ID}/contact`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)
+  });
+  const d = await r.json();
+  toast(d.success ? 'Contact saved' : 'Error', d.success);
+}
+
+async function updateStatus(status) {
+  const r = await fetch(`/api/bid/${BID_ID}/update`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({status})
+  });
+  const d = await r.json();
+  if (d.success) { toast('Status updated'); setTimeout(() => location.reload(), 800); }
+}
+
+async function rerunAssess() {
+  if (!confirm('Re-run AI assessment with latest data?')) return;
+  const badge = event.target;
+  badge.textContent = '⏳ ANALYZING...';
+  badge.style.color = '#fbbf24';
+  badge.style.background = 'rgba(245,158,11,.12)';
+  try {
+    const r = await fetch(`/api/bid/${BID_ID}/assess`, {method:'POST'});
+    const d = await r.json();
+    if (d.success) location.reload();
+    else { badge.textContent = '✕ FAILED'; badge.style.color = '#f87171'; }
+  } catch(e) { badge.textContent = '✕ ERROR'; badge.style.color = '#f87171'; }
+}
+
+function toggleAllPhotos() {
+  var hidden = document.querySelectorAll('.photo-hidden');
+  var moreBtn = document.getElementById('photo-more-btn');
+  var toggleBtn = document.getElementById('photos-toggle-btn');
+  if (hidden.length > 0) {
+    hidden.forEach(function(el){ el.classList.remove('photo-hidden'); });
+    if (moreBtn) moreBtn.style.display = 'none';
+    if (toggleBtn) toggleBtn.textContent = 'Show fewer';
+  } else {
+    var thumbs = document.querySelectorAll('#photos-scroll .photo-thumb');
+    for (var i = 8; i < thumbs.length; i++) thumbs[i].classList.add('photo-hidden');
+    if (moreBtn) { moreBtn.style.display = ''; }
+    if (toggleBtn) toggleBtn.textContent = 'Show all ' + thumbs.length;
+  }
+}
+
+function openLightbox(url) {
+  document.getElementById('lightbox-img').src = url;
+  document.getElementById('lightbox').classList.add('open');
+}
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('open');
+  document.getElementById('lightbox-img').src = '';
+}
+function openReportLightbox(url) {
+  document.getElementById('report-lightbox-img').src = url;
+  document.getElementById('report-lightbox').style.display = 'block';
+  document.body.style.overflow = 'hidden';
+}
+function closeReportLightbox() {
+  document.getElementById('report-lightbox').style.display = 'none';
+  document.getElementById('report-lightbox-img').src = '';
+  document.body.style.overflow = '';
+}
+document.addEventListener('keydown', e => { if (e.key==='Escape') { closeLightbox(); closeReportLightbox(); } });
+
+// ── Vehicle details toggle ────────────────────────────────────────────────
+let _vdCollapsed = true;
+document.getElementById('vehicle-details-body').style.display = 'none';
+document.getElementById('vd-chevron').style.transform = 'rotate(0deg)';
+function toggleVehicleDetails() {
+  _vdCollapsed = !_vdCollapsed;
+  document.getElementById('vehicle-details-body').style.display = _vdCollapsed ? 'none' : '';
+  document.getElementById('vd-chevron').style.transform = _vdCollapsed ? 'rotate(0deg)' : 'rotate(180deg)';
+}
+
+let _contactCollapsed = true;
+function toggleContact() {
+  _contactCollapsed = !_contactCollapsed;
+  document.getElementById('contact-body').style.display = _contactCollapsed ? 'none' : '';
+  document.getElementById('contact-chevron').style.transform = _contactCollapsed ? 'rotate(0deg)' : 'rotate(180deg)';
+}
+
+// ── Thread reply from bid detail page ─────────────────────────────────────
+async function sendThreadReply() {
+  const input = document.getElementById('thread-reply-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.disabled = true;
+  try {
+    const r = await fetch(`/api/bid/${BID_ID}/reply`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: msg, action: 'bid', bid_amount: null})
+    });
+    const d = await r.json();
+    if (d.success) {
+      input.value = '';
+      // Append to thread immediately
+      const container = document.querySelector('.messages');
+      const div = document.createElement('div');
+      div.innerHTML = `<div class="msg outbound">${msg}</div><div class="msg-meta" style="text-align:right">just now · Sent</div>`;
+      container.appendChild(div);
+      container.scrollTop = container.scrollHeight;
+      toast(d.sms_sent === false ? 'Sent (SMS pending)' : 'Sent!');
+    } else {
+      toast(d.error || 'Failed', false);
+    }
+  } catch(e) { toast('Connection error', false); }
+  input.disabled = false;
+  input.focus();
+}
+
+// ── Live message polling (3s) ─────────────────────────────────────────────
+let _chimeCtx = null;
+// AudioContext must be unlocked by user gesture
+document.addEventListener('click', function _unlockAudio() {
+  if (!_chimeCtx) _chimeCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_chimeCtx.state === 'suspended') _chimeCtx.resume();
+  document.removeEventListener('click', _unlockAudio);
+}, {once: false});
+
+function playChime() {
+  if (!_chimeCtx) _chimeCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_chimeCtx.state === 'suspended') { _chimeCtx.resume(); return; }
+  const osc = _chimeCtx.createOscillator();
+  const gain = _chimeCtx.createGain();
+  osc.connect(gain); gain.connect(_chimeCtx.destination);
+  osc.frequency.setValueAtTime(880, _chimeCtx.currentTime);
+  osc.frequency.setValueAtTime(1100, _chimeCtx.currentTime + 0.1);
+  gain.gain.setValueAtTime(0.3, _chimeCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, _chimeCtx.currentTime + 0.4);
+  osc.start(_chimeCtx.currentTime); osc.stop(_chimeCtx.currentTime + 0.4);
+}
+
+let _highestMsgId = 0;
+let _pollReady = false;
+
+// Initialize: get current max message id, THEN start polling
+(async function() {
+  try {
+    const r = await fetch(`/api/bid/${BID_ID}/messages-poll?since=0`);
+    const d = await r.json();
+    _highestMsgId = d.max_id || 0;
+  } catch(e) {}
+  _pollReady = true;
+})();
+
+async function pollMessages() {
+  if (!_pollReady) return;
+  try {
+    const r = await fetch(`/api/bid/${BID_ID}/messages-poll?since=${_highestMsgId}`);
+    const d = await r.json();
+    if (d.new_messages && d.new_messages.length > 0) {
+      const container = document.getElementById('msg-thread-desktop') || document.querySelector('.messages');
+      if (container) {
+        for (const m of d.new_messages) {
+          if (m.id > _highestMsgId) _highestMsgId = m.id;
+          const isInbound = m.direction === 'inbound';
+          const div = document.createElement('div');
+          div.innerHTML = `
+            <div class="msg ${m.direction}">${m.message}</div>
+            <div class="msg-meta" style="text-align:${isInbound ? 'left' : 'right'}">
+              just now · ${isInbound ? 'Field Rep' : 'Sent'}
+            </div>`;
+          container.appendChild(div);
+        }
+        container.scrollTop = container.scrollHeight;
+        playChime();
+        const last = d.new_messages[d.new_messages.length - 1];
+        if (last.direction === 'inbound') {
+          showMsgPopupBid(last.message);
+        }
+      }
+    }
+    // Also update max_id even if no new messages (covers edge cases)
+    if (d.max_id > _highestMsgId) _highestMsgId = d.max_id;
+  } catch(e) {}
+}
+
+function showMsgPopupBid(msg) {
+  let popup = document.getElementById('bid-msg-popup');
+  if (!popup) {
+    popup = document.createElement('div');
+    popup.id = 'bid-msg-popup';
+    popup.style.cssText = 'position:fixed;top:70px;right:24px;background:#1e3a5f;border:1px solid #3b82f6;border-radius:12px;padding:16px 20px;z-index:300;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,.5);cursor:pointer';
+    popup.onclick = () => popup.remove();
+    document.body.appendChild(popup);
+  }
+  popup.innerHTML = `<div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:4px">New message from Field Rep</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">${msg}</div>`;
+  clearTimeout(popup._timer);
+  popup._timer = setTimeout(() => popup.remove(), 6000);
+}
+
+setInterval(pollMessages, 3000);
+
+
+// ── vAuto auto-poll (while pending) ──────────────────────────────────────
+{% if not vauto_data and bid.vin %}
+(function() {
+  let _vautoPoll;
+  async function checkVauto() {
+    try {
+      const r = await fetch(`/api/vauto/status/${BID_ID}`);
+      const d = await r.json();
+      if (d.status === 'complete') {
+        clearInterval(_vautoPoll);
+        location.reload();
+      }
+    } catch(e) {}
+  }
+  _vautoPoll = setInterval(checkVauto, 5000);
+})();
+{% endif %}
+
+// ── AccuTrade auto-poll (while pending) ──────────────────────────────────
+{% if not accutrade_data and bid.vin %}
+(function() {
+  let _atPoll;
+  async function checkAccuTrade() {
+    try {
+      const r = await fetch(`/api/accutrade/status/${BID_ID}`);
+      const d = await r.json();
+      if (d.status === 'complete' || d.status === 'not_available') {
+        clearInterval(_atPoll);
+        location.reload();
+      }
+    } catch(e) {}
+  }
+  _atPoll = setInterval(checkAccuTrade, 5000);
+})();
+{% endif %}
+
+// ── iPacket auto-poll (while pending) ────────────────────────────────────
+{% if not ipacket_data and bid.vin %}
+(function() {
+  let _ipPoll;
+  async function checkIpacket() {
+    try {
+      const r = await fetch(`/api/ipacket/status/${BID_ID}`);
+      const d = await r.json();
+      if (d.status === 'complete' || d.status === 'not_available') {
+        clearInterval(_ipPoll);
+        location.reload();
+      }
+    } catch(e) {}
+  }
+  _ipPoll = setInterval(checkIpacket, 5000);
+})();
+{% endif %}
+
+// ── Share modal ──
+var _shareContactsLoaded = false;
+
+function openShareModal() {
+  document.getElementById('shareOverlay').classList.add('show');
+  document.getElementById('shareAsking').focus();
+  if (!_shareContactsLoaded) {
+    _shareContactsLoaded = true;
+    loadShareContacts();
+  }
+}
+function closeShareModal() {
+  document.getElementById('shareOverlay').classList.remove('show');
+  document.getElementById('saveContactRow').style.display = 'none';
+}
+
+async function loadShareContacts() {
+  try {
+    const r = await fetch('/api/share-contacts');
+    const contacts = await r.json();
+    const sel = document.getElementById('shareContactSelect');
+    sel.innerHTML = '<option value="">-- Pick a contact or type below --</option>';
+    contacts.forEach(function(c) {
+      sel.innerHTML += '<option value="' + c.phone + '">' + c.name + ' (' + c.phone + ')</option>';
+    });
+  } catch(e) {}
+}
+
+function shareContactPicked() {
+  const sel = document.getElementById('shareContactSelect');
+  const phoneInput = document.getElementById('sharePhone');
+  if (sel.value) {
+    phoneInput.value = sel.value;
+    phoneInput.dispatchEvent(new Event('input'));
+    document.getElementById('shareSaveContact').style.display = 'none';
+  }
+}
+
+// Show Save button when typing a new number
+document.getElementById('sharePhone').addEventListener('input', function() {
+  var digits = this.value.replace(/\D/g, '');
+  document.getElementById('shareSmsBtn').style.display = digits.length >= 10 ? 'inline-block' : 'none';
+  // Show save button if number isn't from the dropdown
+  var sel = document.getElementById('shareContactSelect');
+  var isFromDropdown = sel.value && sel.value.replace(/\D/g, '') === digits;
+  var saveBtn = document.getElementById('shareSaveContact');
+  var showSave = digits.length >= 10 && !isFromDropdown;
+  saveBtn.style.opacity = showSave ? '1' : '.3';
+  saveBtn.style.pointerEvents = showSave ? 'auto' : 'none';
+});
+
+function saveShareContact() {
+  document.getElementById('saveContactRow').style.display = 'block';
+  document.getElementById('saveContactName').focus();
+}
+
+function cancelSaveContact() {
+  document.getElementById('saveContactRow').style.display = 'none';
+  document.getElementById('saveContactName').value = '';
+}
+
+async function confirmSaveContact() {
+  var name = document.getElementById('saveContactName').value.trim();
+  var phone = document.getElementById('sharePhone').value.trim();
+  if (!name) { document.getElementById('saveContactName').style.borderColor = '#ef4444'; return; }
+  try {
+    const r = await fetch('/api/share-contacts', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name, phone: phone})
+    });
+    const d = await r.json();
+    if (d.success) {
+      cancelSaveContact();
+      document.getElementById('shareSaveContact').style.opacity = '.3';
+      document.getElementById('shareSaveContact').style.pointerEvents = 'none';
+
+      // Flash "Saved!" on the phone field
+      var phoneInput = document.getElementById('sharePhone');
+      var origBorder = phoneInput.style.borderColor;
+      phoneInput.style.borderColor = '#22c55e';
+      var savedLabel = document.createElement('span');
+      savedLabel.textContent = 'Saved!';
+      savedLabel.style.cssText = 'color:#4ade80;font-size:12px;font-weight:600;margin-left:8px';
+      phoneInput.parentElement.appendChild(savedLabel);
+      setTimeout(function() {
+        phoneInput.style.borderColor = origBorder || '#1e293b';
+        if (savedLabel.parentElement) savedLabel.remove();
+      }, 2000);
+
+      // Reload dropdown and select the new contact
+      _shareContactsLoaded = false;
+      await loadShareContacts();
+      document.getElementById('shareContactSelect').value = d.phone;
+    }
+  } catch(e) {}
+}
+
+
+async function submitShare(action) {
+  const copyBtn = document.getElementById('shareCopyBtn');
+  const smsBtn = document.getElementById('shareSmsBtn');
+  const activeBtn = action === 'sms' ? smsBtn : copyBtn;
+  activeBtn.disabled = true;
+  const origText = activeBtn.textContent;
+  activeBtn.textContent = action === 'sms' ? 'Sending...' : 'Copying...';
+
+  const share_notes = document.getElementById('shareNotes').value.trim();
+  const share_asking = document.getElementById('shareAsking').value.trim();
+  const share_phone = action === 'sms' ? document.getElementById('sharePhone').value.trim() : '';
+
+
+  try {
+    const r = await fetch(`/api/bid/${BID_ID}/share`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({share_notes, share_asking, share_phone})
+    });
+    const d = await r.json();
+    if (!d.success) {
+      activeBtn.textContent = d.error || 'Error';
+      setTimeout(()=>{activeBtn.textContent=origText;activeBtn.disabled=false},2500);
+      return;
+    }
+
+    // Always copy to clipboard
+    await navigator.clipboard.writeText(d.clipboard_text);
+
+    closeShareModal();
+
+    // Show toast
+    let toast = document.getElementById('shareToast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'shareToast';
+      toast.className = 'share-toast';
+      document.body.appendChild(toast);
+    }
+    if (action === 'sms' && d.sms_sent) {
+      toast.textContent = 'Texted to ' + share_phone + ' + copied to clipboard';
+    } else if (action === 'sms' && d.sms_error) {
+      toast.textContent = 'Copied — but text failed: ' + d.sms_error;
+    } else {
+      toast.textContent = 'Copied to clipboard — paste into your group chat';
+    }
+    toast.classList.add('show');
+    setTimeout(()=>{ toast.classList.remove('show'); }, 4000);
+
+    const shareBtn = document.getElementById('shareBtn');
+    shareBtn.textContent = (action === 'sms' && d.sms_sent) ? 'Sent!' : 'Copied!';
+    shareBtn.style.background = 'rgba(34,197,94,.15)';
+    shareBtn.style.color = '#4ade80';
+    shareBtn.style.borderColor = '#22c55e';
+    setTimeout(()=>{
+      shareBtn.textContent = 'Share';
+      shareBtn.style.background = 'rgba(59,130,246,.12)';
+      shareBtn.style.color = '#60a5fa';
+      shareBtn.style.borderColor = '#3b82f6';
+    }, 3000);
+
+    activeBtn.textContent = origText;
+    activeBtn.disabled = false;
+  } catch(e) {
+    activeBtn.textContent = 'Error';
+    setTimeout(()=>{activeBtn.textContent=origText;activeBtn.disabled=false},2000);
+  }
+}
+
+{% if vauto_data and not ai_assessment %}
+(function() {
+  let _assessPoll;
+  let _assessAttempts = 0;
+  async function checkAssess() {
+    if (++_assessAttempts > 60) { clearInterval(_assessPoll); return; }
+    try {
+      const r = await fetch(`/api/bid/${BID_ID}/assess-status`);
+      const d = await r.json();
+      if (d.done) { clearInterval(_assessPoll); location.reload(); }
+    } catch(e) {}
+  }
+  _assessPoll = setInterval(checkAssess, 5000);
+})();
+{% endif %}
+
+
+function forceReprocess(e, bid_id){
+  e.preventDefault();
+  if(!confirm("Wipe vAuto/AccuTrade/iPacket lookups + claim and re-queue?")) return;
+  fetch("/api/admin/bid/" + bid_id + "/force-reprocess", {method:"POST"})
+    .then(r => r.json())
+    .then(d => {
+      if(d.ok){
+        alert("Reset queued. A worker will pick it up on next poll.");
+        setTimeout(() => location.reload(), 800);
+      } else { alert("Failed: " + (d.error||"unknown")); }
+    });
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SMS Intake Log · Experience Wholesale</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:#0b0f19;color:#e2e8f0;font-size:14px}
+.wrap{max-width:1500px;margin:0 auto;padding:24px}
+header{display:flex;align-items:center;gap:18px;margin-bottom:22px;flex-wrap:wrap}
+h1{font-size:22px;font-weight:700;color:#f1f5f9}
+.sub{color:#64748b;font-size:13px}
+a.back{color:#64748b;text-decoration:none;font-size:13px;padding:6px 12px;border:1px solid #1e293b;border-radius:6px}
+a.back:hover{color:#e2e8f0;border-color:#334155}
+
+.filter-bar{display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap}
+.filter-bar a{padding:6px 14px;font-size:13px;font-weight:500;text-decoration:none;color:#64748b;background:#0f172a;border:1px solid #1e293b;border-radius:6px}
+.filter-bar a.active{color:#f1f5f9;background:#1e293b;border-color:#334155}
+.filter-bar a:hover{color:#e2e8f0}
+.filter-bar .cnt{margin-left:6px;font-size:11px;color:#475569;font-weight:600}
+
+table{width:100%;border-collapse:collapse;background:#111827;border-radius:10px;overflow:hidden;border:1px solid #1e293b}
+thead{background:#0f172a}
+th{text-align:left;padding:12px 14px;font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.6px;border-bottom:1px solid #1e293b}
+td{padding:12px 14px;vertical-align:top;border-bottom:1px solid #1e293b;font-size:13px}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(59,130,246,.04)}
+
+.t-time{color:#94a3b8;font-variant-numeric:tabular-nums;white-space:nowrap}
+.t-time-rel{color:#64748b;font-size:11px;display:block;margin-top:2px}
+.t-phone{color:#cbd5e1;font-variant-numeric:tabular-nums;white-space:nowrap}
+.t-body{max-width:380px;color:#e2e8f0;word-break:break-word;line-height:1.45}
+.t-body em{color:#64748b;font-style:italic}
+.t-parsed{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#94a3b8;line-height:1.5}
+.t-parsed b{color:#cbd5e1;font-weight:600}
+.t-parsed .miss{color:#475569}
+.t-reason{color:#94a3b8;font-size:12px;line-height:1.5;max-width:340px}
+
+.thumbs{display:flex;gap:5px;flex-wrap:wrap}
+.thumbs a{display:block;line-height:0;border-radius:4px;overflow:hidden;border:1px solid #1e293b}
+.thumbs a:hover{border-color:#3b82f6}
+.thumbs img{width:54px;height:40px;object-fit:cover;display:block;background:#0f172a}
+
+.badge{display:inline-block;padding:3px 9px;font-size:10px;font-weight:700;border-radius:4px;text-transform:uppercase;letter-spacing:.5px}
+.b-new_bid{background:rgba(74,222,128,.12);color:#4ade80;border:1px solid rgba(74,222,128,.25)}
+.b-stitched{background:rgba(96,165,250,.12);color:#60a5fa;border:1px solid rgba(96,165,250,.25)}
+.b-partner_reply{background:rgba(251,191,36,.10);color:#fbbf24;border:1px solid rgba(251,191,36,.25)}
+.b-share_reply{background:rgba(167,139,250,.12);color:#a78bfa;border:1px solid rgba(167,139,250,.25)}
+.b-pending{background:rgba(248,113,113,.12);color:#f87171;border:1px solid rgba(248,113,113,.25)}
+.b-error{background:rgba(248,113,113,.18);color:#fca5a5;border:1px solid rgba(248,113,113,.35)}
+
+.bid-link{color:#60a5fa;text-decoration:none;font-weight:600;font-size:13px;font-family:'JetBrains Mono',ui-monospace,monospace}
+.bid-link:hover{text-decoration:underline}
+
+.empty{padding:60px 20px;text-align:center;color:#475569}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>📱 SMS Intake Log</h1>
+    <span class="sub">Every inbound text — what we got, what we did with it, why</span>
+    <div style="flex:1"></div>
+    <a class="back" href="/">← Back to bids</a>
+  </header>
+
+  <div class="filter-bar">
+    {% set outcomes = [('all','All'),('new_bid','New Bid'),('stitched','Stitched'),('partner_reply','Partner Reply'),('share_reply','Share Reply'),('pending','Pending/Error')] %}
+    {% for key, label in outcomes %}
+      <a href="?outcome={{ key }}" class="{% if outcome_filter == key %}active{% endif %}">
+        {{ label }}
+        {% if key != 'all' %}<span class="cnt">{{ counts_7d.get(key, 0) }}</span>{% endif %}
+      </a>
+    {% endfor %}
+    <span class="sub" style="margin-left:auto;align-self:center">7-day counts shown next to filters</span>
+  </div>
+
+  {% if rows %}
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>From</th>
+        <th>Body</th>
+        <th>Photos</th>
+        <th>Parsed</th>
+        <th>Outcome</th>
+        <th>Reason</th>
+        <th>Bid</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td class="t-time">
+          {{ r.created_at.strftime('%Y-%m-%d %H:%M:%S') if r.created_at else '—' }}
+          <span class="t-time-rel">{{ time_ago(r.created_at) if r.created_at else '' }}</span>
+        </td>
+        <td class="t-phone">{{ r.from_phone or '—' }}</td>
+        <td class="t-body">
+          {% if r.body %}{{ r.body }}{% else %}<em>(no text body — media-only)</em>{% endif %}
+        </td>
+        <td>
+          {% set local_photos = locals_by_bid.get(r.bid_id, []) %}
+          {% set urls = local_photos if local_photos else (r.media_urls or []) %}
+          {% if urls %}
+          <div class="thumbs">
+            {% for u in urls %}
+              {% set src = u if u.startswith('/static/') else u|thumb_url('mobile') %}
+              {% set full = u if u.startswith('/static/') else u|thumb_url('full') %}
+              <a href="{{ full }}" target="_blank" title="Open full size" style="display:none"><img src="{{ src }}" alt="" onload="this.parentElement.style.display='block'" onerror="this.parentElement.style.display='none'"></a>
+            {% endfor %}
+          </div>
+          {% else %}<span style="color:#475569">—</span>{% endif %}
+        </td>
+        <td class="t-parsed">
+          {% if r.parsed_vin %}<b>VIN</b> {{ r.parsed_vin }}{% else %}<span class="miss">no VIN</span>{% endif %}<br>
+          {% if r.parsed_miles %}<b>mi</b> {{ '{:,}'.format(r.parsed_miles) }}{% else %}<span class="miss">no miles</span>{% endif %}
+        </td>
+        <td><span class="badge b-{{ r.outcome or 'pending' }}">{{ (r.outcome or 'pending').replace('_',' ') }}</span></td>
+        <td class="t-reason">{{ r.reason or '' }}</td>
+        <td>
+          {% if r.bid_id %}
+            <a class="bid-link" href="/bid/{{ r.bid_id }}">#{{ r.bid_id }} →</a>
+          {% else %}<span style="color:#475569">—</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">
+    <h3>No intake records yet</h3>
+    <p style="margin-top:8px">Texts to your Twilio number will land here.</p>
+  </div>
+  {% endif %}
+</div>
+</body>
+</html>

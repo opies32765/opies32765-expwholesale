@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Settings — {{ dealer.name }}</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:28px}
+  .wrap{max-width:640px;margin:0 auto}
+  a.back{color:#7dd3fc;text-decoration:none;font-size:14px}
+  h1{margin:16px 0 4px;font-size:26px}
+  p.sub{margin:0 0 24px;color:#94a3b8;font-size:14px}
+  .card{background:#1e293b;padding:22px 26px;border-radius:12px;margin-bottom:18px}
+  .card h2{margin:0 0 12px;font-size:18px}
+  .flash{padding:12px 16px;background:#1e3a8a;color:#dbeafe;border-radius:8px;font-size:14px;margin-bottom:18px}
+  .flash.error{background:#7f1d1d;color:#fecaca}
+  label{display:block;margin:14px 0 6px;font-size:13px;color:#cbd5e1}
+  input[type=text],input[type=tel],input[type=email],input[type=password]{width:100%;padding:12px 14px;border:1px solid #334155;background:#0f172a;color:#f1f5f9;border-radius:6px;font-size:16px;box-sizing:border-box}
+  button{margin-top:14px;padding:11px 22px;background:#2563eb;color:#fff;border:0;border-radius:6px;font-weight:600;font-size:14px;cursor:pointer}
+  button.secondary{background:#334155}
+  button.danger{background:#7f1d1d}
+  .status{font-size:14px;padding:10px 14px;border-radius:6px;margin-bottom:12px}
+  .status.on{background:#064e3b;color:#bbf7d0}
+  .status.off{background:#3f3f46;color:#cbd5e1}
+  .legal{font-size:12px;color:#64748b;margin-top:10px;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="wrap">
+  {# Round-trip the dashboard_token in ?d= so address-bar shares from any
+     page within the partner portal stay login-free for the recipient. #}
+  {% set _qtok = '?d=' ~ dealer.dashboard_token if dealer.dashboard_token else '' %}
+  <a class="back" href="{{ url_for('partner.dashboard', slug=slug) }}{{ _qtok }}">← Back to dashboard</a>
+  <h1>Settings</h1>
+  <p class="sub">Signed in as {{ user.email }}</p>
+
+  {% with msgs = get_flashed_messages(with_categories=true) %}
+    {% for cat, m in msgs %}<div class="flash {{ cat }}">{{ m }}</div>{% endfor %}
+  {% endwith %}
+
+  <div class="card">
+    <h2>Login email</h2>
+    <p style="font-size:14px;color:#94a3b8;margin-top:0">
+      The email you use to sign in. Bid-alert emails (when enabled below) and
+      password-reset links go to this address.
+    </p>
+    <form method="post">
+      <input type="hidden" name="action" value="update_email">
+      <label for="email">Email address</label>
+      <input type="email" id="email" name="email"
+             value="{{ user.email if '@' in user.email and not user.email.endswith('.invite') else '' }}"
+             placeholder="you@yourdealership.com"
+             autocomplete="email" required>
+      <button type="submit">Update email</button>
+    </form>
+    {% if user.email.endswith('.invite') %}
+      <div class="legal" style="margin-top:14px;color:#fbbf24">
+        Heads up — your account was created with a placeholder email. Set your
+        real address now so password-reset links and bid alerts can reach you.
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Set / change password</h2>
+    <p style="font-size:14px;color:#94a3b8;margin-top:0">
+      {% if user.password_hash %}
+        Change the password you use to sign in.
+      {% else %}
+        Optional — set a password and you can sign in any time at
+        <code style="background:#0f172a;padding:2px 6px;border-radius:3px;font-size:12px">/partner/{{ slug }}/login</code>
+        with your email and that password (no need to keep the access link).
+      {% endif %}
+    </p>
+    <form method="post">
+      <input type="hidden" name="action" value="set_password">
+      <input type="hidden" name="username" value="{{ user.email }}" autocomplete="username">
+      {% if user.password_hash %}
+        <label for="current_password">Current password</label>
+        <input type="password" id="current_password" name="current_password"
+               autocomplete="current-password" required>
+      {% endif %}
+      <label for="new_password">New password (min 8 characters)</label>
+      <input type="password" id="new_password" name="new_password"
+             minlength="8" autocomplete="new-password" required>
+      <label for="confirm_password">Confirm new password</label>
+      <input type="password" id="confirm_password" name="confirm_password"
+             minlength="8" autocomplete="new-password" required>
+      <button type="submit">{% if user.password_hash %}Change password{% else %}Set password{% endif %}</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Email bid alerts</h2>
+    <p style="font-size:14px;color:#94a3b8;margin-top:0">
+      A summary email every time Experience Wholesale responds to one of your bid requests.
+      Goes to <b>{{ user.email }}</b>.
+    </p>
+    <form method="post">
+      <input type="hidden" name="action" value="toggle_email">
+      <label style="display:flex;align-items:center;gap:12px;padding:10px 0;cursor:pointer;font-size:16px">
+        <input type="checkbox" name="email_bid_alerts" {% if user.email_bid_alerts %}checked{% endif %} style="transform:scale(1.4)">
+        <span>Send me an email when EW responds to my bids</span>
+      </label>
+      <button type="submit">Save</button>
+    </form>
+    <div class="legal" style="margin-top:14px">
+      Account/invite emails (password reset, welcome) are always sent regardless of this setting.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>SMS bid alerts</h2>
+    {% if user.sms_opt_in %}
+      <div class="status on">
+        &#10003; Enabled — sending to <b>{{ user.phone }}</b> since {{ user.sms_verified_at.strftime('%Y-%m-%d') if user.sms_verified_at else '' }}
+      </div>
+      <p style="font-size:14px;color:#94a3b8">You'll get a text every time Experience Wholesale responds to one of your bid requests. <strong>Notifications are outgoing-only</strong> — we can't receive replies to this number (other than STOP). Use your dashboard to respond. Standard message rates may apply.</p>
+      <form method="post">
+        <input type="hidden" name="action" value="opt_out">
+        <button type="submit" class="danger">Turn off SMS alerts</button>
+      </form>
+    {% else %}
+      <div class="status off">Not enabled</div>
+      <p style="font-size:14px;color:#94a3b8">Enter your mobile number to get a text whenever we respond to one of your bids.</p>
+
+      <form method="post">
+        <input type="hidden" name="action" value="enable_sms">
+        <label for="phone">Mobile number</label>
+        <input type="tel" id="phone" name="phone"
+               placeholder="(555) 123-4567"
+               value="{{ user.phone or '' }}"
+               autocomplete="tel" required>
+        <button type="submit">Enable SMS alerts</button>
+      </form>
+
+      <div class="legal">
+        <strong>One-way alerts only</strong> — we send you notifications; we don't
+        receive replies on this line except STOP/HELP. To respond to a bid,
+        use your portal dashboard.
+        <br><br>
+        By entering your number you agree to receive transactional bid-response
+        SMS messages from Experience Wholesale. Message &amp; data rates may apply.
+        Reply STOP at any time to unsubscribe. Reply HELP for help.
+      </div>
+    {% endif %}
+  </div>
+</div>
+</body>
+</html>

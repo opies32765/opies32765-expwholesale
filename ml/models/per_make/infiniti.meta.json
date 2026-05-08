@@ -1,9 +1,9 @@
 {
   "make_name": "INFINITI",
-  "trained_at": "2026-05-07T17:09:20.202466Z",
-  "n_total": 162,
+  "trained_at": "2026-05-08T08:31:25.578532Z",
+  "n_total": 163,
   "n_train": 156,
-  "n_test": 6,
+  "n_test": 7,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -217,49 +217,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 4455.0,
-    "mape_pct": 62.09,
-    "r2": 0.8213,
-    "within_5pct": 33.3,
-    "within_10pct": 33.3
+    "mae_dollars": 4271.0,
+    "mape_pct": 54.19,
+    "r2": 0.8304,
+    "within_5pct": 28.6,
+    "within_10pct": 42.9
   },
   "baseline_metrics": {
-    "mae_dollars": 7448.0,
-    "mape_pct": 82.25,
+    "mae_dollars": 6973.0,
+    "mape_pct": 72.04,
     "ratio": 1.0457
   },
   "top_features": [
     {
       "name": "base_appraised_value",
-      "importance": 0.3552454113960266
+      "importance": 0.35274744033813477
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.3193114697933197
+      "importance": 0.3215329945087433
     },
     {
       "name": "market_asking_price",
-      "importance": 0.14283546805381775
+      "importance": 0.1411600410938263
     },
     {
       "name": "supplier_name_Infiniti Of Orange Park",
-      "importance": 0.016265777871012688
+      "importance": 0.017945578321814537
     },
     {
       "name": "supplier_name_Mall Of Georgia Mazda",
-      "importance": 0.014274575747549534
-    },
-    {
-      "name": "odometer",
-      "importance": 0.00971064530313015
-    },
-    {
-      "name": "model_name_QX30 Sport Sport Utility Vehicle",
-      "importance": 0.009356807917356491
+      "importance": 0.013820192776620388
     },
     {
       "name": "body_type_OTHER",
-      "importance": 0.008815562352538109
+      "importance": 0.009949947707355022
+    },
+    {
+      "name": "odometer",
+      "importance": 0.009920690208673477
+    },
+    {
+      "name": "model_name_QX30 Sport Sport Utility Vehicle",
+      "importance": 0.009058964438736439
     }
   ]
 }

@@ -171,11 +171,33 @@ CREATE INDEX IF NOT EXISTS idx_dss_inventory ON dealer_sold_signals(inventory_id
 CREATE INDEX IF NOT EXISTS idx_dss_dealer_vin ON dealer_sold_signals(dealer_id, vin);
 
 
+-- ── Partner-portal columns on dealers (added 2026-04-23 → 2026-05-05) ─
+-- Live in production; canonicalized here so a fresh schema rebuild
+-- produces a working partner-portal-capable dealer row. See
+-- migrations/2026-05-05_partner_portal_v2.sql for the migration that
+-- captures everything.
+ALTER TABLE dealers ADD COLUMN IF NOT EXISTS portal_slug         TEXT;
+ALTER TABLE dealers ADD COLUMN IF NOT EXISTS salesperson         TEXT;
+ALTER TABLE dealers ADD COLUMN IF NOT EXISTS salesperson_set_at  TIMESTAMPTZ;
+ALTER TABLE dealers ADD COLUMN IF NOT EXISTS salesperson_phone   TEXT;
+ALTER TABLE dealers ADD COLUMN IF NOT EXISTS dashboard_token     TEXT;
+ALTER TABLE dealers ADD COLUMN IF NOT EXISTS mobile_token        TEXT;
+ALTER TABLE dealers ADD COLUMN IF NOT EXISTS brand               JSONB;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dealers_portal_slug
+    ON dealers(portal_slug)     WHERE portal_slug     IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dealers_dashboard_token
+    ON dealers(dashboard_token) WHERE dashboard_token IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dealers_mobile_token
+    ON dealers(mobile_token)    WHERE mobile_token    IS NOT NULL;
+
+
 -- ── Convenience view: dealer stats for list page ─────────────────────
--- Age buckets prefer dealer-declared source_added_at (JSON-LD datePosted /
--- photo-filename timestamp) over our scanner-observed first_seen_at.
--- COALESCE — when source_added_at is NULL we fall back to first_seen_at.
-CREATE OR REPLACE VIEW dealer_stats AS
+-- Age precedence: vAuto-verified > dealer-declared source_added_at >
+-- scanner-observed first_seen_at. Surfaces partner-portal config so
+-- /dealers/<id> can render the salesperson chip + shareable links card
+-- without an extra query.
+DROP VIEW IF EXISTS dealer_stats;
+CREATE VIEW dealer_stats AS
 SELECT
     d.id                                         AS dealer_id,
     d.name, d.url, d.platform, d.scrape_method, d.active,
@@ -183,17 +205,24 @@ SELECT
     COUNT(*) FILTER (WHERE i.status = 'active')                                               AS in_stock,
     COUNT(*) FILTER (WHERE i.status = 'sold')                                                  AS sold_total,
     COUNT(*) FILTER (WHERE i.status = 'active'
-                       AND COALESCE(i.source_added_at, i.first_seen_at) >  NOW() - INTERVAL '30 days')  AS age_under_30,
+                       AND COALESCE(i.verified_at - ((i.verified_days_on_lot || ' days')::interval),
+                                    i.source_added_at, i.first_seen_at) >  NOW() - INTERVAL '30 days')  AS age_under_30,
     COUNT(*) FILTER (WHERE i.status = 'active'
-                       AND COALESCE(i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '30 days'
-                       AND COALESCE(i.source_added_at, i.first_seen_at) >  NOW() - INTERVAL '60 days')  AS age_30_60,
+                       AND COALESCE(i.verified_at - ((i.verified_days_on_lot || ' days')::interval),
+                                    i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '30 days'
+                       AND COALESCE(i.verified_at - ((i.verified_days_on_lot || ' days')::interval),
+                                    i.source_added_at, i.first_seen_at) >  NOW() - INTERVAL '60 days')  AS age_30_60,
     COUNT(*) FILTER (WHERE i.status = 'active'
-                       AND COALESCE(i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '60 days'
-                       AND COALESCE(i.source_added_at, i.first_seen_at) >  NOW() - INTERVAL '90 days')  AS age_60_90,
+                       AND COALESCE(i.verified_at - ((i.verified_days_on_lot || ' days')::interval),
+                                    i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '60 days'
+                       AND COALESCE(i.verified_at - ((i.verified_days_on_lot || ' days')::interval),
+                                    i.source_added_at, i.first_seen_at) >  NOW() - INTERVAL '90 days')  AS age_60_90,
     COUNT(*) FILTER (WHERE i.status = 'active'
-                       AND COALESCE(i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '90 days')  AS age_over_90,
+                       AND COALESCE(i.verified_at - ((i.verified_days_on_lot || ' days')::interval),
+                                    i.source_added_at, i.first_seen_at) <= NOW() - INTERVAL '90 days')  AS age_over_90,
     COUNT(*) FILTER (WHERE i.status = 'sold'
-                       AND i.sold_at      >  COALESCE(d.last_scan_at, NOW()) - INTERVAL '7 days')       AS sold_last_7d
+                       AND i.sold_at      >  COALESCE(d.last_scan_at, NOW()) - INTERVAL '7 days')       AS sold_last_7d,
+    d.salesperson, d.salesperson_set_at, d.portal_slug, d.salesperson_phone
 FROM dealers d
 LEFT JOIN dealer_inventory i ON i.dealer_id = d.id
 GROUP BY d.id;

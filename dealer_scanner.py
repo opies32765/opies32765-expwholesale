@@ -946,7 +946,16 @@ def extract_vehicle(url, html):
             except ValueError:
                 pass
 
-    # 8) Mileage regex fallback
+    # 8a) DealerOn HTML mileage — labelled `info__value title="N"` next to
+    #      a `<span>Mileage</span>` label. Their JSON-LD omits
+    #      mileageFromOdometer so this is the only signal on Encore-class
+    #      sites.
+    if not out.get('mileage'):
+        v = _extract_dealeron_mileage(html)
+        if v is not None:
+            out['mileage'] = v
+
+    # 8b) Mileage regex fallback
     if not out.get('mileage'):
         m = MILES_RE.search(html or '')
         if m:
@@ -1024,7 +1033,18 @@ def _parse_ymm_from_url(url):
     individual words, and the trailing-17-char-VIN strip rule below removes
     the VIN before it lands in `trim`. (2026-05-03 Encore onboarding.)
     """
-    path = urlparse(url).path.rstrip('/').lower()
+    # DealerOn drops the slash from "W/Feature" leaving a single CamelCase
+    # token like `WPremium`/`WNavigation`/`wAdvance`/`WM`/`WP1`. Without this
+    # strip those survive lowercase + title-case as cosmetic glitches
+    # (`Wpremium`, `Wm Sport`). Pattern: word-boundary + W (either case),
+    # followed by a capital, followed by either a lowercase letter, a digit,
+    # or another word boundary. The third condition matches `WM Sport`
+    # (M then space) and the second matches `WP1` (P then 1) — but NOT VINs
+    # (`W-B-A-...`, three-cap run with no boundary) and NOT `WRX` (R-X
+    # contiguous caps). Done pre-lowercase so case info is still intact.
+    path_raw = urlparse(url).path.rstrip('/')
+    path_raw = re.sub(r'\b[Ww](?=[A-Z](?:[a-z\d]|\b))', '', path_raw)
+    path = path_raw.lower()
     slug = path.rsplit('/', 1)[-1] if path else ''
     # Normalize DealerOn's `+`-as-space to a uniform `-` separator so the
     # tokenizer below produces proper word tokens for trim/make/model.
@@ -1416,6 +1436,30 @@ def _extract_dealer_com_fields(html):
         except (ValueError, TypeError):
             pass
     return out
+
+
+# ── DealerOn HTML mileage extractor ────────────────────────────────────
+# DealerOn's JSON-LD doesn't carry mileageFromOdometer; the visible markup
+# renders it as `<span class="info__label">Mileage</span><span
+# class="info__value" title="32,947">32,947</span>`. The MILES_RE fallback
+# wants the number adjacent to "miles"/"mi" so it never fires on this DOM.
+_DEALERON_MILEAGE_RE = re.compile(
+    r'>Mileage</span>\s*<span[^>]*?title="([\d,]+)"', re.I)
+
+
+def _extract_dealeron_mileage(html):
+    if not html:
+        return None
+    m = _DEALERON_MILEAGE_RE.search(html)
+    if not m:
+        return None
+    try:
+        v = int(m.group(1).replace(',', ''))
+        if 0 < v <= 999999:
+            return v
+    except ValueError:
+        pass
+    return None
 
 
 # ── Photo-filename timestamp extractor ─────────────────────────────────

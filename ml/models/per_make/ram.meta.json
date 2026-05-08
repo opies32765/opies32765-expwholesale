@@ -1,9 +1,9 @@
 {
   "make_name": "RAM",
-  "trained_at": "2026-05-07T17:08:59.280346Z",
-  "n_total": 721,
+  "trained_at": "2026-05-08T08:30:54.539303Z",
+  "n_total": 722,
   "n_train": 688,
-  "n_test": 33,
+  "n_test": 34,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -217,49 +217,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2897.0,
-    "mape_pct": 8.8,
-    "r2": 0.9423,
-    "within_5pct": 42.4,
-    "within_10pct": 66.7
+    "mae_dollars": 2808.0,
+    "mape_pct": 8.01,
+    "r2": 0.9406,
+    "within_5pct": 55.9,
+    "within_10pct": 70.6
   },
   "baseline_metrics": {
-    "mae_dollars": 3205.0,
-    "mape_pct": 10.42,
+    "mae_dollars": 3137.0,
+    "mape_pct": 10.23,
     "ratio": 1.013
   },
   "top_features": [
     {
-      "name": "market_asking_price",
-      "importance": 0.32327792048454285
+      "name": "base_appraised_value",
+      "importance": 0.32938051223754883
     },
     {
-      "name": "base_appraised_value",
-      "importance": 0.30847564339637756
+      "name": "market_asking_price",
+      "importance": 0.31997251510620117
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.248726949095726
-    },
-    {
-      "name": "model_name_1500 TRX SB Pickup Truck",
-      "importance": 0.009140394628047943
+      "importance": 0.23183906078338623
     },
     {
       "name": "supplier_name_Rick Hendrick Chrysler Dodge Jeep Ram Duluth",
-      "importance": 0.007426126394420862
+      "importance": 0.008189651183784008
+    },
+    {
+      "name": "model_name_1500 TRX SB Pickup Truck",
+      "importance": 0.007955760695040226
     },
     {
       "name": "supplier_name_Crown Euro Cars Inc.",
-      "importance": 0.005099053960293531
+      "importance": 0.0058009084314107895
     },
     {
       "name": "supplier_name_Lifted Trucks",
-      "importance": 0.0046259392984211445
+      "importance": 0.004537529777735472
     },
     {
       "name": "body_type_OTHER",
-      "importance": 0.004197413567453623
+      "importance": 0.004382373299449682
     }
   ]
 }

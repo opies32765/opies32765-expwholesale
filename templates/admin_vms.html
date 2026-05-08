@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Proxmox VMs — EW Buy Center</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:100vh}
+.header{background:#243447;border-bottom:1px solid #344f68;padding:0 32px;height:66px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:12px;text-decoration:none}
+.logo-mark{width:38px;height:38px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;color:#fff}
+.logo-text{font-size:17px;font-weight:700;color:#f1f5f9;letter-spacing:-0.3px}
+.logo-sub{font-size:11px;color:#7a9bb5;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+.header-right{display:flex;align-items:center;gap:16px}
+.nav-link{font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px}
+.nav-link:hover{color:#e2e8f0;border-color:#334155}
+.nav-link.active{color:#60a5fa;border-color:#3b82f6;background:rgba(59,130,246,.1)}
+
+.content{max-width:1500px;margin:0 auto;padding:28px 24px}
+.page-title{font-size:28px;font-weight:800;margin-bottom:4px}
+.page-desc{font-size:14px;color:#7a9bb5;margin-bottom:20px;line-height:1.5}
+
+.banner{background:#243447;border:1px solid #344f68;border-radius:10px;padding:14px 18px;margin-bottom:18px;display:flex;align-items:center;gap:14px}
+.banner.warn{border-color:#b45309;background:rgba(180,83,9,.12)}
+.banner.error{border-color:#ef4444;background:rgba(239,68,68,.1)}
+.banner .pill{font-size:10px;font-weight:700;padding:3px 8px;border-radius:4px;letter-spacing:.4px}
+.banner .pill.ok{color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.25)}
+.banner .pill.err{color:#fca5a5;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3)}
+.banner .pill.warn{color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.3)}
+.banner .text{flex:1;font-size:13px;color:#cbd5e1;line-height:1.5}
+.banner .text code{font-family:monospace;font-size:12px;color:#fbbf24;background:rgba(0,0,0,.25);padding:1px 6px;border-radius:3px}
+
+.host-card{background:#243447;border:1px solid #344f68;border-radius:10px;padding:18px;margin-bottom:22px}
+.host-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.host-title{font-size:15px;font-weight:700;color:#f1f5f9;text-transform:uppercase;letter-spacing:.4px}
+.host-version{font-size:11px;color:#7a9bb5;font-family:monospace}
+.host-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}
+.host-stat{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:12px}
+.host-stat .label{font-size:10px;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.host-stat .val{font-size:22px;font-weight:800;color:#e2e8f0;font-family:monospace;line-height:1}
+.host-stat .sub{font-size:11px;color:#94a3b8;margin-top:4px}
+.host-stat .bar{margin-top:8px;height:4px;background:#1e293b;border-radius:2px;overflow:hidden}
+.host-stat .bar > span{display:block;height:100%;background:linear-gradient(90deg,#3b82f6,#60a5fa);transition:width .4s}
+.host-stat.warn .bar > span{background:linear-gradient(90deg,#f59e0b,#fbbf24)}
+.host-stat.danger .bar > span{background:linear-gradient(90deg,#ef4444,#f87171)}
+
+.section-title{font-size:14px;font-weight:700;color:#f1f5f9;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 12px}
+.vm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px;margin-bottom:24px}
+.vm-card{background:#243447;border:1px solid #344f68;border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px}
+.vm-card.template{border-style:dashed;opacity:.92}
+.vm-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.vm-id{font-size:12px;color:#7a9bb5;font-family:monospace;font-weight:600}
+.vm-name{font-size:15px;font-weight:700;color:#f1f5f9;margin-top:2px}
+.badge{font-size:10px;font-weight:700;padding:3px 8px;border-radius:4px;letter-spacing:.4px;text-transform:uppercase;font-family:monospace}
+.badge.running{color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.3)}
+.badge.stopped{color:#94a3b8;background:rgba(148,163,184,.12);border:1px solid rgba(148,163,184,.3)}
+.badge.paused{color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.3)}
+.badge.unknown{color:#fca5a5;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.3)}
+.badge.template{color:#a78bfa;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3)}
+
+.vm-stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px}
+.vm-stat{background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:8px 10px}
+.vm-stat .l{color:#7a9bb5;font-size:10px;text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px}
+.vm-stat .v{color:#e2e8f0;font-family:monospace;font-weight:700;font-size:13px}
+.vm-stat .bar{margin-top:5px;height:3px;background:#1e293b;border-radius:2px;overflow:hidden}
+.vm-stat .bar > span{display:block;height:100%;background:linear-gradient(90deg,#3b82f6,#60a5fa);transition:width .4s}
+
+.vm-actions{display:flex;flex-wrap:wrap;gap:6px}
+.btn{padding:7px 12px;border-radius:6px;border:1px solid transparent;cursor:pointer;font-family:'Inter',sans-serif;font-size:11px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;background:#0f172a;color:#cbd5e1;transition:all .15s;display:inline-flex;align-items:center;gap:5px}
+.btn:hover:not(:disabled){background:#1e293b;border-color:#475569;color:#f1f5f9}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.primary{background:#1e3a5f;border-color:rgba(59,130,246,.4);color:#93c5fd}
+.btn.primary:hover:not(:disabled){background:#1d4ed8;color:#fff;border-color:#3b82f6}
+.btn.warn{background:rgba(180,83,9,.15);border-color:rgba(251,191,36,.3);color:#fbbf24}
+.btn.warn:hover:not(:disabled){background:rgba(180,83,9,.3);color:#fde68a}
+.btn.danger{background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.3);color:#fca5a5}
+.btn.danger:hover:not(:disabled){background:rgba(239,68,68,.2);color:#fee2e2}
+.btn.ghost{background:transparent;border-color:#334155;color:#94a3b8}
+.btn.ghost:hover:not(:disabled){background:#1e293b;color:#e2e8f0}
+
+.expand{border-top:1px solid #344f68;padding-top:12px;margin-top:4px;display:none}
+.expand.open{display:block}
+.expand-toggle{cursor:pointer;color:#60a5fa;font-size:11px;font-weight:600;user-select:none;text-transform:uppercase;letter-spacing:.4px}
+.expand-toggle:hover{color:#93c5fd}
+
+.snap-list{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.snap-row{background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:8px 10px;display:flex;align-items:center;gap:10px;font-size:12px}
+.snap-row .snap-name{font-family:monospace;font-weight:700;color:#f1f5f9;min-width:100px}
+.snap-row .snap-desc{flex:1;color:#94a3b8;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.snap-row .snap-age{font-size:10px;color:#7a9bb5;font-family:monospace}
+.snap-row .snap-actions{display:flex;gap:4px}
+.snap-empty{color:#7a9bb5;font-size:12px;font-style:italic;padding:6px 0}
+
+.snap-form{margin-top:10px;display:flex;gap:6px;flex-wrap:wrap}
+.snap-form input{flex:1;min-width:120px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:7px 10px;color:#e2e8f0;font-size:12px;font-family:'Inter',sans-serif}
+.snap-form input:focus{outline:none;border-color:#3b82f6}
+
+.toast{position:fixed;bottom:20px;right:20px;background:#243447;border:1px solid #344f68;border-radius:8px;padding:12px 16px;font-size:13px;color:#e2e8f0;box-shadow:0 6px 20px rgba(0,0,0,.4);z-index:1000;max-width:420px;animation:slideIn .25s ease-out}
+.toast.ok{border-color:rgba(74,222,128,.4)}
+.toast.err{border-color:rgba(239,68,68,.4);color:#fee2e2}
+@keyframes slideIn{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
+
+.empty{text-align:center;padding:40px;color:#7a9bb5;font-size:14px}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.2);border-top-color:#60a5fa;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.refresh-info{font-size:11px;color:#7a9bb5;display:flex;align-items:center;gap:6px}
+.refresh-dot{width:6px;height:6px;border-radius:50%;background:#4ade80;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <a href="/" class="logo">
+    <div class="logo-mark">EW</div>
+    <div>
+      <div class="logo-text">EW Buy Center</div>
+      <div class="logo-sub">Proxmox VMs — Admin</div>
+    </div>
+  </a>
+  <div class="header-right">
+    <a href="/" class="nav-link">Dashboard</a>
+    <a href="/dealers" class="nav-link">Dealer DB</a>
+    <a href="/admin/ai-levers" class="nav-link">AI Levers</a>
+    <a href="/admin/vms" class="nav-link active">VMs</a>
+  </div>
+</div>
+
+<div class="content">
+  <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:6px">
+    <div>
+      <div class="page-title">Proxmox VMs</div>
+      <div class="page-desc">Manage the Playwright bid-worker VMs running on the Proxmox host. Lifecycle controls, snapshots, and restore — all without leaving EW.</div>
+    </div>
+    <div class="refresh-info" id="refreshInfo">
+      <span class="refresh-dot"></span>
+      <span>Auto-refresh every 5s</span>
+    </div>
+  </div>
+
+  {% if not proxmox_configured %}
+  <div class="banner warn">
+    <span class="pill warn">Setup needed</span>
+    <div class="text">
+      <strong>Proxmox API not configured.</strong> Add <code>PROXMOX_API_BASE</code> and <code>PROXMOX_API_TOKEN</code> as <code>Environment=</code> entries in <code>/etc/systemd/system/expwholesale.service</code>, then <code>systemctl daemon-reload &amp;&amp; systemctl restart expwholesale</code>. The base URL must point at a Cloudflare-tunnel hostname that forwards to <code>https://192.168.1.209:8006</code> (the Contabo server cannot reach the LAN directly).
+    </div>
+  </div>
+  {% else %}
+  <div class="banner" id="connBanner" style="display:none">
+    <span class="pill err">Unreachable</span>
+    <div class="text" id="connBannerText"></div>
+  </div>
+  {% endif %}
+
+  <!-- Host card -->
+  <div class="host-card" id="hostCard">
+    <div class="host-head">
+      <div class="host-title">Host: <span id="hostNode">{{ proxmox_node }}</span></div>
+      <div class="host-version" id="hostVersion">—</div>
+    </div>
+    <div class="host-grid" id="hostGrid">
+      <div class="host-stat"><div class="label">Loading…</div><div class="val">—</div></div>
+    </div>
+  </div>
+
+  <div class="section-title">Virtual Machines</div>
+  <div class="vm-grid" id="vmGrid">
+    <div class="empty">Loading VMs…</div>
+  </div>
+</div>
+
+<script>
+const PROXMOX_BASE = {{ proxmox_base|tojson }};
+const PROXMOX_NODE = {{ proxmox_node|tojson }};
+const PROXMOX_CONFIGURED = {{ proxmox_configured|tojson }};
+const expandedVms = new Set();
+
+function fmtBytes(b){
+  if(!b) return '0';
+  const u = ['B','KB','MB','GB','TB']; let i=0; let n=b;
+  while(n>=1024 && i<u.length-1){ n/=1024; i++; }
+  return n.toFixed(n<10?2:(n<100?1:0)) + ' ' + u[i];
+}
+function fmtUptime(s){
+  if(!s) return '—';
+  const d=Math.floor(s/86400), h=Math.floor((s%86400)/3600), m=Math.floor((s%3600)/60);
+  if(d>0) return `${d}d ${h}h`;
+  if(h>0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+function fmtAge(ts){
+  if(!ts) return '—';
+  const now = Math.floor(Date.now()/1000);
+  const s = now - ts;
+  if(s < 60) return s+'s ago';
+  if(s < 3600) return Math.floor(s/60)+'m ago';
+  if(s < 86400) return Math.floor(s/3600)+'h ago';
+  return Math.floor(s/86400)+'d ago';
+}
+function pctClass(p){ if(p>=85) return 'danger'; if(p>=70) return 'warn'; return ''; }
+
+function toast(msg, ok){
+  const t = document.createElement('div');
+  t.className = 'toast ' + (ok ? 'ok' : 'err');
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(()=>t.remove(), 4500);
+}
+
+async function api(method, path, body){
+  const opts = { method, headers: {'Content-Type':'application/json'} };
+  if(body) opts.body = JSON.stringify(body);
+  const r = await fetch(path, opts);
+  let j = null;
+  try { j = await r.json(); } catch(e){}
+  // Logical success requires HTTP 2xx AND json.ok (we return 200 on
+  // Proxmox-unreachable so Cloudflare doesn't swallow the error body).
+  const ok = r.ok && j && j.ok !== false;
+  return { ok, status: r.status, json: j };
+}
+
+function showConnError(msg){
+  const b = document.getElementById('connBanner');
+  if(!b) return;
+  b.style.display = 'flex';
+  document.getElementById('connBannerText').innerHTML =
+    '<strong>Cannot reach Proxmox.</strong> ' + (msg || '') +
+    ' &nbsp; Verify the Cloudflare tunnel for <code>'+PROXMOX_BASE+'</code> is online.';
+}
+function hideConnError(){
+  const b = document.getElementById('connBanner');
+  if(b) b.style.display = 'none';
+}
+
+async function loadHost(){
+  const r = await api('GET', '/api/proxmox/host');
+  const grid = document.getElementById('hostGrid');
+  if(!r.ok || !r.json || !r.json.ok){
+    if(PROXMOX_CONFIGURED) showConnError(r.json && r.json.error ? r.json.error : '');
+    grid.innerHTML = '<div class="host-stat"><div class="label">Status</div><div class="val" style="font-size:14px;color:#fca5a5">Unreachable</div></div>';
+    document.getElementById('hostVersion').textContent = '—';
+    return;
+  }
+  hideConnError();
+  const d = r.json;
+  document.getElementById('hostVersion').textContent = (d.pve_version || '') + ' · uptime ' + fmtUptime(d.uptime_s);
+  grid.innerHTML = `
+    <div class="host-stat ${pctClass(d.cpu_pct)}">
+      <div class="label">CPU</div>
+      <div class="val">${d.cpu_pct.toFixed(1)}<span style="font-size:14px;color:#7a9bb5">%</span></div>
+      <div class="sub">${d.cpu_cores} cores · load ${(d.loadavg && d.loadavg[0] || 0).toFixed(2)}</div>
+      <div class="bar"><span style="width:${Math.min(100, d.cpu_pct)}%"></span></div>
+    </div>
+    <div class="host-stat ${pctClass(d.mem_pct)}">
+      <div class="label">RAM</div>
+      <div class="val">${d.mem_pct.toFixed(1)}<span style="font-size:14px;color:#7a9bb5">%</span></div>
+      <div class="sub">${fmtBytes(d.mem_used)} / ${fmtBytes(d.mem_total)}</div>
+      <div class="bar"><span style="width:${Math.min(100, d.mem_pct)}%"></span></div>
+    </div>
+    <div class="host-stat ${pctClass(d.disk_pct)}">
+      <div class="label">Disk (rootfs)</div>
+      <div class="val">${d.disk_pct.toFixed(1)}<span style="font-size:14px;color:#7a9bb5">%</span></div>
+      <div class="sub">${fmtBytes(d.disk_used)} / ${fmtBytes(d.disk_total)}</div>
+      <div class="bar"><span style="width:${Math.min(100, d.disk_pct)}%"></span></div>
+    </div>
+    <div class="host-stat">
+      <div class="label">VMs</div>
+      <div class="val">${d.vm_total}</div>
+      <div class="sub"><span style="color:#4ade80">${d.vm_running} running</span> · <span style="color:#94a3b8">${d.vm_stopped} stopped</span></div>
+    </div>
+  `;
+}
+
+function vmCard(v){
+  const expanded = expandedVms.has(v.vmid);
+  const isRunning = v.status === 'running';
+  const isStopped = v.status === 'stopped';
+  const statusBadge = v.template ? 'template' : v.status;
+  return `
+  <div class="vm-card ${v.template?'template':''}" data-vmid="${v.vmid}">
+    <div class="vm-head">
+      <div>
+        <div class="vm-id">VMID ${v.vmid}${v.template?' · template':''}</div>
+        <div class="vm-name">${v.name}</div>
+      </div>
+      <span class="badge ${statusBadge}">${statusBadge}</span>
+    </div>
+    <div class="vm-stats">
+      <div class="vm-stat">
+        <div class="l">CPU</div>
+        <div class="v">${v.cpu_pct.toFixed(1)}% / ${v.maxcpu} vCPU</div>
+        <div class="bar"><span style="width:${Math.min(100, v.cpu_pct)}%"></span></div>
+      </div>
+      <div class="vm-stat">
+        <div class="l">RAM</div>
+        <div class="v">${fmtBytes(v.mem_bytes)} / ${fmtBytes(v.maxmem_bytes)}</div>
+        <div class="bar"><span style="width:${Math.min(100, v.mem_pct)}%"></span></div>
+      </div>
+      <div class="vm-stat">
+        <div class="l">Disk</div>
+        <div class="v">${fmtBytes(v.maxdisk_bytes)}</div>
+      </div>
+      <div class="vm-stat">
+        <div class="l">Uptime</div>
+        <div class="v">${isRunning ? fmtUptime(v.uptime_s) : '—'}</div>
+      </div>
+    </div>
+    <div class="vm-actions">
+      <button class="btn primary" onclick="vmAction(${v.vmid},'start')" ${isRunning?'disabled':''}>Start</button>
+      <button class="btn warn" onclick="vmAction(${v.vmid},'stop')" ${!isRunning?'disabled':''}>Shutdown</button>
+      <button class="btn danger" onclick="vmActionConfirm(${v.vmid},'forcestop','Force stop VM ${v.vmid}? This is a hard power-off and may corrupt data.')" ${!isRunning?'disabled':''}>Force Stop</button>
+      <button class="btn warn" onclick="vmAction(${v.vmid},'reboot')" ${!isRunning?'disabled':''}>Reboot</button>
+      <button class="btn danger" onclick="vmActionConfirm(${v.vmid},'reset','Hard-reset VM ${v.vmid}? Like pulling the power cord.')" ${!isRunning?'disabled':''}>Reset</button>
+      <button class="btn ghost" onclick="openConsole(${v.vmid})">Console</button>
+      <button class="btn ghost" onclick="toggleExpand(${v.vmid})" style="margin-left:auto">${expanded?'Collapse':'Snapshots'}</button>
+    </div>
+    <div class="expand ${expanded?'open':''}" id="expand-${v.vmid}">
+      <div class="section-title" style="font-size:11px;margin:0 0 6px">Snapshots</div>
+      <div class="snap-list" id="snaps-${v.vmid}"><div class="snap-empty">Loading…</div></div>
+      <div class="snap-form">
+        <input type="text" id="snap-name-${v.vmid}" placeholder="snapshot name (alnum/_/-)">
+        <input type="text" id="snap-desc-${v.vmid}" placeholder="description (optional)">
+        <button class="btn primary" onclick="createSnapshot(${v.vmid})">Take snapshot</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function loadVms(){
+  const r = await api('GET', '/api/proxmox/vms');
+  const grid = document.getElementById('vmGrid');
+  if(!r.ok || !r.json || !r.json.ok){
+    grid.innerHTML = '<div class="empty">Cannot reach Proxmox. ' + ((r.json && r.json.error) ? r.json.error : '') + '</div>';
+    return;
+  }
+  const vms = r.json.vms || [];
+  if(vms.length === 0){
+    grid.innerHTML = '<div class="empty">No VMs found.</div>';
+    return;
+  }
+  grid.innerHTML = vms.map(vmCard).join('');
+  // re-load snapshots for any expanded VMs
+  expandedVms.forEach(vmid => loadSnapshots(vmid));
+}
+
+async function loadSnapshots(vmid){
+  const r = await api('GET', `/api/proxmox/vm/${vmid}/snapshots`);
+  const c = document.getElementById('snaps-' + vmid);
+  if(!c) return;
+  if(!r.ok || !r.json || !r.json.ok){
+    c.innerHTML = '<div class="snap-empty">Cannot load snapshots.</div>';
+    return;
+  }
+  const snaps = (r.json.snapshots || []).filter(s => !s.is_current);
+  if(snaps.length === 0){
+    c.innerHTML = '<div class="snap-empty">No snapshots yet.</div>';
+    return;
+  }
+  c.innerHTML = snaps.map(s => `
+    <div class="snap-row">
+      <div class="snap-name">${s.name}</div>
+      <div class="snap-desc" title="${(s.description||'').replace(/"/g,'&quot;')}">${s.description || ''}</div>
+      <div class="snap-age">${fmtAge(s.snaptime)}</div>
+      <div class="snap-actions">
+        <button class="btn warn" onclick="restoreSnapshot(${vmid}, '${s.name}')">Restore</button>
+        <button class="btn danger" onclick="deleteSnapshot(${vmid}, '${s.name}')">Delete</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function toggleExpand(vmid){
+  if(expandedVms.has(vmid)){
+    expandedVms.delete(vmid);
+    const el = document.getElementById('expand-'+vmid);
+    if(el) el.classList.remove('open');
+  } else {
+    expandedVms.add(vmid);
+    loadVms(); // re-render with expand open and trigger snapshot load
+  }
+}
+
+async function vmAction(vmid, action){
+  const r = await api('POST', `/api/proxmox/vm/${vmid}/${action}`);
+  toast(`${action} VM ${vmid}: ${r.ok ? 'queued' : (r.json && r.json.error || 'failed')}`, r.ok);
+  setTimeout(loadVms, 1500);
+}
+
+function vmActionConfirm(vmid, action, msg){
+  if(!confirm(msg + '\n\nAre you sure?')) return;
+  vmAction(vmid, action);
+}
+
+async function openConsole(vmid){
+  const r = await api('GET', `/api/proxmox/console-url/${vmid}`);
+  if(r.ok && r.json && r.json.url){
+    window.open(r.json.url, '_blank');
+  } else {
+    toast('Cannot build console URL — Proxmox not configured', false);
+  }
+}
+
+async function createSnapshot(vmid){
+  const name = (document.getElementById('snap-name-'+vmid).value || '').trim();
+  const desc = (document.getElementById('snap-desc-'+vmid).value || '').trim();
+  if(!name){ toast('Snapshot name required', false); return; }
+  const r = await api('POST', `/api/proxmox/vm/${vmid}/snapshot`, { name, description: desc });
+  if(r.ok){
+    toast(`Snapshot "${r.json.snapshot}" queued for VM ${vmid}`, true);
+    document.getElementById('snap-name-'+vmid).value = '';
+    document.getElementById('snap-desc-'+vmid).value = '';
+    setTimeout(()=>loadSnapshots(vmid), 1500);
+  } else {
+    toast('Snapshot failed: ' + (r.json && r.json.error || 'unknown'), false);
+  }
+}
+
+async function restoreSnapshot(vmid, name){
+  if(!confirm(`This will revert VM ${vmid} to snapshot "${name}".\n\nAll changes since this snapshot will be lost.\n\nContinue?`)) return;
+  const r = await api('POST', `/api/proxmox/vm/${vmid}/snapshot/${encodeURIComponent(name)}/restore`);
+  toast(`Restore VM ${vmid} → ${name}: ${r.ok ? 'queued' : (r.json && r.json.error || 'failed')}`, r.ok);
+  setTimeout(()=>{ loadVms(); loadSnapshots(vmid); }, 1500);
+}
+
+async function deleteSnapshot(vmid, name){
+  if(!confirm(`Delete snapshot "${name}" on VM ${vmid}?\n\nThis cannot be undone.`)) return;
+  const r = await api('DELETE', `/api/proxmox/vm/${vmid}/snapshot/${encodeURIComponent(name)}`);
+  toast(`Delete ${name}: ${r.ok ? 'queued' : (r.json && r.json.error || 'failed')}`, r.ok);
+  setTimeout(()=>loadSnapshots(vmid), 1500);
+}
+
+async function tick(){
+  await Promise.all([loadHost(), loadVms()]);
+}
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>

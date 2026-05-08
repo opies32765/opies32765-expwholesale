@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AI Accuracy — Experience Wholesale</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;padding:24px}
+h1{font-size:22px;font-weight:700;margin-bottom:6px}
+.sub{color:#64748b;font-size:13px;margin-bottom:20px}
+.window-tabs{display:flex;gap:8px;margin-bottom:24px}
+.win-tab{padding:6px 14px;background:#111827;border:1px solid #1e293b;color:#cbd5e1;
+  border-radius:6px;cursor:pointer;font-size:12px;font-weight:600}
+.win-tab.active{background:#1e3a8a;border-color:#3b82f6;color:#fff}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px}
+.metric{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:14px}
+.metric-label{font-size:10px;text-transform:uppercase;color:#64748b;letter-spacing:.6px;margin-bottom:4px;font-weight:700}
+.metric-value{font-size:22px;font-weight:800;font-family:monospace;color:#e2e8f0}
+.metric-sub{font-size:10px;color:#64748b;margin-top:2px}
+.metric.good .metric-value{color:#86efac}
+.metric.warn .metric-value{color:#fbbf24}
+.metric.bad  .metric-value{color:#fca5a5}
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px}
+.chart-card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:16px;min-height:280px}
+.chart-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#94a3b8;margin-bottom:10px}
+.chart-canvas{position:relative;height:240px}
+table{width:100%;border-collapse:collapse;font-size:12px;font-family:monospace}
+th{text-align:left;padding:8px;background:#0f172a;color:#94a3b8;font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.5px;border-bottom:1px solid #1e293b}
+td{padding:7px 8px;border-bottom:1px solid #1e293b}
+tr:hover td{background:#0f172a}
+.badge{display:inline-block;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700}
+.b-green{background:rgba(34,197,94,.15);color:#86efac;border:1px solid rgba(34,197,94,.3)}
+.b-yellow{background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.3)}
+.b-red{background:rgba(239,68,68,.15);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
+.section{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:16px;margin-bottom:24px}
+.bid-link{color:#60a5fa;text-decoration:none}
+.bid-link:hover{text-decoration:underline}
+.empty{padding:40px;text-align:center;color:#475569;font-style:italic}
+</style>
+</head>
+<body>
+<h1>AI Accuracy &nbsp;<span style="font-size:11px;color:#64748b;font-weight:500">v2 prompt vs LSL purchase reality</span></h1>
+<div class="sub">Reconciles ai_assessment_log → LSL deals.purchase_cost via VIN match. Updated daily at 6 AM ET.</div>
+
+<div class="window-tabs" style="flex-wrap:wrap;align-items:center;gap:6px">
+  <span class="win-tab" data-preset="today">Today</span>
+  <span class="win-tab" data-preset="yesterday">Yesterday</span>
+  <span class="win-tab" data-preset="last7">Last 7d</span>
+  <span class="win-tab active" data-preset="last30">Last 30d</span>
+  <span class="win-tab" data-preset="last60">Last 60d</span>
+  <span class="win-tab" data-preset="last90">Last 90d</span>
+  <span class="win-tab" data-preset="last365">1 year</span>
+  <span class="win-tab" data-preset="all">All time</span>
+  <span style="display:inline-flex;align-items:center;gap:6px;margin-left:8px;padding:4px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px">
+    <span style="font-size:11px;color:#64748b">From</span>
+    <input type="date" id="dateFrom" style="background:#0b0f19;color:#cbd5e1;border:1px solid #334155;border-radius:4px;padding:3px 6px;font-size:11px;font-family:inherit;color-scheme:dark">
+    <span style="font-size:11px;color:#64748b">to</span>
+    <input type="date" id="dateTo" style="background:#0b0f19;color:#cbd5e1;border:1px solid #334155;border-radius:4px;padding:3px 6px;font-size:11px;font-family:inherit;color-scheme:dark">
+    <button id="applyRange" style="background:#1e3a8a;color:#fff;border:1px solid #3b82f6;border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer;font-weight:600">Apply</button>
+  </span>
+</div>
+<div id="rangeLabel" style="font-size:11px;color:#94a3b8;margin-bottom:16px;font-family:monospace"></div>
+
+<!-- ─── Bias Correction Panel (SIMPLIFIED) ──────────────────────────── -->
+<div class="section" id="biasPanel" style="border:1px solid #3b3b6e;background:linear-gradient(180deg,#171729 0%,#111827 100%)">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:10px">
+    <div>
+      <div style="font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;color:#c4b5fd">⚙ Bias Correction</div>
+      <div style="font-size:11px;color:#64748b;margin-top:2px">After Gemini answers, nudge price toward what we actually paid on similar cars.</div>
+    </div>
+    <button id="bcToggle" style="background:#1e3a8a;color:#fff;border:1px solid #3b82f6;border-radius:6px;padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer">…</button>
+  </div>
+
+  <!-- Status banner — explains in one sentence what's happening -->
+  <div id="bcStatus" style="background:#0b0f19;border:1px solid #1e293b;border-radius:6px;padding:14px;margin-bottom:12px;font-size:13px;color:#cbd5e1">
+    Loading…
+  </div>
+
+  <!-- Active manual overrides (per-make/model) -->
+  <div id="bcOverridesWrap" style="display:none;margin-bottom:12px">
+    <div style="font-size:11px;color:#fbbf24;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px;font-weight:700">⚠ Active manual overrides</div>
+    <div style="background:#1c1917;border:1px solid #92400e;border-radius:6px;padding:10px;font-size:12px">
+      <div id="bcOverridesList"></div>
+    </div>
+  </div>
+
+  <!-- Eligible segments (n>=3 unique cars + bias>=4%) — read-only list -->
+  <div style="font-size:11px;color:#94a3b8;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px;font-weight:700">
+    Eligible patterns today <span style="color:#64748b;text-transform:none;font-weight:400">(unique cars ≥ 3, bias ≥ 4%)</span>
+  </div>
+  <div id="bcEligibleWrap" style="border:1px solid #1e293b;border-radius:6px;max-height:280px;overflow-y:auto">
+    <table>
+      <thead style="position:sticky;top:0;z-index:1;background:#0f172a"><tr>
+        <th>Make / Model</th>
+        <th style="text-align:right">unique<br>cars</th>
+        <th style="text-align:right">bias</th>
+        <th style="text-align:right">consistency<br>(σ)</th>
+        <th>what would happen</th>
+      </tr></thead>
+      <tbody id="bcEligible"></tbody>
+    </table>
+  </div>
+
+  <!-- Advanced (collapsed) — keep tier sliders for power users -->
+  <details id="bcAdvanced" style="margin-top:14px">
+    <summary style="cursor:pointer;color:#64748b;font-size:11px;text-transform:uppercase;letter-spacing:.5px;font-weight:700;padding:6px 0">⚙ Advanced — tune thresholds</summary>
+    <div style="padding-top:12px">
+      <table style="margin-bottom:12px;font-size:12px">
+        <thead><tr>
+          <th>Tier</th><th>min unique cars</th><th>min |bias|</th><th>max stddev</th><th>strength %</th>
+        </tr></thead>
+        <tbody id="bcTiers"></tbody>
+      </table>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="font-size:11px;color:#94a3b8">Window (days):
+          <input type="number" id="bcWindow" min="7" max="180" style="width:60px;background:#0b0f19;color:#cbd5e1;border:1px solid #334155;border-radius:4px;padding:3px 6px;font-family:monospace;margin-left:6px">
+        </label>
+        <button id="bcPreview" style="background:#0f172a;color:#c4b5fd;border:1px solid #6d28d9;border-radius:4px;padding:5px 12px;font-size:11px;font-weight:700;cursor:pointer">Preview impact</button>
+        <button id="bcSave" style="background:#1e3a8a;color:#fff;border:1px solid #3b82f6;border-radius:4px;padding:5px 12px;font-size:11px;font-weight:700;cursor:pointer">Save thresholds</button>
+        <button id="bcRefreshSeg" style="background:#0f172a;color:#94a3b8;border:1px solid #334155;border-radius:4px;padding:5px 12px;font-size:11px;cursor:pointer">↻ Refresh now</button>
+        <span id="bcConfigVer" style="font-size:11px;color:#64748b;font-family:monospace"></span>
+      </div>
+      <div id="bcPreviewBox" style="background:#0b0f19;border:1px solid #1e293b;border-radius:6px;padding:12px;margin-top:10px;font-size:12px;font-family:monospace;color:#94a3b8;display:none"></div>
+    </div>
+  </details>
+</div>
+
+<div class="metrics" id="metrics"></div>
+
+<div class="charts">
+  <div class="chart-card">
+    <div class="chart-title">Error distribution (|delta_pct|)</div>
+    <div class="chart-canvas"><canvas id="histChart"></canvas></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-title">Daily median |delta_pct| trend</div>
+    <div class="chart-canvas"><canvas id="trendChart"></canvas></div>
+  </div>
+</div>
+
+<div class="charts">
+  <div class="chart-card" style="grid-column:1/-1">
+    <div class="chart-title">AI recommendation vs actual purchase ($)</div>
+    <div class="chart-canvas" style="height:340px"><canvas id="scatterChart"></canvas></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="chart-title" style="margin-bottom:12px">Per-make leaderboard</div>
+  <table id="makeTable"><thead>
+    <tr><th>Make</th><th>N</th><th>Mean |delta|</th><th>Mean signed</th><th>In confidence</th></tr>
+  </thead><tbody></tbody></table>
+</div>
+
+<div class="section">
+  <div class="chart-title" style="margin-bottom:12px">All matched bids (newest first)</div>
+  <table id="rowsTable"><thead>
+    <tr><th>Bid</th><th>VIN</th><th>YMM</th><th>Miles</th>
+        <th>AI rec</th><th>Range</th><th>Actual paid</th><th>Δ $</th><th>Δ %</th>
+        <th>Purchased</th></tr>
+  </thead><tbody></tbody></table>
+</div>
+
+<script>
+let charts = {};
+
+function fmtDate(d){
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function presetRange(preset){
+  const now = new Date();
+  const todayStr = fmtDate(now);
+  const ago = (n) => { const x = new Date(now); x.setDate(x.getDate()-n); return fmtDate(x); };
+  switch (preset) {
+    case 'today':     return {from: todayStr, to: todayStr, label: 'Today'};
+    case 'yesterday': return {from: ago(1), to: ago(1), label: 'Yesterday'};
+    case 'last7':     return {from: ago(6), to: todayStr, label: 'Last 7 days'};
+    case 'last30':    return {from: ago(29), to: todayStr, label: 'Last 30 days'};
+    case 'last60':    return {from: ago(59), to: todayStr, label: 'Last 60 days'};
+    case 'last90':    return {from: ago(89), to: todayStr, label: 'Last 90 days'};
+    case 'last365':   return {from: ago(364), to: todayStr, label: 'Last 1 year'};
+    case 'all':       return {from: '2020-01-01', to: '2099-12-31', label: 'All time'};
+  }
+}
+
+async function loadData(from, to, label){
+  document.getElementById('rangeLabel').textContent = label
+    ? `${label} · ${from} → ${to}`
+    : `${from} → ${to}`;
+  const url = `/api/admin/ai-accuracy/data?from=${from}&to=${to}`;
+  const r = await fetch(url);
+  const d = await r.json();
+  renderMetrics(d.stats);
+  renderHist(d.histogram);
+  renderTrend(d.trend);
+  renderScatter(d.rows);
+  renderMakeTable(d.per_make);
+  renderRowsTable(d.rows);
+}
+
+function loadPreset(preset){
+  document.querySelectorAll('.win-tab').forEach(t=>{
+    t.classList.toggle('active', t.dataset.preset === preset);
+  });
+  const r = presetRange(preset);
+  document.getElementById('dateFrom').value = r.from;
+  document.getElementById('dateTo').value   = r.to;
+  loadData(r.from, r.to, r.label);
+}
+
+function fmt$(v){ return v == null ? '—' : '$' + Math.round(v).toLocaleString(); }
+function fmtPct(v, signed){
+  if (v == null) return '—';
+  const s = (signed && v > 0 ? '+' : '') + Number(v).toFixed(2) + '%';
+  return s;
+}
+
+function renderMetrics(s) {
+  const el = document.getElementById('metrics');
+  if (!s || !s.n_matches) {
+    el.innerHTML = '<div class="empty">No matched bids in this window. Add data or extend the window.</div>';
+    return;
+  }
+  const cls = (m) => m == null ? '' : (m <= 5 ? 'good' : m <= 10 ? 'warn' : 'bad');
+  const rangeCls = s.in_confidence_pct >= 50 ? 'good' : s.in_confidence_pct >= 25 ? 'warn' : 'bad';
+  el.innerHTML = `
+    <div class="metric"><div class="metric-label">Matched bids</div>
+      <div class="metric-value">${s.n_matches}</div>
+      <div class="metric-sub">bid ↔ purchase pairs</div></div>
+    <div class="metric ${cls(s.median_abs_pct)}"><div class="metric-label">Median |Δ|</div>
+      <div class="metric-value">${fmtPct(s.median_abs_pct)}</div>
+      <div class="metric-sub">typical error magnitude</div></div>
+    <div class="metric"><div class="metric-label">Mean signed Δ</div>
+      <div class="metric-value">${s.mean_signed_pct==null?'—':((-s.mean_signed_pct)>=0?'+':'')+(-s.mean_signed_pct).toFixed(2)+'%'}</div>
+      <div class="metric-sub">${s.mean_signed_pct<0?'AI over-recs (positive = over-paid)':s.mean_signed_pct>0?'AI under-recs (negative = missed)':'unbiased'}</div></div>
+    <div class="metric ${rangeCls}"><div class="metric-label">In confidence range</div>
+      <div class="metric-value">${s.in_confidence_pct}%</div>
+      <div class="metric-sub">${s.in_confidence_count} / ${s.n_matches} actuals fell within band</div></div>
+    <div class="metric"><div class="metric-label">Within ±5%</div>
+      <div class="metric-value">${s.within_5pct}</div>
+      <div class="metric-sub">tight hits</div></div>
+    <div class="metric"><div class="metric-label">Within ±10%</div>
+      <div class="metric-value">${s.within_10pct}</div>
+      <div class="metric-sub">acceptable hits</div></div>
+    <div class="metric"><div class="metric-label">P25 |Δ|</div>
+      <div class="metric-value">${fmtPct(s.p25_abs_pct)}</div>
+      <div class="metric-sub">best-quartile error</div></div>
+    <div class="metric"><div class="metric-label">P75 |Δ|</div>
+      <div class="metric-value">${fmtPct(s.p75_abs_pct)}</div>
+      <div class="metric-sub">worst-quartile error</div></div>
+    <div class="metric warn"><div class="metric-label">If we'd followed AI: under-bid total</div>
+      <div class="metric-value">${fmt$(s.total_underbid_dollars)}</div>
+      <div class="metric-sub">${s.n_underbid||0} bids · AI suggested below actual paid · would have missed</div></div>
+    <div class="metric bad"><div class="metric-label">If we'd followed AI: over-paid total</div>
+      <div class="metric-value">${fmt$(s.total_overpaid_dollars)}</div>
+      <div class="metric-sub">${s.n_overpaid||0} bids · AI suggested above actual paid · would have over-paid</div></div>
+    <div class="metric ${s.net_dollars>=0?'good':'bad'}" style="grid-column:span 2"><div class="metric-label">Net $ direction (under-bids − over-pays)</div>
+      <div class="metric-value">${s.net_dollars==null?'—':(s.net_dollars>=0?'+':'')+fmt$(s.net_dollars).replace('$','$')}</div>
+      <div class="metric-sub">${s.net_dollars>0?'AI tilts conservative (under) — would have missed deals':s.net_dollars<0?'AI tilts aggressive (over) — would have overpaid':'balanced'}</div></div>
+  `;
+}
+
+function renderHist(hist) {
+  const ctx = document.getElementById('histChart');
+  if (charts.hist) charts.hist.destroy();
+  charts.hist = new Chart(ctx, {
+    type: 'bar',
+    data: {labels: hist.map(h=>h.range),
+           datasets: [{data: hist.map(h=>h.count),
+                       backgroundColor: ['#86efac','#a7f3d0','#fcd34d','#fb923c','#f87171'],
+                       borderColor: '#1e293b', borderWidth: 1}]},
+    options: {plugins:{legend:{display:false}},
+              scales: {y:{ticks:{color:'#94a3b8'},grid:{color:'#1e293b'}},
+                       x:{ticks:{color:'#94a3b8'},grid:{display:false}}}}
+  });
+}
+
+function renderTrend(trend) {
+  const ctx = document.getElementById('trendChart');
+  if (charts.trend) charts.trend.destroy();
+  charts.trend = new Chart(ctx, {
+    type: 'line',
+    data: {labels: trend.map(t=>t.day),
+           datasets: [{label:'Median |Δ%|',
+                       data: trend.map(t=>t.median_abs_pct),
+                       borderColor:'#fbbf24', backgroundColor:'rgba(251,191,36,.10)',
+                       tension:0.3, pointRadius:3, fill:true}]},
+    options: {plugins:{legend:{display:false}},
+              scales: {y:{ticks:{color:'#94a3b8',callback:v=>v+'%'},grid:{color:'#1e293b'}},
+                       x:{ticks:{color:'#94a3b8',maxRotation:0},grid:{display:false}}}}
+  });
+}
+
+function renderScatter(rows) {
+  const ctx = document.getElementById('scatterChart');
+  if (charts.scatter) charts.scatter.destroy();
+  const points = rows
+    .filter(r=>r.ai_recommendation && r.actual_purchase_cost)
+    .map(r=>({x:r.ai_recommendation, y:r.actual_purchase_cost, bid:r.bid_id,
+              vin:r.vin, ymm:[r.year,r.make,r.model].filter(Boolean).join(' ')}));
+  const maxv = Math.max(1, ...points.map(p=>Math.max(p.x,p.y)));
+  charts.scatter = new Chart(ctx, {
+    type: 'scatter',
+    data: {datasets: [
+      {label:'AI vs Actual', data: points,
+       backgroundColor:'rgba(96,165,250,.6)', pointRadius:4},
+      {label:'y = x (perfect)', data:[{x:0,y:0},{x:maxv,y:maxv}], type:'line',
+       borderColor:'rgba(255,255,255,.18)', borderDash:[5,5], pointRadius:0, fill:false}
+    ]},
+    options: {
+      plugins:{legend:{labels:{color:'#cbd5e1'}},
+        tooltip:{callbacks:{label:c=>`Bid ${c.raw.bid} ${c.raw.ymm}: rec ${fmt$(c.raw.x)} → paid ${fmt$(c.raw.y)}`}}},
+      scales:{
+        x:{title:{display:true,text:'AI recommendation ($)',color:'#94a3b8'},
+           ticks:{color:'#94a3b8',callback:v=>'$'+(v/1000).toFixed(0)+'k'},grid:{color:'#1e293b'}},
+        y:{title:{display:true,text:'Actual paid ($)',color:'#94a3b8'},
+           ticks:{color:'#94a3b8',callback:v=>'$'+(v/1000).toFixed(0)+'k'},grid:{color:'#1e293b'}}
+      }
+    }
+  });
+}
+
+function renderMakeTable(rows) {
+  const tb = document.querySelector('#makeTable tbody');
+  tb.innerHTML = '';
+  rows.forEach(r=>{
+    const cls = r.mean_abs_pct == null ? '' : (r.mean_abs_pct <= 5 ? 'b-green' : r.mean_abs_pct <= 10 ? 'b-yellow' : 'b-red');
+    const inRangePct = r.n ? Math.round(100*r.in_range_n/r.n) : 0;
+    tb.innerHTML += `
+      <tr><td>${r.make||'—'}</td><td>${r.n}</td>
+          <td><span class="badge ${cls}">${r.mean_abs_pct==null?'—':r.mean_abs_pct.toFixed(2)+'%'}</span></td>
+          <td>${r.mean_signed_pct==null?'—':((-r.mean_signed_pct)>=0?'+':'')+(-r.mean_signed_pct).toFixed(2)+'%'}</td>
+          <td>${r.in_range_n} / ${r.n} (${inRangePct}%)</td></tr>`;
+  });
+}
+
+function renderRowsTable(rows) {
+  const tb = document.querySelector('#rowsTable tbody');
+  tb.innerHTML = '';
+  rows.slice(0, 200).forEach(r=>{
+    const ymm = [r.year, r.make, r.model].filter(Boolean).join(' ');
+    const cls = r.abs_delta_pct == null ? '' : (r.abs_delta_pct <= 5 ? 'b-green' : r.abs_delta_pct <= 10 ? 'b-yellow' : 'b-red');
+    const dDate = r.actual_purchased_at ? r.actual_purchased_at.substring(0,10) : '—';
+    const range = (r.ai_confidence_low!=null && r.ai_confidence_high!=null)
+                  ? `${fmt$(r.ai_confidence_low)}–${fmt$(r.ai_confidence_high)}` : '—';
+    const tr = document.createElement('tr');
+    tr.style.cursor = 'pointer';
+    tr.title = 'Click to see segment data and override';
+    tr.innerHTML = `
+      <td><a class="bid-link" href="/bid/${r.bid_id}" target="_blank" onclick="event.stopPropagation()">#${r.bid_id}</a></td>
+      <td>${r.vin||'—'}</td><td>${ymm}</td>
+      <td>${r.mileage?Number(r.mileage).toLocaleString():'—'}</td>
+      <td>${fmt$(r.ai_recommendation)}</td>
+      <td>${range}</td>
+      <td>${fmt$(r.actual_purchase_cost)}</td>
+      <td>${r.delta==null?'—':((-r.delta)>=0?'+':'')+fmt$(-r.delta).replace('$','')}</td>
+      <td><span class="badge ${cls}">${r.delta_pct==null?'—':((-r.delta_pct)>=0?'+':'')+(-r.delta_pct).toFixed(2)+'%'}</span></td>
+      <td>${dDate}</td>`;
+    tr.addEventListener('click', ()=> openSegmentModal(r));
+    tb.appendChild(tr);
+  });
+  if (rows.length === 0) tb.innerHTML = '<tr><td colspan="10" class="empty">No matches in this window.</td></tr>';
+}
+
+// ─── Per-segment drill-down modal ────────────────────────────────────
+let _modalCurrent = null;
+async function openSegmentModal(rowOrYMM){
+  // Accept either a matched-bid row or {make, model, year, mileage}
+  const r = rowOrYMM;
+  if(!r.make || !r.model){alert('No make/model on this row.'); return;}
+  _modalCurrent = r;
+  document.getElementById('segModal').style.display = 'flex';
+  document.getElementById('segModalBody').innerHTML = '<div style="padding:30px;text-align:center;color:#64748b">Loading segment data…</div>';
+  const params = new URLSearchParams({make: r.make, model: r.model});
+  if(r.year)    params.set('year', r.year);
+  if(r.mileage) params.set('mileage', r.mileage);
+  try{
+    const resp = await fetch('/api/correction/lookup-segment?'+params, {credentials:'same-origin'});
+    const d = await resp.json();
+    if(d.error) throw new Error(d.error);
+    renderSegmentModal(d, r);
+  }catch(e){
+    document.getElementById('segModalBody').innerHTML = `<div style="padding:30px;color:#fca5a5">Error: ${e.message}</div>`;
+  }
+}
+
+function renderSegmentModal(d, ctx){
+  const body = document.getElementById('segModalBody');
+  const ymmTitle = `${ctx.year||''} ${d.make} ${d.model}`.trim();
+  const miles = ctx.mileage ? Number(ctx.mileage).toLocaleString()+' mi' : '';
+  const aiRec = ctx.ai_recommendation ? '$'+Number(ctx.ai_recommendation).toLocaleString() : '—';
+  const actual = ctx.actual_purchase_cost ? '$'+Number(ctx.actual_purchase_cost).toLocaleString() : '—';
+  const delta = ctx.delta_pct!=null ? ((ctx.delta_pct>0?'+':'')+(-ctx.delta_pct).toFixed(2)+'%') : '—';
+  const deltaColor = ctx.abs_delta_pct==null?'#94a3b8':(ctx.abs_delta_pct<=5?'#86efac':ctx.abs_delta_pct<=10?'#fbbf24':'#fca5a5');
+
+  // Levels
+  let levelsHtml = '';
+  if(!d.levels || d.levels.length===0){
+    levelsHtml = `<div style="padding:14px;color:#fbbf24;font-style:italic">No bias data exists for this make+model in the last 30 days. Override below is the only way to nudge.</div>`;
+  } else {
+    levelsHtml = `<table style="margin-bottom:12px">
+      <thead><tr>
+        <th>Match level</th><th style="text-align:right">unique cars</th>
+        <th style="text-align:right">bias</th><th style="text-align:right">σ</th>
+      </tr></thead><tbody>`;
+    d.levels.forEach(lvl => {
+      const lvlName = (lvl.year_band==='any' && lvl.mileage_band==='any')
+        ? `${d.make} ${d.model} <span style="color:#64748b;font-size:11px">(all years, all miles)</span>`
+        : (lvl.mileage_band==='any')
+          ? `${d.make} ${d.model} <span style="color:#64748b;font-size:11px">(${lvl.year_band}, all miles)</span>`
+          : `${d.make} ${d.model} <span style="color:#64748b;font-size:11px">(${lvl.year_band}, ${lvl.mileage_band})</span>`;
+      const biasColor = lvl.bias_pct>0?'#86efac':lvl.bias_pct<0?'#fca5a5':'#94a3b8';
+      levelsHtml += `<tr>
+        <td>${lvlName}</td>
+        <td style="text-align:right;font-weight:700">${lvl.n}</td>
+        <td style="text-align:right;color:${biasColor};font-weight:700">${lvl.bias_pct>0?'+':''}${lvl.bias_pct.toFixed(2)}%</td>
+        <td style="text-align:right;color:#94a3b8">${lvl.stddev_pct!=null?'±'+lvl.stddev_pct.toFixed(1)+'%':'—'}</td>
+      </tr>`;
+    });
+    levelsHtml += '</tbody></table>';
+  }
+
+  // Recent bids
+  let bidsHtml = '';
+  if(d.last_5_bids && d.last_5_bids.length){
+    bidsHtml = `<div style="font-size:11px;color:#94a3b8;margin:14px 0 6px;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Recent unique cars (newest first)</div>
+      <table><thead><tr><th>Bid</th><th>Year</th><th style="text-align:right">Miles</th><th style="text-align:right">AI rec</th><th style="text-align:right">Sold</th><th style="text-align:right">Δ%</th><th>Date</th></tr></thead><tbody>`;
+    d.last_5_bids.forEach(b => {
+      const bcls = b.delta_pct==null?'':(Math.abs(b.delta_pct)<=5?'b-green':Math.abs(b.delta_pct)<=10?'b-yellow':'b-red');
+      bidsHtml += `<tr>
+        <td><a class="bid-link" href="/bid/${b.bid_id}" target="_blank">#${b.bid_id}</a></td>
+        <td>${b.year||'—'}</td>
+        <td style="text-align:right">${b.mileage?Number(b.mileage).toLocaleString():'—'}</td>
+        <td style="text-align:right">${b.ai_recommendation?'$'+Number(b.ai_recommendation).toLocaleString():'—'}</td>
+        <td style="text-align:right">${b.actual_purchase_cost?'$'+Number(b.actual_purchase_cost).toLocaleString():'—'}</td>
+        <td style="text-align:right"><span class="badge ${bcls}">${b.delta_pct!=null?((-b.delta_pct>=0?'+':''))+(-b.delta_pct).toFixed(1)+'%':'—'}</span></td>
+        <td>${b.sold_date||'—'}</td>
+      </tr>`;
+    });
+    bidsHtml += '</tbody></table>';
+  }
+
+  // Override section
+  const ov = d.active_override;
+  const ovType = ov ? ov.type : 'none';
+  const ovAdj = ov && ov.type==='fixed_adjustment' ? ov.adjustment_pct : '';
+  const setAt = ov && ov.set_at ? ov.set_at.substring(0,10) : '';
+
+  body.innerHTML = `
+    <div style="padding:18px 22px;border-bottom:1px solid #1e293b;background:#0f172a">
+      <div style="display:flex;justify-content:space-between;align-items:start;gap:20px">
+        <div>
+          <div style="font-size:18px;font-weight:800;color:#e2e8f0">${ymmTitle}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:2px">${miles} ${ctx.bid_id?' · bid #'+ctx.bid_id:''} ${ctx.vin?' · '+ctx.vin:''}</div>
+          ${ctx.delta_pct!=null?`<div style="font-size:12px;color:#94a3b8;margin-top:6px">AI rec ${aiRec} · sold ${actual} · <span style="color:${deltaColor};font-weight:700">${delta}</span></div>`:''}
+        </div>
+        <button onclick="closeSegmentModal()" style="background:transparent;border:1px solid #475569;color:#94a3b8;border-radius:4px;width:28px;height:28px;cursor:pointer;font-size:16px">×</button>
+      </div>
+    </div>
+
+    <div style="padding:18px 22px">
+      <div style="font-size:11px;color:#94a3b8;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Bias data we have on ${d.make} ${d.model}</div>
+      ${levelsHtml}
+      ${bidsHtml}
+
+      <div style="margin-top:18px;padding-top:14px;border-top:1px solid #1e293b">
+        <div style="font-size:11px;color:#c4b5fd;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;font-weight:700">⚙ Manual override for ${d.make} ${d.model}</div>
+        <div style="font-size:11px;color:#64748b;margin-bottom:12px">Applies to ALL ${d.make} ${d.model}s regardless of year or miles. Wins over auto tier-matching.</div>
+
+        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px;font-size:13px">
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+            <input type="radio" name="ovType" value="none" ${ovType==='none'?'checked':''}>
+            <span><b>Use system default</b> <span style="color:#64748b;font-size:11px">— let auto tier-match decide based on data</span></span>
+          </label>
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+            <input type="radio" name="ovType" value="force_zero" ${ovType==='force_zero'?'checked':''}>
+            <span><b>Force NO correction</b> <span style="color:#64748b;font-size:11px">— always use Gemini's raw price for ${d.make} ${d.model}</span></span>
+          </label>
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+            <input type="radio" name="ovType" value="fixed_adjustment" ${ovType==='fixed_adjustment'?'checked':''}>
+            <span><b>Force fixed adjustment</b> of
+              <input type="number" id="ovAdjPct" value="${ovAdj}" step="0.5" min="-50" max="50" style="width:60px;background:#0b0f19;color:#cbd5e1;border:1px solid #334155;border-radius:3px;padding:2px 6px;font-family:monospace;font-size:12px" oninput="document.querySelector('input[name=ovType][value=fixed_adjustment]').checked=true">
+              <span style="color:#cbd5e1">%</span>
+              <span style="color:#64748b;font-size:11px">— positive = bid higher, negative = bid lower</span>
+            </span>
+          </label>
+        </div>
+        ${ov?`<div style="font-size:11px;color:#64748b;margin-bottom:10px">Current override set ${setAt} by ${ov.set_by||'?'}</div>`:''}
+
+        <div style="display:flex;gap:10px;justify-content:flex-end">
+          <button onclick="closeSegmentModal()" style="background:transparent;color:#94a3b8;border:1px solid #475569;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer">Cancel</button>
+          <button onclick="saveSegmentOverride()" style="background:#1e3a8a;color:#fff;border:1px solid #3b82f6;border-radius:4px;padding:6px 16px;font-size:12px;font-weight:700;cursor:pointer">Save override</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function closeSegmentModal(){
+  document.getElementById('segModal').style.display = 'none';
+  _modalCurrent = null;
+}
+
+async function saveSegmentOverride(){
+  if(!_modalCurrent) return;
+  const ovType = document.querySelector('input[name=ovType]:checked')?.value;
+  if(!ovType) return alert('Pick an override option');
+  const body = {make: _modalCurrent.make, model: _modalCurrent.model};
+  if(ovType==='none') body.action = 'remove';
+  else if(ovType==='force_zero') body.action = 'force_zero';
+  else if(ovType==='fixed_adjustment'){
+    const pct = parseFloat(document.getElementById('ovAdjPct').value);
+    if(isNaN(pct)) return alert('Enter a numeric adjustment %');
+    body.action = 'fixed_adjustment';
+    body.adjustment_pct = pct;
+  }
+  const r = await fetch('/api/correction/segment-override',{
+    method:'POST', credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if(d.error) return alert('Save failed: '+d.error);
+  closeSegmentModal();
+  loadBiasPanel();   // refresh active overrides list at top
+  loadPreset(currentPresetKey()||'last30'); // refresh detail table badges
+}
+function currentPresetKey(){
+  const a = document.querySelector('.win-tab.active');
+  return a ? a.dataset.preset : null;
+}
+
+document.querySelectorAll('.win-tab').forEach(t=>{
+  t.addEventListener('click', ()=> loadPreset(t.dataset.preset));
+});
+document.getElementById('applyRange').addEventListener('click', ()=>{
+  const f = document.getElementById('dateFrom').value;
+  const t = document.getElementById('dateTo').value;
+  if (!f || !t) return alert('Pick both From and To dates.');
+  document.querySelectorAll('.win-tab').forEach(x=>x.classList.remove('active'));
+  loadData(f, t, 'Custom');
+});
+loadPreset('last30');
+
+
+// ─── Bias Correction panel ──────────────────────────────────────────
+function tierMatchLabel(seg, tiers){
+  const n=seg.n, bias=Math.abs(seg.bias_pct||0), sd=seg.stddev_pct;
+  for(const t of (tiers||[])){
+    if(n<(t.min_n||0)) continue;
+    if(bias<(t.min_abs_bias||0)) continue;
+    if(t.max_stddev!=null && (sd==null || sd>t.max_stddev)) continue;
+    return t.name;
+  }
+  return 'none';
+}
+
+let _bcConfig = null;
+
+async function loadBiasPanel(){
+  try{
+    const r = await fetch('/api/correction/active', {credentials:'same-origin'});
+    const d = await r.json();
+    if(d.error){console.error('bias load err:',d.error);return;}
+    _bcConfig = d.config;
+    document.getElementById('bcWindow').value = d.config.window_days || 30;
+    document.getElementById('bcConfigVer').textContent = d.config_id ? `config v${d.config_id} ${d.active?'(active)':'(inactive)'}` : 'no saved config — using defaults';
+
+    // ── Active manual overrides list ─────────────────────────────
+    const overrides = d.config.segment_overrides || [];
+    const ovWrap = document.getElementById('bcOverridesWrap');
+    const ovList = document.getElementById('bcOverridesList');
+    const normOverrides = overrides.map(o => typeof o === 'string' ? {key:o, type:'force_zero'} : o).filter(o => o.key);
+    if(normOverrides.length === 0){
+      ovWrap.style.display = 'none';
+    } else {
+      ovWrap.style.display = 'block';
+      ovList.innerHTML = '';
+      normOverrides.forEach(o => {
+        const [mk, md] = o.key.split('|');
+        const desc = o.type === 'force_zero'
+          ? `<span style="color:#fbbf24">Force NO correction</span>`
+          : o.type === 'fixed_adjustment'
+            ? `<span style="color:#86efac">Fixed adjustment <b>${o.adjustment_pct>0?'+':''}${o.adjustment_pct}%</b></span>`
+            : `<span style="color:#94a3b8">${o.type}</span>`;
+        const setAt = o.set_at ? o.set_at.substring(0,10) : '';
+        const div = document.createElement('div');
+        div.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px dashed #44403c';
+        div.innerHTML = `
+          <div><b>${mk} ${md}</b> &nbsp; ${desc}
+            ${setAt?`<span style="color:#64748b;font-size:10px">&nbsp;set ${setAt}</span>`:''}</div>
+          <button data-mk="${mk}" data-md="${md}" class="bcOvEdit" style="background:transparent;border:1px solid #475569;color:#94a3b8;border-radius:3px;padding:2px 8px;font-size:10px;cursor:pointer">edit</button>`;
+        ovList.appendChild(div);
+      });
+      document.querySelectorAll('.bcOvEdit').forEach(b => {
+        b.addEventListener('click', () => openSegmentModal({make:b.dataset.mk, model:b.dataset.md}));
+      });
+    }
+
+    // ── Status banner + toggle button ────────────────────────────
+    const enabled = !!d.config.enabled && !!d.active;
+    const eligible = (d.segments||[]).filter(s => {
+      const t = tierMatchLabel(s, d.config.tiers);
+      return t !== 'none';
+    });
+    const overrideCount = normOverrides.length;
+    const totalActive = eligible.length + overrideCount;
+    const status = document.getElementById('bcStatus');
+    const toggle = document.getElementById('bcToggle');
+    if(enabled){
+      status.style.borderColor = '#16a34a';
+      status.innerHTML = `<b style="color:#86efac">● ACTIVE</b> — bias correction is running on every assessment.<br>
+        <span style="color:#94a3b8;font-size:12px">${eligible.length} data-driven pattern${eligible.length===1?'':'s'} + ${overrideCount} manual override${overrideCount===1?'':'s'} active.</span>`;
+      toggle.textContent = 'PAUSE';
+      toggle.style.background = '#7f1d1d';
+      toggle.style.borderColor = '#dc2626';
+      toggle.disabled = false;
+      toggle.style.cursor = 'pointer';
+    } else {
+      status.style.borderColor = '#6b7280';
+      const subline = totalActive > 0
+        ? `<span style="color:#94a3b8;font-size:12px">If turned on now: ${eligible.length} data-driven correction${eligible.length===1?'':'s'} + ${overrideCount} manual override${overrideCount===1?'':'s'} would fire.</span>`
+        : `<span style="color:#94a3b8;font-size:12px">No corrections would fire — no qualifying segments and no manual overrides set. Click any matched bid below to set an override, or wait for more data.</span>`;
+      status.innerHTML = `<b style="color:#fbbf24">● PAUSED</b> — Gemini's answer is used as-is, no corrections applied.<br>${subline}`;
+      // Allow activation if EITHER eligible patterns OR overrides exist
+      toggle.textContent = totalActive > 0 ? 'ACTIVATE' : 'NOTHING TO ACTIVATE';
+      toggle.disabled = totalActive === 0;
+      toggle.style.background = totalActive > 0 ? '#1e3a8a' : '#374151';
+      toggle.style.borderColor = totalActive > 0 ? '#3b82f6' : '#4b5563';
+      toggle.style.cursor = totalActive > 0 ? 'pointer' : 'not-allowed';
+    }
+
+    // ── Eligible patterns table (simplified, read-only) ──────────
+    const elig = document.getElementById('bcEligible');
+    elig.innerHTML = '';
+    if(eligible.length === 0){
+      elig.innerHTML = `<tr><td colspan="5" style="padding:24px;text-align:center;color:#64748b;font-style:italic">
+        No patterns have enough data yet. Need ≥3 unique sales of the same make+model
+        with bias ≥ 4% before a correction can fire safely.
+      </td></tr>`;
+    } else {
+      eligible.forEach(s=>{
+        const tier = tierMatchLabel(s, d.config.tiers);
+        const tierObj = (d.config.tiers||[]).find(t=>t.name===tier);
+        const strength = tierObj ? tierObj.strength : 0;
+        const biasColor = s.bias_pct>0?'#86efac':s.bias_pct<0?'#fca5a5':'#94a3b8';
+        const direction = s.bias_pct>0 ? 'AI under-bid' : 'AI over-bid';
+        const action_pct = (strength * Math.abs(s.bias_pct)).toFixed(1);
+        const dirArrow = s.bias_pct>0 ? '↑' : '↓';
+        const bandLabel = (s.year_band==='any' && s.mileage_band==='any')
+          ? '<span style="color:#64748b;font-size:11px">(all years, all miles)</span>'
+          : `<span style="color:#94a3b8;font-size:11px">${s.year_band==='any'?'any year':s.year_band} · ${s.mileage_band==='any'?'any miles':s.mileage_band}</span>`;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><b>${s.make}</b> ${s.model}<br>${bandLabel}</td>
+          <td style="text-align:right;font-weight:700;font-size:14px">${s.n}</td>
+          <td style="text-align:right;color:${biasColor};font-weight:700">${s.bias_pct>0?'+':''}${s.bias_pct?.toFixed(1)}%<br><span style="font-size:10px;font-weight:400;color:#64748b">${direction}</span></td>
+          <td style="text-align:right;color:#94a3b8">±${s.stddev_pct?.toFixed(1) || '?'}%</td>
+          <td style="font-size:11px;color:#cbd5e1">
+            <span class="badge ${tier==='strong'?'b-green':tier==='medium'?'b-yellow':'b-red'}">${tier}</span>
+            &nbsp;Adjust ${dirArrow} <b>${action_pct}%</b> of Gemini's price
+          </td>
+        `;
+        elig.appendChild(tr);
+      });
+    }
+
+    // ── Tiers table (advanced, hidden by default) ────────────────
+    const tb = document.getElementById('bcTiers');
+    tb.innerHTML = '';
+    (d.config.tiers||[]).forEach((t,i)=>{
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><span class="badge ${t.name==='strong'?'b-green':t.name==='medium'?'b-yellow':'b-red'}">${t.name}</span></td>
+        <td><input type="number" data-tier="${i}" data-k="min_n" value="${t.min_n}" style="width:60px;background:#0b0f19;color:#cbd5e1;border:1px solid #334155;border-radius:3px;padding:2px 4px;font-family:monospace;font-size:11px"></td>
+        <td><input type="number" step="0.1" data-tier="${i}" data-k="min_abs_bias" value="${t.min_abs_bias}" style="width:60px;background:#0b0f19;color:#cbd5e1;border:1px solid #334155;border-radius:3px;padding:2px 4px;font-family:monospace;font-size:11px"> %</td>
+        <td><input type="number" step="0.1" data-tier="${i}" data-k="max_stddev" value="${t.max_stddev==null?'':t.max_stddev}" placeholder="—" style="width:60px;background:#0b0f19;color:#cbd5e1;border:1px solid #334155;border-radius:3px;padding:2px 4px;font-family:monospace;font-size:11px"> %</td>
+        <td><input type="number" step="0.05" min="0" max="1" data-tier="${i}" data-k="strength" value="${t.strength}" style="width:60px;background:#0b0f19;color:#cbd5e1;border:1px solid #334155;border-radius:3px;padding:2px 4px;font-family:monospace;font-size:11px"></td>
+      `;
+      tb.appendChild(tr);
+    });
+  }catch(e){console.error('bias panel err:',e);}
+}
+
+async function bcToggleActive(){
+  // One-click toggle: read current config, flip enabled, save & activate
+  const r = await fetch('/api/correction/active', {credentials:'same-origin'});
+  const d = await r.json();
+  const cfg = d.config || {};
+  const newEnabled = !(cfg.enabled && d.active);
+  cfg.enabled = newEnabled;
+  const desc = newEnabled ? 'activated via toggle ' + new Date().toISOString().slice(0,16)
+                          : 'paused via toggle ' + new Date().toISOString().slice(0,16);
+  const sr = await fetch('/api/correction/save', {
+    method:'POST', credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({config:cfg, description:desc, activate:true}),
+  });
+  const sd = await sr.json();
+  if(sd.error){alert('Toggle failed: '+sd.error);return;}
+  loadBiasPanel();
+}
+
+function readPanelConfig(){
+  const cfg = JSON.parse(JSON.stringify(_bcConfig||{}));
+  // enabled flag is controlled by the ACTIVATE/PAUSE button now, not in here.
+  // When user clicks "Save thresholds" we keep current enabled state.
+  cfg.window_days = parseInt(document.getElementById('bcWindow').value)||30;
+  cfg.tiers = (cfg.tiers||[]).map((t,i)=>({...t}));
+  document.querySelectorAll('#bcTiers input').forEach(inp=>{
+    const i = parseInt(inp.dataset.tier), k = inp.dataset.k;
+    let v = inp.value;
+    if(k==='max_stddev' && v==='') v = null;
+    else v = parseFloat(v);
+    cfg.tiers[i][k] = v;
+  });
+  return cfg;
+}
+
+document.getElementById('bcPreview').addEventListener('click', async ()=>{
+  const cfg = readPanelConfig();
+  const box = document.getElementById('bcPreviewBox');
+  box.style.display = 'block';
+  box.textContent = 'Computing…';
+  try{
+    const r = await fetch('/api/correction/preview',{
+      method:'POST', credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({config:cfg, window_days:cfg.window_days}),
+    });
+    const d = await r.json();
+    if(d.error){box.textContent='ERROR: '+d.error;return;}
+    const dir = d.avg_shift_dollars>0?'↑':d.avg_shift_dollars<0?'↓':'·';
+    const verdict = d.improved>d.worsened?'<span style="color:#86efac">would have IMPROVED on net</span>':
+                    d.worsened>d.improved?'<span style="color:#fca5a5">would have WORSENED on net</span>':
+                    '<span style="color:#94a3b8">net neutral</span>';
+    const staleNote = (d.n_stale_excluded||0) > 0
+      ? `<br>&nbsp;&nbsp;<span style="color:#64748b;font-size:11px">(${d.n_stale_excluded} stale matches excluded — actual purchase was outside the ${d.window_days}d window)</span>`
+      : '';
+    box.innerHTML = `
+      <b style="color:#c4b5fd">Replay against last ${d.window_days}d window (${d.n_total_bids} fresh bids in scope):</b>${staleNote}<br>
+      &nbsp;&nbsp;Would correct: <b style="color:#cbd5e1">${d.n_corrected}</b> of ${d.n_total_bids}<br>
+      &nbsp;&nbsp;Avg shift: <b style="color:#cbd5e1">${dir} $${Math.abs(d.avg_shift_dollars).toLocaleString()}</b> (${d.avg_shift_pct>0?'+':''}${d.avg_shift_pct}%)<br>
+      &nbsp;&nbsp;Of corrected — <span style="color:#86efac">${d.improved} improved</span> · <span style="color:#fca5a5">${d.worsened} worsened</span> · <span style="color:#94a3b8">${d.unchanged} unchanged</span><br>
+      &nbsp;&nbsp;Improvement rate: <b>${d.improvement_pct}%</b> &nbsp;&nbsp; ${verdict}`;
+  }catch(e){box.textContent='ERROR: '+e.message;}
+});
+
+document.getElementById('bcSave').addEventListener('click', async ()=>{
+  const cfg = readPanelConfig();
+  // Preserve whatever the current enabled state is — user uses the toggle for that
+  const ar = await fetch('/api/correction/active', {credentials:'same-origin'});
+  const ad = await ar.json();
+  cfg.enabled = !!(ad.config && ad.config.enabled);
+  const desc = 'thresholds tuned ' + new Date().toISOString().slice(0,16);
+  const r = await fetch('/api/correction/save',{
+    method:'POST', credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({config:cfg, description:desc, activate:!!ad.active}),
+  });
+  const d = await r.json();
+  if(d.error){alert('Save failed: '+d.error);return;}
+  alert(`Thresholds saved (v${d.id}). State unchanged: ${cfg.enabled?'active':'paused'}.`);
+  loadBiasPanel();
+});
+
+document.getElementById('bcToggle').addEventListener('click', ()=>{
+  if(document.getElementById('bcToggle').disabled) return;
+  bcToggleActive();
+});
+
+document.getElementById('bcRefreshSeg').addEventListener('click', async ()=>{
+  const btn = document.getElementById('bcRefreshSeg');
+  btn.textContent = '⟳ Refreshing…'; btn.disabled = true;
+  await fetch('/api/correction/refresh', {method:'POST', credentials:'same-origin'});
+  btn.textContent = '↻ Refresh segments now'; btn.disabled = false;
+  loadBiasPanel();
+});
+
+loadBiasPanel();
+</script>
+<!-- ─── Per-segment drill-down modal ────────────────────────────────── -->
+<div id="segModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#0f172a;border:1px solid #3b3b6e;border-radius:10px;width:100%;max-width:760px;max-height:90vh;overflow-y:auto;font-family:'Inter',system-ui,sans-serif;color:#e2e8f0">
+    <div id="segModalBody"></div>
+  </div>
+</div>
+</body>
+</html>

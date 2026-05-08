@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Workers — Experience Wholesale</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh;padding:24px}
+.wrap{max-width:1400px;margin:0 auto}
+.head{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;gap:16px;flex-wrap:wrap}
+.title-wrap{display:flex;align-items:center;gap:12px}
+.logo-mark{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;font-size:16px;font-weight:800;color:#fff}
+.title{font-size:18px;font-weight:700;color:#f1f5f9}
+.title-sub{font-size:12px;color:#64748b;margin-top:2px}
+.nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.nav a{font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px}
+.nav a:hover{color:#e2e8f0;border-color:#334155}
+.nav a.active{color:#3b82f6;border-color:rgba(59,130,246,.4);background:rgba(59,130,246,.08)}
+.section{margin-bottom:32px}
+.section-title{font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.section-title .count{background:#1e293b;color:#94a3b8;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px}
+.card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:16px;position:relative}
+.card.degraded{border-color:rgba(245,158,11,.4)}
+.card.paused{border-color:rgba(100,116,139,.5);opacity:.85}
+.card.dead{border-color:rgba(239,68,68,.4)}
+.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.worker-id{font-size:14px;font-weight:700;color:#f1f5f9;font-family:'JetBrains Mono','Consolas',monospace}
+.badge{font-size:10px;font-weight:700;padding:3px 8px;border-radius:8px;text-transform:uppercase;letter-spacing:.4px}
+.b-primary{background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.3)}
+.b-standby{background:rgba(59,130,246,.12);color:#93c5fd;border:1px solid rgba(59,130,246,.3)}
+.b-degraded{background:rgba(245,158,11,.15);color:#fbbf24;border:1px solid rgba(245,158,11,.3)}
+.b-paused{background:rgba(100,116,139,.2);color:#94a3b8;border:1px solid rgba(100,116,139,.3)}
+.b-dead{background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.3)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:12px;margin-bottom:10px}
+.kv .k{color:#64748b;font-weight:500}
+.kv .v{color:#e2e8f0;font-family:'JetBrains Mono','Consolas',monospace;font-size:11.5px}
+.hb-fresh{color:#4ade80}
+.hb-stale{color:#f87171}
+.current-bid{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px;margin-bottom:10px}
+.current-bid .label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px}
+.current-bid .bid-line{font-size:13px;color:#e2e8f0;margin-bottom:6px}
+.dots{display:flex;gap:6px;align-items:center;font-size:11px}
+.dot{width:10px;height:10px;border-radius:50%;border:1.5px solid #334155;display:inline-block}
+.dot.started{background:#fbbf24;border-color:#fbbf24}
+.dot.done{background:#4ade80;border-color:#4ade80}
+.dot-label{font-size:10px;color:#64748b;margin-right:6px}
+.elapsed{font-size:11px;color:#fbbf24;margin-left:auto;font-family:'JetBrains Mono','Consolas',monospace}
+.elapsed.over{color:#f87171}
+.actions{display:flex;gap:6px;margin-top:10px}
+.btn{flex:1;padding:6px 10px;border-radius:6px;border:1px solid #334155;background:transparent;color:#94a3b8;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;text-transform:uppercase;letter-spacing:.4px}
+.btn:hover{color:#e2e8f0;border-color:#475569;background:#1e293b}
+.btn.danger{color:#f87171;border-color:rgba(239,68,68,.3)}
+.btn.danger:hover{background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.5)}
+.empty-state{background:#111827;border:1px dashed #1e293b;border-radius:12px;padding:24px;text-align:center;color:#64748b;font-size:13px}
+.empty-state .check{font-size:24px;color:#4ade80;margin-bottom:6px}
+table{width:100%;border-collapse:collapse;background:#111827;border:1px solid #1e293b;border-radius:12px;overflow:hidden;font-size:12.5px}
+th{text-align:left;padding:10px 14px;font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.6px;background:#0f172a;border-bottom:1px solid #1e293b}
+td{padding:10px 14px;border-bottom:1px solid #1e293b;color:#e2e8f0}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(59,130,246,.04)}
+.mono{font-family:'JetBrains Mono','Consolas',monospace;font-size:11.5px}
+.muted{color:#64748b}
+.act-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.chip{display:inline-block;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600;background:#1e293b;color:#94a3b8;font-family:'JetBrains Mono','Consolas',monospace}
+.phase-track{display:flex;align-items:center;gap:6px;font-size:11px;color:#94a3b8;flex-wrap:wrap}
+.phase-track .pdone{color:#4ade80}
+.phase-track .pstart{color:#fbbf24}
+.refresh-status{font-size:11px;color:#64748b;font-family:'JetBrains Mono','Consolas',monospace}
+.live-dot{width:8px;height:8px;border-radius:50%;background:#4ade80;animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+/* Proxmox enrichment styles (added 2026-05-01) */
+.host-strip{background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:10px 14px;margin-bottom:18px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12.5px;color:#cbd5e1;font-family:'JetBrains Mono','Consolas',monospace}
+.host-strip .host-label{color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;font-family:'Inter',system-ui,sans-serif}
+.host-strip .sep{color:#334155}
+.host-strip .host-err{color:#f87171}
+.host-strip a{color:#93c5fd;text-decoration:none;margin-left:auto}
+.host-strip a:hover{text-decoration:underline}
+.vm-block{margin-top:10px;padding-top:10px;border-top:1px solid #1e293b}
+.vm-row{display:flex;align-items:center;gap:8px;font-size:11.5px;margin-bottom:6px;flex-wrap:wrap}
+.vm-status{font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;text-transform:uppercase;letter-spacing:.4px}
+.vm-status.running{background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.3)}
+.vm-status.stopped{background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.3)}
+.vm-status.paused{background:rgba(100,116,139,.2);color:#94a3b8;border:1px solid rgba(100,116,139,.3)}
+.vm-status.absent{background:rgba(100,116,139,.15);color:#64748b;border:1px solid rgba(100,116,139,.25)}
+.vm-status.unknown{background:rgba(245,158,11,.15);color:#fbbf24;border:1px solid rgba(245,158,11,.3)}
+.vm-mem-bar{flex:1;min-width:80px;height:6px;background:#1e293b;border-radius:3px;overflow:hidden;position:relative}
+.vm-mem-bar > span{display:block;height:100%;background:#3b82f6;transition:width .3s}
+.vm-mem-bar.hot > span{background:#f87171}
+.vm-meta{color:#64748b;font-family:'JetBrains Mono','Consolas',monospace;font-size:11px}
+.vm-meta .mv{color:#cbd5e1}
+.vm-snap-link{color:#93c5fd;text-decoration:none;font-size:11px}
+.vm-snap-link:hover{text-decoration:underline}
+.vm-actions{display:flex;gap:6px;margin-top:8px}
+.vm-btn{flex:1;padding:5px 8px;border-radius:6px;border:1px solid #334155;background:transparent;color:#94a3b8;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:4px}
+.vm-btn:hover{color:#e2e8f0;border-color:#475569;background:#1e293b}
+.vm-btn[disabled]{opacity:.4;cursor:not-allowed}
+.vm-btn .ic{font-size:12px}
+.vm-err{color:#f87171;font-size:11px;font-style:italic}
+/* Services panel (added 2026-05-02) */
+.svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.svc-card{background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.svc-head{display:flex;align-items:center;gap:8px}
+.svc-name{font-family:'JetBrains Mono','Consolas',monospace;font-size:13px;font-weight:600;color:#e2e8f0}
+.svc-meta{color:#64748b;font-family:'JetBrains Mono','Consolas',monospace;font-size:11px;line-height:1.5}
+.svc-meta .mv{color:#cbd5e1}
+.svc-actions{display:flex;gap:6px;margin-top:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div class="title-wrap">
+      <div class="logo-mark">EW</div>
+      <div>
+        <div class="title">Worker Monitor</div>
+        <div class="title-sub">Live phase progress + stuck-bid watchdog</div>
+      </div>
+    </div>
+    <div class="nav">
+      <a href="/">Dashboard</a>
+      <a href="/admin/costs">Costs</a>
+      <a href="/admin/ai-levers">AI Levers</a>
+      <a href="/admin/workers" class="active">Workers</a>
+      <span class="live-dot"></span>
+      <span class="refresh-status" id="refresh-status">connecting…</span>
+    </div>
+  </div>
+
+  <!-- Proxmox host summary strip (added 2026-05-01) -->
+  <div class="host-strip" id="host-strip">
+    <span class="host-label">Proxmox host</span>
+    <span class="muted">connecting…</span>
+  </div>
+
+  <!-- Services panel (added 2026-05-02) -->
+  <div class="section">
+    <div class="section-title">Services <span class="count" id="service-count">0</span></div>
+    <div class="svc-grid" id="services-grid"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Workers <span class="count" id="worker-count">0</span></div>
+    <div class="grid" id="workers-grid"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Stuck Bids <span class="count" id="stuck-count">0</span></div>
+    <div id="stuck-wrap"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Recent Activity <span class="count" id="activity-count">0</span></div>
+    <div id="activity-wrap"></div>
+  </div>
+</div>
+
+<script>
+const fmtAgo = (sec) => {
+  if (sec === null || sec === undefined) return '—';
+  if (sec < 60) return sec + 's ago';
+  if (sec < 3600) return Math.floor(sec/60) + 'm ' + (sec%60) + 's ago';
+  return Math.floor(sec/3600) + 'h ' + Math.floor((sec%3600)/60) + 'm ago';
+};
+const fmtDur = (ms) => {
+  if (!ms && ms !== 0) return '—';
+  const s = Math.round(ms/1000);
+  if (s < 60) return s + 's';
+  return Math.floor(s/60) + 'm ' + (s%60) + 's';
+};
+const fmtTime = (iso) => {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString('en-US', {hour12:false});
+  } catch(e){ return iso; }
+};
+
+function workerCard(w){
+  const eff = w.effective_priority || w.priority || 'unknown';
+  const hbDead = (w.last_hb_sec === null || w.last_hb_sec > 180);
+  const hbStale = w.last_hb_sec > 90;
+  let cardClass = 'card';
+  let badge = '<span class="badge b-' + eff + '">' + eff + '</span>';
+  if (w.paused) { cardClass += ' paused'; badge = '<span class="badge b-paused">PAUSED</span>'; }
+  else if (hbDead) { cardClass += ' dead'; badge = '<span class="badge b-dead">DEAD</span>'; }
+  else if (eff === 'degraded') { cardClass += ' degraded'; }
+
+  // current bid + phase dots
+  let currentBlock = '';
+  if (w.current_bid_id){
+    const ph = w.phases || {};
+    const dotCls = (s) => s === 'done' ? 'done' : (s === 'started' ? 'started' : '');
+    const elapsed = w.current_elapsed_sec || 0;
+    const elClass = elapsed > 90 ? 'elapsed over' : 'elapsed';
+    currentBlock = '<div class="current-bid">' +
+      '<div class="label">Currently working on</div>' +
+      '<div class="bid-line"><a href="/bid/' + w.current_bid_id + '" style="color:#93c5fd;text-decoration:none">Bid #' + w.current_bid_id + '</a></div>' +
+      '<div class="dots">' +
+        '<span class="dot-label">vauto</span><span class="dot ' + dotCls(ph.vauto) + '"></span>' +
+        '<span class="dot-label" style="margin-left:8px">acc</span><span class="dot ' + dotCls(ph.accutrade) + '"></span>' +
+        '<span class="dot-label" style="margin-left:8px">ipkt</span><span class="dot ' + dotCls(ph.ipacket) + '"></span>' +
+        '<span class="' + elClass + '">' + elapsed + 's</span>' +
+      '</div>' +
+    '</div>';
+  }
+
+  const hbCls = hbDead ? 'hb-stale' : (hbStale ? 'hb-stale' : 'hb-fresh');
+
+  return '<div class="' + cardClass + '">' +
+    '<div class="card-head"><div class="worker-id">' + w.worker_id + '</div>' + badge + '</div>' +
+    '<div class="kv">' +
+      '<span class="k">Heartbeat</span><span class="v ' + hbCls + '">' + fmtAgo(w.last_hb_sec) + '</span>' +
+      '<span class="k">Today</span><span class="v">' + (w.lookups_today || 0) + ' lookups</span>' +
+      '<span class="k">All-time</span><span class="v muted">' + (w.lookups_done || 0) + '</span>' +
+      '<span class="k">IP</span><span class="v muted">' + (w.last_seen_ip || '—') + '</span>' +
+      (w.pause_reason ? '<span class="k">Reason</span><span class="v muted">' + w.pause_reason + '</span>' : '') +
+      (w.pending_exit ? '<span class="k">Exit</span><span class="v" style="color:#fbbf24">pending</span>' : '') +
+    '</div>' +
+    currentBlock +
+    '<div class="actions">' +
+      (w.paused
+        ? '<button class="btn" onclick="workerAction(\'' + w.worker_id + '\',\'unpause\')">Unpause</button>'
+        : '<button class="btn" onclick="workerAction(\'' + w.worker_id + '\',\'pause\')">Pause</button>') +
+      '<button class="btn danger" onclick="workerAction(\'' + w.worker_id + '\',\'exit\')">Force Exit</button>' +
+    '</div>' +
+    vmBlock(w) +
+  '</div>';
+}
+
+// ─── Proxmox enrichment renderers (added 2026-05-01) ───
+function fmtUptime(sec){
+  if (sec === null || sec === undefined || sec <= 0) return '—';
+  if (sec < 60) return sec + 's';
+  if (sec < 3600) return Math.floor(sec/60) + 'm';
+  if (sec < 86400) return Math.floor(sec/3600) + 'h ' + Math.floor((sec%3600)/60) + 'm';
+  return Math.floor(sec/86400) + 'd ' + Math.floor((sec%86400)/3600) + 'h';
+}
+function fmtSnap(sec){
+  if (sec === null || sec === undefined) return 'none';
+  if (sec < 60) return sec + 's ago';
+  if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+  if (sec < 86400) return Math.floor(sec/3600) + 'h ago';
+  return Math.floor(sec/86400) + 'd ago';
+}
+function vmBlock(w){
+  const vm = w.vm;
+  if (!vm) return '';  // worker not mapped to any vmid
+  const vmid = vm.vmid;
+
+  // Error / VM not present yet (clones not built)
+  if (vm.error || vm.status === 'absent'){
+    return '<div class="vm-block">' +
+      '<div class="vm-row">' +
+        '<span class="vm-status absent">VM ' + (vmid || '?') + '</span>' +
+        '<span class="vm-err">' + (vm.error || 'VM offline') + '</span>' +
+      '</div>' +
+    '</div>';
+  }
+
+  const status = (vm.status || 'unknown').toLowerCase();
+  const memUsed = vm.mem_used_mb || 0;
+  const memTotal = vm.mem_total_mb || 0;
+  const memPct = memTotal ? Math.min(100, Math.round((memUsed / memTotal) * 100)) : 0;
+  const memHot = memPct > 85;
+  const memUsedGb = (memUsed / 1024).toFixed(1);
+  const memTotalGb = (memTotal / 1024).toFixed(1);
+  const cpuPct = (vm.cpu_pct === null || vm.cpu_pct === undefined) ? '—' : vm.cpu_pct.toFixed(1);
+  const isRunning = status === 'running';
+  const snapTxt = vm.snapshot_count
+    ? 'Snap ' + fmtSnap(vm.last_snapshot_age_sec) + ' (' + vm.snapshot_count + ')'
+    : 'No snaps';
+
+  return '<div class="vm-block">' +
+    '<div class="vm-row">' +
+      '<span class="vm-status ' + status + '">' + status + '</span>' +
+      '<span class="vm-meta">vmid <span class="mv">' + vmid + '</span></span>' +
+      '<span class="vm-meta">CPU <span class="mv">' + cpuPct + '%</span></span>' +
+      '<span class="vm-meta">Up <span class="mv">' + fmtUptime(vm.uptime_sec) + '</span></span>' +
+    '</div>' +
+    '<div class="vm-row">' +
+      '<span class="vm-meta">RAM <span class="mv">' + memUsedGb + '/' + memTotalGb + ' GB</span></span>' +
+      '<div class="vm-mem-bar' + (memHot ? ' hot' : '') + '"><span style="width:' + memPct + '%"></span></div>' +
+      '<a class="vm-snap-link" href="/admin/vms#vm-' + vmid + '">' + snapTxt + '</a>' +
+    '</div>' +
+    '<div class="vm-actions">' +
+      '<button class="vm-btn" title="Soft restart worker process via NSSM" onclick="vmAction(\'restart-worker\',\'' + w.worker_id + '\',' + vmid + ')">' +
+        '<span class="ic">🔄</span> Worker</button>' +
+      '<button class="vm-btn" title="Reboot the entire VM" onclick="vmAction(\'reboot-vm\',\'' + w.worker_id + '\',' + vmid + ')"' + (isRunning ? '' : ' disabled') + '>' +
+        '<span class="ic">🔃</span> VM</button>' +
+      '<button class="vm-btn" title="Create a Proxmox snapshot" onclick="vmAction(\'snapshot\',\'' + w.worker_id + '\',' + vmid + ')"' + (isRunning ? '' : ' disabled') + '>' +
+        '<span class="ic">📸</span> Snap</button>' +
+    '</div>' +
+  '</div>';
+}
+
+function renderHostStrip(px){
+  const el = document.getElementById('host-strip');
+  if (!el) return;
+  if (!px || !px.ok || !px.host){
+    const msg = (px && px.error) ? px.error : 'unreachable';
+    el.innerHTML = '<span class="host-label">Proxmox host</span>' +
+      '<span class="host-err">' + msg + '</span>' +
+      '<a href="/admin/vms">VMs page →</a>';
+    return;
+  }
+  const h = px.host;
+  el.innerHTML =
+    '<span class="host-label">Proxmox host</span>' +
+    '<span>' + h.cpu_pct.toFixed(1) + '% CPU</span>' +
+    '<span class="sep">·</span>' +
+    '<span>' + h.mem_used_gb + '/' + h.mem_total_gb + ' GB RAM (' + h.mem_free_gb + ' GB free)</span>' +
+    '<span class="sep">·</span>' +
+    '<span>' + h.vm_total + ' VMs (' + h.vm_running + ' running)</span>' +
+    '<span class="sep">·</span>' +
+    '<span>capacity for ~' + h.capacity_more_workers + ' more workers</span>' +
+    '<a href="/admin/vms">VMs page →</a>';
+}
+
+async function vmAction(kind, workerId, vmid){
+  let url, msg;
+  if (kind === 'restart-worker'){
+    url = '/api/admin/workers/' + encodeURIComponent(workerId) + '/exit';
+    msg = 'Soft-restart worker ' + workerId + ' (NSSM will relaunch on next heartbeat)?';
+  } else if (kind === 'reboot-vm'){
+    url = '/api/proxmox/vm/' + vmid + '/reboot';
+    msg = 'Reboot VM ' + vmid + ' (full VM cycle — worker will disappear briefly)?';
+  } else if (kind === 'snapshot'){
+    const name = 'quick_' + Math.floor(Date.now()/1000);
+    url = '/api/proxmox/vm/' + vmid + '/snapshot';
+    try {
+      const r = await fetch(url, {
+        method:'POST',
+        credentials:'same-origin',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({name: name, vmstate: false}),
+      });
+      const j = await r.json().catch(()=>({}));
+      if (!r.ok || j.ok === false){
+        alert('Snapshot failed: ' + (j.error || ('HTTP ' + r.status)));
+      }
+    } catch(e){
+      alert('Snapshot error: ' + e.message);
+    }
+    refresh();
+    return;
+  } else {
+    return;
+  }
+  try {
+    const r = await fetch(url, {method:'POST', credentials:'same-origin'});
+    const j = await r.json().catch(()=>({}));
+    if (!r.ok || j.ok === false){
+      alert('Action failed: ' + (j.error || ('HTTP ' + r.status)));
+    }
+  } catch(e){
+    alert('Error: ' + e.message);
+  }
+  refresh();
+}
+// Services panel (added 2026-05-02)
+function serviceCard(s){
+  const status = (s.status || 'unknown').toLowerCase();
+  const memUsed = s.mem_used_mb || 0;
+  const memTotal = s.mem_total_mb || 0;
+  const memPct = s.mem_pct || 0;
+  const cpu = (s.cpu_pct === null || s.cpu_pct === undefined) ? '—' : s.cpu_pct.toFixed(1) + '%';
+  const isRunning = status === 'running';
+  return '' +
+    '<div class="svc-card">' +
+      '<div class="svc-head">' +
+        '<span class="svc-name">' + (s.name || ('vmid ' + s.vmid)) + '</span>' +
+        '<span class="vm-status ' + status + '">' + status + '</span>' +
+      '</div>' +
+      '<div class="svc-meta">' +
+        'RAM <span class="mv">' + memUsed + '/' + memTotal + ' MB</span> (' + memPct + '%)' +
+        ' · CPU <span class="mv">' + cpu + '</span>' +
+        ' · Up <span class="mv">' + fmtUptime(s.uptime_sec) + '</span>' +
+        '<br>vmid <span class="mv">' + s.vmid + '</span> on <span class="mv">' + (s.node || 'pve') + '</span>' +
+      '</div>' +
+      '<div class="svc-actions">' +
+        '<button class="vm-btn" ' + (isRunning ? '' : 'disabled') +
+          ' onclick="svcAction(\'reboot\',' + s.vmid + ')" title="Reboot the VM (Proxmox cycle)">' +
+          '<span class="ic">🔃</span> VM</button>' +
+        '<button class="vm-btn" onclick="svcAction(\'snapshot\',' + s.vmid + ')" title="Take a quick snapshot">' +
+          '<span class="ic">📸</span> Snap</button>' +
+      '</div>' +
+    '</div>';
+}
+async function svcAction(kind, vmid){
+  let url;
+  if (kind === 'reboot'){
+    url = '/api/proxmox/vm/' + vmid + '/reboot';
+  } else if (kind === 'snapshot'){
+    const name = 'quick_' + Math.floor(Date.now()/1000);
+    try {
+      const r = await fetch('/api/proxmox/vm/' + vmid + '/snapshot', {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name: name, vmstate: false}),
+      });
+      const j = await r.json().catch(()=>({}));
+      if (!r.ok || j.ok === false) alert('Snapshot failed: ' + (j.error || ('HTTP ' + r.status)));
+    } catch(e){ alert('Snapshot error: ' + e.message); }
+    refresh(); return;
+  } else { return; }
+  try {
+    const r = await fetch(url, {method:'POST', credentials:'same-origin'});
+    const j = await r.json().catch(()=>({}));
+    if (!r.ok || j.ok === false) alert('Action failed: ' + (j.error || ('HTTP ' + r.status)));
+  } catch(e){ alert('Error: ' + e.message); }
+  refresh();
+}
+function renderServices(rows){
+  const grid = document.getElementById('services-grid');
+  const cnt = document.getElementById('service-count');
+  if (!grid) return;
+  rows = rows || [];
+  cnt.textContent = rows.length;
+  if (!rows.length){
+    grid.innerHTML = '<div class="empty-state">No services running</div>';
+    return;
+  }
+  grid.innerHTML = rows.map(serviceCard).join('');
+}
+// ─── end Proxmox enrichment renderers ───
+
+function stuckTable(rows){
+  if (!rows.length){
+    return '<div class="empty-state"><div class="check">✓</div>No stuck bids</div>';
+  }
+  let html = '<table><thead><tr>' +
+    '<th>Bid</th><th>VIN</th><th>Vehicle</th><th>Worker</th><th>Claimed</th><th>Last Phase</th><th>Phase Age</th><th></th>' +
+    '</tr></thead><tbody>';
+  for (const r of rows){
+    html += '<tr>' +
+      '<td><a href="/bid/' + r.bid_id + '" style="color:#93c5fd;text-decoration:none">#' + r.bid_id + '</a></td>' +
+      '<td class="mono">' + (r.vin || '—') + '</td>' +
+      '<td>' + (r.ymm || '—') + '</td>' +
+      '<td><span class="chip">' + (r.worker_id || '—') + '</span></td>' +
+      '<td class="mono">' + fmtAgo(r.age_sec) + '</td>' +
+      '<td>' + (r.last_phase || '—') + (r.last_state ? ' / ' + r.last_state : '') + '</td>' +
+      '<td class="mono" style="color:#f87171">' + fmtAgo(r.last_phase_age_sec) + '</td>' +
+      '<td><button class="btn danger" onclick="releaseClaim(' + r.bid_id + ')">Release</button></td>' +
+    '</tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+function activityTable(rows){
+  if (!rows.length){
+    return '<div class="empty-state">No completed activity yet.</div>';
+  }
+  let html = '<table><thead><tr>' +
+    '<th>Bid</th><th>Worker</th><th>Vehicle</th><th>Phases</th><th>Total</th><th>Status</th><th>Done</th>' +
+    '</tr></thead><tbody>';
+  for (const r of rows){
+    // Compress phase markers into a horizontal track
+    const phStr = r.phases.map(p => {
+      const cls = p.state === 'done' ? 'pdone' : 'pstart';
+      const sym = p.state === 'done' ? '✓' : '▸';
+      return '<span class="' + cls + '">' + p.phase + ' ' + sym + ' ' + fmtTime(p.ts) + '</span>';
+    }).join(' <span class="muted">→</span> ');
+    const statusCls = r.status === 'ok' ? 'pdone' : (r.status && r.status.startsWith('released') ? 'pstart' : '');
+    html += '<tr>' +
+      '<td><a href="/bid/' + r.bid_id + '" style="color:#93c5fd;text-decoration:none">#' + r.bid_id + '</a></td>' +
+      '<td><span class="chip">' + (r.worker_id || '—') + '</span></td>' +
+      '<td>' + (r.ymm || '—') + '</td>' +
+      '<td><div class="phase-track">' + (phStr || '<span class="muted">no markers</span>') + '</div></td>' +
+      '<td class="mono">' + fmtDur(r.duration_ms) + '</td>' +
+      '<td><span class="' + statusCls + '">' + (r.status || '—') + '</span></td>' +
+      '<td class="mono muted">' + fmtTime(r.completed_at) + '</td>' +
+    '</tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+async function refresh(){
+  try {
+    const r = await fetch('/api/admin/workers/snapshot', {credentials:'same-origin'});
+    if (r.status === 302 || r.redirected) { location.href = '/login'; return; }
+    const d = await r.json();
+    document.getElementById('workers-grid').innerHTML = d.workers.map(workerCard).join('');
+    document.getElementById('worker-count').textContent = d.workers.length;
+    renderHostStrip(d.proxmox);
+    renderServices(d.services);
+    document.getElementById('stuck-wrap').innerHTML = stuckTable(d.stuck);
+    document.getElementById('stuck-count').textContent = d.stuck.length;
+    document.getElementById('activity-wrap').innerHTML = activityTable(d.activity);
+    document.getElementById('activity-count').textContent = d.activity.length;
+    const t = new Date();
+    document.getElementById('refresh-status').textContent = 'updated ' + t.toLocaleTimeString('en-US',{hour12:false});
+  } catch(e){
+    document.getElementById('refresh-status').textContent = 'error: ' + e.message;
+  }
+}
+
+async function workerAction(wid, action){
+  if (action === 'exit' && !confirm('Force ' + wid + ' to exit on next heartbeat?')) return;
+  await fetch('/api/admin/workers/' + encodeURIComponent(wid) + '/' + action, {
+    method:'POST', credentials:'same-origin'
+  });
+  refresh();
+}
+
+async function releaseClaim(bidId){
+  if (!confirm('Release claim on bid #' + bidId + '?')) return;
+  await fetch('/api/admin/workers/release/' + bidId, {
+    method:'POST', credentials:'same-origin'
+  });
+  refresh();
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

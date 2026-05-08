@@ -1,0 +1,30 @@
+{
+  "name": "EW Partner",
+  "short_name": "EW Partner",
+  "description": "Experience Wholesale — Partner dashboard for tracking bid activity",
+  "start_url": "/owner",
+  "scope": "/owner",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#0b0f19",
+  "background_color": "#0b0f19",
+  "icons": [
+    {
+      "src": "/static/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/static/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/static/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

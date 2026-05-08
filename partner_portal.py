@@ -49,6 +49,51 @@ def _no_cache(resp):
     return resp
 
 
+@bp.before_request
+def _auto_login_via_query_token():
+    """Auto-login is gated on the `?d=<token>` query param matching the
+    dealer's `dashboard_token`. Bare slug URLs (no token, no cookie)
+    fall through to the normal login redirect.
+
+    Reverted from the slug-as-auth behavior on 2026-05-05 per spec —
+    only explicit token-bearing URLs get in without creds. The
+    /partner/<slug>/d/<token> path-based route is a separate handler
+    (`dashboard_access_token`) and is not affected by this hook."""
+    if session.get('partner_user_id'):
+        return
+    if not request.view_args:
+        return
+    slug = request.view_args.get('slug')
+    if not slug:
+        return
+    if request.endpoint in ('partner.accept_invite',
+                            'partner.reset_password',
+                            'partner.dashboard_access_token'):
+        return
+    tok = (request.args.get('d') or '').strip()
+    if not tok:
+        return
+    import hmac
+    try:
+        with _db() as conn, conn.cursor() as cur:
+            dealer = _dealer_by_slug(cur, slug)
+            if not dealer:
+                return
+            if not hmac.compare_digest(dealer.get('dashboard_token') or '', tok):
+                return
+            cur.execute("""SELECT id FROM partner_users
+                            WHERE dealer_id = %s
+                            ORDER BY (password_hash IS NULL) DESC,
+                                     created_at ASC
+                            LIMIT 1""", (dealer['id'],))
+            u = cur.fetchone()
+            if u:
+                session['partner_user_id'] = u['id']
+                session.permanent = True
+    except Exception:
+        pass
+
+
 # ── Config ────────────────────────────────────────────────────────────────
 PORTAL_BASE = os.environ.get('PORTAL_BASE', 'https://experience-wholesale.net')
 EMAIL_FROM = os.environ.get('EMAIL_FROM', 'opies32765@gmail.com')
@@ -216,15 +261,21 @@ def _slug_for_dealer(dealer_id: int, cur) -> str:
 
 def _dealer_by_slug(cur, slug: str):
     """Resolve slug → dealer row. Checks the explicit portal_slug column
-    first, then falls back to name-derived for dealers without one set."""
+    first, then falls back to name-derived for dealers without one set.
+    Returned columns must include `salesperson` so partner-bid create
+    paths can snapshot it onto bids.salesperson."""
     slug_lower = (slug or '').lower()
-    cur.execute("SELECT id, name, portal_slug FROM dealers "
+    cur.execute("SELECT id, name, portal_slug, salesperson, salesperson_phone, "
+                "mobile_token, dashboard_token, brand, portal_mode "
+                "FROM dealers "
                 "WHERE active = TRUE AND LOWER(portal_slug) = %s", (slug_lower,))
     d = cur.fetchone()
     if d:
         return d
     # Fallback: name-derived slug for dealers without an explicit one
-    cur.execute("SELECT id, name FROM dealers WHERE active = TRUE")
+    cur.execute("SELECT id, name, salesperson, salesperson_phone, "
+                "mobile_token, dashboard_token, brand, portal_mode "
+                "FROM dealers WHERE active = TRUE")
     for d in cur.fetchall():
         import re
         s = re.sub(r'[^a-z0-9]+', '', d['name'].lower())[:32]
@@ -274,6 +325,23 @@ def dashboard(slug):
             session.pop('partner_user_id', None)
             return redirect(url_for('partner.login', slug=slug))
 
+        # Auto-provision a mobile-app token on first dashboard hit so the
+        # partner can copy/share their /mobile?p=<token> link without an
+        # admin step. One token per dealer; doesn't rotate (per spec).
+        if not dealer.get('mobile_token'):
+            new_token = secrets.token_urlsafe(16)
+            cur.execute("UPDATE dealers SET mobile_token = %s "
+                        "WHERE id = %s AND mobile_token IS NULL",
+                        (new_token, dealer['id']))
+            conn.commit()
+            dealer = dict(dealer)
+            dealer['mobile_token'] = new_token
+
+        # Wholesaler mode skips every inventory-driven query. Wholesalers
+        # have no scraped site, so there's no aged inventory, no buckets,
+        # no per-row bid form — they only use Quick Drop + mobile.
+        wholesaler_mode = (dealer.get('portal_mode') == 'wholesaler')
+
         # Enabled buckets for this dealer
         cur.execute("""
             SELECT bucket, enabled FROM partner_alert_config
@@ -281,27 +349,20 @@ def dashboard(slug):
         """, (dealer['id'],))
         enabled_buckets = {r['bucket']: r['enabled'] for r in cur.fetchall()}
 
-        # Cars currently in any enabled age bucket. Age precedence: vAuto >
-        # dealer source_added_at > scanner first_seen_at.
+        # Fetch ALL active inventory regardless of enabled buckets — the
+        # partner dashboard now shows the full bucketed view (matches the
+        # admin /dealers/<id> page pattern). enabled_buckets is still used
+        # for the daily-digest email; the dashboard view is no longer
+        # gated on it.
+        # Age precedence: vAuto > dealer source_added_at > scanner first_seen_at.
         effective_fs = ("COALESCE("
                         "i.verified_at - (i.verified_days_on_lot || ' days')::interval, "
                         "i.source_added_at, i.first_seen_at)")
-        where_parts = []
-        if enabled_buckets.get('30_60'):
-            where_parts.append(f"({effective_fs} <= NOW() - INTERVAL '30 days' "
-                               f"AND {effective_fs} > NOW() - INTERVAL '60 days')")
-        if enabled_buckets.get('60_90'):
-            where_parts.append(f"({effective_fs} <= NOW() - INTERVAL '60 days' "
-                               f"AND {effective_fs} > NOW() - INTERVAL '90 days')")
-        if enabled_buckets.get('90_plus'):
-            where_parts.append(f"{effective_fs} <= NOW() - INTERVAL '90 days'")
-        if enabled_buckets.get('price_drop'):
-            where_parts.append("i.price_drop_amount IS NOT NULL")
-
         rows = []
-        already_requested_vins = set()
+        already_requested_vins = {}
         recent_responses = []
-        if where_parts:
+        bucket_rows = {'under_30': [], '30_60': [], '60_90': [], '90_plus': []}
+        if not wholesaler_mode:
             cur.execute(f"""
                 SELECT i.id, i.vin, i.year, i.make, i.model, i.trim,
                        i.mileage, i.price, i.url, i.photo_url, i.ext_color,
@@ -311,34 +372,165 @@ def dashboard(slug):
                 FROM dealer_inventory i
                 WHERE i.dealer_id = %s
                   AND i.status = 'active'
-                  AND ({' OR '.join(where_parts)})
                 ORDER BY {effective_fs} ASC
             """, (dealer['id'],))
             rows = cur.fetchall()
 
-            # VINs already in a submitted bid request so we can show status.
-            # `ew_counter` is EW's offer back to the partner (bids.bid_amount),
-            # NOT what the partner asked for (bids.asking_price, which is just
-            # our storage of the target_price they typed in).
-            cur.execute("""
-                SELECT pbr.id AS pbr_id, pbr.vin, pbr.target_price,
-                       pbr.partner_message, pbr.submitted_at, pbr.bid_id,
-                       b.status AS bid_status,
-                       b.bid_amount AS ew_counter,
-                       b.bid_response AS ew_message
-                FROM partner_bid_requests pbr
-                LEFT JOIN bids b ON b.id = pbr.bid_id
-                WHERE pbr.dealer_id = %s
-                ORDER BY pbr.submitted_at DESC
-            """, (dealer['id'],))
-            already_requested_vins = {r['vin']: r for r in cur.fetchall()}
+            # Group rows into 4 age buckets using the same effective-age
+            # precedence as the admin /dealers/<id> page. Re-use
+            # best_age_days_filter for parity.
+            from dealer_db import best_age_days_filter
+            for r in rows:
+                age = best_age_days_filter(r)
+                try:
+                    age_int = int(age)
+                except (TypeError, ValueError):
+                    age_int = 0
+                if age_int < 30:
+                    bucket_rows['under_30'].append(r)
+                elif age_int < 60:
+                    bucket_rows['30_60'].append(r)
+                elif age_int < 90:
+                    bucket_rows['60_90'].append(r)
+                else:
+                    bucket_rows['90_plus'].append(r)
+
+        # VINs already in a submitted bid request so we can show status.
+        # `ew_counter` is EW's offer back to the partner (bids.bid_amount),
+        # NOT what the partner asked for (bids.asking_price, which is just
+        # our storage of the target_price they typed in). Pulled outside the
+        # `where_parts` guard so quick-drop bids stay visible even if the
+        # dealer has no enabled age buckets.
+        cur.execute("""
+            SELECT pbr.id AS pbr_id, pbr.vin, pbr.target_price,
+                   pbr.partner_message, pbr.submitted_at, pbr.bid_id,
+                   b.status AS bid_status,
+                   b.bid_amount AS ew_counter,
+                   b.bid_response AS ew_message
+            FROM partner_bid_requests pbr
+            LEFT JOIN bids b ON b.id = pbr.bid_id
+            WHERE pbr.dealer_id = %s
+            ORDER BY pbr.submitted_at DESC
+        """, (dealer['id'],))
+        already_requested_vins = {r['vin']: r for r in cur.fetchall()}
+
+        # Quick-drop bid requests — partner_bid_requests rows where
+        # inventory_id IS NULL (car wasn't in their scraped inventory at
+        # submit time). Render as their own section below the inventory
+        # table so they get the same EW-thread + counter UX as in-inventory
+        # bids. YMM/miles come from the bids row (NHTSA-decoded at submit).
+        cur.execute("""
+            SELECT pbr.id AS pbr_id, pbr.vin, pbr.target_price,
+                   pbr.partner_message, pbr.submitted_at, pbr.bid_id,
+                   b.status AS bid_status,
+                   b.bid_amount AS ew_counter,
+                   b.bid_response AS ew_message,
+                   b.year, b.make, b.model, b.trim, b.mileage
+            FROM partner_bid_requests pbr
+            LEFT JOIN bids b ON b.id = pbr.bid_id
+            WHERE pbr.dealer_id = %s
+              AND pbr.inventory_id IS NULL
+            ORDER BY pbr.submitted_at DESC
+        """, (dealer['id'],))
+        quick_drop_rows = cur.fetchall()
+
+        # Inventory-based bid requests — same shape as quick_drop_rows so
+        # the template can render them in one combined "Bid Requests"
+        # stack. Fall back to inv columns when bid columns are missing
+        # (the bid INSERT didn't always copy YMM/miles).
+        cur.execute("""
+            SELECT pbr.id AS pbr_id, pbr.vin, pbr.target_price,
+                   pbr.partner_message, pbr.submitted_at, pbr.bid_id,
+                   b.status AS bid_status,
+                   b.bid_amount AS ew_counter,
+                   b.bid_response AS ew_message,
+                   COALESCE(b.year, i.year)       AS year,
+                   COALESCE(b.make, i.make)       AS make,
+                   COALESCE(b.model, i.model)     AS model,
+                   COALESCE(b.trim, i.trim)       AS trim,
+                   COALESCE(b.mileage, i.mileage) AS mileage
+            FROM partner_bid_requests pbr
+            LEFT JOIN bids b ON b.id = pbr.bid_id
+            LEFT JOIN dealer_inventory i ON i.id = pbr.inventory_id
+            WHERE pbr.dealer_id = %s
+              AND pbr.inventory_id IS NOT NULL
+            ORDER BY pbr.submitted_at DESC
+        """, (dealer['id'],))
+        inventory_bid_rows = cur.fetchall()
+
+        # Unread EW responses — drive the floating banners at the top of
+        # the dashboard. One banner per pbr where the bid has an EW
+        # offer/message and the dealer hasn't acknowledged it yet (no
+        # partner_seen_response_at, or response is newer than that ts).
+        cur.execute("""
+            SELECT pbr.id AS pbr_id, pbr.vin, pbr.bid_id,
+                   b.bid_amount, b.bid_response, b.updated_at,
+                   b.year, b.make, b.model
+            FROM partner_bid_requests pbr
+            JOIN bids b ON b.id = pbr.bid_id
+            WHERE pbr.dealer_id = %s
+              AND (b.bid_amount IS NOT NULL OR b.bid_response IS NOT NULL)
+              AND (pbr.partner_seen_response_at IS NULL
+                   OR b.updated_at > pbr.partner_seen_response_at)
+            ORDER BY b.updated_at DESC
+        """, (dealer['id'],))
+        unread_responses = cur.fetchall()
 
     return render_template('partner_dashboard.html',
                            user=user, dealer=dealer, slug=slug,
                            rows=rows, enabled_buckets=enabled_buckets,
+                           bucket_rows=bucket_rows,
                            already_requested_vins=already_requested_vins,
+                           quick_drop_rows=quick_drop_rows,
+                           inventory_bid_rows=inventory_bid_rows,
+                           unread_responses=unread_responses,
+                           wholesaler_mode=wholesaler_mode,
                            viewing_as_admin=session.get('partner_viewing_as_admin', False),
                            BUCKETS=BUCKETS)
+
+
+# ── Password-less dashboard access via per-dealer token ──────────────────
+@bp.route('/partner/<slug>/d/<token>')
+def dashboard_access_token(slug, token):
+    """Frictionless dashboard entry — anyone with this URL lands on the
+    dealer's portal without setting a password. The token is per-dealer
+    and stored in `dealers.dashboard_token`. The handler logs the visitor
+    in as the dealer's first partner_user (preferring the placeholder
+    no-password account, which is the natural one to ride for token
+    access). Settings on that account let the dealer optionally set
+    real credentials later for a more conventional login.
+
+    Token comparison is constant-time to defang any timing-attack
+    enumeration. No expiry — token is permanent per spec; rotate via
+    `UPDATE dealers SET dashboard_token = ...` to invalidate."""
+    import hmac
+    with _db() as conn, conn.cursor() as cur:
+        dealer = _dealer_by_slug(cur, slug)
+        if not dealer:
+            return 'Unknown portal.', 404
+        stored = dealer.get('dashboard_token') or ''
+        if not stored or not hmac.compare_digest(stored, token):
+            return 'Invalid or expired access link.', 404
+        cur.execute("""SELECT id FROM partner_users
+                        WHERE dealer_id = %s
+                        ORDER BY (password_hash IS NULL) DESC,
+                                 created_at ASC
+                        LIMIT 1""", (dealer['id'],))
+        u = cur.fetchone()
+        if not u:
+            return 'No partner account exists for this dealer yet.', 500
+    session['partner_user_id'] = u['id']
+    session.permanent = True
+    # Telegram-alert only on first login per session (suppress duplicate
+    # pings when the dealer refreshes the same token URL repeatedly).
+    if not session.get('_partner_link_alerted'):
+        _tg_alert(f'🔑 <b>{dealer["name"]}</b> partner opened dashboard via direct link')
+        session['_partner_link_alerted'] = True
+    # Render the dashboard inline (no redirect) so the URL bar keeps the
+    # /d/<token> path. Whatever the user copies from their address bar
+    # then has the token in it and can be shared without triggering the
+    # login redirect on the recipient's side.
+    return dashboard(slug)
 
 
 # ── Auth routes ───────────────────────────────────────────────────────────
@@ -521,18 +713,25 @@ def admin_view_as(dealer_id):
     """EW admin clicks a link → gets logged into that dealer's portal as the
     first registered user on that dealer. Requires EW admin auth (the
     before_request hook in app.py gates /admin/* on session['logged_in']).
-    Sets a flag so the dashboard banner shows 'Viewing as admin'."""
+    Sets a flag so the dashboard banner shows 'Viewing as admin'.
+    Prefers a user who has set a password; falls back to any placeholder
+    partner_user so admin can preview a dealer that's been provisioned
+    but not yet activated."""
     with _db() as conn, conn.cursor() as cur:
         cur.execute("""
             SELECT pu.id, d.name AS dealer_name
             FROM partner_users pu
             JOIN dealers d ON d.id = pu.dealer_id
-            WHERE pu.dealer_id = %s AND pu.password_hash IS NOT NULL
-            ORDER BY pu.created_at ASC LIMIT 1
+            WHERE pu.dealer_id = %s
+            ORDER BY (pu.password_hash IS NOT NULL) DESC,
+                     pu.created_at ASC
+            LIMIT 1
         """, (dealer_id,))
         row = cur.fetchone()
         if not row:
-            return f'No partner users have set a password for dealer {dealer_id}.', 404
+            return (f'No partner_user row exists for dealer {dealer_id}. '
+                    f'Provision one via /admin/partner/{dealer_id}/invite '
+                    f'or /admin/partner/{dealer_id}/config first.'), 404
         import re
         slug = re.sub(r'[^a-z0-9]+', '', row['dealer_name'].lower())[:32]
 
@@ -648,23 +847,58 @@ def admin_update_partner_user(user_id):
 
 @bp.route('/admin/partner/<int:dealer_id>/config', methods=['GET', 'POST'])
 def admin_config(dealer_id):
-    """Toggle which alert buckets are enabled for this dealer."""
+    """Toggle which alert buckets are enabled for this dealer.
+    Also surfaces the password-less dashboard access link + mobile-link
+    so the EW admin has one canonical place to grab them per dealer."""
     if request.method == 'POST':
+        action = request.form.get('action')
         with _db() as conn, conn.cursor() as cur:
-            for bucket_key, _ in BUCKETS:
-                enabled = request.form.get(f'enabled_{bucket_key}') == 'on'
-                cur.execute("""
-                    INSERT INTO partner_alert_config (dealer_id, bucket, enabled)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (dealer_id, bucket) DO UPDATE
-                      SET enabled = EXCLUDED.enabled, updated_at = NOW()
-                """, (dealer_id, bucket_key, enabled))
-            conn.commit()
-        flash('Alert preferences saved.', 'info')
+            if action == 'rotate_dashboard_token':
+                new_token = secrets.token_urlsafe(20)
+                cur.execute("UPDATE dealers SET dashboard_token = %s WHERE id = %s",
+                            (new_token, dealer_id))
+                conn.commit()
+                flash('Dashboard access link rotated. Old link no longer works.', 'info')
+            elif action == 'rotate_mobile_token':
+                new_token = secrets.token_urlsafe(16)
+                cur.execute("UPDATE dealers SET mobile_token = %s WHERE id = %s",
+                            (new_token, dealer_id))
+                conn.commit()
+                flash('Mobile link rotated. Old link no longer works.', 'info')
+            else:
+                for bucket_key, _ in BUCKETS:
+                    enabled = request.form.get(f'enabled_{bucket_key}') == 'on'
+                    cur.execute("""
+                        INSERT INTO partner_alert_config (dealer_id, bucket, enabled)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (dealer_id, bucket) DO UPDATE
+                          SET enabled = EXCLUDED.enabled, updated_at = NOW()
+                    """, (dealer_id, bucket_key, enabled))
+                conn.commit()
+                flash('Alert preferences saved.', 'info')
 
     with _db() as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM dealers WHERE id = %s", (dealer_id,))
         dealer = cur.fetchone()
+        # Auto-provision missing tokens so this page is always actionable
+        # without admin having to seed them via SQL first.
+        updates = {}
+        if dealer and not dealer.get('dashboard_token'):
+            updates['dashboard_token'] = secrets.token_urlsafe(20)
+        if dealer and not dealer.get('mobile_token'):
+            updates['mobile_token'] = secrets.token_urlsafe(16)
+        if updates:
+            sets = ', '.join(f"{k} = %s" for k in updates)
+            cur.execute(f"UPDATE dealers SET {sets} WHERE id = %s",
+                        (*updates.values(), dealer_id))
+            conn.commit()
+            for k, v in updates.items():
+                dealer = dict(dealer); dealer[k] = v
+        if not dealer.get('portal_slug'):
+            import re
+            dealer = dict(dealer)
+            dealer['_computed_slug'] = re.sub(r'[^a-z0-9]+', '',
+                                              dealer['name'].lower())[:32]
         cur.execute("""
             SELECT bucket, enabled FROM partner_alert_config
             WHERE dealer_id = %s
@@ -843,11 +1077,17 @@ def notify_partner_of_ew_response(bid_id: int, send_email: bool = False, send_te
 
 
 # ── Submit bid requests (partner side) ────────────────────────────────────
-def _ensure_partner_contact(cur, dealer_id: int, dealer_name: str) -> int:
+def _ensure_partner_contact(cur, dealer_id: int, dealer_name: str,
+                            salesperson: str | None = None) -> int:
     """One synthetic contact per partner dealer. All bids from a partner use
     this contact_id so they group together in the EW bid list. Phone uses
     a non-numeric sentinel (`PARTNER{id}`) so it can't collide with a real
-    field-rep number but still satisfies NOT NULL."""
+    field-rep number but still satisfies NOT NULL.
+
+    `company` carries the EW-side salesperson assigned to this dealer (the
+    value drives the blue chip in the dashboard contact cell). On every
+    bid create, `company` is refreshed via ON CONFLICT so reassigning the
+    dealer's salesperson updates the chip on subsequent bids."""
     phone = f'PARTNER{dealer_id}'
     cur.execute("""
         INSERT INTO contacts (phone, name, company)
@@ -855,7 +1095,8 @@ def _ensure_partner_contact(cur, dealer_id: int, dealer_name: str) -> int:
         ON CONFLICT (phone) DO UPDATE
           SET name = EXCLUDED.name, company = EXCLUDED.company
         RETURNING id
-    """, (phone, f'{dealer_name} (Partner Portal)', dealer_name))
+    """, (phone, f'{dealer_name} (Partner Portal)',
+          (salesperson or '').strip() or None))
     return cur.fetchone()['id']
 
 
@@ -879,7 +1120,8 @@ def submit_requests(slug):
         if not dealer or dealer['id'] != user['dealer_id']:
             return 'Forbidden', 403
 
-        contact_id = _ensure_partner_contact(cur, dealer['id'], dealer['name'])
+        contact_id = _ensure_partner_contact(cur, dealer['id'], dealer['name'],
+                                              dealer.get('salesperson'))
         partner_phone = f'PARTNER{dealer["id"]}'
 
         # Pre-pass: collect all selected inv_ids + their prices so we can
@@ -942,18 +1184,27 @@ def submit_requests(slug):
             if message:
                 raw_message += f' — {message}'
             notes = f'[Partner Portal · {dealer["name"]} · requested by {user["email"]}]'
+            # Snapshot the dealer's currently-assigned EW salesperson onto
+            # the bid (matches the Quick Drop + mobile-token paths) so it
+            # renders the PARTNER + 👤 badges on the EW dashboard. Frozen
+            # at create time — reassigning the dealer's salesperson later
+            # doesn't rewrite history.
+            salesperson_snapshot = dealer.get('salesperson') or None
             cur.execute("""
                 INSERT INTO bids (contact_id, phone, vin,
                                   year, make, model, trim, mileage, color,
                                   raw_message, asking_price, notes,
-                                  status, has_unread, partner_request_id)
+                                  status, has_unread,
+                                  partner_request_id, partner_dealer_id,
+                                  salesperson)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        'new', TRUE, %s)
+                        'new', TRUE, %s, %s, %s)
                 RETURNING id
             """, (contact_id, partner_phone, inv['vin'],
                   inv['year'], inv['make'], inv['model'], inv['trim'],
                   inv['mileage'], inv['ext_color'],
-                  raw_message, price_val, notes, pbr_id))
+                  raw_message, price_val, notes,
+                  pbr_id, dealer['id'], salesperson_snapshot))
             bid_id = cur.fetchone()['id']
 
             # 3. Link bid back to partner_bid_requests
@@ -970,19 +1221,29 @@ def submit_requests(slug):
                     all_photos = [p for p in raw if isinstance(p, str) and p.startswith('http')]
             if not all_photos and inv.get('photo_url'):
                 all_photos = [inv['photo_url']]
+            # DealerOn (and other AAN/WP) galleries embed srcset entries
+            # like "url?width=400 400w, url?width=800 800w" — when the
+            # scanner stored those as separate items, the trailing
+            # " 400w" descriptor got captured into the URL and broke
+            # rendering. Strip everything after the first space and
+            # decode HTML-encoded `&amp;` so each entry is a real URL.
+            def _clean(u):
+                u = (u or '').strip().split(' ', 1)[0]
+                return u.replace('&amp;', '&')
+            all_photos = [_clean(p) for p in all_photos]
             # Filter out dealer logos / badges / icons — those routinely
             # slip into scraped galleries and end up as photo #1.
             _JUNK = ('logo', 'badge', 'icon', 'placeholder', '/cms/', '/ui/',
                      'facebook', 'instagram', 'twitter', 'youtube')
             all_photos = [p for p in all_photos
-                          if not any(j in p.lower() for j in _JUNK)]
+                          if p and not any(j in p.lower() for j in _JUNK)]
             # Dedupe while preserving order
             seen = set()
             all_photos = [p for p in all_photos if not (p in seen or seen.add(p))]
-            # Cap at 10 — TXT Charlie posts 25+ per car but EW bid UI doesn't
-            # need a full gallery. First 10 cover exterior + key interior.
+            # Cap at 15 — partners want the full gallery on EW dashboard,
+            # 400px-wide srcset entries are tiny so this stays cheap.
             new_photo_ids = []
-            for url in all_photos[:10]:
+            for url in all_photos[:15]:
                 cur.execute("""
                     INSERT INTO bid_photos (bid_id, url) VALUES (%s, %s)
                     RETURNING id
@@ -1001,6 +1262,11 @@ def submit_requests(slug):
             # link, every size (strip/mobile/full) is already on disk.
             warm_bid_photo_thumbs(new_photo_ids)
 
+            # 7. SMS the assigned salesperson (no-op if no phone on file).
+            _notify_salesperson(dealer, bid_id, inv['vin'],
+                                inv.get('year'), inv.get('make'), inv.get('model'),
+                                price_val, source='inventory bid')
+
             count += 1
         conn.commit()
 
@@ -1011,6 +1277,302 @@ def submit_requests(slug):
                   f'{"s" if count != 1 else ""}\n'
                   f'{user["full_name"] or user["email"]}')
     return redirect(url_for('partner.dashboard', slug=slug))
+
+
+# ── SMS notification to dealer's assigned EW salesperson ───────────
+def _notify_salesperson(dealer_row, bid_id, vin, year, make, model,
+                        asking_price, source='bid'):
+    """Fire-and-forget SMS to the dealer's assigned salesperson_phone
+    when a partner submission lands. Silent no-op when no phone is set
+    on the dealer (so admin can opt-in by populating the field on
+    /dealers/<id>). Called from quick_drop / submit_requests / mobile
+    partner-submit paths so all three channels notify."""
+    print(f'[salesperson notify] called bid={bid_id} dealer={dealer_row.get("name") if dealer_row else None} phone={dealer_row.get("salesperson_phone") if dealer_row else None}', flush=True)
+    if not dealer_row:
+        print('  → no dealer_row, skipping', flush=True)
+        return
+    phone = (dealer_row.get('salesperson_phone') or '').strip()
+    if not phone:
+        print('  → no phone, skipping', flush=True)
+        return
+    car = ' '.join(str(x) for x in (year, make, model) if x).strip() or '(VIN-only)'
+    sales_first = (dealer_row.get('salesperson') or 'there').split(' ')[0]
+    parts = [f'Hey {sales_first} — {dealer_row["name"]} just submitted a {source} on a {car}']
+    if asking_price:
+        try:
+            parts.append(f'asking ${int(float(asking_price)):,}')
+        except (TypeError, ValueError):
+            pass
+    parts.append(f'Bid #{bid_id}')
+    msg = ' — '.join(parts) + ' (Reply STOP to opt out.)'
+    print(f'[salesperson notify] dispatching SMS to {phone}: {msg[:120]}', flush=True)
+    try:
+        ok = _send_sms(phone, msg)
+        print(f'[salesperson notify] _send_sms returned {ok}', flush=True)
+    except Exception as e:
+        print(f'[salesperson sms] {dealer_row.get("name")}: {e}', flush=True)
+
+
+# ── Per-car bid detail page (mobile-friendly full-page form) ────────
+@bp.route('/partner/<slug>/bid/<int:inv_id>')
+def bid_detail(slug, inv_id):
+    """Full-page detail view for one inventory car. Pre-bid state shows
+    a target-price + notes form that POSTs to the existing
+    /partner/<slug>/submit endpoint (same shape, single car). Post-bid
+    state shows the EW thread + counter form. Mobile YMM links land
+    here so the dealer can act on a single car without scrolling
+    sideways through the dashboard table."""
+    user = _current_partner_user()
+    if not user:
+        return redirect(url_for('partner.login', slug=slug))
+    with _db() as conn, conn.cursor() as cur:
+        dealer = _dealer_by_slug(cur, slug)
+        if not dealer or dealer['id'] != user['dealer_id']:
+            return 'Forbidden', 403
+        cur.execute('SELECT * FROM dealer_inventory '
+                    'WHERE id = %s AND dealer_id = %s',
+                    (inv_id, dealer['id']))
+        inv = cur.fetchone()
+        if not inv:
+            return 'Vehicle not found', 404
+        cur.execute("""SELECT pbr.id AS pbr_id, pbr.target_price,
+                              pbr.partner_message, pbr.submitted_at,
+                              pbr.bid_id,
+                              b.status AS bid_status,
+                              b.bid_amount AS ew_counter,
+                              b.bid_response AS ew_message
+                         FROM partner_bid_requests pbr
+                    LEFT JOIN bids b ON b.id = pbr.bid_id
+                        WHERE pbr.dealer_id = %s
+                          AND pbr.inventory_id = %s
+                        ORDER BY pbr.submitted_at DESC
+                        LIMIT 1""",
+                    (dealer['id'], inv_id))
+        req = cur.fetchone()
+    return render_template('partner_bid_detail.html',
+                           dealer=dealer, slug=slug, inv=inv, req=req,
+                           user=user)
+
+
+# ── Quick Drop: bid request for a car NOT in the partner's inventory ───
+@bp.route('/partner/<slug>/quick-drop', methods=['POST'])
+def quick_drop(slug):
+    """Partner wants a bid on a vehicle that isn't in their scraped
+    inventory — e.g. a trade just walked in. They give us VIN + miles +
+    asking price (all required) plus optional photos + notes. We create a
+    partner_bid_requests row with NULL inventory_id, the EW bid, copy
+    photos, and the standard pipeline (vAuto + assessment via worker
+    polling) picks it up automatically."""
+    user = _current_partner_user()
+    if not user:
+        return jsonify({'error': 'not_authenticated'}), 401
+
+    # ── Parse + validate form ────────────────────────────────────────
+    vin = (request.form.get('vin') or '').strip().upper()
+    if len(vin) != 17 or not any(c.isalpha() for c in vin):
+        return jsonify({'error': 'VIN must be 17 characters and include letters.'}), 400
+    if any(c in vin for c in 'IOQ'):
+        return jsonify({'error': 'VIN contains invalid characters (I/O/Q).'}), 400
+
+    raw_miles = (request.form.get('mileage') or '').replace(',', '').strip()
+    try:
+        mileage = int(raw_miles)
+        if mileage <= 0 or mileage > 1_000_000:
+            raise ValueError
+    except ValueError:
+        return jsonify({'error': 'Mileage is required and must be a positive number.'}), 400
+
+    raw_price = (request.form.get('asking_price') or '').replace(',', '').replace('$', '').strip()
+    try:
+        asking_price = float(raw_price)
+        if asking_price <= 0 or asking_price > 10_000_000:
+            raise ValueError
+    except ValueError:
+        return jsonify({'error': 'Asking price is required and must be a positive number.'}), 400
+
+    notes_in = (request.form.get('notes') or '').strip()
+
+    # Photo files (optional). Cap at 10 to keep request bounded.
+    photo_files = []
+    for f in request.files.getlist('photos'):
+        if f and f.filename:
+            photo_files.append(f)
+        if len(photo_files) >= 10:
+            break
+
+    # NHTSA decode runs FIRST (outside any DB txn). Slow + remote; we don't
+    # want it inside the writer transaction. Best-effort — bid still
+    # creates without YMM if NHTSA times out.
+    try:
+        from app import decode_vin as _decode_vin
+        decoded = _decode_vin(vin) or {}
+    except Exception:
+        decoded = {}
+
+    # Single atomic transaction for ALL writes (pbr + bid + photos +
+    # messages). Earlier split-transaction layout left orphan pbr rows
+    # when bid_messages crashed, because the pbr was already committed.
+    with _db() as conn, conn.cursor() as cur:
+        dealer = _dealer_by_slug(cur, slug)
+        if not dealer or dealer['id'] != user['dealer_id']:
+            return jsonify({'error': 'forbidden'}), 403
+
+        # Salesperson snapshot — frozen on the bid even if dealer is
+        # reassigned later (matches the inventory-bid path).
+        salesperson_snapshot = dealer.get('salesperson') or None
+
+        # Wholesaler-mode dealers (no scraped site) submit through the same
+        # Quick Drop pipeline, but the bid is held in 'pending' review until
+        # the assigned reviewer (e.g. Oscar) approves it from
+        # /wholesaler-<reviewer>. Until then the bid is invisible to the
+        # Buy Center. vAuto/iPacket/AccuTrade still run in the background
+        # so all data is ready when the reviewer opens it.
+        is_wholesaler = (dealer.get('portal_mode') == 'wholesaler')
+        review_status = 'pending' if is_wholesaler else None
+
+        contact_id = _ensure_partner_contact(cur, dealer['id'], dealer['name'],
+                                              dealer.get('salesperson'))
+        partner_phone = f'PARTNER{dealer["id"]}'
+
+        source_label = 'Wholesaler Submission' if is_wholesaler else 'Quick Drop'
+        raw_message = f'{source_label} from {dealer["name"]}: need ${int(asking_price):,}'
+        if notes_in:
+            raw_message += f' — {notes_in}'
+        notes = (f'[Partner {source_label} · {dealer["name"]} · '
+                 f'requested by {user["email"]}]')
+
+        # 1. partner_bid_requests audit row (NULL inventory_id since this
+        #    car isn't in their scraped inventory).
+        cur.execute("""
+            INSERT INTO partner_bid_requests
+                (dealer_id, partner_user_id, inventory_id, vin,
+                 target_price, partner_message)
+            VALUES (%s, %s, NULL, %s, %s, %s)
+            RETURNING id
+        """, (dealer['id'], user['id'], vin, asking_price, notes_in or None))
+        pbr_id = cur.fetchone()['id']
+
+        # 2. Create the bid linked to this pbr.
+        cur.execute("""
+            INSERT INTO bids (contact_id, phone, vin,
+                              year, make, model, trim, mileage,
+                              raw_message, asking_price, notes,
+                              status, has_unread,
+                              partner_request_id, partner_dealer_id,
+                              salesperson, vauto_priority, review_status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'new', TRUE, %s, %s, %s, TRUE, %s)
+            RETURNING id
+        """, (contact_id, partner_phone, vin,
+              decoded.get('year'), decoded.get('make'), decoded.get('model'),
+              decoded.get('trim'), mileage,
+              raw_message, asking_price, notes,
+              pbr_id, dealer['id'], salesperson_snapshot, review_status))
+        bid_id = cur.fetchone()['id']
+
+        cur.execute("UPDATE partner_bid_requests SET bid_id = %s WHERE id = %s",
+                    (bid_id, pbr_id))
+
+        # 3. Save uploaded photos to /static/uploads/ + bid_photos rows.
+        new_photo_ids = []
+        if photo_files:
+            from werkzeug.utils import secure_filename
+            uploads_dir = os.path.join(current_app.root_path,
+                                       'static', 'uploads')
+            os.makedirs(uploads_dir, exist_ok=True)
+            for f in photo_files:
+                ext = os.path.splitext(f.filename)[1].lower() or '.jpg'
+                if ext not in ('.jpg', '.jpeg', '.png', '.webp', '.heic'):
+                    continue
+                fname = f'qd_{bid_id}_{secrets.token_hex(6)}{ext}'
+                disk_path = os.path.join(uploads_dir, fname)
+                f.save(disk_path)
+                rel_url = f'/static/uploads/{fname}'
+                # Store the *URL path* in both columns (this codebase treats
+                # local_path as a URL too — the dashboard's COALESCE picks it
+                # first and feeds it to the thumb proxy as a URL). Storing
+                # the absolute filesystem path here breaks the image link.
+                cur.execute("""INSERT INTO bid_photos (bid_id, url, local_path)
+                               VALUES (%s, %s, %s) RETURNING id""",
+                            (bid_id, rel_url, rel_url))
+                new_photo_ids.append(cur.fetchone()['id'])
+
+        # 4. Seed message thread
+        cur.execute("""
+            INSERT INTO bid_messages (bid_id, direction, message,
+                                      from_phone, to_phone)
+            VALUES (%s, 'inbound', %s, %s, %s)
+        """, (bid_id, raw_message, partner_phone, 'EW'))
+
+        conn.commit()
+
+    # 5. Pre-warm thumbnails (best-effort)
+    if new_photo_ids:
+        try:
+            warm_bid_photo_thumbs(new_photo_ids)
+        except Exception:
+            pass
+
+    # 6. Kick off market check (background); vAuto + assessment workers
+    #    poll the queue and pick this up automatically because
+    #    vauto_priority=TRUE.
+    try:
+        from app import trigger_market_check
+        trigger_market_check(bid_id, vin)
+    except Exception:
+        pass
+
+    _tg_prefix = '🕒 PENDING REVIEW' if is_wholesaler else '🎯'
+    _tg_alert(f'{_tg_prefix} <b>{dealer["name"]}</b> {source_label} · Bid #{bid_id}\n'
+              f'{user["email"]}\n'
+              f'{vin} · {mileage:,} mi · ask ${int(asking_price):,}'
+              + (f'\nPhotos: {len(new_photo_ids)}' if new_photo_ids else '')
+              + (f'\n{notes_in}' if notes_in else ''))
+
+    # SMS the dealer's assigned salesperson if a phone is on file.
+    _notify_salesperson(dealer, bid_id, vin,
+                        decoded.get('year'), decoded.get('make'),
+                        decoded.get('model'), asking_price,
+                        source=source_label)
+
+    return jsonify({'ok': True, 'bid_id': bid_id, 'pbr_id': pbr_id})
+
+
+# ── Partner deletes their own quick-drop request ──────────────────────
+@bp.route('/partner/<slug>/qd/<int:pbr_id>/delete', methods=['POST'])
+@bp.route('/partner/<slug>/req/<int:pbr_id>/delete', methods=['POST'])
+def quick_drop_delete(slug, pbr_id):
+    """Partner removes their own bid request — works for BOTH Quick Drop
+    pbrs (inventory_id IS NULL) and inventory-based pbrs (inventory_id
+    IS NOT NULL). Hard-delete: bid + photos + messages + pbr. Restricted
+    to their own dealer."""
+    user = _current_partner_user()
+    if not user:
+        return jsonify({'error': 'not_authenticated'}), 401
+    with _db() as conn, conn.cursor() as cur:
+        dealer = _dealer_by_slug(cur, slug)
+        if not dealer or dealer['id'] != user['dealer_id']:
+            return jsonify({'error': 'forbidden'}), 403
+        cur.execute("""SELECT id, bid_id, vin, inventory_id
+                         FROM partner_bid_requests
+                        WHERE id = %s AND dealer_id = %s""",
+                    (pbr_id, dealer['id']))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'not_found_or_not_yours'}), 404
+        bid_id = row['bid_id']
+        vin = row['vin']
+        kind = 'Quick Drop' if row['inventory_id'] is None else 'inventory bid'
+        if bid_id:
+            cur.execute("DELETE FROM bid_messages WHERE bid_id = %s", (bid_id,))
+            cur.execute("DELETE FROM bid_photos WHERE bid_id = %s", (bid_id,))
+            cur.execute("DELETE FROM bids WHERE id = %s", (bid_id,))
+        cur.execute("DELETE FROM partner_bid_requests WHERE id = %s", (pbr_id,))
+        conn.commit()
+    _tg_alert(f'🗑 <b>{dealer["name"]}</b> deleted {kind}'
+              + (f' · Bid #{bid_id}' if bid_id else '')
+              + f'\n{vin} · {user["email"]}')
+    return jsonify({'ok': True})
 
 
 # ── Partner counters EW's offer ───────────────────────────────────────────
@@ -1172,55 +1734,31 @@ def settings_page(slug):
 
         if request.method == 'POST':
             action = request.form.get('action')
-            if action == 'send_code':
+            if action == 'enable_sms':
+                # One-step SMS opt-in for partner dealers. Consent trail comes
+                # from the signed partner agreement, not the SMS double-opt-in
+                # handshake — same logic the bid-send path uses (sms_opt_in
+                # alone gates eligibility for partners). Confirmation SMS
+                # still goes out so a wrong number is at least visible.
                 raw_phone = request.form.get('phone') or ''
                 phone = _normalize_phone(raw_phone)
                 if not phone:
                     flash('Please enter a valid US phone number (10 digits).', 'error')
                 else:
-                    code = f'{secrets.randbelow(1_000_000):06d}'
                     cur.execute("""
                         UPDATE partner_users
-                        SET phone = %s, sms_verify_code = %s,
-                            sms_verify_expires = NOW() + INTERVAL '10 minutes',
-                            sms_opt_in = FALSE, sms_verified_at = NULL
-                        WHERE id = %s
-                    """, (phone, code, user['id']))
-                    conn.commit()
-                    ok = _send_sms(phone,
-                        f'Experience Wholesale verification code: {code}. '
-                        f'Reply with this to enable SMS bid alerts. '
-                        f'Reply STOP to stop.')
-                    if ok:
-                        flash(f'Code sent to {phone}. Enter it below.', 'info')
-                    else:
-                        flash('Could not send SMS. Double-check the number.', 'error')
-            elif action == 'verify_code':
-                typed = (request.form.get('code') or '').strip()
-                cur.execute("""
-                    SELECT sms_verify_code, sms_verify_expires, phone
-                    FROM partner_users WHERE id = %s
-                """, (user['id'],))
-                row = cur.fetchone()
-                if not row or not row['sms_verify_code']:
-                    flash('No code on file. Send yourself a new one.', 'error')
-                elif row['sms_verify_expires'] and row['sms_verify_expires'] < datetime.now(timezone.utc):
-                    flash('That code expired. Send a new one.', 'error')
-                elif typed != row['sms_verify_code']:
-                    flash('Wrong code. Check the SMS and try again.', 'error')
-                else:
-                    cur.execute("""
-                        UPDATE partner_users
-                        SET sms_opt_in = TRUE, sms_verified_at = NOW(),
+                        SET phone = %s, sms_opt_in = TRUE,
+                            sms_verified_at = NOW(),
                             sms_verify_code = NULL, sms_verify_expires = NULL
                         WHERE id = %s
-                    """, (user['id'],))
+                    """, (phone, user['id']))
                     conn.commit()
-                    # Confirmation SMS per Twilio best practice
-                    _send_sms(row['phone'],
+                    _send_sms(phone,
                         'You are subscribed to Experience Wholesale bid alerts. '
                         'Reply STOP to unsubscribe.')
-                    flash('SMS alerts enabled — you are all set.', 'info')
+                    _tg_alert(f'📱 <b>{dealer["name"]}</b> partner enabled SMS alerts\n'
+                              f'{user["email"]} → {phone}')
+                    flash(f'SMS alerts enabled. Sending to {phone}.', 'info')
             elif action == 'opt_out':
                 cur.execute("""
                     UPDATE partner_users
@@ -1236,6 +1774,66 @@ def settings_page(slug):
                 """, (enabled, user['id']))
                 conn.commit()
                 flash('Email preferences saved.', 'info')
+            elif action == 'set_password':
+                # Self-serve password set/change. If the account has no
+                # password yet (placeholder / token-link user), accept any
+                # new password >= 8 chars. If a password already exists,
+                # require the current one to confirm it's the legitimate
+                # holder. Email may also be updated in the same form.
+                new_pw  = request.form.get('new_password') or ''
+                conf_pw = request.form.get('confirm_password') or ''
+                cur.execute("SELECT password_hash FROM partner_users WHERE id=%s",
+                            (user['id'],))
+                row = cur.fetchone()
+                has_existing = bool(row and row['password_hash'])
+                if has_existing:
+                    cur_pw = request.form.get('current_password') or ''
+                    if not _check_password(cur_pw, row['password_hash']):
+                        flash('Current password is incorrect.', 'error')
+                        new_pw = ''  # short-circuit
+                if new_pw:
+                    if len(new_pw) < 8:
+                        flash('New password must be at least 8 characters.',
+                              'error')
+                    elif new_pw != conf_pw:
+                        flash('New passwords do not match.', 'error')
+                    else:
+                        cur.execute("""UPDATE partner_users
+                                       SET password_hash = %s
+                                       WHERE id = %s""",
+                                    (_hash_password(new_pw), user['id']))
+                        conn.commit()
+                        verb = 'changed' if has_existing else 'set'
+                        _tg_alert(f'🔐 <b>{dealer["name"]}</b> partner '
+                                  f'{verb} their password\n{user["email"]}')
+                        flash(f'Password {verb}. Sign in any time at '
+                              f'/partner/{slug}/login with your email + '
+                              f'this password.', 'info')
+            elif action == 'update_email':
+                # Self-serve email change. Email is the unique login identifier
+                # so we (a) validate format, (b) reject if the new address is
+                # already taken by a different partner_user. Old email is
+                # carried in the Telegram alert so admin can spot the swap.
+                new_email = (request.form.get('email') or '').strip().lower()
+                old_email = user['email']
+                if '@' not in new_email or '.' not in new_email.split('@', 1)[-1]:
+                    flash('Please enter a valid email address.', 'error')
+                elif new_email == old_email:
+                    flash('That is already your email on file.', 'info')
+                else:
+                    cur.execute("""SELECT id FROM partner_users
+                                    WHERE LOWER(email) = %s AND id <> %s""",
+                                (new_email, user['id']))
+                    if cur.fetchone():
+                        flash('That email is already used by another partner account.', 'error')
+                    else:
+                        cur.execute("UPDATE partner_users SET email = %s WHERE id = %s",
+                                    (new_email, user['id']))
+                        conn.commit()
+                        _tg_alert(f'📧 <b>{dealer["name"]}</b> partner updated their email\n'
+                                  f'{old_email} → {new_email}')
+                        flash(f'Email updated to {new_email}. Use it next time you log in.',
+                              'info')
 
         # Refetch latest state
         cur.execute("SELECT * FROM partner_users WHERE id = %s", (user['id'],))
@@ -1247,19 +1845,34 @@ def settings_page(slug):
 
 @bp.route('/partner/<slug>/mark-seen', methods=['POST'])
 def mark_seen(slug):
-    """Mark all EW responses for this dealer as seen by the partner — stops
-    the chime from firing again on the same responses."""
+    """Mark partner_bid_requests as seen so the floating-banner UI clears
+    (and the chime won't re-fire on the same response). Optional form
+    field `pbr_id` scopes to a single request — used by the per-banner
+    × close button. With no pbr_id, marks every pending response on the
+    dealer (used by the bulk-clear hook on counter submit + chime reset)."""
     user = _current_partner_user()
     if not user:
         return jsonify({'error': 'not_authenticated'}), 401
+    pbr_id_raw = (request.form.get('pbr_id') or '').strip()
     with _db() as conn, conn.cursor() as cur:
         dealer = _dealer_by_slug(cur, slug)
         if not dealer or dealer['id'] != user['dealer_id']:
             return jsonify({'error': 'forbidden'}), 403
-        cur.execute("""
-            UPDATE partner_bid_requests
-            SET partner_seen_response_at = NOW()
-            WHERE dealer_id = %s
-        """, (dealer['id'],))
+        if pbr_id_raw:
+            try:
+                pbr_id = int(pbr_id_raw)
+            except ValueError:
+                return jsonify({'error': 'bad_pbr_id'}), 400
+            cur.execute("""
+                UPDATE partner_bid_requests
+                SET partner_seen_response_at = NOW()
+                WHERE id = %s AND dealer_id = %s
+            """, (pbr_id, dealer['id']))
+        else:
+            cur.execute("""
+                UPDATE partner_bid_requests
+                SET partner_seen_response_at = NOW()
+                WHERE dealer_id = %s
+            """, (dealer['id'],))
         conn.commit()
     return jsonify({'ok': True})

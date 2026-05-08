@@ -178,7 +178,7 @@ def dashboard():
         cur.execute(f"""
             SELECT b.id, b.vin, b.year, b.make, b.model, b.trim, b.mileage,
                    b.color, b.status, b.asking_price, b.ai_price, b.bid_amount,
-                   b.created_at, b.updated_at, b.has_unread,
+                   b.created_at, b.updated_at, b.has_unread, b.salesperson,
                    c.name AS contact_name, b.phone,
                    (SELECT COALESCE(local_path, url) FROM bid_photos
                     WHERE bid_id = b.id
@@ -362,7 +362,7 @@ def login():
             conn.commit()
             session.permanent = True
             session['owner_user_id'] = u['id']
-            _tg_alert(f'🔓 EW Owner login: <b>{u["name"] or u["email"]}</b>')
+            _tg_alert(f'🔓 EW Partner login: <b>{u["name"] or u["email"]}</b>')
             return redirect(url_for('owner.dashboard'))
     return render_template('owner_login.html')
 
@@ -402,7 +402,7 @@ def accept_invite(token):
                 conn.commit()
                 session.permanent = True
                 session['owner_user_id'] = u['id']
-                _tg_alert(f'✅ EW Owner activated: <b>{u["name"] or u["email"]}</b>')
+                _tg_alert(f'✅ EW Partner activated: <b>{u["name"] or u["email"]}</b>')
                 return redirect(url_for('owner.dashboard'))
     return render_template('owner_set_password.html', email=u['email'])
 
@@ -423,7 +423,7 @@ def forgot():
                                WHERE id = %s""", (tok, u['id']))
                 conn.commit()
                 link = f'{PORTAL_BASE}/owner/reset/{tok}'
-                _send_email(u['email'], 'Reset your EW Owner Portal password',
+                _send_email(u['email'], 'Reset your EW Partner Portal password',
                     f'<p>Hi {u["name"] or ""},</p>'
                     f'<p>Click to reset your password (link valid {RESET_TTL_HOURS}h):</p>'
                     f'<p><a href="{link}">{link}</a></p>')
@@ -514,16 +514,16 @@ def admin_invite():
             """, (tok, name, phone, email))
             conn.commit()
     link = f'{PORTAL_BASE}/owner/invite/{tok}'
-    _send_email(email, 'You\'re invited to the EW Owner Portal',
+    _send_email(email, 'You\'re invited to the EW Partner Portal',
         f'<p>Hi {name or ""},</p>'
-        f'<p>You have been invited to the Experience Wholesale Owner Portal — '
+        f'<p>You have been invited to the Experience Wholesale Partner Portal — '
         f'a mobile dashboard that pings you when new bids arrive.</p>'
         f'<p>Click here to set your password (valid {INVITE_TTL_DAYS} days):</p>'
         f'<p><a href="{link}">{link}</a></p>'
         f'<p>Once your password is set, bookmark <a href="{PORTAL_BASE}/owner">'
         f'{PORTAL_BASE}/owner</a> on your phone — install it as an app from '
         f'the browser menu (Add to Home Screen) for push notifications.</p>')
-    _tg_alert(f'📧 EW Owner invite sent to <b>{email}</b>')
+    _tg_alert(f'📧 EW Partner invite sent to <b>{email}</b>')
     flash(f'Invite sent to {email}.', 'success')
     return redirect(url_for('owner.admin_list'))
 

@@ -168,8 +168,7 @@ tr:last-child td{border-bottom:none}
     <a href="/sms-intake" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Inbound SMS log — every text we received and what we did with it">SMS Log</a>
     <a href="/intel/" target="_blank" style="font-size:13px;color:#c084fc;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(168,85,247,.35);border-radius:6px;transition:all .15s;background:rgba(168,85,247,.1)" onmouseover="this.style.background='rgba(168,85,247,.2)';this.style.color='#d8b4fe'" onmouseout="this.style.background='rgba(168,85,247,.1)';this.style.color='#c084fc'" title="Dealer Intelligence — separate login (admin / Sedecrem34)">Dealer Intel ↗</a>
     <a href="/admin/workers" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · Worker monitor (live phase progress, stuck-bid watchdog)">Workers</a>
-    <a href="/admin/costs" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · Cost Analysis">Costs</a>
-    <a href="/admin/ai-levers" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · AI Levers (segment buckets, weights, velocity)">AI Levers</a>
+    <a href="/admin/ai-accuracy" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · AI accuracy vs LSL purchase reality">AI Accuracy</a>
     <div class="live-dot"></div>
     <span class="live-label">LIVE</span>
   </div>
@@ -512,11 +511,19 @@ function renderRow(b, pc, fp, activeWorker) {
                                             : (wid.charAt(0).toUpperCase() + wid.slice(1));
     workerChip = `<div title="${wid} working on ${w.job_type}" style="margin-top:3px;display:inline-flex;align-items:center;gap:5px;padding:2px 7px;background:rgba(96,165,250,.10);border:1px solid rgba(96,165,250,.3);border-radius:10px;font-size:10px;font-weight:600;color:#60a5fa;letter-spacing:.2px"><span style="width:6px;height:6px;background:#4ade80;border-radius:50%;display:inline-block;animation:pulse 1.5s ease-in-out infinite"></span>${wname} · ${w.job_type}</div>`;
   }
+  // Mirror the SSR badges (PARTNER + salesperson) so auto-poll re-renders
+  // don't visually drop them between page loads.
+  const partnerBadge = b.partner_request_id
+    ? `<span style="display:inline-block;padding:2px 7px;background:#1e3a8a;color:#dbeafe;border-radius:10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;margin-right:6px">PARTNER</span>`
+    : '';
+  const spBadge = b.salesperson
+    ? `<span style="display:inline-block;padding:2px 7px;background:rgba(168,139,250,.15);color:#c4b5fd;border:1px solid rgba(168,139,250,.35);border-radius:10px;font-size:10px;font-weight:700;letter-spacing:.3px;margin-right:6px" title="EW salesperson tagged from dealer assignment at submit time">👤 ${b.salesperson}</span>`
+    : '';
   return `<tr data-id="${b.id}" data-created="${b.created_at||''}" class="${rowClass}" data-unread="${b.has_unread?1:0}">
     <td><div class="bid-num">${star}#${b.id}</div><div class="bid-time">${timeAgo(b.created_at)}</div>${workerChip}</td>
     <td>${contactCell}</td>
     <td>${vehicle}</td>
-    <td><div class="msg-preview">${stripFieldMeta(b.raw_message)}</div></td>
+    <td>${partnerBadge}${spBadge}<div class="msg-preview">${stripFieldMeta(b.raw_message)}</div></td>
     <td>${askPrice}</td>
     <td>${aiPrice}</td>
     <td>${bidSent}</td>

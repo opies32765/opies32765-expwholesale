@@ -34,6 +34,7 @@ from process_bid import process_bid
 EW_SERVER = os.environ.get("EW_SERVER", "https://experience-wholesale.net")
 WORKER_ID = os.environ.get("WORKER_ID", "vm-worker-1")
 WORKER_PRIORITY = os.environ.get("WORKER_PRIORITY", "primary")
+WORKER_SOURCE = os.environ.get("WORKER_SOURCE", "ew")
 
 EW_POLL_INTERVAL = 5
 HEARTBEAT_INTERVAL = 30  # bumped from 60 for tighter watchdog detection
@@ -150,7 +151,7 @@ def ipacket_upload(filepath):
 
 def ew_get_pending():
     try:
-        params = {"worker_id": WORKER_ID, "priority": WORKER_PRIORITY}
+        params = {"worker_id": WORKER_ID, "priority": WORKER_PRIORITY, "source": WORKER_SOURCE}
         r = http_requests.get(f"{EW_SERVER}/api/vauto/pending",
                               params=params, timeout=30)
         if r.status_code == 200:
@@ -543,7 +544,7 @@ def main():
     args = ap.parse_args()
 
     print(f"EW VM Worker — Playwright")
-    print(f"  WORKER_ID={WORKER_ID} priority={WORKER_PRIORITY}")
+    print(f"  WORKER_ID={WORKER_ID} priority={WORKER_PRIORITY} source={WORKER_SOURCE}")
     print(f"  EW_SERVER={EW_SERVER}")
     print(f"  poll={EW_POLL_INTERVAL}s  heartbeat={HEARTBEAT_INTERVAL}s  cookie_export={COOKIE_EXPORT_INTERVAL}s")
 

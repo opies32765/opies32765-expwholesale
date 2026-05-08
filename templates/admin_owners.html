@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Owners — EW Admin</title>
+<title>EW Partner Accounts — Admin</title>
 <style>
 body{margin:0;font-family:-apple-system,'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh}
 header{padding:18px 28px;background:#111827;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;align-items:center}
@@ -36,7 +36,7 @@ tbody tr:last-child td{border-bottom:0}
 </head>
 <body>
 <header>
-  <h1>Owner Portal Admins</h1>
+  <h1>EW Partner Accounts</h1>
   <a href="/">‹ Back to Buy Center</a>
 </header>
 <main>
@@ -45,11 +45,11 @@ tbody tr:last-child td{border-bottom:0}
   {% endwith %}
 
   <div class="card">
-    <h2>Invite a new owner</h2>
+    <h2>Invite a new partner</h2>
     <form class="invite" method="post" action="/admin/owners/invite">
       <div>
         <label for="i-email">Email</label>
-        <input id="i-email" name="email" type="email" required placeholder="owner@example.com">
+        <input id="i-email" name="email" type="email" required placeholder="partner@example.com">
       </div>
       <div>
         <label for="i-name">Name</label>
@@ -61,11 +61,11 @@ tbody tr:last-child td{border-bottom:0}
       </div>
       <button type="submit">Send invite</button>
     </form>
-    <p class="muted" style="margin-top:14px">Owners get a one-time invite link to set their password, then a phone-first dashboard at /owner. Push notifications fire on new bids if they install the app and grant permission.</p>
+    <p class="muted" style="margin-top:14px">Partners get a one-time invite link to set their password, then a phone-first dashboard at /owner. Push notifications fire on new bids if they install the app and grant permission.</p>
   </div>
 
   <div class="card">
-    <h2>Owners ({{ owners|length }})</h2>
+    <h2>Partners ({{ owners|length }})</h2>
     {% if not owners %}
       <p class="muted">No owners yet. Invite the first one above.</p>
     {% else %}

@@ -1,0 +1,99 @@
+{
+  "features": [
+    "year",
+    "mileage",
+    "mmr_n_tx",
+    "lsl_avg_sale",
+    "lsl_avg_gross",
+    "lsl_avg_purchase",
+    "lsl_n_deals",
+    "make_AUDI",
+    "make_BMW",
+    "make_MERCEDES_BENZ",
+    "make_PORSCHE",
+    "make_LAND_ROVER",
+    "make_LEXUS",
+    "make_CADILLAC",
+    "make_GENESIS",
+    "make_TESLA",
+    "make_VOLVO",
+    "make_ACURA",
+    "make_INFINITI",
+    "make_MASERATI",
+    "make_JAGUAR",
+    "make_FERRARI",
+    "make_BENTLEY",
+    "make_LAMBORGHINI",
+    "make_TOYOTA",
+    "make_HONDA",
+    "make_FORD",
+    "make_CHEVROLET",
+    "make_GMC",
+    "make_NISSAN",
+    "make_other"
+  ],
+  "numeric_features": [
+    "year",
+    "mileage",
+    "mmr_n_tx",
+    "lsl_avg_sale",
+    "lsl_avg_gross",
+    "lsl_avg_purchase",
+    "lsl_n_deals"
+  ],
+  "top_makes": [
+    "AUDI",
+    "BMW",
+    "MERCEDES-BENZ",
+    "PORSCHE",
+    "LAND ROVER",
+    "LEXUS",
+    "CADILLAC",
+    "GENESIS",
+    "TESLA",
+    "VOLVO",
+    "ACURA",
+    "INFINITI",
+    "MASERATI",
+    "JAGUAR",
+    "FERRARI",
+    "BENTLEY",
+    "LAMBORGHINI",
+    "TOYOTA",
+    "HONDA",
+    "FORD",
+    "CHEVROLET",
+    "GMC",
+    "NISSAN"
+  ],
+  "sanity": {
+    "price": [
+      1000,
+      2000000
+    ],
+    "mileage": [
+      0,
+      500000
+    ],
+    "msrp": [
+      5000,
+      1000000
+    ],
+    "days": [
+      0,
+      1000
+    ],
+    "spread": [
+      -200000,
+      200000
+    ],
+    "year": [
+      2000,
+      2030
+    ]
+  },
+  "n_train": 146,
+  "cv_mae": null,
+  "cv_mape_pct": null,
+  "trained_at": "2026-05-06T17:46:29.107968+00:00"
+}

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reset Password — Experience Wholesale</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center}
+  .box{background:#1e293b;padding:32px;border-radius:12px;width:360px;box-shadow:0 20px 40px rgba(0,0,0,.3)}
+  h1{margin:0 0 8px;font-size:22px}p.sub{margin:0 0 20px;color:#94a3b8;font-size:13px}
+  label{display:block;margin:12px 0 4px;font-size:12px;color:#cbd5e1}
+  input{width:100%;padding:10px 12px;border:1px solid #334155;background:#0f172a;color:#f1f5f9;border-radius:6px;font-size:14px;box-sizing:border-box}
+  button{margin-top:18px;width:100%;padding:12px;background:#2563eb;color:#fff;border:0;border-radius:6px;font-weight:600;cursor:pointer}
+  .flash{padding:10px 12px;background:#1e3a8a;color:#dbeafe;border-radius:6px;font-size:13px;margin-bottom:12px}
+  a{color:#7dd3fc;font-size:12px;text-decoration:none}
+</style>
+</head>
+<body>
+  <div class="box">
+    <h1>Reset password</h1>
+    <p class="sub">Enter the email you sign in with and we will send a reset link.</p>
+    {% with msgs = get_flashed_messages(with_categories=true) %}
+      {% for cat, m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}
+    {% endwith %}
+    <form method="post">
+      <label>Email</label>
+      <input type="email" name="email" required autofocus>
+      <button type="submit">Send reset link</button>
+    </form>
+    <p style="margin-top:16px;text-align:center"><a href="{{ url_for('partner.login', slug=slug) }}">Back to sign in</a></p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,176 @@
+{# Per-car bid detail page — mobile-friendly full-page form.
+   Pre-bid state: target_price + notes inputs, POST to /submit (existing
+   handler accepts select_<id>=on / price_<id> / message_<id>).
+   Post-bid state: thread + counter form (uses /counter endpoint). #}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ inv.year }} {{ inv.make }} {{ inv.model }} — {{ dealer.name }}</title>
+<style>
+  :root{--bg:#0f172a;--panel:#1e293b;--mute:#94a3b8;--text:#e2e8f0;
+        --line:#334155;--accent:#2563eb;--good:#22c55e;--warn:#f59e0b;--bad:#ef4444}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);font-size:16px}
+  main{max-width:680px;margin:0 auto;padding:18px}
+  .back{display:inline-flex;align-items:center;gap:8px;color:#7dd3fc;text-decoration:none;font-size:14px;font-weight:600;margin-bottom:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:14px}
+  h1{font-size:22px;line-height:1.25;margin:0 0 6px}
+  h1 a{color:#7dd3fc;text-decoration:none}
+  h1 a:hover{text-decoration:underline}
+  .meta{color:var(--mute);font-size:13px;line-height:1.5}
+  .meta .vin{font-family:ui-monospace,monospace;color:#e2e8f0}
+  .age{display:inline-block;padding:4px 10px;border-radius:14px;font-weight:800;font-size:13px;margin-right:8px}
+  .age.under{background:#1e3a8a;color:#dbeafe}
+  .age.aged{background:#78350f;color:#fde68a}
+  .age.stale{background:#7f1d1d;color:#fecaca}
+  .photo-strip{display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;margin:10px 0 0;padding-bottom:4px}
+  .photo-strip img{height:110px;border-radius:8px;object-fit:cover;flex-shrink:0;border:1px solid var(--line)}
+  label{display:block;font-size:11px;font-weight:700;color:var(--mute);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 6px}
+  input[type=text],input[type=number]{width:100%;padding:14px;border:1px solid var(--line);background:var(--bg);color:var(--text);border-radius:8px;font-size:18px;font-weight:700;font-family:inherit}
+  textarea{width:100%;min-height:90px;padding:12px;border:1px solid var(--line);background:var(--bg);color:var(--text);border-radius:8px;font-size:15px;font-family:inherit;line-height:1.5;resize:vertical}
+  button.primary{width:100%;padding:16px;background:var(--good);color:#0f172a;border:0;border-radius:10px;font-size:17px;font-weight:800;cursor:pointer;margin-top:18px}
+  button.primary:disabled{opacity:.5;cursor:not-allowed}
+  button.secondary{padding:10px 16px;background:#2563eb;color:#fff;border:0;border-radius:8px;font-weight:700;font-size:14px;cursor:pointer}
+  .thread{padding:14px;background:#0f172a;border:1px solid var(--line);border-radius:8px;font-size:14px;line-height:1.5}
+  .thread em{color:var(--mute);font-style:normal;font-weight:600}
+  .thread .ew{color:#7dd3fc;font-weight:600;display:block;margin-top:8px}
+  .status-chip{display:inline-block;padding:4px 12px;border-radius:12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+  .status-responded{background:#166534;color:#bbf7d0}
+  .status-waiting{background:#422006;color:#fde68a}
+  .bid-num{font-size:18px;color:#fbbf24;font-family:ui-monospace,monospace;font-weight:800;letter-spacing:.5px;margin-top:8px}
+  .err{color:#fca5a5;font-size:13px;margin-top:8px}
+  .flash{padding:12px 14px;background:#1e3a8a;color:#dbeafe;border-radius:8px;font-size:14px;margin-bottom:14px}
+  .price-display{font-size:18px;font-weight:700;color:var(--text)}
+</style>
+</head>
+<body>
+<main>
+  <a class="back" href="{{ url_for('partner.dashboard', slug=slug) }}">← Back to dashboard</a>
+
+  {% with msgs = get_flashed_messages(with_categories=true) %}
+    {% for cat, m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}
+  {% endwith %}
+
+  <div class="card">
+    {% set _age = inv|best_age_days %}
+    {% set _bucket = 'stale' if _age|int >= 90 else ('aged' if _age|int >= 60 else 'under') %}
+    <span class="age {{ _bucket }}">{{ _age }}d on lot</span>
+    <h1>
+      {% if inv.url %}<a href="{{ inv.url }}" target="_blank" rel="noopener">{{ inv.year }} {{ inv.make }} {{ inv.model }} {{ inv.trim or '' }}</a>
+      {% else %}{{ inv.year }} {{ inv.make }} {{ inv.model }} {{ inv.trim or '' }}{% endif %}
+    </h1>
+    <div class="meta">
+      VIN <span class="vin">{{ inv.vin }}</span>
+      {% if inv.ext_color %} · {{ inv.ext_color }}{% endif %}
+      {% if inv.mileage %} · {{ inv.mileage|miles }} mi{% endif %}
+      {% if inv.price %}<br>Listed at <span class="price-display">{{ inv.price|money }}</span>{% if inv.price_drop_amount %} <span style="color:#a78bfa;font-size:13px">↓ ${{ '{:,.0f}'.format(inv.price_drop_amount) }}</span>{% endif %}{% endif %}
+    </div>
+    {% set _photos = (inv.photos if inv.photos is iterable and inv.photos is not string else []) %}
+    {% set _hero = _photos[0] if _photos else inv.photo_url %}
+    {% if _hero %}
+      <div style="margin-top:12px">
+        <img src="/thumb?url={{ _hero|urlencode }}&size=full" alt=""
+             style="width:100%;max-height:280px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block">
+      </div>
+    {% endif %}
+  </div>
+
+  {% if req %}
+    {# Existing bid request — show thread + counter form #}
+    <div class="card">
+      {% if req.ew_counter or req.ew_message %}
+        <span class="status-chip status-responded">EW Replied</span>
+      {% else %}
+        <span class="status-chip status-waiting">Awaiting EW</span>
+      {% endif %}
+      {% if req.bid_id %}<div class="bid-num">Bid #{{ req.bid_id }}</div>{% endif %}
+
+      <label>Thread</label>
+      <div class="thread">
+        {% if req.target_price %}<em>You said:</em> ${{ '{:,.0f}'.format(req.target_price) }}{% endif %}
+        {% if req.partner_message %}<br>{{ req.partner_message }}{% endif %}
+        {% if req.ew_counter %}<span class="ew"><em>EW offer:</em> ${{ '{:,.0f}'.format(req.ew_counter) }}</span>{% endif %}
+        {% if req.ew_message %}<span class="ew">{{ req.ew_message }}</span>{% endif %}
+        {% if not req.target_price and not req.partner_message and not req.ew_counter and not req.ew_message %}
+          <em>Awaiting EW response…</em>
+        {% endif %}
+      </div>
+
+      {% if req.ew_counter or req.ew_message %}
+        <div class="counter-form" data-pbr-id="{{ req.pbr_id }}">
+          <label>Counter price</label>
+          <input type="text" class="counter-price" inputmode="numeric" placeholder="e.g. 25,000"
+                 oninput="var d=this.value.replace(/[^0-9]/g,'');this.value=d?parseInt(d,10).toLocaleString('en-US'):'';">
+          <label>Reply</label>
+          <textarea class="counter-msg" placeholder="Optional message…"></textarea>
+          <button type="button" class="primary" onclick="sendCounter(this.parentElement)">Send Counter</button>
+        </div>
+      {% endif %}
+
+      <button type="button" onclick="deleteRequest({{ req.pbr_id }})"
+              style="margin-top:18px;width:100%;padding:12px;background:transparent;color:#fca5a5;border:1px solid #7f1d1d;border-radius:8px;font-weight:600;font-size:14px;cursor:pointer">
+        ✕ Withdraw this bid request
+      </button>
+    </div>
+  {% else %}
+    {# No bid yet — show submit form. POSTs to /submit (existing handler). #}
+    <form method="post" action="{{ url_for('partner.submit_requests', slug=slug) }}" class="card">
+      <input type="hidden" name="select_{{ inv.id }}" value="on">
+      <label for="price">What you want for it</label>
+      <input type="text" id="price" name="price_{{ inv.id }}" inputmode="numeric"
+             placeholder="$25,000" autofocus required
+             oninput="var d=this.value.replace(/[^0-9]/g,'');this.value=d?'$'+parseInt(d,10).toLocaleString('en-US'):'';">
+
+      <label for="msg">Notes (optional)</label>
+      <textarea id="msg" name="message_{{ inv.id }}" rows="4"
+                placeholder="Anything you'd want us to know — title status, accidents, recent service…"></textarea>
+
+      <button type="submit" class="primary">Submit Bid Request</button>
+    </form>
+  {% endif %}
+</main>
+
+<script>
+async function deleteRequest(pbrId){
+  if (!confirm('Withdraw this bid request? This cannot be undone.')) return;
+  try {
+    const r = await fetch('/partner/{{ slug }}/req/' + pbrId + '/delete', {method:'POST'});
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    location.href = '{{ url_for("partner.dashboard", slug=slug) }}';
+  } catch(e) {
+    alert('Could not delete: ' + e.message);
+  }
+}
+async function sendCounter(wrapper){
+  const pbrId = wrapper.dataset.pbrId;
+  const priceEl = wrapper.querySelector('.counter-price');
+  const msgEl   = wrapper.querySelector('.counter-msg');
+  const btn     = wrapper.querySelector('button');
+  const counterPrice = (priceEl.value || '').replace(/,/g,'').replace(/[^0-9]/g,'');
+  const counterMsg   = (msgEl.value || '').trim();
+  if (!counterPrice && !counterMsg) {
+    alert('Add a counter price or a reply message before sending.');
+    return;
+  }
+  btn.disabled = true; btn.textContent = 'Sending…';
+  const fd = new FormData();
+  fd.append('pbr_id', pbrId);
+  if (counterPrice) fd.append('counter_price', counterPrice);
+  if (counterMsg)   fd.append('counter_message', counterMsg);
+  try {
+    const r = await fetch('{{ url_for("partner.counter_offer", slug=slug) }}', {method:'POST', body: fd});
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    btn.textContent = 'Sent!';
+    setTimeout(() => location.reload(), 700);
+  } catch (e) {
+    alert('Could not send counter: ' + e.message);
+    btn.disabled = false; btn.textContent = 'Send Counter';
+  }
+}
+</script>
+</body>
+</html>

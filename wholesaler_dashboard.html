@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>{{ reviewer_name }} — Wholesaler Review</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:100vh}
+
+/* Header */
+.header{background:#243447;border-bottom:1px solid #344f68;padding:0 32px;height:66px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-mark{width:38px;height:38px;background:linear-gradient(135deg,#a855f7,#7c3aed);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;color:#fff}
+.logo-text{font-size:17px;font-weight:700;color:#f1f5f9;letter-spacing:-0.3px}
+.logo-sub{font-size:11px;color:#7a9bb5;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+.header-right{display:flex;align-items:center;gap:8px}
+.live-dot{width:8px;height:8px;background:#22c55e;border-radius:50%;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(.85)}}
+.live-label{font-size:14px;color:#22c55e;font-weight:600}
+
+/* Stats bar */
+.stats-bar{background:#243447;border-bottom:1px solid #344f68;padding:18px 40px;display:flex;gap:48px;align-items:center}
+.stat-item{display:flex;flex-direction:column;align-items:center;gap:4px}
+.stat-num{font-size:38px;font-weight:800;line-height:1}
+.stat-label{font-size:12px;color:#7a9bb5;font-weight:600;text-transform:uppercase;letter-spacing:.8px}
+.stat-num.blue{color:#60a5fa}
+.stat-num.yellow{color:#fbbf24}
+.stat-num.green{color:#34d399}
+.stat-num.purple{color:#c084fc}
+.stat-num.gray{color:#7a9bb5}
+.stat-num.white{color:#f1f5f9}
+.stat-num.red{color:#fca5a5}
+.stat-divider{width:1px;height:44px;background:#344f68}
+
+/* Filters */
+.filters{padding:16px 32px;display:flex;gap:10px;align-items:center;border-bottom:1px solid #344f68;flex-wrap:wrap}
+.filter-btn{padding:9px 20px;border-radius:8px;border:1px solid #344f68;background:transparent;color:#a8c0d6;font-size:15px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-decoration:none;display:inline-block}
+.filter-btn:hover{border-color:#4d7a9e;color:#e2e8f0}
+.filter-btn.active{background:#3b1d6b;border-color:#a855f7;color:#c4b5fd}
+.filter-btn-passed{border-color:rgba(153,27,27,.5);color:#fca5a5;background:rgba(127,29,29,.25)}
+.filter-btn-passed:hover{background:rgba(153,27,27,.4);border-color:#b91c1c;color:#fca5a5}
+.filter-btn-passed.active{background:#7f1d1d;border-color:#ef4444;color:#fca5a5}
+.filter-btn-approved{border-color:rgba(34,197,94,.4);color:#86efac;background:rgba(20,83,45,.2)}
+.filter-btn-approved:hover{background:rgba(20,83,45,.4);border-color:#16a34a;color:#86efac}
+.filter-btn-approved.active{background:#14532d;border-color:#22c55e;color:#86efac}
+.filter-count{background:#344f68;border-radius:4px;padding:2px 8px;font-size:13px;margin-left:5px;color:#7a9bb5}
+.filter-btn.active .filter-count{background:rgba(168,85,247,.2);color:#c4b5fd}
+.filter-btn-passed.active .filter-count{background:rgba(239,68,68,.2);color:#fca5a5}
+.filter-btn-approved.active .filter-count{background:rgba(34,197,94,.2);color:#86efac}
+.filter-divider{width:1px;height:30px;background:#344f68;margin:0 6px}
+.filter-select{background:#243447;border:1px solid #344f68;border-radius:8px;color:#a8c0d6;font-size:15px;font-weight:500;font-family:'Inter',sans-serif;padding:9px 36px 9px 16px;appearance:none;cursor:pointer;outline:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237a9bb5' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center}
+.filter-select:focus{border-color:#a855f7;color:#e2e8f0}
+.filter-label{font-size:12px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.7px;white-space:nowrap}
+
+/* Bid # */
+.bid-num{font-size:15px;font-weight:700;color:#7a9bb5;font-family:monospace}
+.bid-time{font-size:12px;color:#5a7a96;margin-top:3px;white-space:nowrap}
+
+tbody tr{cursor:pointer}
+tr.review-pending td{background:rgba(168,85,247,.05)}
+tr.review-pending:hover td{background:rgba(168,85,247,.10)}
+tr.review-rejected td{background:rgba(239,68,68,.06);opacity:.65}
+tr.review-rejected:hover td{background:rgba(239,68,68,.11);opacity:.85}
+tr.review-approved td{background:rgba(34,197,94,.05)}
+tr.review-approved:hover td{background:rgba(34,197,94,.09)}
+
+/* Table */
+.table-wrap{padding:24px 32px}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:12px 16px;font-size:12px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid #344f68}
+td{padding:15px 16px;border-bottom:1px solid #2a3f54;vertical-align:middle}
+tr:hover td{background:rgba(255,255,255,.03)}
+tr:last-child td{border-bottom:none}
+
+.contact-name{font-size:16px;font-weight:600;color:#f1f5f9}
+.contact-phone{font-size:14px;color:#7a9bb5;margin-top:2px}
+.contact-company{font-size:13px;color:#c084fc;margin-top:2px;font-weight:500}
+
+.vehicle-vin{font-size:15px;font-weight:700;color:#e2e8f0;font-family:monospace;letter-spacing:.5px}
+.vehicle-desc{font-size:14px;color:#a8c0d6;margin-top:3px}
+.no-vin{font-size:14px;color:#5a7a96;font-style:italic}
+
+.msg-preview{font-size:15px;color:#c4d6e8;max-width:360px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;line-height:1.55}
+
+.photo-badge{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:#7a9bb5;background:#2a3f54;padding:5px 11px;border-radius:6px}
+.photo-badge svg{width:13px;height:13px}
+.photo-cell{display:flex;align-items:center;gap:8px}
+.photo-thumb-link{display:block;line-height:0;border-radius:6px;overflow:hidden;border:1px solid #1e293b;transition:transform .15s,border-color .15s;flex-shrink:0}
+.photo-thumb-link:hover{transform:scale(1.04);border-color:#a855f7}
+.photo-thumb{width:54px;height:40px;object-fit:cover;display:block;background:#0f172a}
+
+/* Review-status badges */
+.badge{display:inline-block;padding:5px 13px;border-radius:6px;font-size:13px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+.badge-pending{background:rgba(168,85,247,.18);color:#c4b5fd;border:1px solid rgba(168,85,247,.3)}
+.badge-approved{background:rgba(34,197,94,.2);color:#34d399;border:1px solid rgba(34,197,94,.4)}
+.badge-rejected{background:rgba(127,29,29,.3);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
+
+.time-col{font-size:14px;color:#7a9bb5;white-space:nowrap}
+
+.btn-view{padding:7px 14px;background:#2a3f54;border:1px solid #3d5a74;border-radius:6px;color:#a8c0d6;font-size:13px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-decoration:none}
+.btn-view:hover{background:#344f68;color:#e2e8f0}
+
+/* Counter / Mark Bought / Pass row actions. Counter is the primary action
+   (most common — back-and-forth negotiation). Mark Bought is the deal-done
+   button that pushes the bid to EW Buy Center. Pass kills it. */
+.row-actions{display:flex;flex-direction:column;gap:6px;min-width:160px}
+.btn-counter{padding:9px 14px;background:#a855f7;border:1px solid #c084fc;border-radius:6px;color:#fff;font-size:13px;font-weight:800;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-align:center}
+.btn-counter:hover{background:#c084fc;color:#1e0a3c}
+.btn-counter:disabled{opacity:.5;cursor:not-allowed}
+.btn-bought{padding:7px 14px;background:#14532d;border:1px solid #22c55e;border-radius:6px;color:#bbf7d0;font-size:12px;font-weight:700;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-align:center}
+.btn-bought:hover{background:#22c55e;color:#052e16}
+.btn-bought:disabled{opacity:.5;cursor:not-allowed}
+.btn-pass{padding:7px 14px;background:transparent;border:1px solid rgba(127,29,29,.5);border-radius:6px;color:#fca5a5;font-size:12px;font-weight:700;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-align:center}
+.btn-pass:hover{background:rgba(127,29,29,.3);color:#fecaca}
+.btn-pass:disabled{opacity:.5;cursor:not-allowed}
+
+/* Counter modal */
+.counter-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;align-items:center;justify-content:center;padding:20px}
+.counter-overlay.show{display:flex}
+.counter-modal{background:#243447;border:1px solid #344f68;border-radius:12px;padding:24px;max-width:520px;width:100%;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+.counter-modal h3{font-size:18px;font-weight:700;color:#f1f5f9;margin-bottom:6px}
+.counter-modal .ctx{font-size:13px;color:#94a3b8;margin-bottom:16px;line-height:1.5}
+.counter-modal .ctx b{color:#cbd5e1}
+.counter-modal label{display:block;font-size:11px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.5px;margin:14px 0 6px}
+.counter-modal input,.counter-modal textarea{width:100%;padding:11px 13px;border:1px solid #344f68;background:#1f2e40;color:#e2e8f0;border-radius:7px;font-size:15px;font-family:'Inter',sans-serif;font-weight:500;box-sizing:border-box}
+.counter-modal input:focus,.counter-modal textarea:focus{border-color:#a855f7;outline:none}
+.counter-modal textarea{min-height:90px;resize:vertical;line-height:1.5}
+.counter-modal .actions{display:flex;gap:10px;margin-top:18px}
+.counter-modal .actions button{flex:1;padding:12px;border-radius:7px;font-weight:800;font-size:14px;border:0;cursor:pointer;font-family:'Inter',sans-serif}
+.counter-modal .send{background:#a855f7;color:#fff}
+.counter-modal .send:hover{background:#c084fc;color:#1e0a3c}
+.counter-modal .send:disabled{opacity:.5;cursor:not-allowed}
+.counter-modal .cancel{background:#1f2e40;color:#a8c0d6;border:1px solid #344f68}
+.counter-modal .cancel:hover{background:#344f68;color:#e2e8f0}
+.counter-modal .err{margin-top:10px;padding:9px 12px;background:#7f1d1d;color:#fecaca;border-radius:6px;font-size:13px;display:none}
+.counter-modal .err.show{display:block}
+
+/* Empty state */
+.empty{text-align:center;padding:80px 24px;color:#5a7a96}
+.empty-icon{font-size:48px;margin-bottom:16px}
+.empty h3{font-size:18px;font-weight:600;color:#7a9bb5;margin-bottom:8px}
+.empty p{font-size:14px;line-height:1.6}
+
+@media(max-width:768px){
+  .stats-bar{gap:20px;padding:14px 16px;flex-wrap:wrap}
+  .table-wrap{padding:12px}
+  .filters{padding:12px 16px}
+  th,td{padding:10px 8px}
+  .header{padding:0 12px !important;height:58px;gap:8px}
+  .logo{gap:8px;flex-shrink:0}
+  .logo-mark{width:32px;height:32px;font-size:15px}
+  .logo-text{font-size:14px}
+  .logo-sub{display:none}
+  .header-right{gap:6px !important;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;scrollbar-width:none;min-width:0}
+  .header-right::-webkit-scrollbar{display:none}
+  .header-right a{font-size:12px !important;padding:4px 9px !important;white-space:nowrap;flex-shrink:0}
+  .header-right .live-dot,.header-right .live-label{display:none}
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">
+    <div class="logo-mark">{{ reviewer_name[0]|upper }}</div>
+    <div>
+      <div class="logo-text">{{ reviewer_name }}'s Wholesaler Review</div>
+      <div class="logo-sub">Pending → Approved → Buy Center</div>
+    </div>
+  </div>
+  <div class="header-right" style="gap:14px">
+    <a href="{{ url_for('wholesaler_review.wholesaler_list', reviewer=reviewer_slug) }}" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s">My Wholesalers</a>
+    <a href="{{ url_for('wholesaler_review.onboard', reviewer=reviewer_slug) }}" style="font-size:13px;color:#86efac;text-decoration:none;font-weight:700;padding:5px 12px;border:1px solid rgba(34,197,94,.4);border-radius:6px;transition:all .15s;background:rgba(20,83,45,.2)">+ Add Wholesaler</a>
+    <a href="{{ url_for('wholesaler_review.queue', reviewer=reviewer_slug) }}" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" title="Card-stack queue view (alternative layout)">Card View</a>
+    <a href="/" style="font-size:13px;color:#60a5fa;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(59,130,246,.3);border-radius:6px;transition:all .15s">EW Buy Center →</a>
+    <a href="/logout" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px">Sign out</a>
+    <div class="live-dot"></div>
+    <span class="live-label">LIVE</span>
+  </div>
+</div>
+
+<div class="stats-bar" style="gap:32px">
+  <div class="stat-item">
+    <div class="stat-num purple" id="stat-pending" style="font-size:44px">{{ stats.pending or 0 }}</div>
+    <div class="stat-label">Pending Review</div>
+  </div>
+  <div class="stat-divider"></div>
+  <div class="stat-item">
+    <div class="stat-num white" id="stat-today" style="font-size:36px">{{ stats.today or 0 }}</div>
+    <div class="stat-label">Today's Submissions</div>
+  </div>
+  <div class="stat-divider"></div>
+  <div class="stat-item">
+    <div class="stat-num green" id="stat-approved-7d">{{ stats.approved_7d or 0 }}</div>
+    <div class="stat-label">Approved (7d)</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-num red" id="stat-rejected-7d">{{ stats.rejected_7d or 0 }}</div>
+    <div class="stat-label">Rejected (7d)</div>
+  </div>
+  <div class="stat-divider"></div>
+  <div class="stat-item">
+    <div class="stat-num blue" id="stat-wholesalers">{{ stats.wholesalers or 0 }}</div>
+    <div class="stat-label">Active Wholesalers</div>
+  </div>
+</div>
+
+<div class="filters">
+  <span class="filter-label">Status</span>
+  <a href="?status=pending&dealer={{ dealer_filter }}" class="filter-btn {% if status_filter=='pending' %}active{% endif %}">Pending <span class="filter-count" data-status="pending">{{ stats.pending or 0 }}</span></a>
+  <a href="?status=approved&dealer={{ dealer_filter }}" class="filter-btn filter-btn-approved {% if status_filter=='approved' %}active{% endif %}">Approved (7d) <span class="filter-count" data-status="approved">{{ stats.approved_7d or 0 }}</span></a>
+  <a href="?status=rejected&dealer={{ dealer_filter }}" class="filter-btn filter-btn-passed {% if status_filter=='rejected' %}active{% endif %}">Rejected (7d) <span class="filter-count" data-status="rejected">{{ stats.rejected_7d or 0 }}</span></a>
+  <a href="?status=all&dealer={{ dealer_filter }}" class="filter-btn {% if status_filter=='all' %}active{% endif %}">All</a>
+
+  {% if wholesalers %}
+  <div class="filter-divider"></div>
+  <span class="filter-label">Wholesaler</span>
+  <select class="filter-select" id="dealer-select" onchange="applyDealerFilter(this.value)">
+    <option value="all" {% if dealer_filter=='all' %}selected{% endif %}>All Wholesalers</option>
+    {% for w in wholesalers %}
+    <option value="{{ w.id }}" {% if dealer_filter == w.id|string %}selected{% endif %}>{{ w.name }}</option>
+    {% endfor %}
+  </select>
+  {% endif %}
+
+  <div class="filter-divider"></div>
+  <input type="search" id="bid-search" placeholder="Search… bid #, VIN, wholesaler, vehicle"
+         oninput="applyBidSearch(this.value)"
+         style="background:#243447;border:1px solid #344f68;border-radius:8px;color:#e2e8f0;font-size:14px;font-family:'Inter',sans-serif;padding:9px 14px;outline:none;min-width:260px"
+         onfocus="this.style.borderColor='#a855f7'"
+         onblur="this.style.borderColor='#344f68'">
+</div>
+
+<div class="table-wrap">
+  {% if bids %}
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Wholesaler</th>
+        <th>Vehicle / VIN</th>
+        <th>Notes / Last Reply</th>
+        <th>Ask</th>
+        <th>AI Price</th>
+        <th>Your Bid</th>
+        <th>Photos</th>
+        <th>Status</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for bid in bids %}
+      <tr data-id="{{ bid.id }}" data-created="{{ bid.created_at.isoformat() if bid.created_at else '' }}" class="review-{{ bid.review_status or 'pending' }}">
+        <td>
+          <div class="bid-num">#{{ bid.id }}</div>
+          <div class="bid-time">{{ time_ago(bid.created_at) }}</div>
+          {% set _active = active_workers.get(bid.id, []) if active_workers else [] %}
+          {% if _active %}
+            {% set _row = _active[0] %}
+            {% set _wid = _row.worker_id %}
+            {% set _wname = ('Worker-' + _wid.split('-')[1]) if _wid.startswith('worker-') else _wid|capitalize %}
+            <div title="{{ _wid }} working on {{ _row.job_type }}" style="margin-top:3px;display:inline-flex;align-items:center;gap:5px;padding:2px 7px;background:rgba(96,165,250,.10);border:1px solid rgba(96,165,250,.3);border-radius:10px;font-size:10px;font-weight:600;color:#60a5fa;letter-spacing:.2px">
+              <span style="width:6px;height:6px;background:#4ade80;border-radius:50%;display:inline-block;animation:pulse 1.5s ease-in-out infinite"></span>
+              {{ _wname }} · {{ _row.job_type }}
+            </div>
+          {% endif %}
+        </td>
+        <td>
+          <div class="contact-name">{{ bid.partner_dealer_name or 'Unknown wholesaler' }}</div>
+          {% if bid.salesperson %}<div class="contact-company">👤 {{ bid.salesperson }}</div>{% endif %}
+        </td>
+        <td>
+          {% if bid.vin %}
+            <div class="vehicle-vin">{{ bid.vin }}{% if bid.id in vauto_done %}<span title="vAuto complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% else %}<span title="vAuto pending" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% endif %}</div>
+            {% if bid.year or bid.make or bid.mileage %}
+              <div class="vehicle-desc">{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }}{% if bid.mileage %} {% if bid.year or bid.make %}· {% endif %}{{ '{:,}'.format(bid.mileage) }} mi{% endif %}</div>
+            {% endif %}
+          {% else %}
+            <div class="no-vin">No VIN extracted</div>
+          {% endif %}
+        </td>
+        <td>
+          <div class="msg-preview">{{ (bid.raw_message or '')|msg_display or '—' }}</div>
+          {% if bid.bid_response %}
+            <div style="margin-top:6px;font-size:12px;color:#7a9bb5;border-left:2px solid #a855f7;padding-left:8px;line-height:1.4;max-width:340px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">
+              <span style="color:#c084fc;font-weight:600">You:</span> {{ bid.bid_response }}
+            </div>
+          {% endif %}
+        </td>
+        <td>
+          {% if bid.asking_price %}
+            <div style="font-size:15px;font-weight:700;color:#94a3b8">${{ '{:,.0f}'.format(bid.asking_price) }}</div>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if bid.ai_price %}
+            <div style="font-size:15px;font-weight:700;color:#a78bfa">${{ '{:,.0f}'.format(bid.ai_price) }}</div>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if bid.bid_amount %}
+            <div style="font-size:15px;font-weight:700;color:#34d399">${{ '{:,.0f}'.format(bid.bid_amount) }}</div>
+          {% else %}<span style="color:#5a7a96">—</span>{% endif %}
+        </td>
+        <td>
+          {% set pc = photo_counts.get(bid.id, 0) %}
+          {% set fp = first_photos.get(bid.id) if first_photos else None %}
+          {% if pc > 0 %}
+          <div class="photo-cell">
+            {% if fp %}
+            <a href="/bid/{{ bid.id }}" class="photo-thumb-link" title="Click to open bid" style="display:none">
+              <img class="photo-thumb" src="{% if fp.startswith('/static/') %}{{ fp }}{% else %}{{ fp|thumb_url('mobile') }}{% endif %}" alt="" onload="this.parentElement.style.display='block'" onerror="this.parentElement.style.display='none'">
+            </a>
+            {% endif %}
+            <span class="photo-badge">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+              {{ pc }}
+            </span>
+          </div>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          <span class="badge badge-{{ bid.review_status or 'pending' }}">{{ (bid.review_status or 'pending').replace('_',' ') }}</span>
+          {% if bid.review_status == 'approved' and bid.review_at %}
+            <div style="font-size:10px;color:#64748b;margin-top:3px">by {{ bid.review_by or '?' }}</div>
+          {% elif bid.review_status == 'rejected' and bid.review_note %}
+            <div style="font-size:10px;color:#7a9bb5;margin-top:3px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ bid.review_note }}">{{ bid.review_note }}</div>
+          {% endif %}
+        </td>
+        <td>
+          {% if bid.review_status == 'pending' or not bid.review_status %}
+            <div class="row-actions">
+              <button class="btn-counter" data-bid="{{ bid.id }}"
+                      data-vin="{{ bid.vin or '' }}"
+                      data-ymm="{{ (bid.year or '') }} {{ (bid.make or '') }} {{ (bid.model or '') }}"
+                      data-ask="{{ bid.asking_price or '' }}"
+                      data-ai="{{ bid.ai_price or '' }}"
+                      data-current="{{ bid.bid_amount or '' }}">Counter →</button>
+              <button class="btn-bought" data-bid="{{ bid.id }}" data-action="approve" data-current="{{ bid.bid_amount or '' }}">Mark Bought · push to EW</button>
+              <button class="btn-pass"   data-bid="{{ bid.id }}" data-action="reject">Pass</button>
+              <a href="/bid/{{ bid.id }}" class="btn-view" style="text-align:center;font-size:11px;padding:5px 10px">Open full thread ↗</a>
+            </div>
+          {% else %}
+            <a href="/bid/{{ bid.id }}" class="btn-view">View →</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">
+    <div class="empty-icon">
+      {% if status_filter == 'pending' %}🌙{% elif status_filter == 'approved' %}✅{% elif status_filter == 'rejected' %}🚫{% else %}📋{% endif %}
+    </div>
+    <h3>
+      {% if status_filter == 'pending' %}Nothing pending review.{% elif status_filter == 'approved' %}No approvals in the last 7 days.{% elif status_filter == 'rejected' %}No rejections in the last 7 days.{% else %}No submissions yet.{% endif %}
+    </h3>
+    <p>{% if not stats.wholesalers %}<a href="{{ url_for('wholesaler_review.onboard', reviewer=reviewer_slug) }}" style="color:#86efac">+ Add your first wholesaler</a> to start.{% else %}Submissions from your wholesalers will appear here.{% endif %}</p>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Counter offer modal — shared across all rows -->
+<div class="counter-overlay" id="counterOverlay">
+  <div class="counter-modal">
+    <h3>Counter offer</h3>
+    <div class="ctx" id="counterCtx"></div>
+    <label for="counterAmount">Your bid amount</label>
+    <input type="text" id="counterAmount" inputmode="numeric" placeholder="$0">
+    <label for="counterMsg">Message to wholesaler</label>
+    <textarea id="counterMsg" placeholder="e.g. Best I can do at this mileage given the books — ${...}"></textarea>
+    <div class="actions">
+      <button class="cancel" type="button" id="counterCancel">Cancel</button>
+      <button class="send"   type="button" id="counterSend">Send counter</button>
+    </div>
+    <div class="err" id="counterErr"></div>
+  </div>
+</div>
+
+<script>
+const REVIEWER_SLUG = {{ reviewer_slug|tojson }};
+
+let highestId = Math.max(0, ...Array.from(document.querySelectorAll('tr[data-id]')).map(r => parseInt(r.dataset.id)));
+const _qs = new URLSearchParams(window.location.search);
+let currentFilter = _qs.get('status') || 'pending';
+let currentDealer = _qs.get('dealer') || 'all';
+
+function applyDealerFilter(d) {
+  const url = new URL(window.location.href);
+  url.searchParams.set('dealer', d);
+  window.location.href = url.toString();
+}
+
+function timeAgo(iso) {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (isNaN(t)) return '';
+  const diff = (Date.now() - t) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  return Math.floor(diff/86400) + 'd ago';
+}
+
+function reviewBadge(s) {
+  const map = {pending:'badge-pending', approved:'badge-approved', rejected:'badge-rejected'};
+  const v = s || 'pending';
+  return `<span class="badge ${map[v]||''}">${v}</span>`;
+}
+
+function stripFieldMeta(msg) {
+  if (!msg) return '—';
+  const skip = ['Rep:', 'VIN:', 'Mileage:', 'Asking:'];
+  const kept = msg.split(' | ').filter(p => !skip.some(s => p.startsWith(s)));
+  return kept.join(' | ').trim() || '—';
+}
+
+let _bidSearchQuery = '';
+function applyBidSearch(q) {
+  _bidSearchQuery = (q || '').trim().toLowerCase();
+  filterVisibleRows();
+}
+function filterVisibleRows() {
+  const q = _bidSearchQuery;
+  const rows = document.querySelectorAll('tbody tr');
+  let visibleCount = 0;
+  rows.forEach(row => {
+    if (!q) { row.style.display=''; visibleCount++; return; }
+    const txt = row.textContent.toLowerCase();
+    const hit = txt.includes(q);
+    row.style.display = hit ? '' : 'none';
+    if (hit) visibleCount++;
+  });
+  const empty = document.querySelector('.empty');
+  if (empty && q) empty.style.display = visibleCount === 0 ? '' : 'none';
+}
+
+let _vautoDone = new Set();
+
+function renderRow(b, pc, fp, activeWorker) {
+  const vehicleDesc = (b.year||b.make||b.mileage) ? `<div class="vehicle-desc">${b.year||''} ${b.make||''} ${b.model||''}${b.mileage ? (b.year||b.make?' · ':'')+b.mileage.toLocaleString()+' mi':''}</div>` : '';
+  const vaScanDone = _vautoDone.has(b.id);
+  const vaBadge = b.vin ? (vaScanDone
+    ? '<span title="Scan complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>'
+    : '<span title="Scanning…" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px;animation:pulse 2s infinite">vA</span>'
+  ) : '';
+  const vehicle = b.vin ? `<div class="vehicle-vin">${b.vin}${vaBadge}</div>${vehicleDesc}` : '<div class="no-vin">No VIN extracted</div>';
+  let photos = '—';
+  if ((pc||0) > 0) {
+    const thumbSrc = fp ? (fp.startsWith('/static/') ? fp : ('/thumb?url=' + encodeURIComponent(fp) + '&size=mobile')) : null;
+    const thumb = thumbSrc ? `<a href="/bid/${b.id}" class="photo-thumb-link" style="display:none"><img class="photo-thumb" src="${thumbSrc}" alt="" onload="this.parentElement.style.display='block'" onerror="this.parentElement.style.display='none'"></a>` : '';
+    photos = `<div class="photo-cell">${thumb}<span class="photo-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>${pc}</span></div>`;
+  }
+  const wholesalerCell = `<div class="contact-name">${b.partner_dealer_name||'Unknown wholesaler'}</div>${b.salesperson?`<div class="contact-company">👤 ${b.salesperson}</div>`:''}`;
+  const reviewState = b.review_status || 'pending';
+  const rowClass = `review-${reviewState}`;
+  const askPrice = b.asking_price ? `<div style="font-size:15px;font-weight:700;color:#94a3b8">$${Math.round(b.asking_price).toLocaleString()}</div>` : '—';
+  const aiPrice  = b.ai_price    ? `<div style="font-size:15px;font-weight:700;color:#a78bfa">$${Math.round(b.ai_price).toLocaleString()}</div>` : '—';
+  const yourBid  = b.bid_amount  ? `<div style="font-size:15px;font-weight:700;color:#34d399">$${Math.round(b.bid_amount).toLocaleString()}</div>` : '<span style="color:#5a7a96">—</span>';
+  const lastReply = b.bid_response
+    ? `<div style="margin-top:6px;font-size:12px;color:#7a9bb5;border-left:2px solid #a855f7;padding-left:8px;line-height:1.4;max-width:340px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical"><span style="color:#c084fc;font-weight:600">You:</span> ${b.bid_response.replace(/</g,'&lt;')}</div>`
+    : '';
+  let workerChip = '';
+  if (activeWorker && activeWorker.length) {
+    const w = activeWorker[0];
+    const wid = w.worker_id || '';
+    const wname = wid.startsWith('worker-') ? ('Worker-' + wid.split('-')[1]) : (wid.charAt(0).toUpperCase() + wid.slice(1));
+    workerChip = `<div title="${wid} working on ${w.job_type}" style="margin-top:3px;display:inline-flex;align-items:center;gap:5px;padding:2px 7px;background:rgba(96,165,250,.10);border:1px solid rgba(96,165,250,.3);border-radius:10px;font-size:10px;font-weight:600;color:#60a5fa;letter-spacing:.2px"><span style="width:6px;height:6px;background:#4ade80;border-radius:50%;display:inline-block;animation:pulse 1.5s ease-in-out infinite"></span>${wname} · ${w.job_type}</div>`;
+  }
+  const ymm = [b.year, b.make, b.model].filter(Boolean).join(' ');
+  const actions = (reviewState === 'pending')
+    ? `<div class="row-actions">
+         <button class="btn-counter" data-bid="${b.id}"
+                 data-vin="${b.vin||''}" data-ymm="${ymm}"
+                 data-ask="${b.asking_price||''}" data-ai="${b.ai_price||''}"
+                 data-current="${b.bid_amount||''}">Counter →</button>
+         <button class="btn-bought" data-bid="${b.id}" data-action="approve" data-current="${b.bid_amount||''}">Mark Bought · push to EW</button>
+         <button class="btn-pass"   data-bid="${b.id}" data-action="reject">Pass</button>
+         <a href="/bid/${b.id}" class="btn-view" style="text-align:center;font-size:11px;padding:5px 10px">Open full thread ↗</a>
+       </div>`
+    : `<a href="/bid/${b.id}" class="btn-view">View →</a>`;
+  const statusMeta = (reviewState === 'approved' && b.review_by)
+    ? `<div style="font-size:10px;color:#64748b;margin-top:3px">by ${b.review_by}</div>`
+    : (reviewState === 'rejected' && b.review_note)
+    ? `<div style="font-size:10px;color:#7a9bb5;margin-top:3px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${b.review_note}">${b.review_note}</div>`
+    : '';
+  return `<tr data-id="${b.id}" data-created="${b.created_at||''}" class="${rowClass}">
+    <td><div class="bid-num">#${b.id}</div><div class="bid-time">${timeAgo(b.created_at)}</div>${workerChip}</td>
+    <td>${wholesalerCell}</td>
+    <td>${vehicle}</td>
+    <td><div class="msg-preview">${stripFieldMeta(b.raw_message)}</div>${lastReply}</td>
+    <td>${askPrice}</td>
+    <td>${aiPrice}</td>
+    <td>${yourBid}</td>
+    <td>${photos}</td>
+    <td>${reviewBadge(reviewState)}${statusMeta}</td>
+    <td>${actions}</td>
+  </tr>`;
+}
+
+function updateStats(s) {
+  const _s = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v||0; };
+  _s('stat-pending',     s.pending);
+  _s('stat-today',       s.today);
+  _s('stat-approved-7d', s.approved_7d);
+  _s('stat-rejected-7d', s.rejected_7d);
+  _s('stat-wholesalers', s.wholesalers);
+  ['pending','approved','rejected'].forEach(k => {
+    const el = document.querySelector(`.filter-count[data-status="${k}"]`);
+    if (el) el.textContent = (k === 'approved' ? s.approved_7d : k === 'rejected' ? s.rejected_7d : s[k]) || 0;
+  });
+}
+
+let newCount = 0;
+let _chimeCtx = null;
+document.addEventListener('click', function _unlockAudio() {
+  if (!_chimeCtx) _chimeCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_chimeCtx.state === 'suspended') _chimeCtx.resume();
+}, {once: true});
+
+function playChime() {
+  if (!_chimeCtx) _chimeCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_chimeCtx.state === 'suspended') _chimeCtx.resume();
+  setTimeout(() => {
+    try {
+      const osc = _chimeCtx.createOscillator();
+      const gain = _chimeCtx.createGain();
+      osc.connect(gain); gain.connect(_chimeCtx.destination);
+      osc.frequency.setValueAtTime(880, _chimeCtx.currentTime);
+      osc.frequency.setValueAtTime(1100, _chimeCtx.currentTime + 0.1);
+      gain.gain.setValueAtTime(0.3, _chimeCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, _chimeCtx.currentTime + 0.4);
+      osc.start(_chimeCtx.currentTime);
+      osc.stop(_chimeCtx.currentTime + 0.4);
+    } catch(e) {}
+  }, 100);
+}
+
+async function poll() {
+  try {
+    const r = await fetch(`/api/wholesaler-${REVIEWER_SLUG}/bids?since_id=${highestId}&status=${currentFilter}&dealer=${currentDealer}`);
+    const d = await r.json();
+    updateStats(d.stats);
+    const tbody = document.querySelector('tbody');
+    const empty = document.querySelector('.empty');
+    if (d.bids.length === 0 && !tbody) return;
+    const fresh = d.bids.filter(b => b.is_new);
+    if (fresh.length > 0) {
+      newCount += fresh.length;
+      highestId = Math.max(highestId, ...fresh.map(b => b.id));
+      showNewBidAlert(fresh.length);
+      playChime();
+    }
+    if (d.vauto_done) _vautoDone = new Set(d.vauto_done);
+    if (d.bids.length > 0 && tbody) {
+      if (empty) empty.style.display = 'none';
+      tbody.innerHTML = d.bids.map(b => renderRow(b, d.photo_counts[b.id], (d.first_photos||{})[b.id], (d.active_workers||{})[b.id])).join('');
+      if (_bidSearchQuery) filterVisibleRows();
+      bindRowActions();
+    }
+  } catch(e) { console.warn('poll error', e); }
+}
+
+function showNewBidAlert(count) {
+  let alert = document.getElementById('new-bid-alert');
+  if (!alert) {
+    alert = document.createElement('div');
+    alert.id = 'new-bid-alert';
+    alert.style.cssText = 'position:fixed;top:68px;left:50%;transform:translateX(-50%);background:#3b1d6b;border:1px solid #a855f7;color:#c4b5fd;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;z-index:200;cursor:pointer;box-shadow:0 4px 20px rgba(0,0,0,.4)';
+    alert.onclick = () => alert.remove();
+    document.body.appendChild(alert);
+  }
+  alert.textContent = `${newCount} new submission${newCount>1?'s':''}`;
+  clearTimeout(alert._timer);
+  alert._timer = setTimeout(() => { alert.remove(); newCount = 0; }, 8000);
+}
+
+setInterval(poll, 3000);
+setInterval(() => {
+  document.querySelectorAll('.bid-time').forEach(el => {
+    const row = el.closest('tr');
+    if (!row) return;
+    const bid = row.dataset.created;
+    if (bid) el.textContent = timeAgo(bid);
+  });
+}, 60000);
+
+// ── Counter modal (shared across all rows) ─────────────────────────────
+const counterOverlay = document.getElementById('counterOverlay');
+const counterCtx     = document.getElementById('counterCtx');
+const counterAmount  = document.getElementById('counterAmount');
+const counterMsg     = document.getElementById('counterMsg');
+const counterErr     = document.getElementById('counterErr');
+const counterSendBtn = document.getElementById('counterSend');
+const counterCancel  = document.getElementById('counterCancel');
+let _counterBidId = null;
+
+function openCounter(btn) {
+  _counterBidId = btn.dataset.bid;
+  const vin = btn.dataset.vin || '';
+  const ymm = (btn.dataset.ymm || '').trim();
+  const ask = btn.dataset.ask;
+  const ai  = btn.dataset.ai;
+  const cur = btn.dataset.current;
+  let ctx = `<b>Bid #${_counterBidId}</b>`;
+  if (ymm) ctx += ` · ${ymm}`;
+  if (vin) ctx += ` · <span style="font-family:monospace">${vin}</span>`;
+  ctx += '<br>';
+  if (ask) ctx += ` Asking: <b>$${parseInt(ask).toLocaleString()}</b>`;
+  if (ai)  ctx += ` &nbsp; AI: <b style="color:#c084fc">$${parseInt(ai).toLocaleString()}</b>`;
+  if (cur) ctx += ` &nbsp; Last counter: <b style="color:#34d399">$${parseInt(cur).toLocaleString()}</b>`;
+  counterCtx.innerHTML = ctx;
+  counterAmount.value = cur || '';
+  counterMsg.value = '';
+  counterErr.classList.remove('show');
+  counterOverlay.classList.add('show');
+  setTimeout(() => counterAmount.focus(), 30);
+}
+
+function closeCounter() {
+  counterOverlay.classList.remove('show');
+  _counterBidId = null;
+}
+
+counterCancel.addEventListener('click', closeCounter);
+counterOverlay.addEventListener('click', ev => {
+  if (ev.target === counterOverlay) closeCounter();
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape' && counterOverlay.classList.contains('show')) closeCounter();
+});
+
+counterSendBtn.addEventListener('click', async () => {
+  const bidId = _counterBidId;
+  if (!bidId) return;
+  const amt = (counterAmount.value || '').replace(/[,$\s]/g,'').trim();
+  const msg = (counterMsg.value || '').trim();
+  if (!amt || isNaN(parseFloat(amt)) || parseFloat(amt) <= 0) {
+    counterErr.textContent = 'Bid amount required.';
+    counterErr.classList.add('show'); return;
+  }
+  if (!msg) {
+    counterErr.textContent = 'Message required (sent to the wholesaler).';
+    counterErr.classList.add('show'); return;
+  }
+  counterErr.classList.remove('show');
+  counterSendBtn.disabled = true;
+  counterSendBtn.textContent = 'Sending…';
+  try {
+    // Reuse the existing EW reply endpoint — it handles bid_amount,
+    // bid_response, outbound bid_messages, and the partner-portal banner
+    // notification fan-out. review_status stays 'pending' (we never
+    // approve/reject from the counter path).
+    const r = await fetch(`/api/bid/${bidId}/reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'bid', bid_amount: parseFloat(amt), message: msg })
+    });
+    const j = await r.json();
+    if (!r.ok || !j.success) throw new Error(j.error || ('HTTP ' + r.status));
+    closeCounter();
+    // Force a poll so the row re-renders with the new bid_amount + bid_response.
+    poll();
+  } catch (e) {
+    counterErr.textContent = `Counter failed: ${e.message}`;
+    counterErr.classList.add('show');
+  } finally {
+    counterSendBtn.disabled = false;
+    counterSendBtn.textContent = 'Send counter';
+  }
+});
+
+// ── Row actions (Counter / Mark Bought / Pass) ─────────────────────────
+function bindRowActions() {
+  document.querySelectorAll('.btn-counter').forEach(btn => {
+    if (btn.dataset.bound) return; btn.dataset.bound = '1';
+    btn.addEventListener('click', ev => {
+      ev.preventDefault(); ev.stopPropagation();
+      openCounter(btn);
+    });
+  });
+  document.querySelectorAll('.btn-bought, .btn-pass').forEach(btn => {
+    if (btn.dataset.bound) return; btn.dataset.bound = '1';
+    btn.addEventListener('click', async ev => {
+      ev.preventDefault(); ev.stopPropagation();
+      const bidId = btn.dataset.bid;
+      const action = btn.dataset.action;
+      if (action === 'reject') {
+        const note = prompt('Pass reason (optional, sent to the wholesaler):', '');
+        if (note === null) return;
+        await postAction(bidId, action, btn, note, '');
+      } else {
+        // approve = Mark Bought, push to EW. Confirm the final price.
+        const cur = btn.dataset.current || '';
+        const finalPrice = prompt(
+          'Final bought price?\n\n(Leave blank to keep the last counter on file.)',
+          cur);
+        if (finalPrice === null) return;
+        if (!confirm('Push this bid to the EW Buy Center as BOUGHT? This cannot be undone from here.')) return;
+        await postAction(bidId, action, btn, '', finalPrice.trim());
+      }
+    });
+  });
+}
+
+async function postAction(bidId, action, btn, note='', finalPrice='') {
+  const url = `/wholesaler-${REVIEWER_SLUG}/${bidId}/${action}`;
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = action === 'approve' ? 'Pushing to EW…' : 'Passing…';
+  try {
+    const fd = new FormData();
+    if (note) fd.append('note', note);
+    if (finalPrice) fd.append('asking_price', finalPrice);  // server reuses this field
+    const r = await fetch(url, { method:'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    const row = btn.closest('tr');
+    if (row) { row.style.transition='opacity .25s'; row.style.opacity='0'; setTimeout(()=>row.remove(), 280); }
+  } catch(e) {
+    alert(`${action} failed: ${e.message}`);
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+bindRowActions();
+
+// Whole-row click → bid detail. Skips clicks on interactive children.
+document.querySelector('tbody')?.addEventListener('click', (e) => {
+  if (e.target.closest('a, button, input, select')) return;
+  const row = e.target.closest('tr[data-id]');
+  if (row && row.dataset.id) window.location.href = `/bid/${row.dataset.id}`;
+});
+</script>
+</body>
+</html>

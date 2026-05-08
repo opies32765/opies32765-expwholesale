@@ -1684,8 +1684,18 @@ def bid_detail(bid_id):
         _mi = market_intel or {}
         _manheim = _mi.get('manheim') or {}
         _rbook = _mi.get('rbook') or {}
+        # 2026-05-08: include mmr_median fallback (same fix as in
+        # _run_assessment). vauto.mmr is NULL for many exotics; manheim
+        # transactions often have real hammer prices whose median is the
+        # truest wholesale signal.
+        # 2026-05-08: AccuTrade trade_in fallback. For bids where vAuto's MMR
+        # feed is empty AND Manheim has zero transactions (Bentley Bentayga,
+        # rare exotics), AccuTrade's trade_in value is wholesale-shaped and
+        # serves as the last wholesale signal before giving up on ML.
         _est_wholesale = (_manheim.get('adjusted_mmr')
                           or _manheim.get('base_mmr')
+                          or _manheim.get('mmr_median')
+                          or (accutrade_data or {}).get('trade_in')
                           or (vauto_data or {}).get('mmr'))
         _market_asking = (_rbook.get('avg_price')
                           or _rbook.get('median')
@@ -2284,8 +2294,10 @@ def twilio_webhook():
     """, (contact_id, from_phone, vin, miles, body, driver_token, from_phone))
     bid_id = cur.fetchone()['id']
 
-    # Direct API kick — supersedes legacy VM 120 polling for this bid.
-    _kick_direct_for_intake(bid_id)
+    # Direct API kick removed 2026-05-08: was firing here with stale
+    # session_appraisal_id (Phase 1 hadn't saved the real appraisal_url
+    # yet). Now fires only from /api/vauto/submit + /api/vauto/url_capture_result
+    # AFTER Phase 1 worker writes the real appraisal_url.
 
     # Apply AI-extracted fields (color, int_color, year/make/model/trim, asking_price).
     # Only fills NULL columns — never overwrites regex-extracted values above.
@@ -3821,7 +3833,17 @@ def _run_assessment(bid_id):
         _mi_for_ml = _market_intel or {}
         _mh = _mi_for_ml.get('manheim') or {}
         _rb = _mi_for_ml.get('rbook') or {}
+        # 2026-05-08: added mmr_median fallback. vAuto's published MMR book
+        # value (vauto.mmr) is NULL for many exotics/rare cars (Audi R8,
+        # Rolls-Royce, etc.) AND adjusted/base_mmr are derived from that
+        # missing field. But the actual Manheim transaction scrape
+        # (manheim_transactions) often has real hammer prices. mmr_median
+        # is the median of those — true wholesale signal. Use it before
+        # giving up on ML.
+        # 2026-05-08: AccuTrade trade_in fallback (same logic as bid_detail).
         _est_w = (_mh.get('adjusted_mmr') or _mh.get('base_mmr')
+                  or _mh.get('mmr_median')
+                  or (accutrade or {}).get('trade_in')
                   or (vauto or {}).get('mmr'))
         _mkt_a = (_rb.get('avg_price') or _rb.get('median')
                   or (vauto or {}).get('rbook'))
@@ -3911,7 +3933,24 @@ def _run_assessment(bid_id):
 
         v2_result = _v2_parse(assessment) if _v2_parse else None
         if v2_result:
-            buy_price = v2_result['target_buy']
+            gemini_raw_target = v2_result['target_buy']
+            buy_price = gemini_raw_target
+            # Bias correction layer — segment-level over/under-bid pivot.
+            # Reads ai_correction_config (active row); if disabled, returns
+            # corrected_target == gemini_raw and tier='none'. See bias_correction.py.
+            _bias_result = None
+            try:
+                import bias_correction as _bc
+                _bias_result = _bc.apply_correction(
+                    {'make': bid.get('make'), 'model': bid.get('model'),
+                     'year': bid.get('year'), 'mileage': bid.get('mileage')},
+                    gemini_raw_target)
+                if _bias_result and _bias_result.get('strength_applied', 0) > 0:
+                    buy_price = _bias_result['corrected_target']
+                    print(f'[ASSESS] Bid {bid_id} bias-correction: '
+                          f'{_bias_result["reason"]}', flush=True)
+            except Exception as _bc_err:
+                print(f'[ASSESS] bias_correction err: {_bc_err}', flush=True)
             v2_low   = v2_result.get('confidence_low')
             v2_high  = v2_result.get('confidence_high')
             v2_reason = v2_result.get('reasoning', '')
@@ -3941,17 +3980,20 @@ def _run_assessment(bid_id):
                 _cur3.execute("""
                     INSERT INTO ai_assessment_log
                         (bid_id, config_version, llm_reasoning,
-                         confidence_low, confidence_high, final_price, raw_response,
+                         confidence_low, confidence_high, final_price,
+                         gemini_raw_target, raw_response,
                          dealer_intel, buyer_intel, market_intel, flags_v2)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     bid_id, 0, v2_reason,
                     v2_low, v2_high, buy_price,
+                    gemini_raw_target,
                     _json.dumps({
                         'v2': v2_result,
                         '_server_flags': (
                             {'odometer_discrepancy': _odo_flag} if _odo_flag else None
                         ),
+                        '_bias_correction': _bias_result,
                     }),
                     _json.dumps(_dealer_intel, default=str) if _dealer_intel else None,
                     _json.dumps(_buyer_intel, default=str) if _buyer_intel else None,
@@ -3960,6 +4002,13 @@ def _run_assessment(bid_id):
                 ))
                 _db3.commit()
                 _db3.close()
+                # Audit log — every assessment that ran through correction
+                if _bias_result is not None:
+                    try:
+                        import bias_correction as _bc2
+                        _bc2.log_correction(bid_id, _bias_result)
+                    except Exception as _lc_err:
+                        print(f'ai_correction_log write err: {_lc_err}', flush=True)
             except Exception as _log_err:
                 print(f'ai_assessment_log v2 write error: {_log_err}', flush=True)
         else:
@@ -4879,8 +4928,7 @@ def mobile_submit():
 
     bid_id = cur.fetchone()['id']
 
-    # Direct API kick — supersedes legacy VM 120 polling for this bid.
-    _kick_direct_for_intake(bid_id)
+    # Direct API kick removed 2026-05-08 (see same removal at intake hooks).
 
     if pbr_id:
         cur.execute("UPDATE partner_bid_requests SET bid_id=%s WHERE id=%s",
@@ -6130,13 +6178,42 @@ def api_vauto_pending():
     # NOT EXISTS instead of LEFT JOIN: Postgres rejects FOR UPDATE on the
     # nullable side of an outer join. NOT EXISTS gives the same semantics
     # (only bids without a vauto_lookups row) without the join.
+    #
+    # 2026-05-08 fix: bid is also eligible when a vauto_lookups row exists
+    # but books haven't been captured (raw_json IS NULL) AND it isn't the
+    # __not_found__ sentinel. This handles the race where Phase 2's
+    # kick_direct_enrichment UPSERTed a placeholder row before any Phase 1
+    # worker could claim — without the fix, those bids became permanently
+    # invisible to /api/vauto/pending. Bids with books OR with the
+    # not-found sentinel stay excluded (no re-claim, no infinite retry).
+    #
+    # 2026-05-08 fix: auto-give-up. Bids that have been claimed 5+ times by
+    # Phase 1 workers but never had a successful POST to /api/vauto/submit
+    # are clearly broken (vAuto session issue, popup hangs, VIN data issue,
+    # etc.). Mark them as __not_found__ so they stop cycling through workers
+    # infinitely. Lightweight, idempotent, self-healing — runs each poll.
+    cur.execute("""
+        UPDATE vauto_lookups
+           SET appraisal_url = '__not_found__'
+         WHERE appraisal_url IS NULL
+           AND bid_id IN (
+               SELECT bid_id FROM worker_jobs
+               WHERE job_type='vauto'
+               GROUP BY bid_id
+               HAVING COUNT(*) >= 5
+                  AND COUNT(*) FILTER (WHERE status='ok') = 0
+           )
+    """)
     cur.execute("""
         WITH eligible AS (
             SELECT b.id
             FROM bids b
             WHERE b.vin IS NOT NULL AND length(b.vin) = 17
               AND NOT EXISTS (
-                  SELECT 1 FROM vauto_lookups vl WHERE vl.bid_id = b.id
+                  SELECT 1 FROM vauto_lookups vl
+                   WHERE vl.bid_id = b.id
+                     AND (vl.raw_json IS NOT NULL
+                          OR vl.appraisal_url = '__not_found__')
               )
               AND (b.vauto_claimed_at IS NULL
                    OR b.vauto_claimed_at < NOW() - INTERVAL '5 minutes')
@@ -6342,6 +6419,82 @@ def api_vauto_refresh_cookies():
     db.commit()
     db.close()
     return jsonify({'ok': True, 'cookies': len(cookies), 'label': label})
+
+
+@app.route('/api/vauto/refresh_session', methods=['POST'])
+def api_vauto_refresh_session():
+    """Cookie file keeper for the direct BFF API path.
+
+    VM 104 verifier (192.168.1.33) maintains a 24/7 vAuto session and POSTs
+    its full session snapshot here every cycle. We atomic-write to
+    /opt/expwholesale/state/vauto_session.json so cookie_jar.py picks it up
+    on next BFF call (no service restart needed — CookieJar auto-reloads on
+    file mtime change).
+
+    Auth: shared secret in `X-Auth` header, matching env var
+    EW_VAUTO_REFRESH_SECRET. No session cookie required (route is in
+    _PUBLIC_PREFIXES via /api/vauto/).
+
+    Payload (full session JSON, same shape as state/vauto_session.json):
+      {
+        "captured_at": "2026-05-08T12:34:56",
+        "cookies": [{"name", "value", "domain", "path", "expires",
+                     "httpOnly", "secure", "sameSite"}, ...],
+        "headers": {"platformuserid": "...", "appraisalentityid": "...", ...},
+        "session_appraisal_id": "..."
+      }
+    """
+    import json as _json
+    import os as _os
+    import tempfile as _tempfile
+
+    expected = (_os.environ.get('EW_VAUTO_REFRESH_SECRET') or '').strip()
+    if not expected:
+        return jsonify({'ok': False, 'error': 'server missing EW_VAUTO_REFRESH_SECRET'}), 500
+    provided = (request.headers.get('X-Auth') or '').strip()
+    if provided != expected:
+        return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+
+    data = request.get_json(silent=True) or {}
+    cookies = data.get('cookies')
+    if not isinstance(cookies, list) or len(cookies) < 10:
+        return jsonify({'ok': False, 'error': 'cookies must be a list of >=10 dicts'}), 400
+    headers = data.get('headers')
+    if not isinstance(headers, dict) or not headers:
+        return jsonify({'ok': False, 'error': 'headers (dict) required'}), 400
+    if not data.get('session_appraisal_id'):
+        return jsonify({'ok': False, 'error': 'session_appraisal_id required'}), 400
+
+    # Sanity: at least one cookie should be cox/vauto-domain
+    domains = {(c.get('domain') or '').lower() for c in cookies if isinstance(c, dict)}
+    if not any(any(d in dom for d in ('cox', 'vauto', 'okta', 'megazord'))
+               for dom in domains):
+        return jsonify({'ok': False, 'error': 'no cox/vauto/okta/megazord domain cookies'}), 400
+
+    target = '/opt/expwholesale/state/vauto_session.json'
+    try:
+        _os.makedirs(_os.path.dirname(target), exist_ok=True)
+        # Atomic write: tmp + rename so cookie_jar.py never reads half-written
+        fd, tmp = _tempfile.mkstemp(prefix='vauto_session_', suffix='.tmp',
+                                    dir=_os.path.dirname(target))
+        try:
+            with _os.fdopen(fd, 'w', encoding='utf-8') as fp:
+                _json.dump(data, fp, indent=2, ensure_ascii=False)
+            _os.replace(tmp, target)
+        finally:
+            if _os.path.exists(tmp):
+                try: _os.remove(tmp)
+                except OSError: pass
+        try: _os.chmod(target, 0o640)
+        except OSError: pass
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f'write failed: {e}'}), 500
+
+    return jsonify({'ok': True,
+                    'cookie_count': len(cookies),
+                    'header_count': len(headers),
+                    'captured_at': data.get('captured_at'),
+                    'written_to': target})
 
 
 @app.route('/api/vauto/heartbeat', methods=['POST'])
@@ -7421,6 +7574,279 @@ def api_admin_ai_accuracy_data():
         db.close()
 
 
+# ─── Bias correction admin API ──────────────────────────────────────────
+# Reads/writes ai_correction_config (versioned) + bias_segments (read-only).
+# UI lives in /admin/ai-accuracy (admin_ai_accuracy.html).
+
+@app.route('/api/correction/active')
+def api_correction_active():
+    try:
+        import bias_correction as _bc
+        cfg = _bc.get_active_config()
+        # Top segments table for the active panel
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            SELECT make, model, year_band, mileage_band, n, bias_pct,
+                   abs_pct, stddev_pct, refreshed_at
+              FROM bias_segments
+             WHERE window_days = %s AND n >= 2
+             ORDER BY n DESC, ABS(bias_pct) DESC
+             LIMIT 200
+        """, (cfg['config'].get('window_days', 30),))
+        segments = []
+        for r in cur.fetchall():
+            d = dict(r)  # get_db() uses RealDictCursor — r is already a dict
+            for k in ('bias_pct','abs_pct','stddev_pct'):
+                if d.get(k) is not None: d[k] = float(d[k])
+            if d.get('refreshed_at') and hasattr(d['refreshed_at'], 'isoformat'):
+                d['refreshed_at'] = d['refreshed_at'].isoformat()
+            d['segment_key'] = f"{d['make']}|{d['model']}|{d['year_band']}|{d['mileage_band']}"
+            segments.append(d)
+        db.close()
+        return jsonify({
+            'config_id': cfg.get('id'),
+            'active': cfg.get('active'),
+            'config': cfg.get('config'),
+            'segments': segments,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/correction/preview', methods=['POST'])
+def api_correction_preview():
+    """Replay PROPOSED config against trailing window without saving.
+    Body: {config: {...}, window_days: 30}. Mutates an in-memory copy of
+    the config table — no DB write."""
+    try:
+        import bias_correction as _bc
+        body = request.get_json(silent=True) or {}
+        proposed = body.get('config') or {}
+        window = int(body.get('window_days') or proposed.get('window_days') or 30)
+        # Patch get_active_config in-process for the duration of preview by
+        # injecting a fake row into a local config eval. Simpler: just re-run
+        # apply_correction with the proposed config injected by monkey-patch.
+        orig = _bc.get_active_config
+        def _stub(conn=None):
+            return {'id': None, 'active': True,
+                    'config': {**_bc.DEFAULT_CONFIG, **proposed}}
+        _bc.get_active_config = _stub
+        try:
+            r = _bc.preview_impact(window_days=window)
+        finally:
+            _bc.get_active_config = orig
+        return jsonify(r)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/correction/save', methods=['POST'])
+def api_correction_save():
+    """Save a NEW versioned config row. Optionally activate it."""
+    try:
+        import json as _json
+        body = request.get_json(silent=True) or {}
+        config = body.get('config')
+        description = body.get('description') or ''
+        activate = bool(body.get('activate'))
+        if not config:
+            return jsonify({'error': 'missing config'}), 400
+        # Basic schema validation
+        if 'tiers' in config and not isinstance(config['tiers'], list):
+            return jsonify({'error': 'tiers must be a list'}), 400
+        if 'window_days' in config and not isinstance(config['window_days'], int):
+            return jsonify({'error': 'window_days must be int'}), 400
+        db = get_db()
+        cur = db.cursor()
+        if activate:
+            cur.execute("UPDATE ai_correction_config SET active = FALSE")
+        cur.execute("""
+            INSERT INTO ai_correction_config (active, config, description, saved_by)
+            VALUES (%s, %s::jsonb, %s, %s) RETURNING id
+        """, (activate, _json.dumps(config), description,
+              session.get('user') or 'admin'))
+        new_row = cur.fetchone()
+        new_id = new_row['id'] if isinstance(new_row, dict) else new_row[0]
+        db.commit()
+        db.close()
+        return jsonify({'ok': True, 'id': new_id, 'active': activate})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/correction/segment-override', methods=['POST'])
+def api_correction_segment_override():
+    """Per-make/model override management.
+    Body shapes:
+      {make, model, action: 'remove'}
+      {make, model, action: 'force_zero'}
+      {make, model, action: 'fixed_adjustment', adjustment_pct: -50..+50}
+    Backward-compat: {segment_key, action: 'add'|'remove'} also accepted as force_zero.
+    """
+    try:
+        import bias_correction as _bc
+        import json as _json
+        from datetime import datetime as _dt
+        body = request.get_json(silent=True) or {}
+
+        # Resolve make/model key (accept either explicit or legacy segment_key)
+        if body.get('make') and body.get('model'):
+            key = _bc._make_model_key(body['make'], body['model'])
+        elif body.get('segment_key'):
+            parts = str(body['segment_key']).split('|')
+            key = '|'.join(parts[:2]).upper() if len(parts) >= 2 else body['segment_key'].upper()
+        else:
+            return jsonify({'error': 'make+model OR segment_key required'}), 400
+
+        action = body.get('action') or 'force_zero'
+        # Map legacy 'add' to 'force_zero'
+        if action == 'add':
+            action = 'force_zero'
+        if action not in ('remove', 'force_zero', 'fixed_adjustment'):
+            return jsonify({'error': 'action must be remove|force_zero|fixed_adjustment'}), 400
+
+        adj_pct = None
+        if action == 'fixed_adjustment':
+            try:
+                adj_pct = float(body.get('adjustment_pct'))
+            except (TypeError, ValueError):
+                return jsonify({'error': 'fixed_adjustment requires numeric adjustment_pct'}), 400
+            if abs(adj_pct) > 50:
+                return jsonify({'error': 'adjustment_pct must be between -50 and +50'}), 400
+
+        db = get_db()
+        cur = db.cursor()
+        # If no active config, create one (seed from defaults) so the override sticks
+        cur.execute("""SELECT id, config FROM ai_correction_config
+                       WHERE active = TRUE ORDER BY saved_at DESC LIMIT 1""")
+        r = cur.fetchone()
+        def _r_get(row, key, idx):
+            if row is None: return None
+            return row[key] if isinstance(row, dict) else row[idx]
+        if not r:
+            cfg = dict(_bc.DEFAULT_CONFIG)
+            cur.execute("""INSERT INTO ai_correction_config (active, config, description, saved_by)
+                           VALUES (TRUE, %s::jsonb, %s, %s) RETURNING id""",
+                        (_json.dumps(cfg),
+                         'auto-created by per-segment override save',
+                         session.get('user') or 'admin'))
+            cfg_id = _r_get(cur.fetchone(), 'id', 0)
+        else:
+            cfg_id = _r_get(r, 'id', 0)
+            raw_cfg = _r_get(r, 'config', 1)
+            cfg = raw_cfg if isinstance(raw_cfg, dict) else _json.loads(raw_cfg)
+
+        overrides = _bc._normalize_overrides(cfg.get('segment_overrides') or [])
+        # Strip any existing entry for this key first
+        overrides = [o for o in overrides if (o.get('key') or '').upper() != key]
+        # Add new entry unless action is 'remove'
+        if action != 'remove':
+            entry = {'key': key, 'type': action,
+                     'set_at': _dt.utcnow().isoformat() + 'Z',
+                     'set_by': session.get('user') or 'admin'}
+            if action == 'fixed_adjustment':
+                entry['adjustment_pct'] = adj_pct
+            overrides.append(entry)
+        cfg['segment_overrides'] = overrides
+        cur.execute("""UPDATE ai_correction_config SET config = %s::jsonb
+                       WHERE id = %s""", (_json.dumps(cfg), cfg_id))
+        db.commit()
+        db.close()
+        return jsonify({'ok': True, 'key': key, 'action': action,
+                        'segment_overrides': overrides})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/correction/lookup-segment')
+def api_correction_lookup_segment():
+    """Drill-down for the per-bid modal.
+    Query params: ?make=X&model=Y&year=Z&mileage=W (year/mileage optional).
+    Returns: {key, levels: [3-level fallback data], active_override, last_5_bids}
+    """
+    try:
+        import bias_correction as _bc
+        make = (request.args.get('make') or '').strip()
+        model = (request.args.get('model') or '').strip()
+        if not make or not model:
+            return jsonify({'error': 'make + model required'}), 400
+        year = request.args.get('year')
+        try: year = int(year) if year else None
+        except (TypeError, ValueError): year = None
+        mileage = request.args.get('mileage')
+        try: mileage = int(mileage) if mileage else None
+        except (TypeError, ValueError): mileage = None
+
+        # 3-level fallback data
+        levels = _bc._lookup_all_levels(make, model, year, mileage, window_days=30)
+        for lvl in levels:
+            for k in ('bias_pct', 'abs_pct', 'stddev_pct'):
+                if lvl.get(k) is not None:
+                    lvl[k] = float(lvl[k])
+
+        # Active override (if any)
+        cfg_row = _bc.get_active_config()
+        ov = _bc._get_override(make, model, cfg_row['config'].get('segment_overrides') or [])
+        key = _bc._make_model_key(make, model)
+
+        # Last 5 unique-VIN bids in window for this make+model
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            SELECT bid_id, vin, year, mileage,
+                   ai_recommendation, actual_purchase_cost, delta_pct,
+                   actual_purchased_at::date AS sold_date
+              FROM (
+                SELECT DISTINCT ON (vin) bid_id, vin, year, mileage,
+                       ai_recommendation, actual_purchase_cost, delta_pct,
+                       actual_purchased_at, ai_assessed_at
+                  FROM ai_accuracy
+                 WHERE UPPER(make) = %s AND UPPER(model) = %s
+                   AND delta_pct IS NOT NULL AND bid_id > 0
+                   AND vin IS NOT NULL AND vin <> ''
+                   AND reconciled_at > NOW() - INTERVAL '60 days'
+                   AND actual_purchased_at > NOW() - INTERVAL '60 days'
+                 ORDER BY vin, ai_assessed_at DESC NULLS LAST
+              ) deduped
+             ORDER BY actual_purchased_at DESC LIMIT 5
+        """, (make.upper(), model.upper()))
+        cols = ['bid_id','vin','year','mileage','ai_recommendation',
+                'actual_purchase_cost','delta_pct','sold_date']
+        bids = []
+        for r in cur.fetchall():
+            d = dict(r) if isinstance(r, dict) else dict(zip(cols, r))
+            if d.get('delta_pct') is not None: d['delta_pct'] = float(d['delta_pct'])
+            if d.get('sold_date') and hasattr(d['sold_date'], 'isoformat'):
+                d['sold_date'] = d['sold_date'].isoformat()
+            bids.append(d)
+        db.close()
+
+        return jsonify({
+            'key': key,
+            'make': make.upper(), 'model': model.upper(),
+            'levels': levels,
+            'active_override': ov,
+            'last_5_bids': bids,
+            'config_active': cfg_row.get('active'),
+            'config_id': cfg_row.get('id'),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/correction/refresh', methods=['POST'])
+def api_correction_refresh():
+    """Manual segment refresh — for admin button."""
+    try:
+        import bias_correction as _bc
+        r30 = _bc.refresh_segments(window_days=30)
+        r90 = _bc.refresh_segments(window_days=90)
+        return jsonify({'30d': r30, '90d': r90})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/admin/workers')
 def admin_workers():
     """Render worker monitoring dashboard. Auth handled by global require_login."""
@@ -8011,7 +8437,14 @@ def api_vauto_url_capture_queue():
 
 @app.route('/api/vauto/submit', methods=['POST'])
 def api_vauto_submit():
-    """Accept vAuto lookup results from worker."""
+    """Accept vAuto lookup results from worker.
+
+    2026-05-08 partial-success detection: if the worker submitted with
+    `appraisal_url` set (got far enough to save) but `carfax_screenshot`
+    missing (Carfax popup timed out per worker_vauto.py), DO NOT commit
+    the partial row. Release the claim and let another worker retry.
+    Capped at 3 attempts to prevent infinite loops on hard-failing bids.
+    """
     data = request.json
     if not data or not data.get('bid_id'):
         return jsonify({'error': 'missing bid_id'}), 400
@@ -8020,6 +8453,39 @@ def api_vauto_submit():
     cur = db.cursor()
     bid_id = data['bid_id']
     vin = data.get('vin', '')
+
+    # ── Partial-success guard ─────────────────────────────────────────
+    appraisal_url_present = bool((data.get('appraisal_url') or '').strip())
+    carfax_present = bool((data.get('carfax_screenshot') or '').strip())
+    cur.execute(
+        "SELECT COUNT(*) AS n FROM worker_jobs WHERE bid_id=%s AND job_type='vauto'",
+        (bid_id,))
+    _row = cur.fetchone()
+    _attempts = _row['n'] if isinstance(_row, dict) else _row[0]
+    if appraisal_url_present and not carfax_present and _attempts < 3:
+        cur.execute(
+            "UPDATE bids SET vauto_claimed_by=NULL, vauto_claimed_at=NULL WHERE id=%s",
+            (bid_id,))
+        cur.execute("""
+            UPDATE worker_jobs
+               SET completed_at = NOW(),
+                   status       = 'partial',
+                   error        = 'carfax_missing — retry triggered',
+                   duration_ms  = EXTRACT(EPOCH FROM (NOW() - claimed_at))::int * 1000
+             WHERE id = (
+                 SELECT id FROM worker_jobs
+                 WHERE bid_id = %s AND job_type='vauto' AND completed_at IS NULL
+                 ORDER BY claimed_at DESC LIMIT 1
+             )
+        """, (bid_id,))
+        db.commit()
+        db.close()
+        print(f'[vauto/submit] bid={bid_id} PARTIAL (carfax missing, attempt '
+              f'{_attempts}/3) — claim released for retry', flush=True)
+        return jsonify({'ok': True, 'partial': True,
+                        'reason': 'carfax_missing',
+                        'attempts': _attempts,
+                        'retry_triggered': True})
 
     cur.execute("""
         INSERT INTO vauto_lookups
@@ -9608,8 +10074,7 @@ def api_bid_external():
           raw_message, data.get('asking_price'), notes_text))
     bid_id = cur.fetchone()['id']
 
-    # Direct API kick — supersedes legacy VM 120 polling for this bid.
-    _kick_direct_for_intake(bid_id)
+    # Direct API kick removed 2026-05-08 (see same removal at intake hooks).
 
     # Store listing photos (CDN URLs)
     for photo_url in (data.get('photos') or []):
@@ -9794,8 +10259,7 @@ def api_bid_quick_drop():
           raw_message, asking_price, full_notes, _trim_confidence))
     bid_id = cur.fetchone()['id']
 
-    # Direct API kick — supersedes legacy VM 120 polling for this bid.
-    _kick_direct_for_intake(bid_id)
+    # Direct API kick removed 2026-05-08 (see same removal at intake hooks).
 
     # Save photos
     for photo_url in saved_photos:

@@ -1,9 +1,9 @@
 {
   "make_name": "HYUNDAI",
-  "trained_at": "2026-05-07T17:09:09.357551Z",
-  "n_total": 341,
+  "trained_at": "2026-05-08T08:31:07.933173Z",
+  "n_total": 342,
   "n_train": 329,
-  "n_test": 12,
+  "n_test": 13,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1572.0,
-    "mape_pct": 6.52,
-    "r2": 0.8801,
-    "within_5pct": 41.7,
-    "within_10pct": 83.3
+    "mae_dollars": 1486.0,
+    "mape_pct": 6.14,
+    "r2": 0.8966,
+    "within_5pct": 53.8,
+    "within_10pct": 84.6
   },
   "baseline_metrics": {
-    "mae_dollars": 1416.0,
-    "mape_pct": 5.58,
+    "mae_dollars": 1401.0,
+    "mape_pct": 5.45,
     "ratio": 1.0168
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.3435804843902588
+      "importance": 0.34820112586021423
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.24241526424884796
+      "importance": 0.24451524019241333
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.14130356907844543
-    },
-    {
-      "name": "year",
-      "importance": 0.020827628672122955
+      "importance": 0.14418449997901917
     },
     {
       "name": "supplier_name_Germain Ford Of Beavercreek",
-      "importance": 0.018784407526254654
+      "importance": 0.019747119396924973
+    },
+    {
+      "name": "year",
+      "importance": 0.0194512028247118
     },
     {
       "name": "original_msrp",
-      "importance": 0.015232531353831291
+      "importance": 0.014236027374863625
+    },
+    {
+      "name": "model_name_Sonata SEL Sedan",
+      "importance": 0.011183944530785084
     },
     {
       "name": "model_name_Santa Fe Limited Sport Utility Vehicle",
-      "importance": 0.01215093582868576
-    },
-    {
-      "name": "sold_year",
-      "importance": 0.010818134061992168
+      "importance": 0.010714069940149784
     }
   ]
 }

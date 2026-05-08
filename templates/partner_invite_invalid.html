@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Invalid Link — Experience Wholesale</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center}
+  .box{background:#1e293b;padding:40px 36px;border-radius:12px;max-width:420px;text-align:center}
+  h1{margin:0 0 8px;font-size:22px}
+  p{color:#94a3b8;font-size:14px;line-height:1.5}
+</style>
+</head>
+<body>
+  <div class="box">
+    <h1>{% if expired %}Link expired{% else %}This invite was already used{% endif %}</h1>
+    <p>
+      {% if expired %}
+        This invite link has expired. Reply to Oscar's email and ask for a new one.
+      {% else %}
+        Good news — this means your account is set up. Invites are one-time only,
+        so from here on, log in directly with your email + password.
+      {% endif %}
+    </p>
+    <div style="margin-top:28px">
+      <a href="/partner/{{ slug or 'txtcharlie' }}/login"
+         style="display:inline-block;padding:14px 28px;background:#2563eb;color:#fff;
+                text-decoration:none;border-radius:8px;font-weight:700;font-size:15px">
+        Go to login page →
+      </a>
+    </div>
+    <p style="margin-top:18px;font-size:13px;color:#64748b">
+      Forgot your password? Use the "Forgot password?" link on the login page.
+    </p>
+  </div>
+</body>
+</html>

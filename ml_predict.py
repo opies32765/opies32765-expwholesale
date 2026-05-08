@@ -43,15 +43,25 @@ def _slugify(s: str) -> str:
 
 
 def _load_make(make_name: str) -> dict | None:
-    """Return {model, meta} for a make, or None if not available."""
+    """Return {model, meta} for a make, or None if not available.
+    mtime-aware: if the on-disk model file has been retrained (mtime newer
+    than cached), reload. Lets nightly per_make_train cron go live without
+    HUPing gunicorn (which would kill in-flight assessment threads)."""
     key = make_name.upper().strip()
-    with _cache_lock:
-        if key in _cache:
-            return _cache[key]
     slug = _slugify(make_name)
     model_path = MODELS_DIR / f'{slug}.json'
     meta_path = MODELS_DIR / f'{slug}.meta.json'
-    if not model_path.exists() or not meta_path.exists():
+    try:
+        cur_mtime = model_path.stat().st_mtime
+    except FileNotFoundError:
+        with _cache_lock:
+            _cache[key] = None
+        return None
+    with _cache_lock:
+        cached = _cache.get(key)
+        if cached and cached.get('mtime') and cached['mtime'] >= cur_mtime:
+            return cached
+    if not meta_path.exists():
         with _cache_lock:
             _cache[key] = None
         return None
@@ -59,7 +69,7 @@ def _load_make(make_name: str) -> dict | None:
     model.load_model(str(model_path))
     with open(meta_path) as fp:
         meta = json.load(fp)
-    out = {'model': model, 'meta': meta}
+    out = {'model': model, 'meta': meta, 'mtime': cur_mtime}
     with _cache_lock:
         _cache[key] = out
     return out

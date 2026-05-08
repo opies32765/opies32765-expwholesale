@@ -20,3 +20,16 @@ state/
 # Local pull/scratch dirs
 _backups/
 _patches/
+
+# Older backup naming variants (added 2026-05-08 baseline checkpoint)
+*.GOOD.*
+*.brokenstate.*
+*.bak_*
+*.bak-*
+
+# Binary runtime artifacts — files rotate, should not be tracked
+thumb_cache/
+accutrade_reports/
+vauto_reports/
+ipacket_reports/
+private_reports/

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Heat Sheet — LSL</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px; }
+    h1 { font-size: 22px; font-weight: 700; color: #34d399; margin: 0 0 4px 0; }
+    .sub { color: #94a3b8; font-size: 12px; margin-bottom: 18px; }
+    .summary { display: flex; gap: 18px; flex-wrap: wrap;
+               background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+               padding: 12px 16px; margin-bottom: 14px; font-family: monospace; }
+    .summary .v { color: #fbbf24; font-size: 18px; font-weight: 700; }
+    .summary .l { color: #94a3b8; font-size: 11px; text-transform: uppercase;
+                  letter-spacing: .4px; }
+    .group-banner { background: rgba(168,85,247,.12); border: 1px solid rgba(168,85,247,.30);
+                    color: #c4b5fd; padding: 8px 12px; margin: 18px 0 8px 0;
+                    font-size: 11px; font-weight: 700; text-transform: uppercase;
+                    letter-spacing: .4px; border-radius: 6px; }
+    table { width: 100%; border-collapse: collapse; font-family: monospace;
+            font-size: 11px; background: #1e293b; border: 1px solid #334155;
+            border-radius: 6px; overflow: hidden; }
+    th { background: #0f172a; color: #94a3b8; text-transform: uppercase;
+         letter-spacing: .4px; font-size: 10px; font-weight: 700;
+         padding: 8px 10px; text-align: left; border-bottom: 1px solid #334155; }
+    th.r { text-align: right; }
+    td { padding: 6px 10px; border-bottom: 1px solid #1e293b; vertical-align: top; }
+    td.r { text-align: right; }
+    td.cust { color: #34d399; }
+    td.sup  { color: #94a3b8; }
+    td.sp   { color: #fbbf24; }
+    td.note { color: #cbd5e1; max-width: 220px; overflow: hidden;
+              text-overflow: ellipsis; white-space: nowrap; }
+    tr.hot { background: rgba(239,68,68,.04); }
+    .flame { color: #ef4444; }
+    .nav { margin-bottom: 16px; }
+    .nav a { color: #60a5fa; text-decoration: none; margin-right: 14px; font-size: 13px; }
+    .err { background: #7f1d1d; color: #fecaca; padding: 12px 16px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <div class="nav"><a href="/">← Bids</a> <a href="/heatsheet">Heat Sheet</a></div>
+  <h1>Heat Sheet</h1>
+  <div class="sub">
+    Live mirror of LSL <code>/sales/heat-sheet</code> for Experience Wholesale (dealerId 10010).
+    {% if window %}Window: {{ window }}.{% endif %}
+  </div>
+
+  {% if error %}
+    <div class="err">{{ error }}</div>
+  {% else %}
+    <div class="summary">
+      <div><div class="v">{{ total }}</div><div class="l">Total Deals</div></div>
+      <div><div class="v">${{ '{:,}'.format(total_sale_price|int) }}</div><div class="l">Sum Sale Price</div></div>
+      <div><div class="v">${{ '{:,}'.format(total_front_value|int) }}</div><div class="l">Sum Front Value</div></div>
+      <div><div class="v">${{ '{:,}'.format(total_fi|int) }}</div><div class="l">Sum Total F&amp;I</div></div>
+      <div><div class="v">{{ hot_count }}</div><div class="l">Hot Sale Notes</div></div>
+    </div>
+
+    {% for group, group_rows in grouped %}
+      <div class="group-banner">{{ group }} · {{ group_rows|length }} deals</div>
+      <table>
+        <thead>
+          <tr>
+            <th>Stock No</th>
+            <th>Vehicle Info</th>
+            <th>Customer</th>
+            <th>Supplier</th>
+            <th>Sales Person</th>
+            <th>Sale Type</th>
+            <th>Vehicle Sale Type</th>
+            <th class="r">Sale Price</th>
+            <th class="r">Front Value</th>
+            <th class="r">Total F&amp;I</th>
+            <th class="r">Days On Lot</th>
+            <th class="r">Days Since Booked</th>
+            <th>Promise Date</th>
+            <th>Sold At</th>
+            <th>Last Sale Note</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for d in group_rows %}
+          <tr class="{{ 'hot' if d.isHotSaleNote else '' }}">
+            <td>{{ d.stockNo or '' }}</td>
+            <td>{{ d.vehicleInfo or '' }}</td>
+            <td class="cust">{{ d.customerName or '' }}</td>
+            <td class="sup">{{ d.supplierName or '' }}</td>
+            <td>{{ d.salesPersonName or '' }}</td>
+            <td>{{ d.saleType or '' }}</td>
+            <td>{{ d.vehicleSaleType or '' }}</td>
+            <td class="r sp">${{ '{:,}'.format((d.salePrice or 0)|int) }}</td>
+            <td class="r">${{ '{:,}'.format((d.frontValue or 0)|int) }}</td>
+            <td class="r">${{ '{:,}'.format((d.totalFi or 0)|int) }}</td>
+            <td class="r">{{ d.daysOnLot if d.daysOnLot is not none else '' }}</td>
+            <td class="r">{{ d.daysSinceBooked if d.daysSinceBooked is not none else '' }}</td>
+            <td>{{ (d.promiseDate or '')[:10] }}</td>
+            <td>{{ (d.soldAt or '')[:10] }}</td>
+            <td class="note">{% if d.isHotSaleNote %}<span class="flame">🔥</span> {% endif %}{{ d.lastSaleNote or '' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% endfor %}
+
+    <div style="margin-top: 16px; color: #475569; font-size: 10px; text-align: right;
+                text-transform: uppercase; letter-spacing: .4px;">
+      Source: LSL <code>/deal/ListHeatSheet</code> · cached {{ cache_age }}s · refreshed at request time
+    </div>
+  {% endif %}
+</body>
+</html>

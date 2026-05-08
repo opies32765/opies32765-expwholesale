@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ dealer.name }} — Partner Config</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:28px}
+  .wrap{max-width:720px;margin:0 auto}
+  h1{margin:0 0 4px}p.sub{margin:0 0 24px;color:#94a3b8;font-size:13px}
+  .card{background:#1e293b;padding:20px;border-radius:10px;margin-bottom:20px}
+  .card h2{margin:0 0 12px;font-size:15px;color:#e2e8f0}
+  label.row{display:flex;align-items:center;gap:10px;padding:8px 0;font-size:14px}
+  label.row input{transform:scale(1.3)}
+  input[type=email],input[type=text]{width:300px;padding:8px 10px;border:1px solid #334155;background:#0f172a;color:#f1f5f9;border-radius:5px;font-size:13px;margin:4px 6px 4px 0}
+  button{padding:9px 16px;background:#2563eb;color:#fff;border:0;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px}
+  button.secondary{background:#334155}
+  .users{border-top:1px solid #334155;margin-top:12px;padding-top:10px}
+  .user-row{padding:8px 0;font-size:13px;color:#cbd5e1;border-bottom:1px dashed #334155}
+  .user-row .meta{color:#64748b;font-size:11px}
+  .flash{padding:10px 14px;background:#1e3a8a;color:#dbeafe;border-radius:6px;font-size:13px;margin-bottom:14px}
+  a{color:#7dd3fc;text-decoration:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a href="/dealers/{{ dealer.id }}">← Back to {{ dealer.name }}</a>
+  <h1>{{ dealer.name }} — Partner Portal Config</h1>
+  <p class="sub">Manage login users + which alert buckets trigger the 5pm daily digest.</p>
+  {% with msgs = get_flashed_messages(with_categories=true) %}
+    {% for cat, m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}
+  {% endwith %}
+
+  <div class="card" style="background:#1e3a8a">
+    <h2 style="margin:0 0 8px;color:#dbeafe">View as dealer</h2>
+    <p style="margin:0 0 14px;color:#bfdbfe;font-size:13px">See exactly what {{ dealer.name }} sees on their portal. A banner stays at the top so you know you're impersonating.</p>
+    <a href="/admin/partner/{{ dealer.id }}/view-as"
+       style="display:inline-block;padding:10px 18px;background:#fff;color:#1e3a8a;text-decoration:none;border-radius:6px;font-weight:700;font-size:13px">
+      🔍 Open {{ dealer.name }}'s portal
+    </a>
+  </div>
+
+  {# ── Shareable links · password-less dashboard + mobile submission ── #}
+  {% set _slug = dealer.portal_slug or dealer._computed_slug %}
+  {% set _dash = request.host_url.rstrip('/') ~ '/partner/' ~ _slug ~ '/d/' ~ dealer.dashboard_token %}
+  {% set _mob  = request.host_url.rstrip('/') ~ '/mobile?p=' ~ dealer.mobile_token %}
+  <div class="card">
+    <h2 style="display:flex;align-items:center;gap:8px">🔗 Shareable links</h2>
+
+    <div style="margin:10px 0 4px;font-size:13px;color:#cbd5e1;font-weight:600">Dashboard access (password-less)</div>
+    <div style="font-size:12px;color:#94a3b8;margin-bottom:8px">Send this to the dealer — opens their dashboard with no login required. Anyone with the link has full dashboard access.</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input type="text" id="dashUrl" readonly value="{{ _dash }}"
+             style="flex:1;min-width:240px;padding:9px 12px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;border-radius:5px;font-size:12px;font-family:ui-monospace,monospace"
+             onclick="this.select()">
+      <button type="button" onclick="copyField('dashUrl', this)">Copy</button>
+      <form method="post" style="display:inline" onsubmit="return confirm('Rotate the dashboard link? The old one will stop working immediately.')">
+        <input type="hidden" name="action" value="rotate_dashboard_token">
+        <button type="submit" class="secondary" title="Generate a new token (invalidates the old link)">Rotate</button>
+      </form>
+    </div>
+
+    <div style="margin:18px 0 4px;font-size:13px;color:#cbd5e1;font-weight:600">Mobile submission link</div>
+    <div style="font-size:12px;color:#94a3b8;margin-bottom:8px">Bid-submission only — narrower scope than the dashboard link. Anyone with this can submit bids tagged to {{ dealer.name }}.</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input type="text" id="mobUrl" readonly value="{{ _mob }}"
+             style="flex:1;min-width:240px;padding:9px 12px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;border-radius:5px;font-size:12px;font-family:ui-monospace,monospace"
+             onclick="this.select()">
+      <button type="button" onclick="copyField('mobUrl', this)">Copy</button>
+      <form method="post" style="display:inline" onsubmit="return confirm('Rotate the mobile link? The old one will stop working immediately.')">
+        <input type="hidden" name="action" value="rotate_mobile_token">
+        <button type="submit" class="secondary">Rotate</button>
+      </form>
+    </div>
+
+    <script>
+      async function copyField(id, btn){
+        const i = document.getElementById(id);
+        try { await navigator.clipboard.writeText(i.value); }
+        catch(e){ i.select(); document.execCommand('copy'); }
+        const t = btn.textContent; btn.textContent = '✓ Copied';
+        setTimeout(()=>btn.textContent = t, 1400);
+      }
+    </script>
+  </div>
+
+  <div class="card">
+    <h2>Alert buckets</h2>
+    <form method="post">
+      {% for key, label in BUCKETS %}
+        <label class="row">
+          <input type="checkbox" name="enabled_{{ key }}" {% if cfg.get(key, true) %}checked{% endif %}>
+          {{ label }}
+        </label>
+      {% endfor %}
+      <button type="submit" style="margin-top:12px">Save preferences</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Partner users</h2>
+    {% if users %}
+      {% for u in users %}
+        <div class="user-row" id="urow-{{ u.id }}">
+          <div class="view-mode">
+            <b>{{ u.full_name or u.email }}</b> &nbsp; <span class="meta">{{ u.email }}</span>
+            <a href="#" onclick="editUser({{ u.id }}, event)" style="margin-left:10px;font-size:11px">edit</a>
+            <a href="#" onclick="deleteUser({{ u.id }}, '{{ u.email }}', event)" style="margin-left:8px;font-size:11px;color:#fca5a5">delete</a>
+            <br>
+            <span class="meta">
+              invited {{ u.invite_sent_at.strftime('%Y-%m-%d') if u.invite_sent_at else '—' }} ·
+              set password {{ u.invite_used_at.strftime('%Y-%m-%d') if u.invite_used_at else 'not yet' }} ·
+              last login {{ u.last_login_at.strftime('%Y-%m-%d') if u.last_login_at else 'never' }}
+            </span>
+          </div>
+          <div class="edit-mode" style="display:none">
+            <input class="edit-name" type="text" placeholder="Full name" value="{{ u.full_name or '' }}" style="width:200px">
+            <input class="edit-email" type="email" placeholder="Email" value="{{ u.email }}" style="width:260px">
+            <button type="button" onclick="saveUser({{ u.id }})">Save</button>
+            <button type="button" class="secondary" onclick="cancelEdit({{ u.id }})">Cancel</button>
+          </div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <p class="sub">No partner users yet. Invite one below.</p>
+    {% endif %}
+
+    <script>
+    function editUser(uid, e) {
+      if (e) e.preventDefault();
+      const row = document.getElementById('urow-' + uid);
+      row.querySelector('.view-mode').style.display = 'none';
+      row.querySelector('.edit-mode').style.display = 'block';
+    }
+    function cancelEdit(uid) {
+      const row = document.getElementById('urow-' + uid);
+      row.querySelector('.edit-mode').style.display = 'none';
+      row.querySelector('.view-mode').style.display = 'block';
+    }
+    function saveUser(uid) {
+      const row = document.getElementById('urow-' + uid);
+      const fd = new FormData();
+      fd.append('action', 'update');
+      fd.append('full_name', row.querySelector('.edit-name').value);
+      fd.append('email', row.querySelector('.edit-email').value);
+      fetch('/admin/partner/user/' + uid + '/update', {method:'POST', body:fd})
+        .then(r => r.json())
+        .then(d => {
+          if (d.ok) location.reload();
+          else alert('Could not save: ' + (d.error || 'unknown') + '\n' + (d.detail || ''));
+        });
+    }
+    function deleteUser(uid, email, e) {
+      if (e) e.preventDefault();
+      if (!confirm('Delete partner user ' + email + '? This revokes their login.')) return;
+      const fd = new FormData();
+      fd.append('action', 'delete');
+      fetch('/admin/partner/user/' + uid + '/update', {method:'POST', body:fd})
+        .then(r => r.json())
+        .then(d => {
+          if (d.ok) location.reload();
+          else alert('Could not delete: ' + (d.error || 'unknown'));
+        });
+    }
+    </script>
+    <form method="post" action="{{ url_for('partner.admin_invite', dealer_id=dealer.id) }}"
+          style="margin-top:16px"
+          onsubmit="event.preventDefault();
+            fetch(this.action,{method:'POST',body:new FormData(this)})
+              .then(r=>r.json())
+              .then(d=>{
+                const box = document.getElementById('invite-result');
+                box.innerHTML = '<b>Invite ready for ' + d.email + '</b><br>' +
+                  (d.email_sent ? 'Email sent via Resend.' : 'Email not sent (no RESEND_API_KEY). Copy this link and send it manually:') +
+                  '<div style=&quot;margin-top:8px;padding:10px;background:#0f172a;border-radius:6px;font-family:ui-monospace,monospace;font-size:12px;word-break:break-all;user-select:all&quot;>' + d.invite_url + '</div>';
+                box.style.display = 'block';
+              })">
+      <input type="email" name="email" placeholder="dealer@email.com" required>
+      <input type="text" name="full_name" placeholder="Full name (optional)">
+      <button type="submit">Send invite</button>
+    </form>
+    <div id="invite-result" style="display:none;margin-top:14px;padding:14px;background:#1e3a8a;color:#dbeafe;border-radius:8px;font-size:13px"></div>
+  </div>
+</div>
+</body>
+</html>

@@ -5,7 +5,10 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="EW Partner">
 <meta name="theme-color" content="#0b0f19">
+<link rel="manifest" href="/static/owner-manifest.json">
+<link rel="apple-touch-icon" href="/static/icons/icon-180.png">
 <title>EW — Bid #{{ bid.id }}</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -87,6 +90,13 @@ a{color:inherit;text-decoration:none}
 .link-btn{display:block;margin-top:12px;padding:11px 14px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.35);border-radius:8px;color:#60a5fa;text-decoration:none;font-size:13px;font-weight:600;text-align:center;letter-spacing:.2px}
 .link-btn:active{background:rgba(59,130,246,.22)}
 
+/* quick-action row — always-visible deep links right under the photo strip */
+.quick-actions{display:flex;gap:8px;padding:10px 12px 4px;background:#0b0f19}
+.qa{flex:1;display:flex;align-items:center;justify-content:center;gap:8px;padding:11px 10px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.35);border-radius:10px;color:#60a5fa;text-decoration:none;font-size:13px;font-weight:600;letter-spacing:.2px;min-height:42px}
+.qa:active{background:rgba(59,130,246,.22)}
+.qa-i{font-size:14px}
+.qa-x{color:#3b82f6;opacity:.7;font-size:12px}
+
 /* badges */
 .bad{display:inline-block;padding:2px 8px;border-radius:8px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
 .bad.ok{background:rgba(34,197,94,.15);color:#4ade80}
@@ -121,6 +131,7 @@ a{color:inherit;text-decoration:none}
     {% if bid.mileage %}<span><b>Mi</b> {{ '{:,}'.format(bid.mileage) }}</span>{% endif %}
     {% if bid.color %}<span><b>Color</b> {{ bid.color }}</span>{% endif %}
     {% if bid.contact_name %}<span><b>From</b> {{ bid.contact_name }}</span>{% endif %}
+    {% if bid.salesperson %}<span style="color:#c4b5fd"><b>👤</b> {{ bid.salesperson }}</span>{% endif %}
   </div>
   <div class="prices">
     <div class="p"><div class="p-l">Ask</div><div class="p-v {% if not bid.asking_price %}empty{% endif %}">{% if bid.asking_price %}${{ '{:,}'.format(bid.asking_price) }}{% else %}—{% endif %}</div></div>
@@ -135,6 +146,24 @@ a{color:inherit;text-decoration:none}
   {% for p in photos %}
     <img src="/thumb?size=mobile&url={{ p.photo_url|urlencode }}" data-full="{{ p.photo_url }}" loading="lazy" onclick="openLightbox(this.dataset.full)">
   {% endfor %}
+</div>
+{% endif %}
+
+<!-- QUICK ACTIONS — always visible, link out to vAuto / AccuTrade -->
+{% set _vauto_url = vauto.appraisal_url if (vauto and vauto.appraisal_url and vauto.appraisal_url.startswith('http')) else None %}
+{% set _accutrade_url = accutrade.appraisal_url if (accutrade and accutrade.appraisal_url) else None %}
+{% if _vauto_url or _accutrade_url %}
+<div class="quick-actions">
+  {% if _vauto_url %}
+    <a class="qa" href="{{ _vauto_url }}" target="_blank" rel="noopener">
+      <span class="qa-i">📊</span><span>Open in vAuto</span><span class="qa-x">↗</span>
+    </a>
+  {% endif %}
+  {% if _accutrade_url %}
+    <a class="qa" href="{{ _accutrade_url }}" target="_blank" rel="noopener">
+      <span class="qa-i">📈</span><span>Open in AccuTrade</span><span class="qa-x">↗</span>
+    </a>
+  {% endif %}
 </div>
 {% endif %}
 
