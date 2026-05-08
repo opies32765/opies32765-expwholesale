@@ -88,20 +88,36 @@ def _post(url: str, payload: dict, headers: dict, cookies: dict,
 # ── Public API ─────────────────────────────────────────────────────────
 
 def _default_criteria_options(vehicle: dict) -> list[dict]:
-    """Default criteriaOptions: empty list (no narrowing).
+    """Default criteriaOptions matching vAuto's UI defaults.
 
-    vAuto's UI auto-selects Series+BodyType+ModelYear by default, but those
-    selections include browser-state-encoded values (e.g. mojibake'd ®) that
-    don't always match server-side data. Verified empirically:
-        - empty filters     → 306 Mercedes-Benz comps for bid 996
-        - 3-filter default  → 1 comp (encoding mismatch on Series)
-        - production stored → 144 comps (from a different filter mix)
+    vAuto's UI auto-selects Series+BodyType+ModelYear when those fields are
+    populated on the canonical decode. We mirror that here. Verified
+    empirically (2026-05-08): when paired with a CANONICAL `vehicle` dict
+    sourced from `/api/appraisal/vehicleInfo?strictYMM=true`, this filter
+    set produces a healthy comp count for series-named vehicles (BMW 840i:
+    41 comps, Defender 110: 68, Ferrari 296 GTS: 29) — vs. 1 row when the
+    operator-typed marketing model name was sent and `criteriaOptions=[]`.
 
-    Empty list yields the broadest valid comp set; vAuto still scopes by
-    `vehicle` attributes (year/make/model proximity). Callers can pass
-    explicit `criteria_options` to narrow further if needed.
+    Only emits filters for fields the canonical decode populated; missing
+    fields are silently skipped.
     """
-    return []
+    out: list[dict] = []
+    series = vehicle.get('series')
+    if series not in (None, ''):
+        out.append({'fieldId': 'Series',
+                    'optionId': str(series),
+                    'isSelected': True})
+    body_type = vehicle.get('bodyType')
+    if body_type not in (None, ''):
+        out.append({'fieldId': 'BodyType',
+                    'optionId': str(body_type),
+                    'isSelected': True})
+    year = vehicle.get('year')
+    if year not in (None, ''):
+        out.append({'fieldId': 'ModelYear',
+                    'optionId': str(year),
+                    'isSelected': True})
+    return out
 
 
 def fetch_competitive_set(vehicle: dict, cookies: dict[str, str],
@@ -110,6 +126,7 @@ def fetch_competitive_set(vehicle: dict, cookies: dict[str, str],
                           criteria_options: Optional[list[dict]] = None,
                           list_price: int = 0,
                           appraisal_id: str = 'unused',
+                          option_codes=None,
                           timeout: int = 30) -> dict:
     """rbook competitive set. Returns full response dict.
 
@@ -119,9 +136,14 @@ def fetch_competitive_set(vehicle: dict, cookies: dict[str, str],
             'competitiveSetVehicles': [{34 fields}, ...]  # ~150 retail listings
         }
 
-    The appraisal_id is metadata only — vAuto computes the comp set from
-    `vehicle` payload, not from any server-side appraisal lookup. Verified
-    via cross-bid replay (see replay_crossbid.py).
+    `appraisal_id` should be the bid's REAL vAuto appraisalId (parsed from
+    the captured appraisal_url's `Id=...` query param). The default
+    `'unused'` is retained as a tripwire for callers that haven't been
+    updated — pass a real id from production paths.
+
+    `option_codes` should be passed through verbatim from the
+    `vehicleInfo.optionCodes` response of `/api/appraisal/vehicleInfo` —
+    vAuto uses these for option-aware comp matching.
     """
     if criteria_options is None:
         criteria_options = _default_criteria_options(vehicle)
@@ -133,7 +155,7 @@ def fetch_competitive_set(vehicle: dict, cookies: dict[str, str],
         'listPrice': list_price,
         'shouldShowMarketInfoForMyVehicle': True,
         'useSmarterCompetitiveSet': False,
-        'optionCodes': None,
+        'optionCodes': option_codes,
     }
     r = _post(COMPETITION_URL, payload, headers, cookies, timeout)
     return r.json()

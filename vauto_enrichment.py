@@ -39,6 +39,9 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
 from typing import Any
+from urllib.parse import urlparse, parse_qs
+
+import requests
 
 from cookie_jar import CookieJar
 from vauto_bff_direct import (
@@ -46,6 +49,10 @@ from vauto_bff_direct import (
     parse_competitive_set, parse_price_guides,
     VAutoAuthError, VAutoServerError, VAutoBadRequestError,
 )
+
+
+VEHICLE_INFO_URL = ('https://slot2.bff.megazord.vauto.app.coxautoinc.com'
+                    '/api/appraisal/vehicleInfo?strictYMM=true')
 
 
 SESSION_PATH = os.environ.get('VAUTO_SESSION_PATH',
@@ -86,8 +93,22 @@ def _session_too_stale(jar: CookieJar) -> bool:
 
 # ── Public entry point ─────────────────────────────────────────────────
 
-def enrich_bid_direct(bid_id: int, vehicle: dict) -> dict:
+def enrich_bid_direct(bid_id: int, vehicle: dict,
+                      appraisal_id: str,
+                      option_codes=None) -> dict:
     """Fetch rbook + priceGuides for a bid via direct BFF API calls.
+
+    Args:
+        bid_id: EW bid id (used only for logging).
+        vehicle: CANONICAL vehicle dict from
+                 `/api/appraisal/vehicleInfo?strictYMM=true`. The caller is
+                 responsible for sourcing this from vAuto — never synthesize
+                 model/series/bodyType from the bids table.
+        appraisal_id: REAL vAuto appraisalId (parsed from appraisal_url
+                      Id= query param). Required — passing 'unused' or the
+                      session's static appraisalId yields wrong comp counts
+                      for series-named vehicles.
+        option_codes: Pass-through from vehicleInfo.optionCodes.
 
     Returns:
         {
@@ -122,13 +143,15 @@ def enrich_bid_direct(bid_id: int, vehicle: dict) -> dict:
 
     cookies = jar.get_cookies()
     headers = jar.get_headers()
-    appraisal_id = jar.get_session_appraisal_id() or 'unused'
 
-    # Fire both calls in parallel
+    # Fire both calls in parallel. competitive_set uses the bid's REAL
+    # appraisalId + canonical vehicle + vAuto-default criteriaOptions
+    # (built inside fetch_competitive_set from the canonical decode).
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
             rb_fut = pool.submit(fetch_competitive_set, vehicle, cookies,
-                                 headers, appraisal_id=appraisal_id)
+                                 headers, appraisal_id=appraisal_id,
+                                 option_codes=option_codes)
             pg_fut = pool.submit(fetch_price_guides, vehicle, cookies,
                                  headers, appraisal_id=appraisal_id)
             rb_resp = rb_fut.result(timeout=PARALLEL_TIMEOUT_SEC)
@@ -149,33 +172,6 @@ def enrich_bid_direct(bid_id: int, vehicle: dict) -> dict:
 
     result['competitive_set'] = parse_competitive_set(rb_resp)
     result['price_guides'] = parse_price_guides(pg_resp)
-
-    # body-style fallback — vAuto BFF treats body-suffix model names
-    # ('RS 6 Avant', 'S550 Coupe') as strict filters that return ~1 row.
-    # When initial comp set is suspiciously small AND model contains a
-    # space, retry with the last word stripped. Use the larger result.
-    _initial_rows = len((result['competitive_set'] or {}).get('rows') or [])
-    _model = vehicle.get('model') or ''
-    if _initial_rows < 5 and ' ' in _model:
-        _stripped = _model.rsplit(' ', 1)[0].strip()
-        if _stripped and _stripped != _model:
-            log.info('bid %d rbook %d rows on model=%r; retry with %r',
-                     bid_id, _initial_rows, _model, _stripped)
-            try:
-                _v_retry = dict(vehicle)
-                _v_retry['model'] = _stripped
-                _rb_retry = fetch_competitive_set(
-                    _v_retry, cookies, headers, appraisal_id=appraisal_id)
-                _retry_parsed = parse_competitive_set(_rb_retry)
-                _retry_rows = len(_retry_parsed.get('rows') or [])
-                if _retry_rows > _initial_rows:
-                    result['competitive_set'] = _retry_parsed
-                    log.info('bid %d retry won: %d rows (vs %d)',
-                             bid_id, _retry_rows, _initial_rows)
-            except Exception as _retry_e:
-                log.warning('bid %d body-strip retry err: %s',
-                            bid_id, _retry_e)
-
     result['ok'] = True
     result['fallback_legacy'] = False
     result['ms'] = int((time.monotonic() - t0) * 1000)
@@ -195,60 +191,79 @@ def log_direct_enrichment_result(bid_id: int, result: dict) -> None:
                     bid_id, result['error'])
 
 
-def build_vehicle_dict_from_bid(conn, bid_id: int) -> dict | None:
-    """Build a vauto_api-compatible vehicle dict from the bids row.
+def build_vehicle_dict_from_bid(conn, bid_id: int):
+    """Build a CANONICAL vehicle dict for the BFF call.
 
-    Returns None if the bid doesn't exist or lacks vin/year/make/model.
-    Optional fields (bodyType, driveTrain, engine, etc.) are left out —
-    vAuto fills them in from VIN if missing.
+    The bids table stores operator-typed marketing names (e.g. "296",
+    "840i", "Defender") which vAuto's BFF treats as literal-string
+    filters and fails to match peers. The canonical model for these VINs
+    is "296 GTS" / "8 Series" / "Defender 110" — different from what we
+    store. So we ASK vAuto for its canonical decode via
+    `/api/appraisal/vehicleInfo?strictYMM=true` and pass that verbatim.
+
+    Returns: (vehicle_dict, option_codes) on success.
+             None if the bid is missing vin/odometer or vehicleInfo
+             refuses to decode the VIN.
+
+    Constraints:
+      - Never synthesize model/series/bodyType from the bids row.
+      - If vehicleInfo returns 4xx/5xx, return None — the caller defers
+        to the legacy claim path (VM 120 EWEnrichRbook).
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT vin, year, make, model, mileage, color "
-            "FROM bids WHERE id = %s", (bid_id,))
+            "SELECT vin, mileage FROM bids WHERE id = %s", (bid_id,))
         row = cur.fetchone()
     if not row:
         return None
-    # Both RealDictCursor and tuple-cursor compat
     if hasattr(row, 'keys'):
-        vin, year, make, model, mileage, color = (
-            row['vin'], row['year'], row['make'], row['model'],
-            row['mileage'], row.get('color') if hasattr(row, 'get') else row['color'])
+        vin = row['vin']
+        mileage = row['mileage']
     else:
-        vin, year, make, model, mileage, color = row[:6]
-    if not vin or not year or not make or not model:
+        vin, mileage = row[0], row[1]
+    if not vin:
         return None
-    # Normalize make/model casing — vAuto's BFF treats 'HONDA' != 'Honda'
-    # AND 'BMW' != 'Bmw'. Bids table stores uppercase from SMS intake;
-    # vAuto wants title case for normal makes, all-caps for acronym makes.
-    ACRONYM_MAKES = {
-        'BMW', 'GMC', 'KIA', 'AMC', 'AMG', 'BYD', 'MG', 'JAC', 'JCB',
-        'FAW', 'INFINITI',  # vAuto stores INFINITI all-caps
-    }
-    def _norm_make(m):
-        if not m: return None
-        upper = m.upper()
-        return upper if upper in ACRONYM_MAKES else m.title()
-    return {
-        'vin':                 vin,
-        'odometer':            int(mileage) if mileage else 0,
-        'odometerUom':         'Miles',
-        'year':                int(year),
-        'make':                _norm_make(make),
-        'model':               model,
-        'series':              None,
-        'bodyCabStyle':        None,
-        'bodyType':            None,
-        'driveTrainType':      None,
-        'engineCylinderCount': None,
-        'engineDisplacement':  None,
-        'transmissionType':    None,
-        'interiorColor':       None,
-        'exteriorBaseColor':   color,
-        'engineFuelIntake':    None,
-        'transmissionGearCount': None,
-        'bodyDoorCount':       None,
-    }
+    odometer = int(mileage) if mileage else 0
+
+    # Load session for cookies+headers
+    try:
+        jar = _get_jar()
+    except Exception as e:
+        log.warning('bid %d vehicleInfo: session load failed: %s', bid_id, e)
+        return None
+    if _session_too_stale(jar):
+        log.warning('bid %d vehicleInfo: session stale (%.0fs)',
+                    bid_id, jar.age_seconds())
+        return None
+
+    try:
+        r = requests.post(
+            VEHICLE_INFO_URL,
+            json={'vin': vin, 'odometer': odometer, 'odometerUom': 'Miles'},
+            headers=jar.get_headers(),
+            cookies=jar.get_cookies(),
+            timeout=15,
+        )
+    except Exception as e:
+        log.warning('bid %d vehicleInfo POST failed: %s', bid_id, e)
+        return None
+    if r.status_code != 200:
+        log.warning('bid %d vehicleInfo status=%d body=%s',
+                    bid_id, r.status_code, r.text[:200])
+        return None
+    try:
+        data = r.json()
+    except Exception as e:
+        log.warning('bid %d vehicleInfo non-json: %s', bid_id, e)
+        return None
+    vehicle = data.get('vehicleInfo')
+    if not vehicle or not vehicle.get('year') or not vehicle.get('make') \
+            or not vehicle.get('model'):
+        log.info('bid %d vehicleInfo: empty/incomplete decode for vin=%s',
+                 bid_id, vin)
+        return None
+    option_codes = data.get('optionCodes')
+    return (vehicle, option_codes)
 
 
 def kick_direct_enrichment(bid_id: int, db_conn_factory) -> None:
@@ -264,20 +279,56 @@ def kick_direct_enrichment(bid_id: int, db_conn_factory) -> None:
     a no-op.
     """
     try:
-        # Fetch vehicle data
+        # Read appraisal_url first — if no real captured URL, defer to
+        # legacy EWEnrichRbook (VM 120). The direct path REQUIRES a real
+        # appraisalId; we don't fall back to the cookie session's static
+        # one because vAuto returns wrong comp counts for series-named
+        # vehicles when the appraisalId mismatches the vehicle.
         try:
             with db_conn_factory() as conn:
-                vehicle = build_vehicle_dict_from_bid(conn, bid_id)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT appraisal_url FROM vauto_lookups "
+                        "WHERE bid_id=%s", (bid_id,))
+                    row = cur.fetchone()
+        except Exception as e:
+            log.warning('bid %d appraisal_url fetch failed: %s', bid_id, e)
+            return
+        appraisal_url = None
+        if row:
+            appraisal_url = row[0] if not hasattr(row, 'keys') else row['appraisal_url']
+        if not appraisal_url or appraisal_url == '__not_found__':
+            log.info('bid %d direct deferred — no appraisal_url (legacy '
+                     'EWEnrichRbook will pick up)', bid_id)
+            return
+        try:
+            qs = parse_qs(urlparse(appraisal_url).query)
+            appraisal_id = (qs.get('Id') or [None])[0]
+        except Exception as e:
+            log.warning('bid %d appraisal_url parse failed: %s', bid_id, e)
+            return
+        if not appraisal_id:
+            log.warning('bid %d appraisal_url has no Id= param: %s',
+                        bid_id, appraisal_url[:160])
+            return
+
+        # Canonical vehicleInfo decode (replaces bids-table read).
+        try:
+            with db_conn_factory() as conn:
+                built = build_vehicle_dict_from_bid(conn, bid_id)
         except Exception as e:
             log.warning('bid %d vehicle fetch failed: %s', bid_id, e)
             return
-        if not vehicle:
-            log.info('bid %d direct skipped — no vin/year/make/model yet',
-                     bid_id)
+        if not built:
+            log.info('bid %d direct skipped — vehicleInfo unavailable, '
+                     'legacy EWEnrichRbook will retry', bid_id)
             return
+        vehicle, option_codes = built
 
-        # Direct API
-        result = enrich_bid_direct(bid_id, vehicle)
+        # Direct API — uses REAL appraisalId + canonical vehicle +
+        # vAuto-default criteriaOptions (Series/BodyType/ModelYear).
+        result = enrich_bid_direct(bid_id, vehicle, appraisal_id,
+                                   option_codes=option_codes)
         log_direct_enrichment_result(bid_id, result)
         if not result['ok']:
             return  # legacy EWEnrichRbook will handle it
