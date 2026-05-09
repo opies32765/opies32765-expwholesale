@@ -144,7 +144,7 @@
 
 {# Manheim Auction #}
 {% if manheim and manheim.count %}
-<details class="card manheim">
+<details class="card manheim" open>
   <summary>
     <span class="title">Manheim Auction</span>
     <span class="summary-text">{{ manheim.count }} sale{% if manheim.count != 1 %}s{% endif %}{% if manheim.median %} · median ${{ '{:,}'.format(manheim.median|int) }}{% endif %}</span>
@@ -173,7 +173,7 @@
 
 {# rBook Market #}
 {% if rbook and rbook.count %}
-<details class="card rbook">
+<details class="card rbook" open>
   <summary>
     <span class="title">rBook Market</span>
     <span class="summary-text">{{ rbook.count }} comp{% if rbook.count != 1 %}s{% endif %}{% if rbook.median %} · median ${{ '{:,}'.format(rbook.median|int) }}{% endif %}</span>
