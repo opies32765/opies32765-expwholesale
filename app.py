@@ -4157,6 +4157,14 @@ def _auto_assess(bid_id):
             if result.get('success'):
                 print(f'Auto-assess complete for bid {bid_id}: buy_price={result.get("buy_price")}')
                 _notify_driver_if_pending(bid_id)
+                # Phase 2 SMS — second text with link to /m/<token>/full.
+                # Idempotent via bids.phase2_notified_at (only fires once).
+                # 2026-05-09: separate from Phase 1 SMS for now; once Phase 2
+                # consistently completes in <1min we can merge into one text.
+                try:
+                    _notify_driver_phase2(bid_id)
+                except Exception as _p2e:
+                    print(f'[phase2-notify] outer error bid={bid_id}: {_p2e}', flush=True)
             else:
                 print(f'Auto-assess failed for bid {bid_id}: {result.get("error")}')
                 _release_assessment_claim(bid_id)
@@ -11018,6 +11026,193 @@ def driver_mini_page(token):
     return render_template('m.html', bid=bid, photos=photos,
                            vauto=vauto, accutrade=accutrade, ipacket=ipacket,
                            token=token)
+
+
+@app.route('/m/<token>/full')
+def driver_full_page(token):
+    """Phase 2 detailed bid view — collapsible cards with manheim,
+    rbook closest_3, comp_msrps, LSL deals, dealer match, AI reasoning,
+    book values. Sent via second SMS once _run_assessment completes.
+    """
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT b.*, c.name as contact_name
+        FROM bids b LEFT JOIN contacts c ON b.contact_id = c.id
+        WHERE b.driver_token = %s
+    """, (token,))
+    bid = cur.fetchone()
+    if not bid:
+        db.close()
+        return 'Not found', 404
+
+    cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid['id'],))
+    vauto = cur.fetchone()
+    cur.execute("SELECT * FROM accutrade_lookups WHERE bid_id = %s", (bid['id'],))
+    accutrade = cur.fetchone()
+    cur.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s", (bid['id'],))
+    ipacket = cur.fetchone()
+
+    cur.execute("""
+        SELECT confidence_low, confidence_high, llm_reasoning, flags_v2,
+               buyer_intel, dealer_intel, market_intel
+          FROM ai_assessment_log
+         WHERE bid_id = %s
+         ORDER BY created_at DESC LIMIT 1
+    """, (bid['id'],))
+    ass = cur.fetchone() or {}
+
+    # Helper: parse JSONB into dict (psycopg2 may return either str or dict)
+    def _j(v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except Exception:
+                return None
+        return v
+
+    buyer = _j(ass.get('buyer_intel') if ass else None)
+    dealer = _j(ass.get('dealer_intel') if ass else None)
+    market_intel = _j(ass.get('market_intel') if ass else None) or {}
+    flags_v2 = _j(ass.get('flags_v2') if ass else None) or []
+
+    # ── Build manheim block from vauto_lookups.manheim_transactions
+    mh = None
+    if vauto and vauto.get('manheim_transactions'):
+        mh_data = _j(vauto['manheim_transactions']) or {}
+        txns = mh_data.get('transactions') or []
+        if txns:
+            prices = sorted(int(t.get('sale_price') or 0) for t in txns if t.get('sale_price'))
+            mh = {
+                'count': len(txns),
+                'median': prices[len(prices)//2] if prices else None,
+                'lo': prices[0] if prices else None,
+                'hi': prices[-1] if prices else None,
+            }
+            # Closest-mile sale
+            if bid.get('mileage'):
+                bid_miles = int(bid['mileage'])
+                txns_with_miles = [t for t in txns if t.get('odometer')]
+                if txns_with_miles:
+                    closest = min(txns_with_miles,
+                                  key=lambda t: abs(int(t.get('odometer') or 0) - bid_miles))
+                    mh['closest'] = {
+                        'mileage': closest.get('odometer'),
+                        'price': closest.get('sale_price'),
+                        'date': closest.get('date_sold') or closest.get('sold_at'),
+                        'condition': closest.get('condition'),
+                        'region': closest.get('region') or closest.get('auction_region'),
+                    }
+
+    # ── Build rbook block. Prefer market_intel_cached.rbook (already
+    #    computed) else fall back to live computation from rbook_competitive_set.
+    rb = None
+    if vauto and vauto.get('market_intel_cached'):
+        cached = _j(vauto['market_intel_cached']) or {}
+        if cached.get('rbook'):
+            rb = dict(cached['rbook'])
+            # rename fields for template clarity
+            rb['count'] = rb.get('n_rows') or len(rb.get('all_rows') or [])
+            rb['median'] = rb.get('retail_median')
+            rb['p25'] = rb.get('retail_p25')
+            rb['p75'] = rb.get('retail_p75')
+            rb['median_dol'] = rb.get('median_days_on_lot')
+            rb['implied_gross'] = cached.get('implied_buyer_gross')
+
+    if not rb and vauto and vauto.get('rbook_competitive_set'):
+        rcs = _j(vauto['rbook_competitive_set']) or {}
+        rows = rcs.get('rows') or []
+        if rows:
+            asks = sorted(int(r.get('price') or 0) for r in rows if r.get('price'))
+            rb = {
+                'count': len(rows),
+                'median': asks[len(asks)//2] if asks else None,
+                'p25': asks[len(asks)//4] if len(asks) >= 4 else None,
+                'p75': asks[(3*len(asks))//4] if len(asks) >= 4 else None,
+            }
+            if bid.get('mileage'):
+                bid_miles = int(bid['mileage'])
+                by_dist = sorted(rows,
+                                 key=lambda r: abs(int(r.get('mileage') or 0) - bid_miles))
+                rb['closest_3'] = by_dist[:3]
+
+    # Merge comp_msrps onto closest_3 if present
+    if rb and rb.get('closest_3'):
+        vins = [c.get('vin') for c in rb['closest_3'] if c.get('vin')]
+        if vins:
+            cur.execute(
+                "SELECT vin, msrp, base_price, status FROM comp_msrps WHERE vin = ANY(%s)",
+                (vins,),
+            )
+            cmap = {r['vin']: {'msrp': r['msrp'], 'base_price': r['base_price'],
+                               'status': r['status']} for r in cur.fetchall()}
+            for c in rb['closest_3']:
+                v = c.get('vin')
+                if v and v in cmap:
+                    c['msrp_lookup'] = cmap[v]
+
+    db.close()
+
+    return render_template(
+        'm_full.html',
+        bid=bid, vauto=vauto, accutrade=accutrade, ipacket=ipacket,
+        confidence_low=ass.get('confidence_low') if ass else None,
+        confidence_high=ass.get('confidence_high') if ass else None,
+        reasoning=(ass.get('llm_reasoning') if ass else None) or bid.get('ai_assessment'),
+        flags=flags_v2,
+        manheim=mh, rbook=rb,
+        buyer=buyer, dealer=dealer,
+        token=token,
+    )
+
+
+def _notify_driver_phase2(bid_id):
+    """Send the second SMS with link to /m/<token>/full once Phase 2 is done.
+    Idempotent via bids.phase2_notified_at — runs at most once per bid.
+    Called from _run_assessment success path (which gates on rbook + manheim
+    completion). Returns True if SMS sent, False otherwise.
+    """
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            SELECT id, driver_token, driver_phone, phase2_notified_at,
+                   year, make, model, ai_price
+              FROM bids WHERE id = %s
+        """, (bid_id,))
+        bid = cur.fetchone()
+        if not bid or not bid['driver_phone'] or not bid['driver_token']:
+            db.close()
+            return False
+        if bid['phase2_notified_at'] is not None:
+            db.close()
+            return False  # already sent
+
+        ymm_parts = [str(bid['year']) if bid['year'] else '',
+                     bid['make'] or '', bid['model'] or '']
+        ymm = ' '.join(p for p in ymm_parts if p).strip() or 'Vehicle'
+        base = os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net')
+        link = f"{base}/m/{bid['driver_token']}/full"
+        price_str = f" ${'{:,}'.format(int(bid['ai_price']))}" if bid['ai_price'] else ''
+        body = f"Bid #{bid['id']} {ymm}{price_str}\nFull report:\n{link}"
+
+        sent = send_sms(bid['driver_phone'], body)
+        if sent:
+            cur.execute(
+                "UPDATE bids SET phase2_notified_at = NOW() WHERE id = %s",
+                (bid_id,),
+            )
+            db.commit()
+            print(f'[phase2-notify] bid={bid_id} → {bid["driver_phone"]}', flush=True)
+        else:
+            print(f'[phase2-notify] SMS failed bid={bid_id}', flush=True)
+        db.close()
+        return sent
+    except Exception as e:
+        print(f'[phase2-notify] error bid={bid_id}: {e}', flush=True)
+        return False
 
 
 @app.route('/m/<token>/reply', methods=['POST'])
