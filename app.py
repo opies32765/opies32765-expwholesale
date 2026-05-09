@@ -11120,6 +11120,10 @@ def driver_full_page(token):
             rb['p75'] = rb.get('retail_p75')
             rb['median_dol'] = rb.get('median_days_on_lot')
             rb['implied_gross'] = cached.get('implied_buyer_gross')
+            # Pass-through extras: full retail range + avg mileage + stocking
+            rb['min'] = rb.get('retail_min')
+            rb['max'] = rb.get('retail_max')
+            # avg_mileage and stocking_report already in dict from dict(cached.rbook)
 
     # Always compute closest_3 from rbook_competitive_set.rows if rb is set
     # but lacks closest_3 (market_intel_cached.rbook doesn't carry closest_3).

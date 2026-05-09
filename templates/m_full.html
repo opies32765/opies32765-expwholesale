@@ -179,11 +179,27 @@
     <span class="summary-text">{{ rbook.count }} comp{% if rbook.count != 1 %}s{% endif %}{% if rbook.median %} · median ${{ '{:,}'.format(rbook.median|int) }}{% endif %}</span>
   </summary>
   <div class="body">
-    <div class="row"><span class="lbl">Comps</span><span class="val">{{ rbook.count }}</span></div>
+    <div class="row"><span class="lbl">Comps available</span><span class="val">{{ rbook.count }}</span></div>
     {% if rbook.median %}<div class="row"><span class="lbl">Median ask</span><span class="val">${{ '{:,}'.format(rbook.median|int) }}</span></div>{% endif %}
+    {% if rbook.min and rbook.max %}<div class="row"><span class="lbl">Range (low–high)</span><span class="val">${{ '{:,}'.format(rbook.min|int) }} – ${{ '{:,}'.format(rbook.max|int) }}</span></div>{% endif %}
     {% if rbook.p25 and rbook.p75 %}<div class="row"><span class="lbl">p25 – p75</span><span class="val">${{ '{:,}'.format(rbook.p25|int) }} – ${{ '{:,}'.format(rbook.p75|int) }}</span></div>{% endif %}
-    {% if rbook.implied_gross %}<div class="row"><span class="lbl">Retail−MMR spread</span><span class="val">${{ '{:,}'.format(rbook.implied_gross|int) }}</span></div>{% endif %}
+    {% if rbook.avg_mileage %}<div class="row"><span class="lbl">Avg mileage in comps</span><span class="val">{{ '{:,}'.format(rbook.avg_mileage|int) }} mi</span></div>{% endif %}
     {% if rbook.median_dol %}<div class="row"><span class="lbl">Median days on lot</span><span class="val">{{ rbook.median_dol }}</span></div>{% endif %}
+    {% if rbook.implied_gross %}<div class="row"><span class="lbl">Retail−MMR spread</span><span class="val">${{ '{:,}'.format(rbook.implied_gross|int) }}</span></div>{% endif %}
+
+    {% if rbook.stocking_report %}
+    {% set sr = rbook.stocking_report %}
+    <div style="margin-top:12px;padding:10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;font-family:monospace;font-size:11px">
+      <div style="font-size:10px;font-weight:700;color:#67e8f9;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">vAuto Stocking Report</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 12px">
+        {% if sr.demand %}<div>Demand <span style="color:#86efac;font-weight:700">{{ sr.demand }}</span></div>{% endif %}
+        {% if sr.interest %}<div>Interest <span style="color:#e2e8f0;font-weight:700">{{ sr.interest }}</span></div>{% endif %}
+        {% if sr.volume %}<div>Volume <span style="color:#e2e8f0;font-weight:700">{{ sr.volume }}</span></div>{% endif %}
+        {% if sr.days_supply %}<div>Days Supply <span style="color:#fbbf24;font-weight:700">{{ sr.days_supply }}</span></div>{% endif %}
+        {% if sr.availability %}<div>Availability <span style="color:#e2e8f0;font-weight:700">{{ sr.availability }}</span></div>{% endif %}
+      </div>
+    </div>
+    {% endif %}
   </div>
 </details>
 {% endif %}
@@ -200,7 +216,7 @@
     {% set is_top = loop.index == 1 %}
     <div class="comp{% if is_top %} top{% endif %}">
       <div class="top-line">
-        <span class="miles-l">#{{ loop.index }}{% if is_top %} ★{% endif %} {{ '{:,}'.format(c.mileage|int) }} mi</span>
+        <span class="miles-l">#{{ loop.index }}{% if is_top %} ★{% endif %} {{ '{:,}'.format(c.mileage|int) }} mi{% if bid.mileage %}{% set delta = (c.mileage|int) - (bid.mileage|int) %}{% set sign = '+' if delta >= 0 else '' %} <span style="font-size:11px;font-weight:400;color:#64748b">({{ sign }}{{ '{:,}'.format(delta|int) }})</span>{% endif %}</span>
         <span class="price-l">${{ '{:,}'.format(c.price|int) if c.price else '—' }}</span>
       </div>
       <div class="meta-line">
