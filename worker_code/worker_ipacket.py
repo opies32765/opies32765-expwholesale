@@ -566,6 +566,25 @@ def lookup(page, ctx, vin, t):
         _ec = parsed.get("exterior_color") or ""
         print(f"[+{time.time()-t:5.1f}s] [ipacket] regex MSRP=${_m:,} base=${_b:,} ext={_ec} text={len(sticker_text)} chars")
 
+    # 2026-05-09: Permanent fix for blank-screenshot / iPacket repeat-VIN rate-limit.
+    # When markers missing AND parser yielded nothing useful AND text is small,
+    # return not_available=True so the server doesn't store an empty success row
+    # (which renders as a blank screenshot in the mini-page mini-page).
+    _txt_u = (sticker_text or "").upper()
+    _has_markers = any(m in _txt_u for m in ("MSRP","TOTAL PRICE","SUGGESTED","AS DELIVERED PRICE","TOTAL VEHICLE PRICE","VEHICLE PRICE"))
+    _has_data = bool(parsed.get("total_msrp") or parsed.get("base_price") or parsed.get("exterior_color") or parsed.get("interior_color"))
+    if not _has_markers and not _has_data:
+        if sticker_page is not page:
+            try: sticker_page.close()
+            except Exception: pass
+        print(f"[+{time.time()-t:5.1f}s] [ipacket] BLANK-CAPTURE → not_available (text={len(sticker_text or '')} chars, no markers, no parsed data) — likely iPacket repeat-VIN rate-limit")
+        return {
+            "screenshot": str(screenshot) if screenshot else None,
+            "sticker_url": sticker_url,
+            "not_available": True,
+            "reason": "iPacket sticker did not render (blank capture). Likely repeat-VIN rate-limit; another bid for same VIN may have full data.",
+        }
+
     if sticker_page is not page:
         try: sticker_page.close()
         except Exception: pass

@@ -9036,6 +9036,27 @@ def api_ipacket_submit():
     if not data or not data.get('bid_id'):
         return jsonify({'error': 'missing bid_id'}), 400
 
+    # 2026-05-09: Reject empty 'success' submissions. Worker should now mark
+    # not_available=True on blank captures (see worker_ipacket.py blank-capture
+    # branch). This is the safety net — if a worker still tries to submit
+    # not_available=False with all-NULL fields, return 422 so it doesn't
+    # pollute ipacket_lookups with empty rows that render as blank stickers
+    # in the mini-page. Worker can retry / mark not_available explicitly.
+    if not data.get('not_available'):
+        _has_data = any([
+            data.get('total_msrp'),
+            data.get('base_price'),
+            (data.get('exterior_color') or '').strip(),
+            (data.get('interior_color') or '').strip(),
+        ])
+        _raw = data.get('raw') or {}
+        _has_options = bool(_raw.get('options'))
+        _text_chars = int(_raw.get('text_chars') or 0)
+        if not _has_data and not _has_options and _text_chars < 200:
+            print(f'[ipacket-submit] REJECTED empty submission for bid={data.get("bid_id")} '
+                  f'(no msrp/base/colors/options, text<200). Worker should retry or mark not_available=True.', flush=True)
+            return jsonify({'error': 'empty submission rejected — set not_available=True if iPacket genuinely had no sticker'}), 422
+
     db = get_db()
     cur = db.cursor()
     bid_id = data['bid_id']
@@ -11022,6 +11043,48 @@ def driver_mini_page(token):
     except Exception:
         pass
 
+    # 2026-05-09: Fallback to a better iPacket for same VIN. Prefer rows with
+    # parsed data; else pick the LARGEST screenshot file (PDF stickers often
+    # render visually but yield no selectable text → parsed fields stay NULL,
+    # but the screenshot itself is still useful). Threshold: <80KB = blank
+    # submit-form capture; >100KB likely a real sticker.
+    if ipacket and bid.get('vin'):
+        _cur_path = (ipacket.get('screenshot') or '').lstrip('/')
+        _cur_size = 0
+        try:
+            if _cur_path:
+                _abs = os.path.join('/opt/expwholesale', _cur_path)
+                _cur_size = os.path.getsize(_abs) if os.path.exists(_abs) else 0
+        except Exception: _cur_size = 0
+        _cur_has_data = bool(ipacket.get('total_msrp') or ipacket.get('base_price') or ipacket.get('exterior_color'))
+        # Trigger fallback if: current row has no parsed data AND screenshot is small/missing
+        if not _cur_has_data and _cur_size < 80_000:
+            try:
+                cur.execute("""SELECT * FROM ipacket_lookups
+                                WHERE vin=%s AND bid_id != %s
+                                ORDER BY looked_up_at DESC LIMIT 10""",
+                            (bid['vin'], bid['id']))
+                candidates = cur.fetchall()
+                best = None; best_score = 0
+                for c in candidates:
+                    cp = (c.get('screenshot') or '').lstrip('/')
+                    cs = 0
+                    try:
+                        if cp:
+                            ap = os.path.join('/opt/expwholesale', cp)
+                            cs = os.path.getsize(ap) if os.path.exists(ap) else 0
+                    except Exception: pass
+                    has_data = bool(c.get('total_msrp') or c.get('base_price') or c.get('exterior_color'))
+                    # Score: parsed data dominates; else screenshot size
+                    score = (1_000_000 if has_data else 0) + cs
+                    if score > best_score:
+                        best_score = score; best = c
+                if best and best_score > _cur_size:
+                    print(f'[m-page] bid={bid["id"]} vin={bid["vin"]} fell back to ipacket bid_id={best["bid_id"]} (score {best_score} vs {_cur_size})', flush=True)
+                    ipacket = best
+            except Exception as _e:
+                print(f'[m-page] ipacket fallback error bid={bid["id"]}: {_e}', flush=True)
+
     db.close()
     return render_template('m.html', bid=bid, photos=photos,
                            vauto=vauto, accutrade=accutrade, ipacket=ipacket,
@@ -11052,6 +11115,41 @@ def driver_full_page(token):
     accutrade = cur.fetchone()
     cur.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s", (bid['id'],))
     ipacket = cur.fetchone()
+    # Same same-VIN fallback as /m/<token>: file-size-aware
+    if ipacket and bid.get('vin'):
+        _cur_path = (ipacket.get('screenshot') or '').lstrip('/')
+        _cur_size = 0
+        try:
+            if _cur_path:
+                _abs = os.path.join('/opt/expwholesale', _cur_path)
+                _cur_size = os.path.getsize(_abs) if os.path.exists(_abs) else 0
+        except Exception: _cur_size = 0
+        _cur_has_data = bool(ipacket.get('total_msrp') or ipacket.get('base_price') or ipacket.get('exterior_color'))
+        if not _cur_has_data and _cur_size < 80_000:
+            try:
+                cur.execute("""SELECT * FROM ipacket_lookups
+                                WHERE vin=%s AND bid_id != %s
+                                ORDER BY looked_up_at DESC LIMIT 10""",
+                            (bid['vin'], bid['id']))
+                candidates = cur.fetchall()
+                best = None; best_score = 0
+                for c in candidates:
+                    cp = (c.get('screenshot') or '').lstrip('/')
+                    cs = 0
+                    try:
+                        if cp:
+                            ap = os.path.join('/opt/expwholesale', cp)
+                            cs = os.path.getsize(ap) if os.path.exists(ap) else 0
+                    except Exception: pass
+                    has_data = bool(c.get('total_msrp') or c.get('base_price') or c.get('exterior_color'))
+                    score = (1_000_000 if has_data else 0) + cs
+                    if score > best_score:
+                        best_score = score; best = c
+                if best and best_score > _cur_size:
+                    print(f'[m-full] bid={bid["id"]} vin={bid["vin"]} fell back to ipacket bid_id={best["bid_id"]} (score {best_score} vs {_cur_size})', flush=True)
+                    ipacket = best
+            except Exception as _e:
+                print(f'[m-full] ipacket fallback error bid={bid["id"]}: {_e}', flush=True)
 
     cur.execute("""
         SELECT confidence_low, confidence_high, llm_reasoning, flags_v2,
