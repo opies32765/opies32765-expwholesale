@@ -8171,6 +8171,74 @@ def api_admin_release_claim(bid_id):
     return jsonify({'ok': True})
 
 
+
+
+@app.route('/api/admin/bid/<int:bid_id>/force-reprocess', methods=['POST'])
+def api_admin_force_reprocess(bid_id):
+    """Hard reset: wipe all 3 phase-1 lookups + claim + assessment so
+    the next /api/vauto/pending poll re-claims this bid fresh from a
+    worker. Wired to the 'Force re-process' button on bid.html.
+
+    Does NOT clear driver_notified_at — preserves SMS-back idempotency
+    so the customer doesn't get re-texted on every retry.
+
+    Added 2026-05-08 — this endpoint was missing for at least 3 days
+    (button was dead-clicking and silently failing on 404).
+    """
+    db = get_db()
+    cur = db.cursor()
+
+    # Verify bid exists first
+    cur.execute('SELECT id, vin FROM bids WHERE id=%s', (bid_id,))
+    row = cur.fetchone()
+    if not row:
+        db.close()
+        return jsonify({'ok': False, 'error': 'bid not found'}), 404
+
+    # Wipe phase-1 lookups
+    cur.execute('DELETE FROM ipacket_lookups WHERE bid_id=%s', (bid_id,))
+    n_ipacket = cur.rowcount
+    cur.execute('DELETE FROM accutrade_lookups WHERE bid_id=%s', (bid_id,))
+    n_accu = cur.rowcount
+    cur.execute('DELETE FROM vauto_lookups WHERE bid_id=%s', (bid_id,))
+    n_vauto = cur.rowcount
+
+    # Reset claim + assessment so worker re-claims and assess re-fires
+    cur.execute("""
+        UPDATE bids
+           SET vauto_claimed_by = NULL,
+               vauto_claimed_at = NULL,
+               ai_assessed_at = NULL,
+               ai_price = NULL,
+               ai_assessment = NULL
+         WHERE id = %s
+    """, (bid_id,))
+
+    # Close any in-flight worker_jobs so worker_jobs reflect the reset
+    cur.execute("""
+        UPDATE worker_jobs
+           SET completed_at = NOW(),
+               status = 'released_admin_reprocess',
+               duration_ms = EXTRACT(EPOCH FROM (NOW()-claimed_at))::int*1000
+         WHERE bid_id = %s AND completed_at IS NULL
+    """, (bid_id,))
+    n_worker_jobs = cur.rowcount
+
+    db.commit()
+    db.close()
+    return jsonify({
+        'ok': True,
+        'bid_id': bid_id,
+        'wiped': {
+            'vauto_lookups': n_vauto,
+            'accutrade_lookups': n_accu,
+            'ipacket_lookups': n_ipacket,
+            'in_flight_worker_jobs_closed': n_worker_jobs,
+        },
+        'msg': 'Bid reset — next vauto poll will re-claim',
+    })
+
+
 @app.route('/api/vauto/release_claim', methods=['POST'])
 def api_vauto_release_claim():
     """Worker hands a claimed bid back when it can't complete (network

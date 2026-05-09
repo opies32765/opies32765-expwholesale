@@ -28,7 +28,9 @@ VM_LIST=(
   '116:pve115:vm-worker-6'
   '111:pve115:vm-worker-7'
   '112:pve115:vm-worker-8'
-  '115:pve115:vm-worker-10'
+  '122:pve-pc2:vm-worker-11'
+  '123:pve-pc2:vm-worker-12'
+  '124:pve-pc2:vm-worker-13'
 )
 
 FILES=( process_bid.py worker_vauto.py worker_accutrade.py worker_ipacket.py worker_main.py )

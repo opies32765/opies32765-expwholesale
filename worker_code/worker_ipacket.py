@@ -10,6 +10,60 @@ PASSWORD = os.environ.get("IPACKET_PASSWORD", "Sedecremlun34$")
 IPACKET_DPAPP = "https://dpapp.autoipacket.com/"
 LOGIN_MARKERS = ("/login", "/signin", "/sign-in", "/forgot")
 
+# 2026-05-08: JWT auto-refresh — capture the Authorization Bearer token from
+# any XHR request to autoipacket.com domains, POST it back to the EW server's
+# /api/ipacket/refresh_token. This keeps vauto_session label='ipacket' fresh
+# as long as ANY worker is doing iPacket pulls — same pattern as the vAuto
+# cookie_keeper. Caught after 76 silent comp_msrp failures from a stale JWT.
+EW_SERVER = os.environ.get("EW_SERVER", "https://experience-wholesale.net")
+
+def _post_jwt_refresh(jwt):
+    """Best-effort POST of fresh iPacket JWT. Server UPSERTs (idempotent)."""
+    if not jwt or not jwt.startswith("eyJ"):
+        return
+    try:
+        import json as _json
+        from urllib import request as _ureq
+        data = _json.dumps({"jwt": jwt}).encode("utf-8")
+        req = _ureq.Request(
+            f"{EW_SERVER}/api/ipacket/refresh_token",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _ureq.urlopen(req, timeout=8) as resp:
+            if resp.status == 200:
+                print(f"[ipacket] JWT auto-refreshed ({len(jwt)} chars)")
+    except Exception as e:
+        # Best-effort — never fail a bid pull because the refresh POST hiccuped
+        print(f"[ipacket] JWT refresh skipped: {type(e).__name__}: {str(e)[:80]}")
+
+
+def _attach_jwt_capture(page):
+    """Hook page.on('request') to capture Authorization Bearer tokens from
+    autoipacket.com XHRs and POST them to the refresh endpoint. Idempotent —
+    only POSTs when the token actually changes."""
+    last = {"token": None}
+    def _on_request(request):
+        try:
+            url = request.url
+            if "autoipacket.com" not in url:
+                return
+            auth = (request.headers or {}).get("authorization", "")
+            if not auth or not auth.lower().startswith("bearer "):
+                return
+            tok = auth.split(None, 1)[1].strip()
+            if not tok.startswith("eyJ") or tok == last["token"]:
+                return
+            last["token"] = tok
+            _post_jwt_refresh(tok)
+        except Exception:
+            pass
+    try:
+        page.on("request", _on_request)
+    except Exception:
+        pass
+
 
 
 def _parse_sticker_text(text):
@@ -81,6 +135,7 @@ def auto_login(page, ctx, max_seconds=60):
 
 def lookup(page, ctx, vin, t):
     print(f"[+{time.time()-t:5.1f}s] [ipacket] start")
+    _attach_jwt_capture(page)  # 2026-05-08: keep server JWT fresh on every call
     page.goto(IPACKET_DPAPP, wait_until="domcontentloaded", timeout=30000); time.sleep(3)
     if not is_logged_in(page.url):
         if not auto_login(page, ctx):
@@ -397,7 +452,7 @@ def lookup(page, ctx, vin, t):
 
     print(f"[+{time.time()-t:5.1f}s] [ipacket] ready (canvas stable)")
     sticker_page = page
-    time.sleep(2)
+    time.sleep(8)  # bumped 2s -> 8s 2026-05-08 — bid 1060 captured spinner; give canvas more time to actually render the sticker PDF after JS detector says ready
 
     ts = int(time.time())
     screenshot = REPORTS_DIR / f"ipacket_{vin}_{ts}.png"

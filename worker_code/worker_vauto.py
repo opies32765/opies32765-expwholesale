@@ -220,6 +220,8 @@ def lookup(page, ctx, vin, miles, t):
 
     title = page.evaluate("() => window.__vauto.titleStatus()")
 
+    # 2026-05-08: Carfax/AutoCheck expect_page timeouts bumped from 15000 to
+    # 45000 ms — intermittently >15s on heavy-image bids (Rolls/Bentley).
     # Carfax + AutoCheck — open BOTH new tabs back-to-back, let the browser
     # load them in parallel, then wait+screenshot each. Sync Playwright single
     # thread but the actual page loads run concurrently in the browser, so
@@ -232,7 +234,7 @@ def lookup(page, ctx, vin, miles, t):
     try:
         page.evaluate("() => window.__vauto.clickCarfaxTrigger()")
         time.sleep(1.5)
-        with ctx.expect_page(timeout=15000) as ni:
+        with ctx.expect_page(timeout=45000) as ni:
             page.evaluate("() => window.__vauto.clickCarfaxPopover()")
         cf_tab = ni.value
     except Exception as e:
@@ -241,7 +243,7 @@ def lookup(page, ctx, vin, miles, t):
 
     # AutoCheck — single click, fire IMMEDIATELY so it loads alongside Carfax
     try:
-        with ctx.expect_page(timeout=15000) as ni:
+        with ctx.expect_page(timeout=45000) as ni:
             page.evaluate("() => window.__vauto.clickAutoCheck()")
         ac_tab = ni.value
     except Exception as e:
