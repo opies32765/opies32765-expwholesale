@@ -1,320 +1,333 @@
+"""dealer_match_v2.py — tiered like-vehicle matcher for the EW Dealer Network card.
+
+REPLACES the body of `find_dealer_matches()` in `/opt/expwholesale/dealer_match.py`.
+Same function signature → callers stay unchanged.
+
+WHAT'S DIFFERENT FROM v1:
+  1. Drops the ±2 year band — Year is EXACT.
+  2. Trim equality is ALWAYS enforced (not optional based on trim_confidence).
+     - Bid trim missing → only match dealer rows where trim is NULL/blank/'base'.
+     - Bid trim present → exact match after body-word stripping.
+  3. Uses canonical YMMT columns when both sides are decoded:
+       Tier 1: bid.canon_* == dealer.nhtsa_*  (trim included)
+       Tier 2: same Y/M/M (drop trim — confidence drop)
+       Tier 3: free-text fallback (legacy v1 behavior, body-stripped)
+     First tier with ≥1 match wins. Each result row carries `match_tier`.
+
+Returns the SAME dict shape as v1 with added `match_tier` per row + summary
+`tier_used`/`tier_confidence` in the top-level result.
 """
-dealer_match.py — Cross-check a bid against our partner-dealer network.
-
-Pulls from the Dealer DB tables (dealers, dealer_inventory, dealer_sold_signals,
-dealer_inventory_history) to answer three questions for every bid:
-
-  1. Is this exact / similar vehicle CURRENTLY LISTED at any partner dealer?
-     (tells us the retail market ceiling + where a same unit sits)
-
-  2. Have partner dealers SOLD this vehicle recently — and how fast?
-     (turnover pattern — "sold 2 in 60 days, avg 3 days on lot" = strong demand)
-
-  3. Which dealers are the best PITCH CANDIDATES if we buy this car?
-     (ranked by historical sales of like-vehicles × turnover speed × current stock)
-
-Returns a structured dict ready to render into the bid-card UI and inject as
-context into the AI assessment prompt.
-"""
-
 from __future__ import annotations
+import re
 from typing import Any
 
 
-DEFAULT_DEALER_MATCH_CONFIG = {
-    # How many years either side of the bid's year to consider a "like vehicle"
-    "year_tolerance": 2,
-    # Window for "recent sales" stat (also used by pitch scoring)
-    "recent_days": 90,
-    # Minimum confidence on a sold-signal to count it as a real sale
-    "min_sold_confidence": 0.70,
-    # Weights for the pitch-score formula — tunable in admin UI:
-    #   score = sold_count*sold_mult + min(fast_bonus_max, max(0, 30 - avg_days_to_sell))
-    #         + active_count*active_mult
-    "pitch_weights": {
-        "sold_count_multiplier":   10,
-        "fast_turnover_bonus_max": 30,
-        "active_count_multiplier":  2,
-    },
-    # Max rows returned per section (UI + prompt budget)
-    "max_active":   5,
-    "max_sales":   10,
-    "max_pitch":    3,
-}
+# Body-class words to strip from trim string before comparison. Trims like
+# "Carrera S Coupe" should equal "Carrera S" stored elsewhere as the trim
+# without body suffix. Order matters — longer first.
+_BODY_NOISE = [
+    'sport utility vehicle', 'pickup truck truck', 'pickup truck',
+    'sport utility', 'crew cab', 'quad cab', 'extended cab', 'regular cab',
+    'cabriolet', 'convertible', 'roadster', 'hatchback', 'targa',
+    'spider', 'spyder', 'coupe', 'sedan', 'wagon', 'minivan', 'van',
+    'truck', 'suv',
+    '4 door', '4 dr.', '4 dr', '2 door', '2 dr.', '2 dr', '4d', '2d',
+    '4matic', '4 matic', 'xdrive', 'quattro', '4wd', 'awd', 'rwd', 'fwd',
+]
+
+# Trim values that should be treated as "base / no trim" — both sides match.
+_BASE_TRIM_TOKENS = {'', 'base', 'standard', 'std', 'l', 'le'}
 
 
-def _cfg(config, key, default):
-    if not config:
-        return default
-    dm = config.get('dealer_match') or {}
-    return dm.get(key, default)
+def _norm_trim(s: str | None) -> str:
+    """Strip body-class noise + lowercase + collapse whitespace.
+    Empty/None/base sentinel → '' (so two 'base' bids match)."""
+    if not s:
+        return ''
+    s = s.lower().strip()
+    # Strip body words from end (greedy, longest first)
+    changed = True
+    while changed:
+        changed = False
+        for noise in _BODY_NOISE:
+            if s.endswith(' ' + noise):
+                s = s[: -(len(noise) + 1)].rstrip()
+                changed = True
+                break
+            if s == noise:
+                s = ''
+                changed = True
+                break
+    s = re.sub(r'\s+', ' ', s).strip()
+    if s in _BASE_TRIM_TOKENS:
+        return ''
+    return s
+
+
+def _norm_text(s: str | None) -> str:
+    if not s: return ''
+    return re.sub(r'\s+', ' ', str(s).upper().strip())
+
+
+# ── Tiered queries ─────────────────────────────────────────────────────────
+
+_AGE_EXPR = ("COALESCE("
+             "di.verified_at - (di.verified_days_on_lot || ' days')::interval, "
+             "di.source_added_at, di.first_seen_at)")
+
+_DAYS_ON_LOT_EXPR = (
+    f"GREATEST(0, ((NOW() AT TIME ZONE 'America/New_York')::date "
+    f"- ({_AGE_EXPR} AT TIME ZONE 'America/New_York')::date)::int)")
+
+
+def _select_active(extra_where: str, params: list, max_active: int) -> tuple:
+    sql = f"""
+        SELECT di.id, di.dealer_id, d.name AS dealer_name, d.city, d.state,
+               di.vin, di.year, di.make, di.model, di.trim,
+               di.price, di.mileage, di.url, di.photo_url,
+               di.first_seen_at, di.last_seen_at,
+               di.source_added_at, di.verified_at, di.verified_days_on_lot,
+               di.price_drop_amount, di.price_drop_at,
+               {_DAYS_ON_LOT_EXPR} AS days_on_lot
+        FROM dealer_inventory di
+        JOIN dealers d ON di.dealer_id = d.id
+        WHERE di.status = 'active'
+          AND d.active = TRUE
+          AND {extra_where}
+        ORDER BY {_AGE_EXPR} ASC
+        LIMIT %s
+    """
+    return sql, params + [max_active]
+
+
+# Tier 1 — full canonical match (year + make + model + trim). Both sides
+# require nhtsa_* (dealer) and canon_* (bid) populated. Strictest tier.
+def _tier1_canon_full(year, make, model, trim):
+    where = """di.nhtsa_year IS NOT NULL
+               AND di.nhtsa_year = %s
+               AND UPPER(di.nhtsa_make) = %s
+               AND UPPER(di.nhtsa_model) = %s
+               AND COALESCE(LOWER(di.nhtsa_trim), '') = %s"""
+    params = [year, _norm_text(make), _norm_text(model), _norm_trim(trim)]
+    return where, params
+
+
+# Tier 2 — canonical Y/M/M only (trim dropped).
+# Used when bid has no trim OR trim disagreement is suspected.
+def _tier2_canon_ymm(year, make, model):
+    where = """di.nhtsa_year IS NOT NULL
+               AND di.nhtsa_year = %s
+               AND UPPER(di.nhtsa_make) = %s
+               AND UPPER(di.nhtsa_model) = %s"""
+    params = [year, _norm_text(make), _norm_text(model)]
+    return where, params
+
+
+# SQL helper — strip trailing body / door-count / drivetrain words from dealer
+# trim so "Carrera S Coupe" matches normalized bid trim "Carrera S" (exact),
+# but "SRT Hellcat Redeye Widebody" does NOT match bid "SRT Hellcat" (those
+# extra words are trim variants, not body noise).
+_SQL_TRIM_STRIP = lambda col: f"""TRIM(BOTH FROM
+    regexp_replace(
+        regexp_replace(
+            regexp_replace(
+                LOWER(regexp_replace(COALESCE({col}, ''), E'\\\\s+', ' ', 'g')),
+                E'\\\\s+(sport utility vehicle|pickup truck truck|pickup truck|sport utility|sport utility veh|crew cab|quad cab|extended cab|regular cab|sedan|coupe|convertible|cabriolet|roadster|hatchback|wagon|minivan|suv|spider|spyder|targa)\\\\s*$',
+                '', 'g'),
+            E'\\\\s+(4d|2d|4 dr|2 dr|4dr|2dr|4 door|2 door)\\\\s*$',
+            '', 'g'),
+        E'\\\\s+(awd|rwd|fwd|4wd|4matic|xdrive|quattro)\\\\s*$',
+        '', 'g'))"""
+
+
+# Tier 3 — free-text fallback. Used when canonical fields not available
+# on either side. Matches v1 behavior except: year is EXACT (not ±2),
+# trim is EXACT after body-strip (not prefix-LIKE).
+def _tier3_freetext(year, make, model, trim):
+    norm_trim = _norm_trim(trim)
+    if norm_trim:
+        where = f"""UPPER(di.make) = %s
+                   AND UPPER(di.model) = %s
+                   AND di.year = %s
+                   AND {_SQL_TRIM_STRIP("di.trim")} = %s"""
+        params = [_norm_text(make), _norm_text(model), year, norm_trim]
+    else:
+        # Bid has NO trim → strict: only match dealer rows whose trim is
+        # empty/null/base AFTER body-stripping (so a dealer trim of just
+        # "Coupe" or "Sedan" still matches base, but "Demon 170" / "SRT
+        # Hellcat" / any actual trim-variant does NOT match a base bid).
+        where = f"""UPPER(di.make) = %s
+                    AND UPPER(di.model) = %s
+                    AND di.year = %s
+                    AND {_SQL_TRIM_STRIP("di.trim")} = ''"""
+        params = [_norm_text(make), _norm_text(model), year]
+    return where, params
+
+
+# ── Public function (drop-in replacement for v1 find_dealer_matches) ────
+
+DEFAULT_CONFIG = {'max_active': 5, 'max_sales': 10, 'max_pitch': 3,
+                  'recent_days': 90, 'min_sold_confidence': 0.70}
 
 
 def find_dealer_matches(db_conn, year, make, model,
-                        trim=None, trim_confidence='low', config=None):
-    """Query partner dealer data for like-vehicles to the bid.
+                        trim=None, trim_confidence=None,
+                        bid_id=None, vin=None, config=None):
+    """Tiered like-vehicle lookup against EW's 8-dealer network.
 
-    trim_confidence semantics:
-      - 'deterministic' / 'high' — require trim similarity (first word of bid's
-        trim must appear in the dealer_inventory trim). Prevents a base Cayenne
-        from matching against Cayenne Turbo GT.
-      - 'medium' / 'low' / None — model-only match (current legacy behavior).
+    Args:
+      year, make, model, trim — bid's vehicle fields. Pass canon_* values when
+        the bid intake has them; pass raw bid.* otherwise. Function will use
+        whichever it gets.
+      bid_id — optional. If passed AND bids.canon_* is populated, the matcher
+        will read canon_* from the DB itself (preferred). Otherwise relies on
+        the args.
+      vin — currently informational; reserved for future tiered "exact VIN" pass.
 
-    Returns structure unchanged; adds 'match_strategy' to config_used for UI.
-
-    Never raises: returns empty structure on any DB error.
+    Returns:
+      {'active': [...], 'recent_sales': [...], 'top_pitch': [...],
+       'config_used': {...},
+       'tier_used': 'tier1_canon' | 'tier2_canon_ymm' | 'tier3_freetext' | 'none',
+       'tier_confidence': 'high' | 'medium' | 'low' | 'none'}
     """
-    empty_result = {
-        'active': [], 'recent_sales': [], 'patterns': [],
-        'top_pitch': [], 'config_used': {}
+    empty = {'active': [], 'recent_sales': [], 'top_pitch': [],
+             'config_used': {}, 'tier_used': 'none',
+             'tier_confidence': 'none'}
+    if not (year and make and model):
+        return empty
+
+    cfg = {**DEFAULT_CONFIG, **(config or {}).get('dealer_match', {})}
+    max_active = int(cfg.get('max_active', 5))
+
+    # If bid_id passed, prefer canon_* from DB (more authoritative than args)
+    canon_year = canon_make = canon_model = canon_trim = None
+    if bid_id is not None:
+        try:
+            # Use a fresh tuple cursor (caller's db_conn may be RealDictCursor)
+            with db_conn.cursor() as _c:
+                _c.execute("""
+                    SELECT canon_year, canon_make, canon_model, canon_trim
+                    FROM bids WHERE id = %s
+                """, (bid_id,))
+                row = _c.fetchone()
+                if row:
+                    # Tolerate either dict-row or tuple-row cursors.
+                    if isinstance(row, dict):
+                        canon_year  = row.get('canon_year')
+                        canon_make  = row.get('canon_make')
+                        canon_model = row.get('canon_model')
+                        canon_trim  = row.get('canon_trim')
+                    else:
+                        canon_year, canon_make, canon_model, canon_trim = row
+        except Exception as _e:
+            print(f'[dealer_match v2] canon lookup err: {_e}', flush=True)
+            try: db_conn.rollback()
+            except Exception: pass
+
+    eff_year  = canon_year  or year
+    eff_make  = canon_make  or make
+    eff_model = canon_model or model
+    eff_trim  = canon_trim if canon_trim is not None else trim
+
+    # ── Try tiers in order; first non-empty wins ────────────────────────
+    tier_attempts = []
+
+    # Tier 1 only worthwhile when canon_* present on bid AND we expect
+    # dealer rows to have nhtsa_* (after backfill, ~all rows do).
+    has_canon_bid = canon_year and canon_make and canon_model
+    if has_canon_bid:
+        tier_attempts.append(('tier1_canon', 'high',
+            _tier1_canon_full(eff_year, eff_make, eff_model, eff_trim)))
+    # Tier 2 — drop trim, still canonical
+    if has_canon_bid:
+        tier_attempts.append(('tier2_canon_ymm', 'medium',
+            _tier2_canon_ymm(eff_year, eff_make, eff_model)))
+    # Tier 3 — free-text always available
+    tier_attempts.append(('tier3_freetext', 'low',
+        _tier3_freetext(eff_year, eff_make, eff_model, eff_trim)))
+
+    chosen_tier = None
+    chosen_conf = None
+    active_rows = []
+    for tier_name, conf, (where, params) in tier_attempts:
+        sql, full_params = _select_active(where, params, max_active)
+        # Use a fresh cursor per tier so errors don't poison the connection.
+        # Also rollback any aborted transaction before trying the next tier.
+        try:
+            with db_conn.cursor() as _c:
+                _c.execute(sql, tuple(full_params))
+                raw_rows = _c.fetchall()
+                # Build dicts whether cursor is RealDictCursor or tuple cursor
+                cols = [d[0] for d in _c.description]
+                rows = []
+                for rr in raw_rows:
+                    rows.append(rr if isinstance(rr, dict) else dict(zip(cols, rr)))
+        except Exception as e:
+            print(f'[dealer_match v2] tier {tier_name} err: {e}', flush=True)
+            try: db_conn.rollback()
+            except Exception: pass
+            continue
+        if rows:
+            for r in rows:
+                r['match_tier'] = tier_name
+            active_rows = rows
+            chosen_tier = tier_name
+            chosen_conf = conf
+            break
+
+    if not chosen_tier:
+        return empty
+
+    # Recent-sales tier query — same WHERE on whichever tier hit
+    # (intentionally simpler — match on the tier that produced active rows
+    # so the two tabs stay coherent)
+    where_rs, params_rs = next(
+        (q for n, _, q in tier_attempts if n == chosen_tier), (None, None))
+    sales_rows = []
+    if where_rs is not None:
+        try:
+            with db_conn.cursor() as _c:
+                _c.execute(f"""
+                    SELECT dss.dealer_id, d.name AS dealer_name, di.year, di.make,
+                           di.model, di.trim, di.price, di.mileage, di.url,
+                           dss.detected_at, dss.confidence,
+                           GREATEST(0,
+                             EXTRACT(EPOCH FROM (dss.detected_at - di.first_seen_at))::int
+                             / 86400
+                           )::int AS days_to_sell
+                    FROM dealer_sold_signals dss
+                    JOIN dealer_inventory di ON dss.inventory_id = di.id
+                    JOIN dealers d ON dss.dealer_id = d.id
+                    WHERE {where_rs}
+                      AND dss.detected_at > NOW() - (%s || ' days')::interval
+                      AND d.active = TRUE
+                      AND dss.confidence >= %s
+                    ORDER BY dss.detected_at DESC
+                    LIMIT %s
+                """, tuple(params_rs + [int(cfg['recent_days']),
+                                         float(cfg['min_sold_confidence']),
+                                         int(cfg['max_sales'])]))
+                raw_rs = _c.fetchall()
+                cols = [d[0] for d in _c.description]
+                sales_rows = [r if isinstance(r, dict) else dict(zip(cols, r))
+                              for r in raw_rs]
+        except Exception as e:
+            print(f'[dealer_match v2] sales tier {chosen_tier} err: {e}',
+                  flush=True)
+            try: db_conn.rollback()
+            except Exception: pass
+
+    return {
+        'active': active_rows,
+        'recent_sales': sales_rows,
+        'top_pitch': [],  # TODO: rank dealers by sold count + turnover
+        'config_used': dict(cfg),
+        'tier_used': chosen_tier,
+        'tier_confidence': chosen_conf,
     }
 
-    if not (year and make and model):
-        return empty_result
 
-    year_tol = int(_cfg(config, 'year_tolerance', 2))
-    recent_days = int(_cfg(config, 'recent_days', 90))
-    min_conf = float(_cfg(config, 'min_sold_confidence', 0.7))
-    weights = _cfg(config, 'pitch_weights',
-                   DEFAULT_DEALER_MATCH_CONFIG['pitch_weights'])
-    sold_mult = float(weights.get('sold_count_multiplier', 10))
-    fast_bonus = float(weights.get('fast_turnover_bonus_max', 30))
-    active_mult = float(weights.get('active_count_multiplier', 2))
-    max_active = int(_cfg(config, 'max_active', 5))
-    max_sales = int(_cfg(config, 'max_sales', 10))
-    max_pitch = int(_cfg(config, 'max_pitch', 3))
-
-    make_u = str(make).strip().upper()
-    model_u = str(model).strip().upper()
-    y = int(year)
-    y_lo, y_hi = y - year_tol, y + year_tol
-
-    # Trim-similarity gate — only applied when bid's trim_confidence is high.
-    # Extract the first significant word of the bid's trim (lowercase) to
-    # require presence in the dealer_inventory trim. Examples:
-    #   bid trim "Cayenne (base)" → key_word = "cayenne"  (too common, falls
-    #     through to model-only match — correct; base trim has no identifier)
-    #   bid trim "Cayenne Turbo GT" → key_word = "turbo"
-    #   bid trim "Carrera S (Coupe)" → key_word = "carrera" or "s"
-    # Choose the MOST DIFFERENTIATING token: skip the model name itself + common
-    # fillers. If no differentiating token remains, fall back to model match.
-    trim_gate_sql = ''
-    trim_gate_args = []
-    use_trim_gate = str(trim_confidence or '').lower() in ('deterministic', 'high')
-    match_strategy = 'model_only'
-    if use_trim_gate and trim:
-        # Strip parens, split by non-letter, drop the model name + tiny stopwords
-        import re as _re
-        cleaned = _re.sub(r'[()]', ' ', str(trim)).lower()
-        tokens = [t for t in _re.split(r'[^a-z0-9]+', cleaned) if t]
-        stop = {'coupe', 'cabriolet', 'sedan', 'suv', 'base',
-                model_u.lower(), make_u.lower()}
-        diff_tokens = [t for t in tokens if t not in stop and len(t) >= 2]
-        if diff_tokens:
-            # Match any of the differentiating tokens in dealer_inventory.trim
-            trim_gate_sql = (" AND ({})"
-                             .format(" OR ".join(
-                                 ["LOWER(COALESCE(di.trim,'')) LIKE %s"] * len(diff_tokens))))
-            trim_gate_args = [f'%{t}%' for t in diff_tokens]
-            match_strategy = f'trim_tokens:{",".join(diff_tokens)}'
-        else:
-            # Trim reduced to model+stopwords (e.g. "Cayenne (base)") →
-            # explicitly exclude dealer_inventory rows whose trim contains any
-            # premium markers (Turbo, GT, S, AMG, RS) so base doesn't match S.
-            premium_markers = ['turbo', 'gts', 'gt3', 'gt4', ' gt ',
-                               'hybrid', 'amg', ' rs ', 's e-hybrid']
-            trim_gate_sql = (" AND NOT (" + " OR ".join(
-                ["LOWER(COALESCE(di.trim,'')) LIKE %s"] * len(premium_markers)) + ")")
-            trim_gate_args = [f'%{m}%' for m in premium_markers]
-            match_strategy = 'base_trim_exclusion'
-
-    try:
-        cur = db_conn.cursor()
-
-        # ── A. Active listings of like-vehicles at partner dealers ──────────
-        # Age precedence (most-trusted first):
-        #   1) vAuto-verified: verified_days_on_lot + days_since_verification
-        #      (Cox crawler catches photo-reupload scams - e.g., TXT Charlie
-        #      BMW M5 scanner=2d but vAuto=120d)
-        #   2) Dealer-declared source_added_at (JSON-LD datePosted / sitemap)
-        #   3) Our scanner's first_seen_at (fallback)
-        effective_fs = ("COALESCE("
-                        "di.verified_at - (di.verified_days_on_lot || ' days')::interval, "
-                        "di.source_added_at, di.first_seen_at)")
-        cur.execute(f"""
-            SELECT di.id, di.dealer_id, d.name AS dealer_name, d.city, d.state,
-                   di.year, di.make, di.model, di.trim,
-                   di.price, di.mileage, di.url, di.photo_url,
-                   di.first_seen_at, di.last_seen_at,
-                   di.source_added_at, di.verified_at, di.verified_days_on_lot,
-                   di.price_drop_amount, di.price_drop_at,
-                   GREATEST(0, ((NOW() AT TIME ZONE 'America/New_York')::date
-                              - ({effective_fs} AT TIME ZONE 'America/New_York')::date)::int) AS days_on_lot
-            FROM dealer_inventory di
-            JOIN dealers d ON di.dealer_id = d.id
-            WHERE di.status = 'active'
-              AND d.active = TRUE
-              AND UPPER(di.make) = %s
-              AND UPPER(di.model) = %s
-              AND di.year BETWEEN %s AND %s
-              {trim_gate_sql}
-            ORDER BY {effective_fs} ASC
-            LIMIT %s
-        """, tuple([make_u, model_u, y_lo, y_hi] + trim_gate_args + [max_active]))
-        active_rows = []
-        for r in cur.fetchall():
-            d = dict(r)
-            dol = d.get('days_on_lot')
-            d['days_on_lot'] = int(dol) if dol is not None else None
-            pd = d.get('price_drop_at')
-            if pd:
-                import datetime
-                try:
-                    age = (datetime.datetime.now(pd.tzinfo) - pd).days
-                    d['price_drop_days_ago'] = age
-                except Exception:
-                    d['price_drop_days_ago'] = None
-            else:
-                d['price_drop_days_ago'] = None
-            for k in ('first_seen_at', 'last_seen_at', 'price_drop_at'):
-                if d.get(k) and hasattr(d[k], 'isoformat'):
-                    d[k] = d[k].isoformat()
-            active_rows.append(d)
-
-        # ── B. Recent sales of like-vehicles in last N days ─────────────────
-        cur.execute(f"""
-            SELECT dss.dealer_id, d.name AS dealer_name,
-                   di.year, di.make, di.model, di.trim, di.price, di.mileage,
-                   dss.detected_at, dss.signal_type, dss.confidence,
-                   di.first_seen_at,
-                   GREATEST(0, ((dss.detected_at AT TIME ZONE 'America/New_York')::date
-                              - (di.first_seen_at AT TIME ZONE 'America/New_York')::date)::int)
-                       AS days_to_sell
-            FROM dealer_sold_signals dss
-            JOIN dealer_inventory di ON dss.inventory_id = di.id
-            JOIN dealers d ON dss.dealer_id = d.id
-            WHERE UPPER(di.make) = %s
-              AND UPPER(di.model) = %s
-              AND di.year BETWEEN %s AND %s
-              AND dss.detected_at > NOW() - (%s || ' days')::interval
-              AND dss.confidence >= %s
-              AND d.active = TRUE
-              {trim_gate_sql}
-            ORDER BY dss.detected_at DESC
-            LIMIT %s
-        """, tuple([make_u, model_u, y_lo, y_hi, recent_days, min_conf] +
-                   trim_gate_args + [max_sales]))
-        sales_rows = []
-        for r in cur.fetchall():
-            d = dict(r)
-            dts = d.get('days_to_sell')
-            d['days_to_sell'] = int(dts) if dts is not None else None
-            for k in ('detected_at', 'first_seen_at'):
-                if d.get(k) and hasattr(d[k], 'isoformat'):
-                    d[k] = d[k].isoformat()
-            sales_rows.append(d)
-
-        # ── C. Pitch-score aggregation per dealer ───────────────────────────
-        # Trim gate in the CTE uses 'di' alias for both inline subqueries.
-        # The alias `dealer_inventory` in the actives CTE doesn't have 'di'
-        # prefix — need to substitute. For simplicity, only apply gate when
-        # the clause is non-empty.
-        actives_trim_gate = trim_gate_sql.replace('di.trim', 'trim')
-        cur.execute(f"""
-            WITH sales AS (
-              SELECT dss.dealer_id,
-                     COUNT(*) AS sold_count,
-                     AVG(EXTRACT(EPOCH FROM (dss.detected_at - di.first_seen_at)) / 86400.0)
-                       AS avg_days_to_sell,
-                     MAX(dss.detected_at) AS last_sold_at
-              FROM dealer_sold_signals dss
-              JOIN dealer_inventory di ON dss.inventory_id = di.id
-              WHERE UPPER(di.make) = %s
-                AND UPPER(di.model) = %s
-                AND di.year BETWEEN %s AND %s
-                AND dss.detected_at > NOW() - (%s || ' days')::interval
-                AND dss.confidence >= %s
-                {trim_gate_sql}
-              GROUP BY dss.dealer_id
-            ),
-            actives AS (
-              SELECT dealer_id, COUNT(*) AS active_count
-              FROM dealer_inventory
-              WHERE UPPER(make) = %s
-                AND UPPER(model) = %s
-                AND year BETWEEN %s AND %s
-                AND status = 'active'
-                {actives_trim_gate}
-              GROUP BY dealer_id
-            )
-            SELECT d.id AS dealer_id, d.name AS dealer_name, d.city, d.state,
-                   COALESCE(s.sold_count, 0)::int  AS sold_count,
-                   ROUND(COALESCE(s.avg_days_to_sell, 0)::numeric)::int
-                     AS avg_days_to_sell,
-                   COALESCE(a.active_count, 0)::int AS active_count,
-                   s.last_sold_at
-            FROM dealers d
-            LEFT JOIN sales   s ON s.dealer_id = d.id
-            LEFT JOIN actives a ON a.dealer_id = d.id
-            WHERE d.active = TRUE
-              AND (s.sold_count IS NOT NULL OR a.active_count IS NOT NULL)
-        """, tuple([make_u, model_u, y_lo, y_hi, recent_days, min_conf] +
-                   trim_gate_args +
-                   [make_u, model_u, y_lo, y_hi] +
-                   trim_gate_args))
-        pattern_rows = []
-        for r in cur.fetchall():
-            d = dict(r)
-            if d.get('last_sold_at') and hasattr(d['last_sold_at'], 'isoformat'):
-                d['last_sold_at'] = d['last_sold_at'].isoformat()
-            pattern_rows.append(d)
-
-        # ── Pitch score + reason (Python side, easier to tune) ──────────────
-        scored = []
-        for p in pattern_rows:
-            sc = p['sold_count']
-            avg = p['avg_days_to_sell']
-            ac = p['active_count']
-            fast_bonus_pts = max(0.0, min(fast_bonus, 30.0 - avg)) if (sc > 0 and avg > 0) else 0.0
-            score = sc * sold_mult + fast_bonus_pts + ac * active_mult
-            # Reason one-liner for UI
-            bits = []
-            if sc > 0 and avg > 0:
-                bits.append(f"{sc} sold in last {recent_days}d, avg {avg}d to sell")
-            elif sc > 0:
-                bits.append(f"{sc} sold in last {recent_days}d")
-            if ac > 0:
-                bits.append(f"{ac} active now")
-            if sc == 0 and ac == 0:
-                bits.append("no recent history")
-            reason = " · ".join(bits)
-            p2 = dict(p)
-            p2['pitch_score'] = round(score, 1)
-            p2['reason'] = reason
-            scored.append(p2)
-        scored.sort(key=lambda x: (-x['pitch_score'], -x['sold_count'], x['avg_days_to_sell'] or 999))
-        top_pitch = [s for s in scored if s['pitch_score'] > 0][:max_pitch]
-
-        return {
-            'active':       active_rows,
-            'recent_sales': sales_rows,
-            'patterns':     pattern_rows,
-            'top_pitch':    top_pitch,
-            'config_used': {
-                'year_tolerance': year_tol,
-                'recent_days': recent_days,
-                'min_sold_confidence': min_conf,
-                'pitch_weights': weights,
-                'match_strategy': match_strategy,
-                'trim_confidence': trim_confidence,
-            },
-        }
-    except Exception as e:
-        print(f'find_dealer_matches error: {e}', flush=True)
-        return empty_result
-
-
-# ── Prompt builder (feeds LLM) ───────────────────────────────────────────────
+# ── Prompt formatter (preserved from v1 — callers in app.py import this) ──
 
 def format_for_prompt(matches, max_sample_lines=8):
     """Render dealer matches as a plain-text block for inclusion in the
@@ -323,14 +336,15 @@ def format_for_prompt(matches, max_sample_lines=8):
         return ''
     active = matches.get('active') or []
     sales  = matches.get('recent_sales') or []
-    patterns = matches.get('patterns') or []
-    pitch = matches.get('top_pitch') or []
-    cfg = matches.get('config_used') or {}
+    pitch  = matches.get('top_pitch') or []
+    cfg    = matches.get('config_used') or {}
+    tier   = matches.get('tier_used') or 'unknown'
 
     if not active and not sales and not pitch:
         return ''
 
-    lines = ['═══ DEALER NETWORK INTEL (live data from scanned partner dealers) ═══']
+    header = '═══ DEALER NETWORK INTEL (live data from scanned partner dealers) ═══'
+    lines = [header, f'  match tier: {tier}']
 
     if active:
         lines.append('\nCURRENTLY LISTED AT PARTNER DEALERS:')
@@ -347,20 +361,19 @@ def format_for_prompt(matches, max_sample_lines=8):
                                              a.get('model'), a.get('trim') or '']).strip()
             lines.append(f'  • {a.get("dealer_name")} ({loc}): {ymm} · {price_str} · {dol_str}{drop}')
 
-    if patterns:
-        # Aggregate lines for readability (one per dealer)
-        sold_present = [p for p in patterns if p.get('sold_count', 0) > 0]
-        if sold_present:
-            lines.append(f'\nRECENT SALES (last {cfg.get("recent_days", 90)} days):')
-            for p in sold_present[:max_sample_lines]:
-                sold = p['sold_count']
-                avg = p['avg_days_to_sell']
-                lines.append(f'  • {p["dealer_name"]}: {sold} sold · avg {avg} days on lot')
+    if sales:
+        lines.append(f'\nRECENT SALES (last {cfg.get("recent_days", 90)} days):')
+        for s in sales[:max_sample_lines]:
+            dts = s.get('days_to_sell')
+            dts_str = f'sold in {dts}d' if dts is not None else 'sold'
+            price = s.get('price')
+            price_str = f'${price:,}' if price else 'no price'
+            lines.append(f'  • {s.get("dealer_name")}: {price_str} · {dts_str}')
 
     if pitch:
         lines.append('\nPITCH CANDIDATES (ranked by fit × turnover × stock):')
         for i, tp in enumerate(pitch, 1):
-            lines.append(f'  {i}. {tp["dealer_name"]} — {tp["reason"]}')
+            lines.append(f'  {i}. {tp.get("dealer_name", "?")} — {tp.get("reason", "")}')
 
     lines.append(
         '\nUse this to inform your percentage adjustment:\n'
@@ -368,5 +381,26 @@ def format_for_prompt(matches, max_sample_lines=8):
         '  - Slow turnover / heavy stock of this model → more caution → larger downward adjustment\n'
         '  - Active listings reveal retail ceiling; our wholesale bid must leave room for partner markup'
     )
-
     return '\n'.join(lines)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Quick self-test (no DB connection)
+# ════════════════════════════════════════════════════════════════════════════
+if __name__ == '__main__':
+    cases = [
+        ('Carrera S Coupe',     'carrera s'),
+        ('Carrera S',           'carrera s'),
+        ('Carrera 4 Convertible','carrera 4'),
+        ('Cayenne',             ''),                # base
+        ('Base',                ''),
+        ('GT 4d Sport Utility', 'gt'),
+        ('S 63 E AMG Sedan',    's 63 e amg'),
+        ('Premium Plus xDrive', 'premium plus'),
+        (None,                  ''),
+    ]
+    print(f"{'INPUT':<28} {'EXPECTED':<18} {'GOT':<18} OK")
+    for inp, expected in cases:
+        got = _norm_trim(inp)
+        ok = 'PASS' if got == expected else 'FAIL'
+        print(f"{repr(inp):<28} {repr(expected):<18} {repr(got):<18} {ok}")

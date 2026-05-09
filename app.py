@@ -1539,6 +1539,45 @@ def bid_detail(bid_id):
     except Exception as _aelog_err:
         print(f'ai_assessment_log read error: {_aelog_err}', flush=True)
 
+    # ── MSRP enrichment for dealer_intel + buyer_intel VINs ───────────────
+    # Mirrors the rBook closest_3 pattern: collect VINs from cached
+    # dealer/buyer matches, enqueue them in comp_msrps (VM 121 scrapes
+    # iPacket), then attach any cached msrp_lookup back to each row so the
+    # template renders "MSRP $X". Idempotent — repeat views don't re-queue
+    # already-cached VINs.
+    try:
+        _msrp_vins = []
+        if ai_log and isinstance(ai_log.get('dealer_intel'), dict):
+            for r in (ai_log['dealer_intel'].get('active') or []):
+                if r.get('vin'):
+                    _msrp_vins.append(r['vin'])
+            for r in (ai_log['dealer_intel'].get('recent_sales') or []):
+                if r.get('vin'):
+                    _msrp_vins.append(r['vin'])
+        if ai_log and isinstance(ai_log.get('buyer_intel'), dict):
+            for r in (ai_log['buyer_intel'].get('deals') or []):
+                # LSL field is vin_no
+                vn = r.get('vin_no') or r.get('vin')
+                if vn:
+                    _msrp_vins.append(vn)
+        _msrp_vins = list({v.upper() for v in _msrp_vins
+                           if isinstance(v, str) and len(v) == 17})
+        if _msrp_vins:
+            _enqueue_msrp_vins(bid_id, _msrp_vins)
+            try: _start_comp_msrp_processor()
+            except Exception: pass
+            _msrp_cache = _load_comp_msrps(_msrp_vins)
+            if ai_log and isinstance(ai_log.get('dealer_intel'), dict):
+                _attach_msrp_to_rows(ai_log['dealer_intel'].get('active') or [],
+                                     'vin', _msrp_cache)
+                _attach_msrp_to_rows(ai_log['dealer_intel'].get('recent_sales') or [],
+                                     'vin', _msrp_cache)
+            if ai_log and isinstance(ai_log.get('buyer_intel'), dict):
+                _attach_msrp_to_rows(ai_log['buyer_intel'].get('deals') or [],
+                                     'vin_no', _msrp_cache)
+    except Exception as _msrp_err:
+        print(f'[bid view] dealer/buyer MSRP enrich err: {_msrp_err}', flush=True)
+
     # Partner-dealer info — show channel-selector UI on Send Bid for any bid
     # tied to a partner dealer. Three resolution paths, in priority order:
     #   1. partner_dealer_id  — explicit (set by Dealer DB Search push)
@@ -2919,6 +2958,44 @@ def _run_assessment(bid_id):
     cur.execute("SELECT url FROM bid_photos WHERE bid_id = %s ORDER BY id LIMIT 8", (bid_id,))
     photos = cur.fetchall()
 
+    # iPacket canon_trim extraction now fires at /api/ipacket/submit time
+    # (see wire_canon_at_ipacket.py). The pre-step here is intentionally
+    # left as a fallback for bids whose canon_trim is still NULL when
+    # assessment runs — e.g. ones where the iPacket worker landed before
+    # this code shipped. Cheap when canon_trim already populated.
+    try:
+        from ipacket_trim import extract_and_persist as _ipt_extract
+        _ipt_cur = db.cursor()
+        _ipt_cur.execute("""
+            SELECT b.canon_trim, b.make, b.model,
+                   ip.total_msrp, ip.screenshot, ip.raw_json
+            FROM bids b
+            LEFT JOIN ipacket_lookups ip ON ip.bid_id = b.id
+            WHERE b.id = %s
+        """, (bid_id,))
+        _ipt_pre = _ipt_cur.fetchone()
+        if _ipt_pre and not _ipt_pre.get('canon_trim') and _ipt_pre.get('screenshot'):
+            _ipt_trim = _ipt_extract(
+                bid_id,
+                _ipt_pre.get('make'),
+                _ipt_pre.get('model'),
+                {
+                    'total_msrp': _ipt_pre.get('total_msrp'),
+                    'screenshot': _ipt_pre.get('screenshot'),
+                    'raw_json':   _ipt_pre.get('raw_json') or {},
+                },
+                db,
+                force_ocr=True,
+            )
+            if _ipt_trim:
+                bid = dict(bid)
+                bid['canon_trim'] = _ipt_trim
+                print(f'[ASSESS] Bid {bid_id} canon_trim fallback-set: '
+                      f'{_ipt_trim!r}', flush=True)
+    except Exception as _ipt_err:
+        print(f'[ASSESS] iPacket trim fallback err on bid {bid_id}: '
+              f'{_ipt_err}', flush=True)
+
     # ── vAuto book values ─────────────────────────────────────────────────────
     cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid_id,))
     vauto = cur.fetchone()
@@ -3016,8 +3093,9 @@ def _run_assessment(bid_id):
             _dealer_intel = find_dealer_matches(
                 _dm_db,
                 bid.get('year'), bid.get('make'), bid.get('model'),
-                trim=bid.get('trim'),
-                trim_confidence=bid.get('trim_confidence') or 'low',
+                trim=bid.get("trim"),
+                trim_confidence=bid.get("trim_confidence") or "low",
+                bid_id=bid_id,
                 config=_ai_cfg,
             )
             _dm_db.close()
@@ -3039,7 +3117,8 @@ def _run_assessment(bid_id):
             _buyer_intel = find_lsl_buyers(
                 bid.get('year'), bid.get('make'), bid.get('model'),
                 mileage=bid.get('mileage'),
-                trim=bid.get('trim'),
+                trim=bid.get("trim"),
+                canon_trim=bid.get("canon_trim"),
                 config=_ai_cfg,
             )
             _bn_n = (_buyer_intel.get('patterns') or {}).get('total_deals', 0)
@@ -8977,6 +9056,41 @@ def api_ipacket_submit():
         data.get('unavailable_reason'),
     ))
     db.commit()
+
+    # ── Extract canon_trim NOW (not later at assessment time) ──────────────
+    # The iPacket sticker we just saved has authoritative trim/edition info
+    # ("SRT Hellcat Jailbreak" etc). Pull it immediately so the bid-detail
+    # page can render exact-trim dealer matches without waiting for the full
+    # Gemini assessment to fire. Idempotent + cheap; OCR cached in raw_json.
+    try:
+        from ipacket_trim import extract_and_persist as _ipt_extract
+        _ipt_cur = db.cursor()
+        _ipt_cur.execute("""
+            SELECT make, model, canon_trim FROM bids WHERE id = %s
+        """, (bid_id,))
+        _ipt_bid = _ipt_cur.fetchone()
+        if (_ipt_bid and not _ipt_bid.get('canon_trim')
+            and data.get('screenshot')):
+            _ipt_trim = _ipt_extract(
+                bid_id,
+                _ipt_bid.get('make'),
+                _ipt_bid.get('model'),
+                {
+                    'total_msrp': data.get('total_msrp'),
+                    'screenshot': data.get('screenshot'),
+                    # raw_json was just persisted above; use the same dict
+                    'raw_json':   data.get('raw') or {},
+                },
+                db,
+                force_ocr=True,
+            )
+            if _ipt_trim:
+                print(f'[ipacket-submit] Bid {bid_id} canon_trim extracted: '
+                      f'{_ipt_trim!r}', flush=True)
+    except Exception as _ipt_err:
+        print(f'[ipacket-submit] canon_trim extract err bid={bid_id}: '
+              f'{_ipt_err}', flush=True)
+
     db.close()
     # AI assessment still fires in background (saved to ai_assessment column
     # for internal reference) — but the SMS-back no longer waits for it.
@@ -9589,6 +9703,52 @@ def _start_comp_msrp_processor():
     t.start()
     print('[comp_msrp processor] DAEMON STARTED (env COMP_MSRP_DAEMON=1)',
           flush=True)
+
+
+def _enqueue_msrp_vins(bid_id, vins):
+    """Generic enqueue: insert any list of VINs into comp_msrps with
+    status='pending' (idempotent via ON CONFLICT). Used by the bid view to
+    queue dealer_intel + buyer_intel VINs alongside rBook closest_3 — VM
+    121's worker scrapes iPacket per-VIN and writes msrp/base_price back.
+
+    Returns count of NEW VINs queued (already-cached ones don't change state).
+    """
+    if not vins:
+        return 0
+    clean = list({v.upper() for v in vins
+                  if v and isinstance(v, str) and len(v) == 17})
+    if not clean:
+        return 0
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.executemany("""
+            INSERT INTO comp_msrps (vin, trigger_bid_id, status)
+            VALUES (%s, %s, 'pending')
+            ON CONFLICT (vin) DO NOTHING
+        """, [(v, bid_id) for v in clean])
+        db.commit()
+        return cur.rowcount
+    except Exception as e:
+        print(f'[comp_msrp enqueue VINs] bid={bid_id} err: {e}', flush=True)
+        return 0
+    finally:
+        db.close()
+
+
+def _attach_msrp_to_rows(rows, vin_field, msrps):
+    """Mutate rows in place: attach msrp_lookup dict to each row whose
+    VIN appears in the msrps cache. Mirrors the rbook closest_3 pattern."""
+    if not rows or not msrps:
+        return
+    for r in rows:
+        v = (r.get(vin_field) or '').upper()
+        if v and v in msrps:
+            r['msrp_lookup'] = {
+                'msrp':       msrps[v].get('msrp'),
+                'base_price': msrps[v].get('base_price'),
+                'status':     msrps[v].get('status'),
+            }
 
 
 def _enqueue_comp_msrps_for_bid(bid_id, market_intel_obj):

@@ -579,6 +579,15 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
                 {{ a.days_on_lot }}d on lot
               </span>
             </div>
+            {% if a.msrp_lookup %}
+              {% if a.msrp_lookup.msrp %}
+              <div style="margin-top:4px;font-size:11px;color:#cbd5e1;font-family:monospace">
+                <span style="color:#64748b">Original MSRP:</span> ${{ '{:,}'.format(a.msrp_lookup.msrp|int) }}{% if a.msrp_lookup.base_price %} · base ${{ '{:,}'.format(a.msrp_lookup.base_price|int) }}{% endif %}
+              </div>
+              {% elif a.msrp_lookup.status in ('pending','in_progress') %}
+              <div style="margin-top:4px;font-size:10px;color:#64748b;font-style:italic">MSRP loading…</div>
+              {% endif %}
+            {% endif %}
             {% if a.price_drop_amount and a.price_drop_days_ago is not none %}
             <div style="margin-top:4px;font-size:11px;color:#fbbf24;font-style:italic">⚠ Price dropped ${{ '{:,}'.format(a.price_drop_amount) }} · {{ a.price_drop_days_ago }}d ago</div>
             {% endif %}
@@ -699,7 +708,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
               <div style="display:grid;grid-template-columns:90px 80px 1fr 90px 80px;gap:10px;font-size:10px;color:#cbd5e1;padding:2px 0;align-items:center">
                 <span style="color:#94a3b8">{{ (d.sold_at or '')[:10] }}</span>
                 <span style="color:#cbd5e1">{{ d.stock_no or '?' }}</span>
-                <span style="color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ d.vehicle_info or '' }}">{{ d.vehicle_info or '' }}</span>
+                <span style="color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ d.vehicle_info or '' }}{% if d.msrp_lookup and d.msrp_lookup.msrp %} · MSRP ${{ '{:,}'.format(d.msrp_lookup.msrp|int) }}{% endif %}">{{ d.vehicle_info or '' }}{% if d.msrp_lookup and d.msrp_lookup.msrp %} <span style="color:#64748b;font-size:10px">· MSRP ${{ '{:,}'.format(d.msrp_lookup.msrp|int) }}</span>{% endif %}</span>
                 <span style="color:#fbbf24;text-align:right">${{ '{:,}'.format((d.sale_price or 0)|int) }}</span>
                 <span style="color:#a78bfa;text-align:right">${{ '{:,}'.format((d.front_value or 0)|int) }}</span>
               </div>

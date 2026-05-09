@@ -23,8 +23,62 @@ Tables used:
 
 from __future__ import annotations
 import os
+import re
 import sqlite3
 from typing import Any
+
+
+# Body-class tokens stripped from the END of vehicle_info before doing
+# strict canon-trim end-match. Mirrors dealer_match v2's body normalizer
+# so both matchers behave consistently. Order: longest first (greedy match).
+_LSL_BODY_SUFFIXES = [
+    'sport utility vehicle', 'pickup truck truck', 'pickup truck',
+    'sport utility', 'crew cab', 'quad cab', 'extended cab', 'regular cab',
+    'cabriolet', 'convertible', 'roadster', 'hatchback', 'targa',
+    'spider', 'spyder', 'coupe', 'sedan', 'wagon', 'minivan', 'van',
+    '4d', '2d', '4 dr', '2 dr', '4dr', '2dr', '4 door', '2 door',
+    '4matic', 'xdrive', 'quattro', 'awd', 'rwd', 'fwd', '4wd',
+]
+
+
+def _strip_body_suffix(s: str) -> str:
+    if not s:
+        return ''
+    out = s.lower().strip()
+    changed = True
+    # Loop until no more body-suffix can be stripped from the end
+    while changed:
+        changed = False
+        for suf in _LSL_BODY_SUFFIXES:
+            if out.endswith(' ' + suf):
+                out = out[: -(len(suf) + 1)].rstrip()
+                changed = True
+                break
+            if out == suf:
+                out = ''
+                changed = True
+                break
+    return out
+
+
+def _vehicle_info_strict_match(vehicle_info: str, canon_trim: str) -> bool:
+    """After stripping body-class noise from the end of vehicle_info, the
+    string MUST end with the canon_trim. This is the strict 'trim variants
+    are different cars' check.
+
+    Examples:
+      vehicle_info='2023 Dodge Challenger SRT Hellcat Jailbreak'
+      canon_trim='Srt Hellcat Jailbreak'                     → True
+      vehicle_info='2023 Dodge Challenger SRT Hellcat Redeye Widebody'
+      canon_trim='Srt Hellcat Jailbreak'                     → False
+      vehicle_info='2023 Dodge Challenger SRT Hellcat Jailbreak Coupe'
+      canon_trim='Srt Hellcat Jailbreak'                     → True (body stripped)
+    """
+    if not vehicle_info or not canon_trim:
+        return False
+    vi = _strip_body_suffix(vehicle_info)
+    ct = canon_trim.lower().strip()
+    return vi.endswith(ct)
 
 
 LSL_DB_PATH = os.environ.get('LSL_DB_PATH', '/opt/livesaleslog/crm.db')
@@ -142,7 +196,7 @@ def _open_lsl_ro():
     return conn
 
 
-def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None) -> dict:
+def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None, canon_trim=None) -> dict:
     """Return raw EW deal rows + per-buyer candidate ranking for the bid's
     year/make/model band.
 
@@ -198,12 +252,28 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None)
         body_clause = '1=1'
         body_args = []
 
-    # Trim filter — F-150 XLT shouldn't match F-150 Raptor/Tremor/Limited.
-    # Pick the most distinguishing trim word and require it in vehicle_info.
-    trim_tok = _trim_filter_token(trim)
-    if trim_tok:
-        trim_clause = 'UPPER(vehicle_info) LIKE UPPER(?)'
-        trim_args = [f'%{trim_tok}%']
+    # Trim filter — prefer canon_trim (e.g. 'Srt Hellcat Jailbreak') over
+    # single-token. canon_trim was extracted from iPacket sticker OCR so it's
+    # the most authoritative trim string we have.
+    #
+    # Strategy: anchor the trim AFTER the model name in vehicle_info using a
+    # leading space (' Srt Hellcat Jailbreak' so it doesn't accidentally
+    # match in the middle of another word). Python post-filter (later in
+    # this function) further restricts to strict end-match after body strip.
+    if canon_trim and canon_trim.strip():
+        ct = canon_trim.strip()
+        trim_clause = 'LOWER(vehicle_info) LIKE LOWER(?)'
+        trim_args = [f'% {ct}%']
+    elif trim:
+        # Legacy fallback when canon_trim isn't populated (older bids,
+        # non-iPacket VINs, etc.). Same single-token logic as before.
+        trim_tok = _trim_filter_token(trim)
+        if trim_tok:
+            trim_clause = 'UPPER(vehicle_info) LIKE UPPER(?)'
+            trim_args = [f'%{trim_tok}%']
+        else:
+            trim_clause = '1=1'
+            trim_args = []
     else:
         trim_clause = '1=1'
         trim_args = []
@@ -239,6 +309,16 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None)
             make_pat, model_pat, *year_prefix_args, *body_args, *trim_args, f'-{recent_days}', max_deals,
         ))
         deals = [dict(r) for r in cur.fetchall()]
+
+        # Strict trim post-filter: when canon_trim is provided, require the
+        # body-stripped vehicle_info to END with canon_trim. This excludes
+        # related but different trims that the SQL substring let through
+        # (e.g. canon='Srt Hellcat Jailbreak' won't match 'Srt Hellcat Redeye
+        # Widebody' even though both contain 'Srt Hellcat').
+        if canon_trim and canon_trim.strip():
+            deals = [d for d in deals
+                     if _vehicle_info_strict_match(d.get('vehicle_info', ''),
+                                                   canon_trim)]
 
         sql_patterns = f"""
         SELECT
