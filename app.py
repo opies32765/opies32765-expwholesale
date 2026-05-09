@@ -11121,6 +11121,17 @@ def driver_full_page(token):
             rb['median_dol'] = rb.get('median_days_on_lot')
             rb['implied_gross'] = cached.get('implied_buyer_gross')
 
+    # Always compute closest_3 from rbook_competitive_set.rows if rb is set
+    # but lacks closest_3 (market_intel_cached.rbook doesn't carry closest_3).
+    if rb and not rb.get('closest_3') and bid.get('mileage') and vauto and vauto.get('rbook_competitive_set'):
+        rcs = _j(vauto['rbook_competitive_set']) or {}
+        rows = rcs.get('rows') or []
+        if rows:
+            bid_miles = int(bid['mileage'])
+            by_dist = sorted(rows,
+                             key=lambda r: abs(int(r.get('mileage') or 0) - bid_miles))
+            rb['closest_3'] = by_dist[:3]
+
     if not rb and vauto and vauto.get('rbook_competitive_set'):
         rcs = _j(vauto['rbook_competitive_set']) or {}
         rows = rcs.get('rows') or []
