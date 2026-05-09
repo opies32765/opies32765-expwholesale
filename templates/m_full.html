@@ -200,21 +200,14 @@
       </div>
     </div>
     {% endif %}
-  </div>
-</details>
-{% endif %}
 
-{# Top-3 Closest Comps with dealer links #}
-{% if rbook and rbook.closest_3 %}
-<details class="card comps">
-  <summary>
-    <span class="title">Top-3 Closest Miles</span>
-    <span class="summary-text">{{ rbook.closest_3|length }} dealer listing{% if rbook.closest_3|length != 1 %}s{% endif %}</span>
-  </summary>
-  <div class="body">
+    {% if rbook.closest_3 %}
+    <div style="margin-top:14px;font-size:11px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.5px">
+      ★ Top-3 Closest Miles · subject {{ '{:,}'.format(bid.mileage|int) if bid.mileage else '?' }} mi
+    </div>
     {% for c in rbook.closest_3 %}
     {% set is_top = loop.index == 1 %}
-    <div class="comp{% if is_top %} top{% endif %}">
+    <div class="comp{% if is_top %} top{% endif %}" style="margin-top:6px">
       <div class="top-line">
         <span class="miles-l">#{{ loop.index }}{% if is_top %} ★{% endif %} {{ '{:,}'.format(c.mileage|int) }} mi{% if bid.mileage %}{% set delta = (c.mileage|int) - (bid.mileage|int) %}{% set sign = '+' if delta >= 0 else '' %} <span style="font-size:11px;font-weight:400;color:#64748b">({{ sign }}{{ '{:,}'.format(delta|int) }})</span>{% endif %}</span>
         <span class="price-l">${{ '{:,}'.format(c.price|int) if c.price else '—' }}</span>
@@ -231,6 +224,7 @@
       </div>
     </div>
     {% endfor %}
+    {% endif %}
   </div>
 </details>
 {% endif %}
