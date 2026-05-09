@@ -310,15 +310,26 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None,
         ))
         deals = [dict(r) for r in cur.fetchall()]
 
-        # Strict trim post-filter: when canon_trim is provided, require the
-        # body-stripped vehicle_info to END with canon_trim. This excludes
-        # related but different trims that the SQL substring let through
-        # (e.g. canon='Srt Hellcat Jailbreak' won't match 'Srt Hellcat Redeye
-        # Widebody' even though both contain 'Srt Hellcat').
-        if canon_trim and canon_trim.strip():
+        # Strict trim post-filter: require body-stripped vehicle_info to
+        # END with the trim. Excludes related-but-different trims that SQL
+        # substring let through (e.g. bid trim='Turbo' won't match
+        # 'Turbo GT' even though both contain 'Turbo').
+        # Prefer canon_trim (iPacket sticker OCR — most authoritative) but
+        # fall back to bid.trim when canon_trim is empty (which is common —
+        # canon_trim is only populated for bids whose iPacket sticker was
+        # successfully OCRed). 2026-05-09: extended fallback to fix bid 1100
+        # (bid.trim='Turbo' was matching LSL deals with trim='Turbo GT').
+        strict_trim = (canon_trim or trim or '').strip()
+        if strict_trim:
             deals = [d for d in deals
                      if _vehicle_info_strict_match(d.get('vehicle_info', ''),
-                                                   canon_trim)]
+                                                   strict_trim)]
+
+        # 2026-05-09: recompute patterns aggregates from the strict-filtered
+        # deals list, NOT the unfiltered SQL set. Otherwise patterns shows
+        # avg over wrong-trim deals (e.g. Turbo bid getting Turbo GT averaged
+        # in). Only fires when strict filter actually narrowed the set.
+        _strict_count = len(deals)
 
         sql_patterns = f"""
         SELECT
@@ -342,6 +353,33 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None,
         cur.execute(sql_patterns,
                     (make_pat, model_pat, *year_prefix_args, *body_args, *trim_args, f'-{recent_days}'))
         patterns = dict(cur.fetchone() or {})
+
+        # Recompute aggregates from strict-filtered deals (consistent with
+        # deals[] shown to Gemini + bid card)
+        if deals:
+            patterns['total_deals'] = len(deals)
+            _buyers = {d.get('customer_name') for d in deals if d.get('customer_name')}
+            patterns['unique_buyers'] = len(_buyers)
+            _sp = [float(d.get('sale_price')) for d in deals if d.get('sale_price')]
+            patterns['avg_sale_price'] = round(sum(_sp) / len(_sp)) if _sp else None
+            _fv = [float(d.get('front_value')) for d in deals
+                   if d.get('front_value') is not None]
+            patterns['avg_front_value'] = round(sum(_fv) / len(_fv)) if _fv else None
+            _gross = [float(d.get('sale_price', 0)) - float(d.get('purchase_cost', 0))
+                      for d in deals
+                      if d.get('sale_price') and d.get('purchase_cost')]
+            patterns['avg_sale_minus_cost'] = round(sum(_gross) / len(_gross)) if _gross else None
+            _sold_dates = sorted(d.get('sold_at') for d in deals if d.get('sold_at'))
+            if _sold_dates:
+                patterns['first_sold_at'] = _sold_dates[0]
+                patterns['last_sold_at']  = _sold_dates[-1]
+        else:
+            # Strict filter eliminated everything — zero out patterns
+            patterns['total_deals'] = 0
+            patterns['unique_buyers'] = 0
+            patterns['avg_sale_price'] = None
+            patterns['avg_front_value'] = None
+            patterns['avg_sale_minus_cost'] = None
 
         # 3/6/12-month rolling windows — count + avg sale + avg gross at each.
         # Gemini and the bid.html ledger card both render these so the user
