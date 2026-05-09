@@ -11190,6 +11190,22 @@ def _notify_driver_phase2(bid_id):
             db.close()
             return False  # already sent
 
+        # Phase 2 phone whitelist gate (TEMPORARY — while Phase 2 enrichment
+        # is still maturing, route Phase 2 SMS only to the operator's phone).
+        # Set PHASE2_PHONE_GATE in systemd env to enable. Empty = no gating.
+        # Compare digit-by-digit so +14074309675 == 4074309675 == 14074309675.
+        gate = (os.environ.get('PHASE2_PHONE_GATE') or '').strip()
+        if gate:
+            def _digits(p):
+                d = ''.join(c for c in (p or '') if c.isdigit())
+                if len(d) == 11 and d[0] == '1':
+                    d = d[1:]
+                return d
+            if _digits(bid['driver_phone']) != _digits(gate):
+                print(f'[phase2-notify] gated — bid={bid_id} driver={bid["driver_phone"]} not in PHASE2_PHONE_GATE', flush=True)
+                db.close()
+                return False
+
         ymm_parts = [str(bid['year']) if bid['year'] else '',
                      bid['make'] or '', bid['model'] or '']
         ymm = ' '.join(p for p in ymm_parts if p).strip() or 'Vehicle'
