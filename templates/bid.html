@@ -824,7 +824,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
               </span>
             </div>
             <div style="margin-top:3px;font-size:11px;color:#64748b;font-family:monospace;display:flex;justify-content:space-between;align-items:baseline;gap:12px">
-              <span>{{ c.dealer or 'unknown dealer' }}{% if c.dealer_city %} &middot; {{ c.dealer_city }}{% if c.dealer_state %}, {{ c.dealer_state }}{% endif %}{% endif %}</span>
+              {% if c.detail_uri %}<a href="{{ c.detail_uri }}" target="_blank" rel="noopener noreferrer" style="color:#7dd3fc;text-decoration:none;border-bottom:1px dashed rgba(125,211,252,.4);transition:color .15s" onmouseover="this.style.color='#bae6fd';this.style.borderBottomColor='rgba(186,230,253,.7)'" onmouseout="this.style.color='#7dd3fc';this.style.borderBottomColor='rgba(125,211,252,.4)'" title="Open dealer listing for VIN {{ c.vin }}">{{ c.dealer or 'unknown dealer' }}{% if c.dealer_city %} &middot; {{ c.dealer_city }}{% if c.dealer_state %}, {{ c.dealer_state }}{% endif %}{% endif %} <span style="font-size:9px;opacity:.7">&#x2197;</span></a>{% else %}<span>{{ c.dealer or 'unknown dealer' }}{% if c.dealer_city %} &middot; {{ c.dealer_city }}{% if c.dealer_state %}, {{ c.dealer_state }}{% endif %}{% endif %}</span>{% endif %}
               <span style="white-space:nowrap">
                 {% if c.msrp_lookup %}
                   {% if c.msrp_lookup.msrp %}
