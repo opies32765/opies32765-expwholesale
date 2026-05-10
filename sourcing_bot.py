@@ -286,9 +286,13 @@ def try_handle_sourcing(from_phone, body, db, cur, intake_log_id=None,
         print(f'[sourcing] {from_phone} dropped/stopped active={active["id"] if active else None}', flush=True)
         return True
 
-    # 1. Mid-conversation continuation
+    # 1. Mid-conversation continuation — but yield to bid intake.
+    # If the gated phone is mid-sourcing AND fires off a VIN/photo, that's
+    # clearly a new bid, not a sourcing reply. Let bid flow handle it.
     if active:
-        # Convert RealDictRow to plain dict so merge_spec can mutate.
+        if _looks_like_bid_intake(body, num_media):
+            print(f"[sourcing] yielding to bid intake (VIN/photo) despite active sourcing id={active['id']}", flush=True)
+            return False
         row = dict(active)
         _run_gemini_and_persist(db, cur, active['id'], row, body or '',
                                  num_media=num_media, send_sms=send_sms,
