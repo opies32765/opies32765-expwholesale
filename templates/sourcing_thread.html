@@ -1,0 +1,99 @@
+{% extends "base.html" if false else "_blank.html" if false else None %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sourcing #{{ req.id }} — EW</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; background:#0b1220; color:#e2e8f0; margin:0; padding:20px; max-width:780px; margin:0 auto }
+    a { color:#60a5fa; text-decoration:none }
+    a:hover { text-decoration:underline }
+    h1 { font-size:18px; margin:0 0 8px 0 }
+    .header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid #1e293b }
+    .badge { padding:3px 9px; border-radius:10px; font-size:10px; font-weight:700; text-transform:uppercase; color:#0b1220 }
+    .card { background:#0f172a; border:1px solid #1e293b; border-radius:6px; padding:12px 14px; margin-bottom:12px }
+    .card-title { font-size:10px; color:#67e8f9; font-weight:700; text-transform:uppercase; letter-spacing:.5px; margin-bottom:8px }
+    .row { display:flex; justify-content:space-between; padding:3px 0; font-size:13px }
+    .lbl { color:#64748b }
+    .val { color:#e2e8f0; font-weight:600 }
+    .turn { padding:8px 10px; border-radius:6px; margin-bottom:6px; font-size:13px; line-height:1.4 }
+    .turn.user { background:#1e293b; color:#cbd5e1 }
+    .turn.bot { background:#0a1f2c; color:#86efac; border:1px solid #134e4a }
+    .turn-meta { font-size:10px; color:#64748b; margin-bottom:3px }
+    .actions { display:flex; gap:8px; margin-top:12px }
+    .btn { background:#1e293b; color:#e2e8f0; border:0; padding:8px 14px; border-radius:5px; font-size:12px; font-weight:600; cursor:pointer; text-decoration:none }
+    .btn.danger { background:#7f1d1d; color:#fecaca }
+    .btn.primary { background:#16a34a; color:#dcfce7 }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>Sourcing Request #{{ req.id }}
+      {% set status_color = {
+         'matched':'#22c55e','presented':'#fb923c','searching':'#60a5fa',
+         'gathering':'#fbbf24','wishlist':'#22d3ee','archived':'#94a3b8'
+      }.get(req.status, '#94a3b8') %}
+      <span class="badge" style="background:{{ status_color }}">{{ req.status }}</span>
+    </h1>
+    <div style="color:#64748b;font-size:12px">
+      {% if req.customer_name %}<b style="color:#cbd5e1">{{ req.customer_name }}</b> · {% endif %}{{ req.phone }}
+      · created {{ req.created_at.strftime('%Y-%m-%d %H:%M') if req.created_at else '?' }}
+    </div>
+  </div>
+  <a href="/" class="btn">← Dashboard</a>
+</div>
+
+<div class="card">
+  <div class="card-title">Spec</div>
+  {% if req.year_min or req.year_max %}<div class="row"><span class="lbl">Year</span><span class="val">{{ req.year_min or '?' }}{% if req.year_max != req.year_min %}–{{ req.year_max or '?' }}{% endif %}</span></div>{% endif %}
+  {% if req.make %}<div class="row"><span class="lbl">Make</span><span class="val">{{ req.make }}</span></div>{% endif %}
+  {% if req.model %}<div class="row"><span class="lbl">Model</span><span class="val">{{ req.model }}</span></div>{% endif %}
+  {% if req.trim %}<div class="row"><span class="lbl">Trim</span><span class="val">{{ req.trim }}</span></div>{% endif %}
+  {% if req.ext_color %}<div class="row"><span class="lbl">Ext color</span><span class="val">{{ req.ext_color|join(', ') }}</span></div>{% endif %}
+  {% if req.int_color %}<div class="row"><span class="lbl">Int color</span><span class="val">{{ req.int_color|join(', ') }}</span></div>{% endif %}
+  {% if req.miles_max %}<div class="row"><span class="lbl">Miles cap</span><span class="val">≤ {{ '{:,}'.format(req.miles_max) }}</span></div>{% endif %}
+  {% if req.options %}<div class="row"><span class="lbl">Options</span><span class="val">{{ req.options|join(', ') }}</span></div>{% endif %}
+  {% if req.price_hint %}<div class="row"><span class="lbl">Price hint</span><span class="val" style="color:#fbbf24">${{ '{:,}'.format(req.price_hint) }} <span style="font-size:10px;color:#64748b">(sort only — never filtered)</span></span></div>{% endif %}
+</div>
+
+<div class="card">
+  <div class="card-title">Conversation ({{ (req.conversation or [])|length }} turns)</div>
+  {% for t in req.conversation or [] %}
+  <div class="turn {{ t.role }}">
+    <div class="turn-meta">{{ t.role }} · {{ t.ts[:19] if t.ts else '' }}</div>
+    {{ t.text }}
+  </div>
+  {% endfor %}
+  {% if not req.conversation %}<div style="color:#64748b;font-size:12px">no messages yet</div>{% endif %}
+</div>
+
+{% if req.status != 'archived' %}
+<div class="actions">
+  <button onclick="closeReq({{ req.id }}, 'closed_by_staff')" class="btn danger">Close (Archive)</button>
+  <button onclick="closeReq({{ req.id }}, 'matched_handed_off')" class="btn primary">Mark Handed Off</button>
+</div>
+{% else %}
+<div style="color:#64748b;font-size:12px;margin-top:12px">
+  Archived {{ req.archived_at.strftime('%Y-%m-%d %H:%M') if req.archived_at else '' }}
+  {% if req.archive_reason %} · reason: <b>{{ req.archive_reason }}</b>{% endif %}
+</div>
+{% endif %}
+
+<script>
+function closeReq(id, reason) {
+  if (!confirm('Close request #' + id + ' with reason "' + reason + '"?')) return;
+  fetch('/api/sourcing/' + id + '/close', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({reason: reason})
+  }).then(r => r.json()).then(j => {
+    if (j.ok) location.reload();
+    else alert('close failed: ' + (j.error || 'unknown'));
+  });
+}
+</script>
+</body>
+</html>

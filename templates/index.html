@@ -174,6 +174,84 @@ tr:last-child td{border-bottom:none}
   </div>
 </div>
 
+{# ─── Sourcing-bot active requests (sticky top banner) ───
+   One row per request. Stays visible until staff clicks Close. #}
+{% if sourcing_active %}
+<div id="sourcing-banner" style="position:sticky;top:0;z-index:50;background:#0b1220;border-bottom:2px solid #1e293b;padding:8px 20px 10px">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+    <span style="font-size:11px;font-weight:700;color:#67e8f9;letter-spacing:1px;text-transform:uppercase">★ Active Sourcing — {{ sourcing_active|length }} open</span>
+    <span style="font-size:10px;color:#64748b">click ✕ to close</span>
+  </div>
+  <div style="max-height:38vh;overflow-y:auto;display:flex;flex-direction:column;gap:4px;border:1px solid #1e293b;border-radius:6px;padding:4px;background:#0a0f1c">
+    {% for r in sourcing_active %}
+    {% set status_color = {
+       'matched':'#22c55e',
+       'presented':'#fb923c',
+       'searching':'#60a5fa',
+       'gathering':'#fbbf24',
+       'wishlist':'#22d3ee'
+    }.get(r.status, '#94a3b8') %}
+    <div id="sr-{{ r.id }}" style="display:grid;grid-template-columns:90px 200px 1fr 90px 120px;gap:10px;align-items:center;background:#0f172a;border-left:3px solid {{ status_color }};border-radius:4px;padding:6px 10px;font-size:12px">
+      <div>
+        <span style="background:{{ status_color }};color:#0b1220;padding:2px 7px;border-radius:9px;font-weight:700;font-size:9px;text-transform:uppercase">{{ r.status }}</span>
+      </div>
+      <div style="overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
+        <div style="color:#e2e8f0;font-weight:600">
+          {% if r.customer_name %}{{ r.customer_name }}{% else %}<span style="color:#64748b;font-style:italic">no name yet</span>{% endif %}
+        </div>
+        <div style="color:#64748b;font-size:10px">{{ r.phone }}</div>
+      </div>
+      <div style="overflow:hidden">
+        <div style="color:#cbd5e1;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+          {% if r.year_min or r.year_max %}{{ r.year_min or '?' }}{% if r.year_max != r.year_min %}–{{ r.year_max or '?' }}{% endif %} {% endif %}{% if r.make %}{{ r.make }} {% endif %}{% if r.model %}{{ r.model }}{% endif %}{% if r.trim %} {{ r.trim }}{% endif %}{% if r.ext_color %} · {{ r.ext_color|join('/') }}{% endif %}{% if r.miles_max %} · ≤{{ '{:,}'.format(r.miles_max) }}mi{% endif %}
+        </div>
+        <div style="color:#94a3b8;font-size:11px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="user: {{ r.last_user_text }}">
+          <span style="color:#64748b">user:</span> {{ r.last_user_text }}
+        </div>
+        <div style="color:#86efac;font-size:11px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="bot: {{ r.last_bot_text }}">
+          <span style="color:#64748b">bot:</span> {{ r.last_bot_text }}
+        </div>
+      </div>
+      <div style="color:#64748b;font-size:10px;text-align:right">
+        {{ time_ago(r.last_msg_at) }}
+      </div>
+      <div style="display:flex;gap:5px;justify-content:flex-end">
+        <a href="/sourcing/{{ r.id }}" style="background:#1e293b;color:#e2e8f0;text-decoration:none;padding:4px 10px;border-radius:4px;font-size:10px;font-weight:600">Thread</a>
+        <button onclick="closeSourcing({{ r.id }})" title="Close request" style="background:#7f1d1d;color:#fecaca;border:0;padding:4px 9px;border-radius:4px;font-size:11px;font-weight:700;cursor:pointer">✕</button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+<script>
+function closeSourcing(id) {
+  if (!confirm('Close sourcing request #' + id + '?')) return;
+  fetch('/api/sourcing/' + id + '/close', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({reason: 'closed_by_staff'})
+  }).then(r => r.json()).then(j => {
+    if (j.ok) {
+      const el = document.getElementById('sr-' + id);
+      if (el) el.remove();
+      const banner = document.getElementById('sourcing-banner');
+      if (banner && banner.querySelectorAll('[id^=sr-]').length === 0) {
+        banner.style.display = 'none';
+      }
+    } else alert('close failed: ' + (j.error || 'unknown'));
+  }).catch(e => alert('close error: ' + e));
+}
+setInterval(() => {
+  fetch('/api/sourcing/active').then(r => r.json()).then(j => {
+    if (j && typeof j.count === 'number') {
+      const cur = document.querySelectorAll('#sourcing-banner [id^=sr-]').length;
+      if (j.count !== cur) location.reload();
+    }
+  }).catch(() => {});
+}, 30000);
+</script>
+{% endif %}
+
 <div class="stats-bar" style="gap:32px">
   <div class="stat-item" style="cursor:pointer" onclick="window.location='/?status=today&rep={{ rep_filter }}'">
     <div class="stat-num white" id="stat-today" style="font-size:44px">{{ stats.today }}</div>

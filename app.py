@@ -551,31 +551,47 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-f
                 max_tokens=1024, temperature=0.4):
     """One-shot Gemini call. Returns text response or None on failure.
     Pass image_bytes for vision tasks. Defaults to Flash (cheap).
-    Use model='gemini-2.5-pro' for high-quality reasoning (assessments)."""
+    Use model='gemini-2.5-pro' for high-quality reasoning (assessments).
+
+    2026-05-09: Auto-retries up to 2 times on 429 RESOURCE_EXHAUSTED with
+    exponential backoff (1s, 2s). Per-minute Vertex quota recovers fast,
+    so this self-heals burst spikes from concurrent bid assessments.
+    """
+    import time as _time
     client = _gemini()
     if not client:
         return None
-    try:
-        from google.genai import types
-        if image_bytes:
-            contents = [
-                types.Part.from_bytes(data=image_bytes, mime_type=mime),
-                prompt,
-            ]
-        else:
-            contents = prompt
-        resp = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                max_output_tokens=max_tokens,
-                temperature=temperature,
-            ),
-        )
-        return resp.text.strip() if resp.text else None
-    except Exception as e:
-        print(f'Gemini call failed ({model}): {e}', flush=True)
-        return None
+    from google.genai import types
+    if image_bytes:
+        contents = [
+            types.Part.from_bytes(data=image_bytes, mime_type=mime),
+            prompt,
+        ]
+    else:
+        contents = prompt
+    cfg = types.GenerateContentConfig(
+        max_output_tokens=max_tokens,
+        temperature=temperature,
+    )
+
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = client.models.generate_content(
+                model=model, contents=contents, config=cfg,
+            )
+            return resp.text.strip() if resp.text else None
+        except Exception as e:
+            last_err = e
+            msg = str(e)
+            if '429' in msg or 'RESOURCE_EXHAUSTED' in msg or 'rate' in msg.lower():
+                if attempt < 2:
+                    _time.sleep(2 ** attempt)  # 1s, 2s
+                    continue
+            # Non-retryable or last attempt — fall through to log + None.
+            break
+    print(f'Gemini call failed ({model}) after retries: {last_err}', flush=True)
+    return None
 
 
 # ── VIN extraction ───────────────────────────────────────────────────────────
@@ -1375,12 +1391,50 @@ def dashboard():
         })
 
     db.close()
+    # Sourcing-bot active requests for the sticky top banner. Stays in
+    # priority order (matched first → wishlist last). Pre-computes last
+    # user/bot messages so the template stays simple.
+    sourcing_active = []
+    try:
+        cur.execute('''
+            SELECT id, phone, status, year_min, year_max, make, model, trim,
+                   ext_color, miles_max, customer_name, conversation,
+                   last_msg_at, last_inbound_at, created_at
+              FROM sourcing_requests
+             WHERE status <> 'archived'
+             ORDER BY
+               CASE status
+                 WHEN 'matched'    THEN 1
+                 WHEN 'presented'  THEN 2
+                 WHEN 'searching'  THEN 3
+                 WHEN 'gathering'  THEN 4
+                 WHEN 'wishlist'   THEN 5
+               END,
+               last_msg_at DESC
+             LIMIT 50
+        ''')
+        rows = cur.fetchall()
+        for r in rows:
+            r = dict(r)
+            conv = r.get('conversation') or []
+            last_user = next((t for t in reversed(conv) if t.get('role') == 'user'), None)
+            last_bot  = next((t for t in reversed(conv) if t.get('role') == 'bot'),  None)
+            r['last_user_text'] = (last_user or {}).get('text', '')
+            r['last_bot_text']  = (last_bot  or {}).get('text', '')
+            sourcing_active.append(r)
+    except Exception as _se:
+        print(f'[dashboard] sourcing query error: {_se}', flush=True)
+        try: db.rollback()
+        except Exception: pass
+        sourcing_active = []
+
     return render_template('index.html', bids=bids, stats=stats,
                            status_filter=status_filter, rep_filter=rep_filter,
                            reps=reps, photo_counts=photo_counts,
                            first_photos=first_photos,
                            vauto_done=vauto_done,
                            active_workers=active_workers,
+                           sourcing_active=sourcing_active,
                            time_ago=time_ago)
 
 
@@ -1991,6 +2045,27 @@ def twilio_webhook():
         # Without rollback, the cursor stays in aborted state and every
         # downstream cur.execute fails — silently dropping the inbound bid.
         print(f'[sms-intake] log create error: {_e}', flush=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # ── Sourcing bot router ──
+    # Intercepts inbound from gated phones (default: dev phone only) that
+    # look like sourcing requests rather than bid intakes. Returns True if
+    # handled (we then return empty TwiML); False falls through to existing
+    # bid-reply logic untouched. See sourcing_bot.py for full design.
+    try:
+        from sourcing_bot import try_handle_sourcing
+        if try_handle_sourcing(from_phone, body, db, cur,
+                               intake_log_id=intake_log_id,
+                               num_media=num_media,
+                               send_sms=send_sms):
+            return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                    200, {'Content-Type': 'application/xml'})
+    except Exception as _src_e:
+        # Never let the sourcing path break legacy bid intake.
+        print(f'[sourcing-bot] router error: {_src_e}', flush=True)
         try:
             db.rollback()
         except Exception:
@@ -11749,6 +11824,48 @@ def api_proxmox_console_url(vmid):
     })
 
 # ─── End Proxmox VM Management ──────────────────────────────────────────────
+
+
+# ─── Sourcing-bot dashboard API ──────────────────────────────────────────
+@app.route('/api/sourcing/active')
+def api_sourcing_active_count():
+    """Lightweight count of non-archived sourcing requests for banner refresh."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT COUNT(*) AS c FROM sourcing_requests WHERE status <> 'archived'")
+    r = cur.fetchone()
+    return jsonify({'count': int(r['c'])})
+
+
+@app.route('/api/sourcing/<int:req_id>/close', methods=['POST'])
+def api_sourcing_close(req_id):
+    """Manually archive a sourcing request from the dashboard banner."""
+    reason = (request.json or {}).get('reason', 'closed_by_staff') if request.is_json else 'closed_by_staff'
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""UPDATE sourcing_requests
+                      SET status='archived',
+                          archived_at=NOW(),
+                          archive_reason=%s
+                    WHERE id=%s
+                    RETURNING id""", (reason, req_id))
+    row = cur.fetchone()
+    if not row:
+        return jsonify({'error': 'not found'}), 404
+    db.commit()
+    return jsonify({'ok': True, 'id': req_id})
+
+
+@app.route('/sourcing/<int:req_id>')
+def sourcing_thread(req_id):
+    """Dashboard thread-detail view: full conversation + spec + actions."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT * FROM sourcing_requests WHERE id=%s", (req_id,))
+    req = cur.fetchone()
+    if not req:
+        return ('not found', 404)
+    return render_template('sourcing_thread.html', req=req)
 
 
 if __name__ == '__main__':
