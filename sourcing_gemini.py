@@ -1,12 +1,14 @@
 """
-EW sourcing-bot — LLM turn module.
+EW sourcing-bot — extraction-only LLM module (Option 2).
 
-(File still named sourcing_gemini.py for compatibility but now uses
-Anthropic Haiku 4.5 to isolate SMS workload from the Vertex AI quota
-shared with bid-assessment / OCR / vision.)
+Haiku now does ONE thing: parse the user's SMS into structured JSON
+{intent, spec_update, spec_clear}. Python (sourcing_bot.py) handles all
+state transitions and reply composition via deterministic templates.
 
-One call per inbound SMS. Returns:
-  spec_update / intent / reply / ready_to_search / next_state.
+This eliminates the prompt-tuning treadmill: Haiku can't write awkward
+phrasings or violate phrasing rules because Haiku doesn't write
+the user-facing replies anymore. Speed: 1 Haiku call per turn (~1.5s)
+vs the old 1-2 calls (1.5-3s).
 """
 import json
 import os
@@ -21,36 +23,18 @@ except ImportError:
 
 
 _HISTORY_TURNS = 10
-
-
-def _fmt_miles(m):
-    """Format mileage for SMS: '23 mi', '9k mi', '47k mi', or '?' if missing.
-    Avoid 'k' rounding under 1000 (showing '0k' for a 23-mile car is wrong).
-    """
-    if m is None:
-        return '?'
-    try:
-        n = int(m)
-    except Exception:
-        return '?'
-    if n < 1000:
-        return f'{n} mi'
-    return f'{round(n/1000)}k mi'
-
 _MODEL = 'claude-haiku-4-5-20251001'
 
 _anthropic_client = None
 
 
 def _client():
-    """Lazy-init the Anthropic client."""
     global _anthropic_client
     if _anthropic_client is None:
         try:
             import anthropic
             api_key = os.environ.get('ANTHROPIC_API_KEY')
             if not api_key:
-                print('[sourcing-llm] ANTHROPIC_API_KEY not set', flush=True)
                 _anthropic_client = False
             else:
                 _anthropic_client = anthropic.Anthropic(api_key=api_key)
@@ -60,73 +44,12 @@ def _client():
     return _anthropic_client if _anthropic_client else None
 
 
-SYSTEM_PROMPT = """You are an SMS assistant for Experience Wholesale, a wholesale auto broker. You text dealers and wholesalers in a peer register: brief, lowercase-friendly, professional, no emoji, no formal greetings, no AI disclosures.
+SYSTEM_PROMPT = """You are an SMS-message structured-data extractor for a wholesale auto sourcing system. You ONLY output JSON. You do NOT write replies to the user — Python composes those.
 
-YOUR JOB
-Help the user source a vehicle. Gather just enough spec to search, present matches without revealing price or source, and either close the loop with a handoff or save a 30-day wishlist.
+Output a single JSON object, no markdown, no prose:
 
-ABSOLUTE RULES
-- NEVER mention or quote a price (including MSRP, retail, asking, etc.).
-- If the user asks for MORE DETAILS, MSRP, a full options list, photos, or VIN of any specific match: tell them you don't have that info on hand and offer to find out IF they're interested. Combine the offer with a name ask in ONE message. Pattern: "don't have msrp/options info on that one — but if you're interested we can find out and come back to you. what's your name so we know who to text?"
-- Do not list more options than the up-to-3 already in the match description (those are pulled from inventory metadata).
-- When the user provides a name in response → save it to customer_name and reply briefly: "thanks {name}, talk soon." Set next_state='matched'.
-- NEVER name the source dealer, city, state, or any URL.
-- NEVER say you are an AI or assistant.
-- If the user states a price/budget, ACK they said it but DO NOT filter by it. We use it as a soft sort hint only.
-- Outbound match descriptions only include: year, model+trim, ext_color / int_color, mileage, up to 3 key options.
-- Keep replies under ~160 chars when possible. Don't ramble.
-
-EXTRACTION RULES
-- "model" should be the model name only (e.g. "911", "Carrera", "Bentayga"), NOT including the trim. If the user says "porsche 911 carrera gts", extract model="911" and trim="carrera gts".
-- "trim" can be everything after the model (e.g. "carrera gts", "turbo s", "denali").
-- Make it lowercase-friendly when extracting (e.g. make="porsche" not "Porsche").
-
-HARD SEARCH MINIMUMS
-year (range OK), make, model. Ask only for what's missing. Do NOT ask budget. Do NOT push for color/miles/options before the first search — most users want to see what's available first.
-
-PRESENTING MATCHES
-Format (≤3 per message), ONE car per line:
-{year} {model} {trim}, {color}, {miles}
-- {color}: "{ext}" if only ext, "{ext} / {int}" if both, "{int} interior" if only int, omit if neither.
-- {miles}: under 1000 → "{n} mi" (e.g. "181 mi", "23 mi"). 1000+ → "{round(n/1000)}k mi" (e.g. "9k mi", "47k mi"). Never "0k mi".
-
-ALWAYS end the presentation with a follow-up question on its own line:
-- if exactly 1 match: "interested?"
-- if 2-3 matches: "any of these work?"
-- if more than 3 total: "got {n} total — want to see the rest?" (replaces the question, listing only top 3)
-
-CLOSING WHEN USER IS INTERESTED IN A SPECIFIC MATCH
-Use the CURRENT_TIME provided below. Business hours: Mon-Fri 09:00-17:00 ET.
-- Mon-Fri 09:00-17:00 → "give us a bit — we'll come back with details"
-- After 17:00 Sun-Thu (and the user is interested) → "we'll come back to you tomorrow with details"
-- After 17:00 Friday, all day Sat, all day Sun before 17:00 → "we'll get back to you one way or the other on monday"
-
-NO MATCHES (search_results.count == 0)
-NEVER silently broaden the search. Instead, offer the user a choice based on what's set in CURRENT_SPEC. Build the offer dynamically:
-- if ext_color is set → option to look at "other colors"
-- if trim is set → option to look at "other trims"
-- if year_min/year_max is narrow → option to look at "other years"
-- always offer to flag it for the wishlist
-Example reply (3 things in spec): "nothing matching right now. want me to look at other colors, other years, or flag it for when one shows up?"
-Example reply (color only in spec): "nothing matching right now. want me to look at other colors, or flag it for when one shows up?"
-
-When the user replies wanting to BROADEN an existing filter, add the field name(s) to spec_clear AND set ready_to_search=true. Examples:
-- "yes other colors" / "any color is fine" → spec_clear: ["ext_color"], ready_to_search: true
-- "open on year" / "any year" → spec_clear: ["year_min", "year_max"], ready_to_search: true
-- "any trim" → spec_clear: ["trim"], ready_to_search: true
-
-When the user PIVOTS to a different vehicle (e.g. was discussing 296, now says "how about a 458"), set the new make/model/trim in spec_update AND clear the prior filters via spec_clear: ["year_min", "year_max", "ext_color", "int_color", "trim", "miles_max"] so old filters from the prior search don't leak into the new query.
-
-When the user says "flag it" / "yes save it" / "yes wishlist" → next_state = "wishlist". Reply: "done. saved: {short_desc}. text 'drop it' anytime. and what's your name so we know who to text?"
-
-NAME CAPTURE
-After the user expresses interest in a specific match (intent=interested) OR agrees to flag it for the wishlist (intent=extend_wishlist), if customer_name is not yet known, append " — what's your name so we know who to call back?" or similar to your reply. ONE sentence. Don't ask for name during the spec-gathering phase.
-
-When the user provides their name (typically a single short message like "mike" or "this is mike stark"), extract it into spec_update.customer_name. Reply briefly: "thanks {first_name}, talk soon." or similar. Don't repeat the handoff line.
-
-OUTPUT
-Return ONLY a JSON object, no markdown, no prose. Schema:
 {
+  "intent": "sourcing|interested|not_interested|more_results|drop_it|stop|extend_wishlist|name_provided|unclear",
   "spec_update": {
     "year_min": int|null, "year_max": int|null,
     "make": str|null, "model": str|null, "trim": str|null,
@@ -137,27 +60,66 @@ Return ONLY a JSON object, no markdown, no prose. Schema:
     "price_hint": int|null,
     "customer_name": str|null
   },
-  "spec_clear": [],
-  "intent": "sourcing|interested|not_interested|more_results|drop_it|extend_wishlist|unclear",
-  "reply": "the SMS text to send back, or null",
-  "ready_to_search": true|false,
-  "next_state": "gathering|searching|presented|matched|wishlist|archived"
+  "spec_clear": ["field_name", ...]
 }
 
-ready_to_search rules:
-- Set true ONLY when (after applying spec_update) make AND model AND (year_min OR year_max) are all known AND status is 'gathering'.
-- Set false otherwise.
+INTENT GUIDE
+- "sourcing": user is specifying or refining a vehicle (most common; default for any new search criteria)
+- "interested": user said yes / "send it" / "the green one" / picked a specific match
+- "not_interested": user said no / "none of those" / "next" after seeing matches
+- "more_results": user asked to see more after "want to see the rest?" ("yes", "ok", "more", "show more", "next")
+- "extend_wishlist": user said yes to a "want me to flag it?" offer
+- "drop_it": user wants to cancel current search ("drop it", "nevermind", "cancel")
+- "stop": full opt-out ("stop", "unsubscribe", "quit")
+- "name_provided": user said only their name in response to a name ask ("Mike", "this is Mike Stark", "Oscar")
+- "unclear": can't tell — be honest, don't guess
 
-Set spec_update fields to null when the user did NOT provide that field this turn. Only fill in NEW info."""
+CONTEXT-SENSITIVE INTENT
+The user's prior message (CONVERSATION_HISTORY) and BOT_LAST_QUESTION matter. If the bot asked "want me to flag it?" and user says "yes", that's "extend_wishlist". If bot asked "any of these work?" and user says "yes", that's "more_results" (probably means show more). If bot asked "what's your name?" and user says "Mike", that's "name_provided".
+
+SPEC EXTRACTION
+- "model" is the model name only (e.g. "911", "Carrera", "MC20", "296", "Bentayga"), NOT trim
+- "trim" is whatever comes after model (e.g. "Carrera GTS", "Turbo S", "GT3 Touring")
+- Lowercase makes ("porsche", not "Porsche")
+- "MC" alone is incomplete — leave model=null, will trigger model-suggestion in Python
+- Year range: "21-23 fine" → year_min=2021, year_max=2023; "2025" → both 2025; "any year" → spec_clear: ["year_min","year_max"]
+- Colors: list form, lowercase ("red" → ext_color: ["red"])
+
+PIVOT
+When user changes vehicle entirely (was discussing 296, now says "how about a 458"), set new make/model/trim in spec_update AND list any prior soft filters in spec_clear: ["year_min","year_max","ext_color","int_color","trim","miles_max"].
+
+BROADEN
+When user explicitly relaxes a filter ("any color", "any year", "open on trim"), put the relevant field name(s) in spec_clear.
+
+NEVER put "customer_name" in spec_clear — it's identity, not request-specific.
+
+If both spec_update and spec_clear touch the same field, that's fine — Python will apply spec_clear first then spec_update on top.
+
+NO REPLY
+Do not write a reply. Do not include "reply" or "ready_to_search" or "next_state" fields. Output ONLY the three fields above. Python decides everything else."""
 
 
-def _now_ny():
-    return datetime.now(_TZ)
+def _format_history(conversation):
+    if not conversation:
+        return '(no prior turns)'
+    last = conversation[-_HISTORY_TURNS:]
+    lines = []
+    for turn in last:
+        role = turn.get('role', '?')
+        text = turn.get('text', '')
+        lines.append(f"{role}: {text}")
+    return '\n'.join(lines)
 
 
-def _format_current_time():
-    n = _now_ny()
-    return f"{n.strftime('%A %Y-%m-%d %H:%M')} ET"
+def _last_bot_question(conversation):
+    """Find the most recent bot message that ended with a question mark."""
+    for t in reversed(conversation or []):
+        if t.get('role') == 'bot':
+            text = (t.get('text') or '').strip()
+            if text.endswith('?'):
+                return text
+            return text  # last bot turn even if not a question
+    return None
 
 
 def _format_current_spec(row):
@@ -176,60 +138,20 @@ def _format_current_spec(row):
         parts.append(f"int_color={row['int_color']}")
     if row.get('miles_max'):
         parts.append(f"miles_max={row['miles_max']}")
-    if row.get('options'):
-        parts.append(f"options={row['options']}")
-    if row.get('price_hint'):
-        parts.append(f"price_hint={row['price_hint']}")
     if row.get('customer_name'):
         parts.append(f"customer_name={row['customer_name']}")
     return ', '.join(parts) if parts else 'EMPTY'
 
 
-def _format_history(conversation):
-    if not conversation:
-        return '(no prior turns)'
-    last = conversation[-_HISTORY_TURNS:]
-    lines = []
-    for turn in last:
-        role = turn.get('role', '?')
-        text = turn.get('text', '')
-        lines.append(f"{role}: {text}")
-    return '\n'.join(lines)
-
-
-def _build_user_prompt(row, new_user_msg, search_results=None, fallback_level=None):
+def _build_user_prompt(row, new_user_msg):
+    last_q = _last_bot_question(row.get('conversation') or [])
     blocks = [
-        f"CURRENT_TIME: {_format_current_time()}",
         f"REQUEST_STATUS: {row.get('status', 'gathering')}",
         f"CURRENT_SPEC: {_format_current_spec(row)}",
+        f"BOT_LAST_QUESTION: {last_q!r}" if last_q else "BOT_LAST_QUESTION: (none)",
         f"CONVERSATION_HISTORY:\n{_format_history(row.get('conversation') or [])}",
+        f"NEW_USER_MSG: {new_user_msg}",
     ]
-    if search_results is not None:
-        blocks.append(f"SEARCH_RESULTS_AVAILABLE: count={len(search_results)}")
-        if fallback_level and fallback_level != 'exact':
-            blocks.append(f"SEARCH_FALLBACK_LEVEL: {fallback_level} — matches do NOT exactly satisfy the user's spec; you MUST disclose what was relaxed (color, trim, or both) and offer the matches as alternatives, not exact hits.")
-        if search_results:
-            descs = []
-            for m in search_results[:3]:
-                ec = m.get('ext_color')
-                ic = m.get('int_color')
-                if ec and ic:
-                    color = f"{ec} / {ic}"
-                elif ec:
-                    color = ec
-                elif ic:
-                    color = f"{ic} interior"
-                else:
-                    color = ''
-                head_parts = [str(m.get('year') or ''), str(m.get('model') or ''), str(m.get('trim') or '')]
-                head = ' '.join(p for p in head_parts if p).strip()
-                pieces = [head]
-                if color: pieces.append(color)
-                pieces.append(_fmt_miles(m.get('mileage')))
-                d = ', '.join(pieces)
-                descs.append(d)
-            blocks.append("TOP_MATCHES:\n" + '\n'.join(descs))
-    blocks.append(f"NEW_USER_MSG: {new_user_msg or '(internal: search complete, present results)'}")
     return '\n\n'.join(blocks)
 
 
@@ -262,14 +184,13 @@ def _empty_spec_update():
     }
 
 
-def _haiku_call(user_prompt, max_tokens=700, temperature=0.3):
+def _haiku_call(user_prompt, max_tokens=300, temperature=0.1):
     cli = _client()
     if not cli:
         return None
     try:
-        # Prompt caching on the system block — system prompt is ~700 tokens
-        # and identical across turns, so cache reads at 10% rate save real $$.
-        # 5-minute TTL is fine for SMS conversation cadence.
+        import time as _time
+        _t0 = _time.monotonic()
         resp = cli.messages.create(
             model=_MODEL,
             max_tokens=max_tokens,
@@ -281,9 +202,16 @@ def _haiku_call(user_prompt, max_tokens=700, temperature=0.3):
             }],
             messages=[{'role': 'user', 'content': user_prompt}],
         )
+        _dt = (_time.monotonic() - _t0) * 1000
+        try:
+            u = resp.usage
+            print(f'[sourcing-llm] {_dt:.0f}ms in={u.input_tokens} out={u.output_tokens} '
+                  f'cache_read={getattr(u, "cache_read_input_tokens", 0)} '
+                  f'cache_create={getattr(u, "cache_creation_input_tokens", 0)}', flush=True)
+        except Exception:
+            print(f'[sourcing-llm] {_dt:.0f}ms', flush=True)
         if not resp.content:
             return None
-        # content is a list of blocks; collect text from text blocks.
         text_parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
         return '\n'.join(text_parts).strip() if text_parts else None
     except Exception as e:
@@ -291,9 +219,10 @@ def _haiku_call(user_prompt, max_tokens=700, temperature=0.3):
         return None
 
 
-def turn(row, new_user_msg, search_results=None, fallback_level=None):
-    """Run one Haiku turn. Returns dict or None on hard failure."""
-    user_block = _build_user_prompt(row, new_user_msg, search_results, fallback_level=fallback_level)
+def extract(row, new_user_msg):
+    """Single Haiku turn: extract structured data only.
+    Returns dict {intent, spec_update, spec_clear} or None on failure."""
+    user_block = _build_user_prompt(row, new_user_msg)
     raw = _haiku_call(user_block)
     parsed = _parse_response(raw)
     if not parsed:
@@ -305,16 +234,12 @@ def turn(row, new_user_msg, search_results=None, fallback_level=None):
         if k in su:
             norm_su[k] = su[k]
     parsed['spec_update'] = norm_su
-
     parsed.setdefault('intent', 'unclear')
-    parsed.setdefault('ready_to_search', False)
-    parsed.setdefault('next_state', row.get('status', 'gathering'))
-    if 'reply' not in parsed:
-        parsed['reply'] = None
+    parsed.setdefault('spec_clear', [])
     return parsed
 
 
-# ── Spec merge helper (unchanged from previous) ──────────────────────────
+# ── Spec merge helper (unchanged) ─────────────────────────────────────────
 _SCALAR_FIELDS = ('year_min', 'year_max', 'make', 'model', 'trim',
                   'miles_max', 'must_clean_title', 'price_hint',
                   'customer_name')
@@ -322,16 +247,16 @@ _LIST_FIELDS = ('ext_color', 'int_color', 'options')
 
 
 def merge_spec(row, spec_update, spec_clear=None):
-    """Merge non-null values from spec_update; explicitly null any field listed
-    in spec_clear. spec_clear takes precedence so 'any color' / 'any year'
-    cleanly drops filters."""
+    """Merge spec_clear (null specified fields) then spec_update (overwrite
+    with non-null values). spec_update wins when both touch the same field.
+    customer_name is identity — never cleared."""
     changes = {}
     spec_clear = set(spec_clear or [])
+    spec_clear.discard('customer_name')
     for k in _SCALAR_FIELDS:
         if k in spec_clear:
             row[k] = None
             changes[k] = None
-            continue
         v = spec_update.get(k)
         if v is not None and v != '':
             row[k] = v
@@ -340,7 +265,6 @@ def merge_spec(row, spec_update, spec_clear=None):
         if k in spec_clear:
             row[k] = None
             changes[k] = None
-            continue
         v = spec_update.get(k)
         if v is not None and isinstance(v, list) and len(v) > 0:
             v_norm = [str(x).strip().lower() for x in v if x is not None and str(x).strip()]
@@ -348,3 +272,44 @@ def merge_spec(row, spec_update, spec_clear=None):
                 row[k] = v_norm
                 changes[k] = v_norm
     return changes
+
+
+# ── Mileage formatter (used by Python templates in sourcing_bot.py) ───────
+def _fmt_miles(m):
+    """'23 mi' / '9k mi' / '?'"""
+    if m is None:
+        return '?'
+    try:
+        n = int(m)
+    except Exception:
+        return '?'
+    if n < 1000:
+        return f'{n} mi'
+    return f'{round(n/1000)}k mi'
+
+
+# ── Time-aware handoff line ──────────────────────────────────────────────
+def handoff_line(name, now_et=None):
+    """Pick the right closing message based on Mon-Fri 9-5 ET rules."""
+    if now_et is None:
+        now_et = datetime.now(_TZ)
+    first = (name or '').strip().split()[0] if name else None
+    h = now_et.hour
+    weekday = now_et.weekday()  # 0=Mon, 6=Sun
+
+    # Mon-Fri 9am-5pm
+    if weekday < 5 and 9 <= h < 17:
+        line = "give us a bit, we'll come back with details"
+    # Friday after 5pm OR Saturday all day OR Sunday before 5pm
+    elif (weekday == 4 and h >= 17) or weekday == 5 or (weekday == 6 and h < 17):
+        line = "we'll get back to you one way or the other on monday"
+    # Sun-Thu after 5pm
+    elif h >= 17 and weekday in (6, 0, 1, 2, 3):
+        line = "back to you tomorrow with details"
+    # Pre-9am weekday
+    else:
+        line = "back to you in a bit"
+
+    if first:
+        return f"thanks {first} — {line}."
+    return f"got it — {line}."
