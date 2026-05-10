@@ -247,6 +247,24 @@ def expire_archive(db, cur):
         print(f'[{_ts()}] [expire] archived {len(rows)} stale wishlists', flush=True)
 
 
+def refresh_taxonomy(db, cur):
+    """Step 0: refresh inventory_taxonomy materialized view so the bot's
+    models_for_make / count_for_make_model / find_make_for_model helpers
+    see fresh inventory data. CONCURRENT refresh allows reads during the
+    refresh — view stays available, no read-side blocking. Cheap (<100ms
+    on current 1k-row inventory)."""
+    try:
+        cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY inventory_taxonomy")
+        db.commit()
+        print(f'[{_ts()}] [taxonomy] refreshed', flush=True)
+    except Exception as e:
+        # Don't let a refresh failure block the rest of the cron — the bot
+        # still works on stale taxonomy data; it just won't see new models.
+        print(f'[{_ts()}] [taxonomy] refresh failed: {e}', flush=True)
+        try: db.rollback()
+        except Exception: pass
+
+
 def main():
     # Late imports so module loads cleanly even if app.py has issues.
     from app import get_db, send_sms
@@ -254,6 +272,7 @@ def main():
     db = get_db()
     cur = db.cursor()
     try:
+        refresh_taxonomy(db, cur)
         scan_wishlists(db, cur)
         dispatch_pending(db, cur, send_sms)
         reping_30day(db, cur, send_sms)

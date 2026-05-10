@@ -1,12 +1,19 @@
 """
-EW sourcing-bot — AI-driven SMS sourcing flow.
+EW sourcing-bot — AI-driven SMS sourcing flow (hybrid architecture).
 
-Step 3: Gemini turn integration. Each inbound user msg from a gated phone
-runs through Gemini-Flash, which returns spec_update + intent + reply +
-ready_to_search + next_state. We persist the conversation, merge spec
-updates, and update status. Search execution itself (when ready_to_search
-fires) lands in step 4 — for now it just transitions to 'searching' and
-sends the model's reply (which will be something like "on it, one sec").
+Per-turn pipeline:
+    user msg -> sourcing_gemini.extract()           # JSON: intent + spec
+              -> merge_spec into row
+              -> _decide(row, parsed, ...)          # Python state machine
+              -> (reply_template, next_state, did_search, branch)
+              -> if branch in _REWRITE_BRANCHES:
+                   sourcing_gemini.tone_rewrite(reply_template, recent_conv)
+              -> persist + send
+
+The LLM never writes the user-facing reply text directly. Python composes
+the SHAPE; tone_rewrite paraphrases the SHAPE in EW voice when stylistic
+variation helps. Deterministic strings (stop/drop acks, match
+presentations, handoff_line) bypass the rewrite for predictability.
 
 Public entry point: try_handle_sourcing(from_phone, body, db, cur, ...)
 returns True if handled, False to fall through to existing bid logic.
@@ -51,6 +58,66 @@ def _looks_like_sourcing(body):
         return False
     bl = body.lower()
     return any(h in bl for h in _SOURCING_HINTS)
+
+
+def _is_plausible_sourcing(body):
+    """Cold-start guard. True only if the body is plausibly a real sourcing
+    request, not a bare number, single-word ack, or stray punctuation.
+
+    Added 2026-05-10 after bid 1129's mileage SMS '12765' was misclassified
+    as a sourcing request. Tightened-then-relaxed same evening when 'Red 296'
+    (a real Ferrari sourcing ask) was being rejected and falling through to
+    the share-reply path.
+
+    Rejects: '', '12765', 'ok', 'thx', '?', '5/10/2026', 'thanks', 'hi'.
+    Accepts: 'looking for a 911 gts', 'porsche 911 gt3 2022',
+    'got any maserati mc20', 'Red 296', 'porsche 911', 'any 458'.
+    """
+    if not body:
+        return False
+    s = body.strip()
+    if len(s) < 4:
+        return False
+    import re as _re
+    alpha_tokens = _re.findall(r'[A-Za-z]{3,}', s)
+    if not alpha_tokens:
+        return False
+    bl = s.lower()
+    # Strong signals.
+    if any(h in bl for h in _SOURCING_HINTS):
+        return True
+    if len(alpha_tokens) >= 2:
+        return True
+    if _re.search(r'\b(19|20)\d{2}\b', s):
+        return True
+    # 2-4 digit non-year token alongside an alpha word: classic
+    # "color + model number" shape — Red 296, porsche 911, any 458, AMG 63.
+    # Excludes 5+ digit mileage-shaped tokens like "12765".
+    for tok in _re.findall(r'\b\d{2,4}\b', s):
+        n = int(tok)
+        if 1900 <= n <= 2100:
+            continue
+        return True
+    return False
+
+
+def _has_recent_sms_bid(cur, phone):
+    """True if this phone has a SMS-driven bid created in the last 60s.
+    Used to yield routing precedence to the bid-stitch path so that bare-
+    mileage / bare-VIN follow-ups to a fresh bid don't get hijacked into
+    sourcing. Mirrors the same window used by the stitch logic in app.py."""
+    try:
+        cur.execute("""
+            SELECT 1 FROM bids
+            WHERE phone = %s
+              AND created_at > NOW() - INTERVAL '60 seconds'
+              AND driver_token IS NOT NULL
+            LIMIT 1
+        """, (phone,))
+        return cur.fetchone() is not None
+    except Exception as _e:
+        print(f'[sourcing] recent-bid check error: {_e}', flush=True)
+        return False
 
 
 def _phone_allowed(phone):
@@ -125,23 +192,353 @@ def _build_spec_update_sql(changes):
     return sets, params
 
 
-# ── Main turn handler — reusable for both new + continuing requests ───────
-def _run_gemini_and_persist(db, cur, request_id, row, user_text, num_media=0,
-                             send_sms=None, phone=None):
-    """
-    Append user msg → Gemini turn → merge spec + reply + state → send SMS.
-    Returns the parsed Gemini response (or None on hard failure).
-    """
-    from sourcing_gemini import turn as gemini_turn, merge_spec
+# ── Reply composition (pure functions; Python decides shape, not LLM) ─────
 
-    # Append user msg into the row (for the prompt build).
+def _format_match(m):
+    from sourcing_gemini import _fmt_miles
+    ec = m.get('ext_color')
+    ic = m.get('int_color')
+    if ec and ic:
+        color = f"{ec} / {ic}"
+    elif ec:
+        color = ec
+    elif ic:
+        color = f"{ic} interior"
+    else:
+        color = ''
+    head_parts = [str(m.get('year') or ''), str(m.get('model') or ''),
+                  str(m.get('trim') or '')]
+    head = ' '.join(p for p in head_parts if p).strip()
+    pieces = [head]
+    if color:
+        pieces.append(color)
+    pieces.append(_fmt_miles(m.get('mileage')))
+    return ', '.join(pieces)
+
+
+def _short_desc(row):
+    parts = []
+    if row.get('year_min') or row.get('year_max'):
+        if row.get('year_min') == row.get('year_max'):
+            parts.append(str(row.get('year_min')))
+        else:
+            parts.append(f"{row.get('year_min','?')}-{row.get('year_max','?')}")
+    for k in ('make', 'model', 'trim'):
+        if row.get(k):
+            parts.append(row[k])
+    s = ' '.join(parts) or 'your search'
+    if row.get('ext_color'):
+        s += f" in {row['ext_color'][0]}"
+    return s
+
+
+def _present_results(matches, price_hint_set=False):
+    """Format the top 3 matches + a follow-up question.
+
+    When the result set is >3 AND we don't yet have a price_hint, add a
+    budget ask to the trailer so the user can narrow by price (which sorts
+    by proximity to price_hint) instead of paginating through everything.
+    Per never-quote-prices rule we don't show prices in the matches; the
+    budget hint is used as a server-side sort key only."""
+    body = '\n'.join(_format_match(m) for m in matches[:3])
+    n = len(matches)
+    if n > 3:
+        if not price_hint_set:
+            return (f"{body}\ngot {n} total — any budget to narrow down, "
+                    f"or want to see the rest?")
+        return f"{body}\ngot {n} total — want to see the rest?"
+    if n > 1:
+        return f"{body}\nany of these work?"
+    return f"{body}\ninterested?"
+
+
+def _no_match_offer(row):
+    """Build a relaxation menu based on what filters are set in the spec."""
+    opts = []
+    if row.get('ext_color'):
+        opts.append("other colors")
+    if row.get('trim'):
+        opts.append("other trims")
+    if row.get('year_min') or row.get('year_max'):
+        opts.append("other years")
+    if row.get('miles_max'):
+        opts.append("a higher mileage cap")
+    if opts:
+        return (f"nothing matching that right now. want me to look at "
+                f"{', '.join(opts)}, or flag it for when one shows up?")
+    return ("nothing matching right now. want me to flag it for when one "
+            "shows up?")
+
+
+_AMBIGUOUS_TRIMS = {
+    'gts', 'turbo', 'turbo s', 's', 'gt', 'gt s', 'touring',
+    'sport', 'sport+',
+}
+_MAKE_SPECIFIC_TRIMS = {
+    'carrera', 'gt3', 'gt4', 'targa', 'panamera', 'macan', 'cayenne',
+    'amg', 'g63', 'g550', 'g-class', 'g class',
+    'm3', 'm4', 'm5', 'm8', 'x6m',
+    'rs', 'r8',
+}
+
+
+def _is_ambiguous_trim_pivot(row, parsed, user_text):
+    """True if user's message is a bare trim name without a fresh make AND
+    the trim spans multiple makes. Probe before searching."""
+    su = (parsed or {}).get('spec_update') or {}
+    new_make = (su.get('make') or '').strip().lower()
+    if new_make:
+        return False
+    new_trim = (su.get('trim') or '').strip().lower()
+    body_lc = (user_text or '').strip().lower()
+    if not row.get('make'):
+        return False
+    candidate = (new_trim or body_lc).strip()
+    if not candidate:
+        return False
+    if candidate in _MAKE_SPECIFIC_TRIMS:
+        return False
+    if candidate in _AMBIGUOUS_TRIMS:
+        return True
+    for trim in _AMBIGUOUS_TRIMS:
+        if trim in candidate.split():
+            return True
+    return False
+
+
+# Branch labels returned by _decide(). _REWRITE_BRANCHES picks which ones
+# get sent through the tone-rewrite layer; the rest go out verbatim.
+_REWRITE_BRANCHES = {
+    'gathering_make_model',
+    'gathering_model_for_make',
+    'gathering_year',
+    'no_match_offer',
+    'ambiguous_trim_probe',
+    'interested_no_name',
+    'more_details_offer',
+    'callback_name_ask',
+    'extend_wishlist_no_name',
+    'more_details_declined',
+}
+
+
+def _last_bot_branch(conversation):
+    """Branch label of the most recent bot turn, or None. Used by _decide
+    to track multi-step flow position (callback ack, name ask, etc)."""
+    for t in reversed(conversation or []):
+        if t.get('role') == 'bot':
+            return ((t.get('raw') or {}).get('branch'))
+    return None
+
+
+def _no_match_offer_relax_aware(row, sibling_models=None):
+    """No-match offer that:
+      - skips narrowing buckets the user has already opted out of
+      - if we have OTHER models in stock for the same make, lists them
+      - offers a pivot to a different model or make as a generic fallback
+      - offers to flag for the wishlist
+    sibling_models: list of model name strings (other models we DO carry
+    for the user's chosen make, excluding the model they asked for).
+    Pass top 3-4 from inventory_taxonomy.models_for_make()."""
+    relaxed = set(row.get('relaxations') or [])
+    narrow_opts = []
+    if row.get('ext_color') and 'ext_color' not in relaxed:
+        narrow_opts.append("other colors")
+    if row.get('trim') and 'trim' not in relaxed:
+        narrow_opts.append("other trims")
+    if (row.get('year_min') or row.get('year_max')) and 'year' not in relaxed:
+        narrow_opts.append("other years")
+    if row.get('miles_max') and 'miles_max' not in relaxed:
+        narrow_opts.append("a higher mileage cap")
+
+    # If we have other models in stock for this make, surface them. Concrete
+    # alternatives ("we've got 296, sf90, roma") read better than the
+    # abstract "a different model".
+    sibling_clause = None
+    make = row.get('make')
+    if sibling_models and make:
+        names = ', '.join(sibling_models[:4])
+        sibling_clause = f"we've got these {make}s in stock: {names}"
+
+    parts = []
+    if narrow_opts:
+        parts.append(', '.join(narrow_opts))
+    parts.append("a different model or make")
+    parts.append("flag it for when one shows up")
+    body = f"no exact match right now. want me to try {', '.join(parts[:-1])}, or {parts[-1]}?"
+    if sibling_clause:
+        body = f"no exact match right now. {sibling_clause}. want one of those, {parts[-2]}, or {parts[-1]}?"
+    return body
+
+
+def _decide(row, parsed, search_results, user_text):
+    """Pure function: pick (reply_template, next_state, did_search, branch)
+    from the merged spec + extracted intent. NO I/O, NO LLM call here.
+
+    branch is a short label used by _run_turn to decide whether to apply
+    the tone-rewrite layer and for log filtering."""
+    from sourcing_gemini import handoff_line, callback_ack
+
+    intent = (parsed or {}).get('intent') or 'unclear'
+    relaxed = set(row.get('relaxations') or [])
+    has_make  = bool(row.get('make'))
+    has_model = bool(row.get('model'))
+    # year-or-relaxed: counts as "satisfied" if user has explicitly opted out.
+    has_year  = bool(row.get('year_min') or row.get('year_max')) or 'year' in relaxed
+    has_name  = bool(row.get('customer_name'))
+    name_first = (row.get('customer_name') or '').strip().split()[0].lower() if has_name else None
+    status = row.get('status', 'gathering')
+    last_branch = _last_bot_branch(row.get('conversation'))
+
+    # Stop / drop intents — deterministic, no rewrite.
+    if intent == 'stop':
+        return ("ok, stopped. text us anytime.", 'archived', False, 'stop')
+    if intent == 'drop_it':
+        return ("ok, dropped. text us anytime.", 'archived', False, 'drop')
+
+    # ── Callback flow (3-step) ────────────────────────────────────────────
+    # Step 3: User just gave name after we asked for it in callback flow.
+    if last_branch == 'callback_name_ask' and has_name and intent in ('name_provided', 'sourcing', 'unclear'):
+        return (callback_ack(row['customer_name']), 'matched', False, 'callback_ack')
+
+    # Step 2: User said yes to "want me to have someone reach out?".
+    if last_branch == 'more_details_offer' and intent == 'callback_yes':
+        if has_name:
+            return (callback_ack(row['customer_name']), 'matched', False, 'callback_ack')
+        return ("what's your name so we know who to reach out to?",
+                'presented', False, 'callback_name_ask')
+
+    # User declined the callback offer.
+    if last_branch == 'more_details_offer' and intent == 'not_interested':
+        return ("ok — let me know if there's something else you want to look at.",
+                'presented', False, 'more_details_declined')
+
+    # Step 1: User asked WHERE / MSRP / options / details of a match.
+    if intent == 'more_details':
+        return ("honestly not sure on that one — want me to have someone reach out with the details?",
+                'presented', False, 'more_details_offer')
+
+    # Name capture after an interest signal — uses handoff_line, not callback_ack.
+    if intent == 'name_provided' and has_name:
+        return (handoff_line(row['customer_name']), 'matched', False, 'name_provided')
+
+    # Wishlist save.
+    if intent == 'extend_wishlist':
+        desc = _short_desc(row)
+        if has_name:
+            return (f"done, {name_first}. saved: {desc}. text 'drop it' anytime.",
+                    'wishlist', False, 'extend_wishlist_with_name')
+        return (f"done. saved: {desc}. text 'drop it' anytime. and what's your name so we know who to text?",
+                'wishlist', False, 'extend_wishlist_no_name')
+
+    # User signaled interest in a specific match.
+    if intent == 'interested':
+        if has_name:
+            return (handoff_line(row['customer_name']), 'matched', False, 'interested_with_name')
+        return ("if you want it we'll get back to you with all the details. what's your name so we know who to text?",
+                'presented', False, 'interested_no_name')
+
+    # Ambiguous bare-trim pivot — ask before searching.
+    if _is_ambiguous_trim_pivot(row, parsed, user_text):
+        return (f"still {row['make']}, or open to other makes?",
+                status, False, 'ambiguous_trim_probe')
+
+    # Spec-gathering ladder. No "got it" prefix — the rewrite layer can vary
+    # the opener; users complained about repetitive acks across consecutive
+    # turns. Bare questions read tighter.
+    if not has_make:
+        return ("what make and model are you looking at?",
+                'gathering', False, 'gathering_make_model')
+    if not has_model:
+        # Use the taxonomy view to suggest the top models we actually carry
+        # for this make. Beats a generic "what porsche model?" — the user
+        # sees the menu instantly. Fallback to bare question if lookup fails.
+        try:
+            from sourcing_search import models_for_make
+            top = models_for_make(row['make'], limit=6)
+            if top:
+                names = ', '.join(m['model'] for m in top[:5])
+                more = ' (+more)' if len(top) > 5 else ''
+                return (f"what {row['make']} model? we've got {names}{more}.",
+                        'gathering', False, 'gathering_model_for_make')
+        except Exception as _e:
+            print(f'[sourcing] models_for_make lookup err: {_e}', flush=True)
+        return (f"what {row['make']} model?",
+                'gathering', False, 'gathering_model_for_make')
+    if not has_year:
+        return ("what year range?",
+                'gathering', False, 'gathering_year')
+
+    # Sort request — return the existing search results re-sorted.
+    if intent == 'sort_request' and search_results:
+        return (_present_results(search_results, price_hint_set=bool(row.get('price_hint'))),
+                'presented', True, 'present_matches_sorted')
+
+    # "Show me the rest" / "list them all". Twilio drops/delays SMS that span
+    # too many segments (>10 segments = ~1600 chars often fails on carrier
+    # delivery), so cap at 10 vehicles per SMS and tell the user how many
+    # remain. They can narrow down rather than chase a 50-row list.
+    if intent == 'more_results' and search_results:
+        n = len(search_results)
+        cap = 10
+        body = '\n'.join(_format_match(m) for m in search_results[:cap])
+        if n > cap:
+            tail = (f"\nthat's {cap} of {n}. narrow down by year, color, or miles "
+                    f"and i'll show the rest?")
+            return (body + tail, 'presented', True, 'present_all')
+        if n > 1:
+            return (f"{body}\nany of these?", 'presented', True, 'present_all')
+        return (f"{body}\ninterested?", 'presented', True, 'present_all')
+
+    # Hard minimums met — search and present.
+    if search_results is not None:
+        if search_results:
+            return (_present_results(search_results, price_hint_set=bool(row.get('price_hint'))),
+                    'presented', True, 'present_matches')
+        # 0 matches: check inventory_taxonomy for sibling models in same make,
+        # so we can offer concrete alternatives rather than just "different model?".
+        siblings = []
+        try:
+            from sourcing_search import models_for_make
+            cur_model = (row.get('model') or '').lower()
+            siblings_full = models_for_make(row.get('make'), limit=8)
+            siblings = [m['model'] for m in siblings_full
+                        if m.get('model') and m['model'].lower() != cur_model][:4]
+        except Exception as _e:
+            print(f'[sourcing] sibling models lookup err: {_e}', flush=True)
+        return (_no_match_offer_relax_aware(row, siblings),
+                'presented', True, 'no_match_offer')
+
+    # Should not happen — caller runs search when minimums met.
+    return ("got it.", status, False, 'fallback')
+
+
+# ── Main turn handler — reusable for both new + continuing requests ───────
+def _run_turn(db, cur, request_id, row, user_text, num_media=0,
+              send_sms=None, phone=None):
+    """One inbound turn:
+      1. extract via Cerebras (JSON)
+      2. merge spec into row
+      3. _decide picks reply shape + next_state (does search if needed)
+      4. tone_rewrite if branch is rewrite-eligible
+      5. persist + send
+
+    Returns dict {intent, branch, did_search, match_count} for logging,
+    or None on hard extract failure (already handled with a graceful ack)."""
+    from sourcing_gemini import extract as llm_extract, tone_rewrite, merge_spec
+    from sourcing_search import search as inv_search, to_match_descs
+
+    # Append user msg into the row (extract reads conversation history).
     row['conversation'] = _append_msg(row.get('conversation'), 'user', user_text)
 
-    parsed = gemini_turn(row, user_text)
+    parsed = llm_extract(row, user_text)
     if not parsed:
-        # Fallback ack so the user isn't left hanging.
+        # Hard failure: extractor returned nothing usable. Send a graceful
+        # ack instead of going silent. Keep the user-side conversation
+        # intact so they can retry without confusion.
         fallback = "got it — one sec."
-        row['conversation'] = _append_msg(row['conversation'], 'bot', fallback)
+        row['conversation'] = _append_msg(row['conversation'], 'bot', fallback,
+                                          raw={'extract': None, 'fallback': True})
         cur.execute("""UPDATE sourcing_requests
                           SET conversation=%s::jsonb,
                               last_msg_at=NOW(),
@@ -151,26 +548,58 @@ def _run_gemini_and_persist(db, cur, request_id, row, user_text, num_media=0,
         db.commit()
         if send_sms and phone:
             send_sms(phone, fallback)
-        print(f'[sourcing] gemini-fallback id={request_id}', flush=True)
+        print(f'[sourcing] extract-failed id={request_id} body={user_text!r}', flush=True)
         return None
 
-    spec_update = parsed.get('spec_update') or {}
-    reply = parsed.get('reply') or "got it."
-    next_state = parsed.get('next_state') or row.get('status', 'gathering')
-    ready = bool(parsed.get('ready_to_search'))
+    # Merge spec onto the row (mutates row[...]). Also persists relaxations
+    # to row['relaxations'] when spec_clear includes a relaxable field.
+    changes = merge_spec(row, parsed.get('spec_update') or {},
+                        spec_clear=parsed.get('spec_clear') or [])
 
-    # Don't let Gemini hand us an invalid status.
-    valid_states = ('gathering', 'searching', 'presented', 'matched',
-                    'wishlist', 'archived')
-    if next_state not in valid_states:
-        next_state = row.get('status', 'gathering')
+    # First decision pass — without search results. Tells us if we have
+    # enough spec to search or need to ask another question.
+    reply, next_state, did_search, branch = _decide(row, parsed, None, user_text)
 
-    # Append bot reply with the raw Gemini blob attached for debugging.
-    row['conversation'] = _append_msg(row['conversation'], 'bot', reply,
-                                       raw={'gemini': parsed})
+    # Decide if we should run inventory search this turn:
+    # - make + model present
+    # - year either set OR explicitly relaxed (relaxations contains 'year')
+    # - status hasn't moved off of search-eligible (gathering/searching/presented)
+    # - intent is one that benefits from search results (sourcing/more_results/sort_request/unclear)
+    relaxed = set(row.get('relaxations') or [])
+    year_ok = bool(row.get('year_min') or row.get('year_max') or 'year' in relaxed)
+    matches = []
+    if (row.get('make') and row.get('model') and year_ok
+        and row.get('status') in ('gathering', 'searching', 'presented')
+        and parsed.get('intent') in ('sourcing', 'more_results', 'sort_request', 'unclear', None)):
+        # Sort preference: explicit from extractor, or the row's price_hint
+        # implicit (handled inside inv_search). more_results lifts the limit
+        # so we can list everything in one shot.
+        sort_pref = parsed.get('sort_pref')
+        limit = 50 if parsed.get('intent') == 'more_results' else 20
+        try:
+            matches = inv_search(row, limit=limit, sort_pref=sort_pref)
+        except Exception as _se:
+            print(f'[sourcing] search error id={request_id}: {_se}', flush=True)
+            matches = []
+        match_descs = to_match_descs(matches)
+        reply, next_state, did_search, branch = _decide(row, parsed, match_descs, user_text)
 
-    # Merge spec updates into the row (mutates), then build the UPDATE.
-    changes = merge_spec(row, spec_update, spec_clear=parsed.get('spec_clear') or [])
+    # Tone rewrite (only on rewrite-eligible branches).
+    final_reply = reply
+    if branch in _REWRITE_BRANCHES:
+        rewritten = tone_rewrite(reply, row.get('conversation'))
+        if rewritten and rewritten.strip():
+            final_reply = rewritten.strip()
+
+    # Append bot reply with the raw extract blob attached for debugging.
+    row['conversation'] = _append_msg(
+        row['conversation'], 'bot', final_reply,
+        raw={'extract': parsed, 'branch': branch,
+             'rewritten': branch in _REWRITE_BRANCHES,
+             'match_count': len(matches) if did_search else None}
+    )
+
+    # Persist: spec changes + conversation + status + maybe wishlist_until.
     set_clauses, params = _build_spec_update_sql(changes)
     set_clauses += [
         "conversation = %s::jsonb",
@@ -179,95 +608,30 @@ def _run_gemini_and_persist(db, cur, request_id, row, user_text, num_media=0,
         "last_inbound_at = NOW()",
     ]
     params += [json.dumps(row['conversation']), next_state]
+    if did_search:
+        set_clauses.append("last_scan_at = NOW()")
+    if next_state == 'wishlist':
+        set_clauses.append("wishlist_until = COALESCE(wishlist_until, NOW() + INTERVAL '30 days')")
     sql = f"UPDATE sourcing_requests SET {', '.join(set_clauses)} WHERE id = %s"
     params.append(request_id)
     cur.execute(sql, params)
     db.commit()
 
-    if send_sms and phone and reply:
-        send_sms(phone, reply)
+    if send_sms and phone and final_reply:
+        send_sms(phone, final_reply)
 
     print(f'[sourcing] turn id={request_id} intent={parsed.get("intent")} '
-          f'ready={ready} next_state={next_state} '
-          f'changes={list(changes.keys())}', flush=True)
+          f'branch={branch} did_search={did_search} matches={len(matches)} '
+          f'next_state={next_state} changes={list(changes.keys())} '
+          f'rewritten={branch in _REWRITE_BRANCHES}', flush=True)
 
-    # Step 4: ready_to_search → run inventory search + presentation turn.
-    # The interim Gemini reply (e.g. "on it, one sec") was already saved to
-    # the conversation but NOT sent — we suppress it and send the
-    # presentation result as the single SMS for this inbound.
-    if ready:
-        try:
-            from sourcing_search import search as inv_search, to_match_descs
-            matches = inv_search(row, limit=20)
-            fallback_level = 'exact'  # we only do strict; user must opt-in to broaden
-        except Exception as _se:
-            print(f"[sourcing] search error id={request_id}: {_se}", flush=True)
-            matches = []
-            fallback_level = 'none' 
-
-        match_descs = to_match_descs(matches)
-        from sourcing_gemini import turn as gemini_turn
-        parsed2 = gemini_turn(row, "", search_results=match_descs, fallback_level=fallback_level)
-
-        if parsed2:
-            reply2 = parsed2.get("reply") or "one sec."
-            next_state2 = parsed2.get("next_state") or ("presented" if matches else "gathering")
-        else:
-            if matches:
-                m = match_descs[0]
-                ec = m.get('ext_color'); ic = m.get('int_color')
-                if ec and ic: color = f"{ec} / {ic}"
-                elif ec: color = ec
-                elif ic: color = f"{ic} interior"
-                else: color = ''
-                head = f"{m['year']} {m['model']} {m.get('trim') or ''}".strip()
-                bits = [head]
-                if color: bits.append(color)
-                bits.append(_fmt_miles_sb(m.get('mileage')))
-                reply2 = 'got 1: ' + ', '.join(bits) + '. interested?' 
-                next_state2 = "presented"
-            else:
-                reply2 = ("nothing matching in our scans right now. want me "
-                          "to flag it and text you the second one shows up?")
-                next_state2 = "presented"
-
-        valid_states = ("gathering", "searching", "presented", "matched",
-                        "wishlist", "archived")
-        if next_state2 not in valid_states:
-            next_state2 = "presented" if matches else "gathering"
-
-        # Drop the interim bot turn so user only sees the final presentation.
-        if row["conversation"] and row["conversation"][-1].get("role") == "bot":
-            row["conversation"] = row["conversation"][:-1]
-        row["conversation"] = _append_msg(row["conversation"], "bot", reply2,
-                                           raw={"gemini": parsed2,
-                                                "match_count": len(matches)})
-
-        if next_state2 == 'wishlist':
-            cur.execute(
-                "UPDATE sourcing_requests SET conversation=%s::jsonb, status=%s, "
-                "last_msg_at=NOW(), last_scan_at=NOW(), "
-                "wishlist_until = COALESCE(wishlist_until, NOW() + INTERVAL '30 days') "
-                "WHERE id=%s",
-                (json.dumps(row["conversation"]), next_state2, request_id),
-            )
-        else:
-            cur.execute(
-                "UPDATE sourcing_requests SET conversation=%s::jsonb, status=%s, "
-                "last_msg_at=NOW(), last_scan_at=NOW() WHERE id=%s",
-                (json.dumps(row["conversation"]), next_state2, request_id),
-            )
-        db.commit()
-
-        if send_sms and phone:
-            send_sms(phone, reply2)
-
-        print(f"[sourcing] presented id={request_id} matches={len(matches)} "
-              f"next_state={next_state2}", flush=True)
-        parsed["_post_search"] = parsed2
-        parsed["_match_count"] = len(matches)
-
-    return parsed
+    return {
+        'intent': parsed.get('intent'),
+        'branch': branch,
+        'did_search': did_search,
+        'match_count': len(matches),
+        'next_state': next_state,
+    }
 
 
 # ── Main router ───────────────────────────────────────────────────────────
@@ -278,6 +642,15 @@ def try_handle_sourcing(from_phone, body, db, cur, intake_log_id=None,
     Returns False to fall through to the existing bid-reply logic.
     """
     if not _phone_allowed(from_phone):
+        return False
+
+    # Yield-to-bid-stitch precedence (added 2026-05-10): if this phone has a
+    # bid created in the last 60s, the inbound is almost certainly a stitch
+    # follow-up (bare mileage, VIN paste, photo) regardless of sourcing
+    # state. Bid stitch needs first crack — otherwise sourcing eats the
+    # follow-up like it did to bid 1129's "12765".
+    if _has_recent_sms_bid(cur, from_phone):
+        print(f'[sourcing] yielding to bid intake (recent bid <60s for {from_phone})', flush=True)
         return False
 
     body_lc = (body or '').strip().lower()
@@ -299,16 +672,20 @@ def try_handle_sourcing(from_phone, body, db, cur, intake_log_id=None,
             print(f"[sourcing] yielding to bid intake (VIN/photo) despite active sourcing id={active['id']}", flush=True)
             return False
         row = dict(active)
-        _run_gemini_and_persist(db, cur, active['id'], row, body or '',
-                                 num_media=num_media, send_sms=send_sms,
-                                 phone=from_phone)
+        _run_turn(db, cur, active['id'], row, body or '',
+                  num_media=num_media, send_sms=send_sms,
+                  phone=from_phone)
         return True
 
-    # 2. Cold inbound from a gated phone.
+    # 2. Cold inbound from a gated phone — must be a CLEAR sourcing request.
+    # Tightened 2026-05-10: previously any non-bid, non-empty body opened a
+    # request, which created ghost rows from "12765" / "ok" / "?" etc.
+    # Now requires _is_plausible_sourcing() — at least one alpha word, not
+    # pure digits, length >= 4, OR an explicit hint phrase.
     if _looks_like_bid_intake(body, num_media):
         return False
-
-    if not _looks_like_sourcing(body):
+    if not _is_plausible_sourcing(body):
+        print(f'[sourcing] cold inbound rejected (implausible body): {body!r}', flush=True)
         return False
 
     # New request — create the row first, then run a Gemini turn against it.
@@ -326,8 +703,8 @@ def try_handle_sourcing(from_phone, body, db, cur, intake_log_id=None,
         'status': 'gathering',
         'conversation': [],
     }
-    _run_gemini_and_persist(db, cur, new_id, row, body or '',
-                             num_media=num_media, send_sms=send_sms,
-                             phone=from_phone)
+    _run_turn(db, cur, new_id, row, body or '',
+              num_media=num_media, send_sms=send_sms,
+              phone=from_phone)
     print(f'[sourcing] NEW id={new_id} phone={from_phone}', flush=True)
     return True

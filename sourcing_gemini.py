@@ -1,14 +1,25 @@
 """
-EW sourcing-bot — extraction-only LLM module (Option 2).
+EW sourcing-bot — LLM module (hybrid architecture, 2026-05-10).
 
-Haiku now does ONE thing: parse the user's SMS into structured JSON
-{intent, spec_update, spec_clear}. Python (sourcing_bot.py) handles all
-state transitions and reply composition via deterministic templates.
+Two distinct LLM calls per turn:
 
-This eliminates the prompt-tuning treadmill: Haiku can't write awkward
-phrasings or violate phrasing rules because Haiku doesn't write
-the user-facing replies anymore. Speed: 1 Haiku call per turn (~1.5s)
-vs the old 1-2 calls (1.5-3s).
+  1. extract(row, msg)        -> {intent, spec_update, spec_clear}
+     Short JSON-only prompt. Cerebras gpt-oss-120b. ~300ms.
+  2. tone_rewrite(text, conv) -> rewritten SMS string
+     Tiny prompt. Same model, no JSON mode. ~250ms.
+     Only called for question/offer branches; deterministic strings
+     (stop/drop, match presentations, handoff_line) skip this layer.
+
+Architecture rationale: prior iteration had ONE big LLM call that did
+extraction + reply composition. That gave natural voice but the model
+sometimes invented wrong makes (e.g. 'Red 296' -> Porsche 911 instead of
+Ferrari 296), wasted thinking tokens on long prompts, and made A/B
+testing reply wording hard. Hybrid splits the concerns: extraction is
+deterministic JSON; reply shape is Python state machine; tone is a
+small rewriting model call only on the branches that benefit.
+
+Endpoint: https://api.cerebras.ai/v1/chat/completions (OpenAI-compatible).
+Auth: env var CEREBRAS_API_KEY=csk-...
 """
 import json
 import os
@@ -23,33 +34,34 @@ except ImportError:
 
 
 _HISTORY_TURNS = 10
-_MODEL = 'claude-haiku-4-5-20251001'
-
-_anthropic_client = None
 
 
-def _client():
-    global _anthropic_client
-    if _anthropic_client is None:
-        try:
-            import anthropic
-            api_key = os.environ.get('ANTHROPIC_API_KEY')
-            if not api_key:
-                _anthropic_client = False
-            else:
-                _anthropic_client = anthropic.Anthropic(api_key=api_key)
-        except Exception as e:
-            print(f'[sourcing-llm] init failed: {e}', flush=True)
-            _anthropic_client = False
-    return _anthropic_client if _anthropic_client else None
+def _fmt_miles(m):
+    """Format mileage for SMS: '23 mi', '9k mi', '47k mi', or '?' if missing.
+    Avoid 'k' rounding under 1000 (showing '0k' for a 23-mile car is wrong).
+    """
+    if m is None:
+        return '?'
+    try:
+        n = int(m)
+    except Exception:
+        return '?'
+    if n < 1000:
+        return f'{n} mi'
+    return f'{round(n/1000)}k mi'
+
+_MODEL = 'gpt-oss-120b'
+_CEREBRAS_URL = 'https://api.cerebras.ai/v1/chat/completions'
+_CEREBRAS_TIMEOUT_SEC = 8
 
 
-SYSTEM_PROMPT = """You are an SMS-message structured-data extractor for a wholesale auto sourcing system. You ONLY output JSON. You do NOT write replies to the user — Python composes those.
+EXTRACT_PROMPT = """You are a structured-data extractor for an SMS auto-sourcing system. You ONLY output JSON. You do NOT write replies — Python composes those.
 
 Output a single JSON object, no markdown, no prose:
 
 {
-  "intent": "sourcing|interested|not_interested|more_results|drop_it|stop|extend_wishlist|name_provided|unclear",
+  "intent": "sourcing|interested|not_interested|more_results|drop_it|stop|extend_wishlist|name_provided|more_details|callback_yes|sort_request|unclear",
+  "sort_pref": "miles_asc|miles_desc|price_asc|price_desc|null",
   "spec_update": {
     "year_min": int|null, "year_max": int|null,
     "make": str|null, "model": str|null, "trim": str|null,
@@ -64,62 +76,103 @@ Output a single JSON object, no markdown, no prose:
 }
 
 INTENT GUIDE
-- "sourcing": user is specifying or refining a vehicle (most common; default for any new search criteria)
-- "interested": user said yes / "send it" / "the green one" / picked a specific match
+- "sourcing": user is specifying or refining a vehicle (default for any new search criteria, includes "any year"/"any color" relaxations)
+- "interested": user said yes / "send it" / "the green one" / picked a specific match after we presented options
 - "not_interested": user said no / "none of those" / "next" after seeing matches
-- "more_results": user asked to see more after "want to see the rest?" ("yes", "ok", "more", "show more", "next")
+- "more_results": user asked to see all/more after "want to see the rest?" ("yes", "show all", "list them all", "show me the rest", "more")
 - "extend_wishlist": user said yes to a "want me to flag it?" offer
-- "drop_it": user wants to cancel current search ("drop it", "nevermind", "cancel")
+- "drop_it": user wants to cancel current search ("drop it", "nevermind", "cancel that", "forget it", "stop searching")
 - "stop": full opt-out ("stop", "unsubscribe", "quit")
 - "name_provided": user said only their name in response to a name ask ("Mike", "this is Mike Stark", "Oscar")
-- "unclear": can't tell — be honest, don't guess
+- "more_details": user asks for MSRP / original sticker / options / photos / VIN / location / "where is it" / "what state" / "is it still available" / pricing or any info we can NOT answer about a specific match. Examples: "where is it?", "what state?", "what was msrp?", "original sticker?", "do you have photos?", "is it still available?", "where's it located?"
+- "callback_yes": user said yes to a "want me to have someone reach out / contact you?" offer (only valid when BOT_LAST_TURN was that offer). Affirmatives: "yes", "sure", "please", "ok do that", "go ahead", "yeah"
+- "sort_request": user wants the same matches re-sorted ("show ascending miles", "lowest miles first", "highest miles", "cheapest first", "most expensive", "lowest price", "highest price")
+- "unclear": cannot tell — be honest, do not guess
+
+SORT_PREF EXTRACTION
+Set sort_pref ONLY when intent="sort_request". Map the user's phrasing:
+- "lowest miles" / "least miles" / "ascending miles" / "fewest miles" / "low to high" -> "miles_asc"
+- "highest miles" / "most miles" / "descending miles" / "high to low" -> "miles_desc"
+- "lowest price" / "cheapest" / "ascending price" / "least expensive" -> "price_asc"
+- "highest price" / "most expensive" / "descending price" / "priciest" -> "price_desc"
+Otherwise sort_pref=null.
 
 CONTEXT-SENSITIVE INTENT
-The user's prior message (CONVERSATION_HISTORY) and BOT_LAST_QUESTION matter. If the bot asked "want me to flag it?" and user says "yes", that's "extend_wishlist". If bot asked "any of these work?" and user says "yes", that's "more_results" (probably means show more). If bot asked "what's your name?" and user says "Mike", that's "name_provided".
+Prior conversation matters. Use BOT_LAST_TURN to disambiguate yes/no/any replies:
+- bot asked "want me to flag it?" + user "yes" -> "extend_wishlist"
+- bot asked "any of these work?" + user "yes" -> "interested"
+- bot asked "what's your name?" + user "Mike" -> "name_provided"
+- bot offered "want me to have someone reach out?" + user "yes"/"please"/"sure"/"do that" -> "callback_yes"
+- bot asked "want to see the rest?" + user "yes"/"show all" -> "more_results"
+- bot asked "what year range?" + user "any" -> intent="sourcing", spec_clear: ["year_min","year_max"]
+- bot asked about color + user "any color"/"any" -> intent="sourcing", spec_clear: ["ext_color"]
+- bot asked "still {make}, or open to other makes?" + user "open"/"other makes" -> intent="sourcing", spec_clear: ["make"]
 
 SPEC EXTRACTION
-- "model" is the model name only (e.g. "911", "Carrera", "MC20", "296", "Bentayga"), NOT trim
-- "trim" is whatever comes after model (e.g. "Carrera GTS", "Turbo S", "GT3 Touring")
-- Lowercase makes ("porsche", not "Porsche")
-- "MC" alone is incomplete — leave model=null, will trigger model-suggestion in Python
-- Year range: "21-23 fine" → year_min=2021, year_max=2023; "2025" → both 2025; "any year" → spec_clear: ["year_min","year_max"]
-- Colors: list form, lowercase ("red" → ext_color: ["red"])
+- "model" = model name only (e.g. "911", "Carrera", "MC20", "296", "Bentayga"), NOT including the trim
+- "trim" = everything after the model (e.g. "Carrera GTS", "Turbo S", "GT3 Touring", "Speed")
+- Lowercase makes ("porsche" not "Porsche")
+- Year range: "21-23 fine" -> year_min=2021, year_max=2023; "2025" -> both 2025; "any year" -> spec_clear: ["year_min","year_max"]
+- Colors: list, lowercase ("red" -> ext_color: ["red"])
+- "MC" alone is incomplete -> leave model=null
+- If user says a budget/price ("under 200k", "around 250"), set price_hint and intent="sourcing"; never filter by it server-side
+
+COMMON MODEL -> MAKE HINTS
+Bare model numbers/names usually map to one make. When user gives just a model with no make, set the make based on these:
+- 296 / 458 / 488 / 812 (Superfast/GTS) / SF90 / F8 / Roma / Portofino / Purosangue -> ferrari
+- MC20 (Cielo) / GranTurismo (Folgore) / Quattroporte / Levante / Ghibli -> maserati
+- 911 / 718 / Cayman / Boxster / Carrera / Targa / Taycan / Macan / Cayenne / Panamera -> porsche
+- M3 / M4 / M5 / M8 / X3M / X5M / X6M / M2 / i7 / i8 -> bmw
+- AMG GT / G63 / G550 / G-Wagon / S63 / E63 / C63 / SL63 -> mercedes
+- R8 / RS3 / RS4 / RS5 / RS6 / RS7 / RSQ8 / TT RS / e-tron GT -> audi
+- Bentayga / Continental (GT/GTC) / Flying Spur / Mulsanne / Bacalar / Batur -> bentley
+- Cullinan / Ghost / Phantom / Wraith / Dawn / Spectre -> rolls-royce
+- Defender / Range Rover / RR Sport / Velar / Discovery / Evoque -> land-rover
+- DBX / DB11 / DB12 / Vantage / DBS / Valkyrie / Valhalla -> aston-martin
+- Huracan (Tecnica/STO/Performante) / Aventador / Urus / Revuelto / Temerario -> lamborghini
+- Model S / Model 3 / Model X / Model Y / Cybertruck / Roadster -> tesla
+- GT-R / NSX -> nissan / acura respectively
+
+If a bare model could match more than one make (rare), leave make=null and let the bot ask. Otherwise, fill make from the hint above so we don't waste a turn.
 
 PIVOT
-When user changes vehicle entirely (was discussing 296, now says "how about a 458"), set new make/model/trim in spec_update AND list any prior soft filters in spec_clear: ["year_min","year_max","ext_color","int_color","trim","miles_max"].
+When user changes vehicle entirely (was 296, now "how about a 458"), set new make/model/trim in spec_update AND list prior soft filters in spec_clear: ["year_min","year_max","ext_color","int_color","trim","miles_max"].
 
 BROADEN
 When user explicitly relaxes a filter ("any color", "any year", "open on trim"), put the relevant field name(s) in spec_clear.
 
-NEVER put "customer_name" in spec_clear — it's identity, not request-specific.
+NEVER put "customer_name" in spec_clear — identity, not request-specific.
 
-If both spec_update and spec_clear touch the same field, that's fine — Python will apply spec_clear first then spec_update on top.
+If both spec_update and spec_clear touch the same field, fine — Python applies spec_clear first, then spec_update on top.
 
-NO REPLY
-Do not write a reply. Do not include "reply" or "ready_to_search" or "next_state" fields. Output ONLY the three fields above. Python decides everything else."""
-
-
-def _format_history(conversation):
-    if not conversation:
-        return '(no prior turns)'
-    last = conversation[-_HISTORY_TURNS:]
-    lines = []
-    for turn in last:
-        role = turn.get('role', '?')
-        text = turn.get('text', '')
-        lines.append(f"{role}: {text}")
-    return '\n'.join(lines)
+NO REPLY TEXT
+Do not write a reply. Do not include "reply", "ready_to_search", or "next_state". Output ONLY {intent, spec_update, spec_clear}. Python decides everything else."""
 
 
-def _last_bot_question(conversation):
-    """Find the most recent bot message that ended with a question mark."""
-    for t in reversed(conversation or []):
-        if t.get('role') == 'bot':
-            text = (t.get('text') or '').strip()
-            if text.endswith('?'):
-                return text
-            return text  # last bot turn even if not a question
-    return None
+TONE_REWRITE_PROMPT = """You rewrite SMS replies in the Experience Wholesale peer-register voice.
+
+Voice rules:
+- Lowercase-friendly, brief, professional
+- No emoji, no formal greetings, no signatures, no AI disclosures, no "I'm here to help"
+- Wholesale-broker peer-to-peer tone (talking to dealers/wholesalers, not retail customers)
+- ≤160 chars when possible
+- Do NOT add ack-openers like "got it,", "ok,", "understood,", "sure,", "alright,"
+  unless the DRAFT itself starts with one. Bare questions read tighter.
+
+Hard rules:
+- Keep meaning IDENTICAL: same question, same offer, same fields named, same numbers
+- Do NOT invent prices, dealer names, options, locations, or facts
+- Do NOT repeat lines verbatim from RECENT_TURNS — vary the phrasing
+- Output ONLY the rewritten SMS — no JSON, no quotes, no preamble, no commentary"""
+
+
+def _now_ny():
+    return datetime.now(_TZ)
+
+
+def _format_current_time():
+    n = _now_ny()
+    return f"{n.strftime('%A %Y-%m-%d %H:%M')} ET"
 
 
 def _format_current_spec(row):
@@ -138,21 +191,61 @@ def _format_current_spec(row):
         parts.append(f"int_color={row['int_color']}")
     if row.get('miles_max'):
         parts.append(f"miles_max={row['miles_max']}")
+    if row.get('options'):
+        parts.append(f"options={row['options']}")
+    if row.get('price_hint'):
+        parts.append(f"price_hint={row['price_hint']}")
     if row.get('customer_name'):
         parts.append(f"customer_name={row['customer_name']}")
     return ', '.join(parts) if parts else 'EMPTY'
 
 
-def _build_user_prompt(row, new_user_msg):
+def _format_history(conversation):
+    if not conversation:
+        return '(no prior turns)'
+    last = conversation[-_HISTORY_TURNS:]
+    lines = []
+    for turn in last:
+        role = turn.get('role', '?')
+        text = turn.get('text', '')
+        lines.append(f"{role}: {text}")
+    return '\n'.join(lines)
+
+
+def _last_bot_question(conversation):
+    """Most recent bot turn (helps the extractor disambiguate yes/no replies)."""
+    for t in reversed(conversation or []):
+        if t.get('role') == 'bot':
+            return (t.get('text') or '').strip()
+    return None
+
+
+def _build_extract_prompt(row, new_user_msg):
+    """Compact prompt for the JSON-extractor pass. No search results — that's
+    a Python concern after the extractor returns intent/spec."""
     last_q = _last_bot_question(row.get('conversation') or [])
     blocks = [
         f"REQUEST_STATUS: {row.get('status', 'gathering')}",
         f"CURRENT_SPEC: {_format_current_spec(row)}",
-        f"BOT_LAST_QUESTION: {last_q!r}" if last_q else "BOT_LAST_QUESTION: (none)",
+        f"BOT_LAST_TURN: {last_q!r}" if last_q else "BOT_LAST_TURN: (none)",
         f"CONVERSATION_HISTORY:\n{_format_history(row.get('conversation') or [])}",
         f"NEW_USER_MSG: {new_user_msg}",
     ]
     return '\n\n'.join(blocks)
+
+
+def _build_rewrite_prompt(draft, recent_conv):
+    """Prompt for the tone-rewrite pass. Tiny — just draft + last 2 turns of
+    context so the rewriter doesn't repeat phrasing."""
+    convo_lines = []
+    for t in (recent_conv or [])[-2:]:
+        role = t.get('role', '?')
+        text = (t.get('text') or '').strip()
+        if text:
+            convo_lines.append(f"{role}: {text}")
+    convo_block = '\n'.join(convo_lines) if convo_lines else '(none)'
+    return (f"DRAFT: {draft}\n\n"
+            f"RECENT_TURNS (do not repeat):\n{convo_block}")
 
 
 def _parse_response(raw):
@@ -184,50 +277,80 @@ def _empty_spec_update():
     }
 
 
-def _haiku_call(user_prompt, max_tokens=300, temperature=0.1):
-    cli = _client()
-    if not cli:
+def _cerebras_call(system_prompt, user_prompt, max_tokens=2500,
+                   temperature=0.3, json_mode=True, label='extract'):
+    """Single Cerebras chat-completions call. Pure stdlib + requests, no SDK.
+    Returns the assistant text or None on failure (auth missing, HTTP error,
+    timeout, empty body).
+
+    json_mode=True forces response_format=json_object (extract pass).
+    json_mode=False returns plain text (rewrite pass).
+
+    reasoning_effort='low' on every call: gpt-oss-120b emits chain-of-thought
+    tokens before the visible answer; low effort keeps latency tight without
+    hurting quality on this kind of structured / short-form work."""
+    api_key = os.environ.get('CEREBRAS_API_KEY')
+    if not api_key:
+        print(f'[sourcing-llm:{label}] CEREBRAS_API_KEY not set', flush=True)
+        return None
+    import requests
+    import time as _time
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json',
+    }
+    payload = {
+        'model': _MODEL,
+        'max_tokens': max_tokens,
+        'temperature': temperature,
+        'reasoning_effort': 'low',
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user',   'content': user_prompt},
+        ],
+    }
+    if json_mode:
+        payload['response_format'] = {'type': 'json_object'}
+    _t0 = _time.monotonic()
+    try:
+        resp = requests.post(_CEREBRAS_URL, headers=headers, json=payload,
+                             timeout=_CEREBRAS_TIMEOUT_SEC)
+    except Exception as e:
+        _dt = (_time.monotonic() - _t0) * 1000
+        print(f'[sourcing-llm:{label}] request error after {_dt:.0f}ms: {e}', flush=True)
+        return None
+    _dt = (_time.monotonic() - _t0) * 1000
+    if resp.status_code != 200:
+        print(f'[sourcing-llm:{label}] HTTP {resp.status_code} after {_dt:.0f}ms: {resp.text[:300]}', flush=True)
         return None
     try:
-        import time as _time
-        _t0 = _time.monotonic()
-        resp = cli.messages.create(
-            model=_MODEL,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=[{
-                'type': 'text',
-                'text': SYSTEM_PROMPT,
-                'cache_control': {'type': 'ephemeral'},
-            }],
-            messages=[{'role': 'user', 'content': user_prompt}],
-        )
-        _dt = (_time.monotonic() - _t0) * 1000
-        try:
-            u = resp.usage
-            print(f'[sourcing-llm] {_dt:.0f}ms in={u.input_tokens} out={u.output_tokens} '
-                  f'cache_read={getattr(u, "cache_read_input_tokens", 0)} '
-                  f'cache_create={getattr(u, "cache_creation_input_tokens", 0)}', flush=True)
-        except Exception:
-            print(f'[sourcing-llm] {_dt:.0f}ms', flush=True)
-        if not resp.content:
-            return None
-        text_parts = [b.text for b in resp.content if getattr(b, 'type', None) == 'text']
-        return '\n'.join(text_parts).strip() if text_parts else None
+        data = resp.json()
     except Exception as e:
-        print(f'[sourcing-llm] Haiku call failed: {e}', flush=True)
+        print(f'[sourcing-llm:{label}] JSON parse error: {e} body={resp.text[:300]!r}', flush=True)
         return None
+    try:
+        u = data.get('usage') or {}
+        print(f'[sourcing-llm:{label}] {_dt:.0f}ms in={u.get("prompt_tokens")} out={u.get("completion_tokens")} model={_MODEL}', flush=True)
+    except Exception:
+        pass
+    choices = data.get('choices') or []
+    if not choices:
+        return None
+    msg = (choices[0] or {}).get('message') or {}
+    content = msg.get('content')
+    return content.strip() if content else None
 
 
 def extract(row, new_user_msg):
-    """Single Haiku turn: extract structured data only.
-    Returns dict {intent, spec_update, spec_clear} or None on failure."""
-    user_block = _build_user_prompt(row, new_user_msg)
-    raw = _haiku_call(user_block)
+    """JSON-only extraction pass. Returns dict
+    {intent, sort_pref, spec_update, spec_clear} or None on failure. No reply
+    text — Python composes that downstream."""
+    user_block = _build_extract_prompt(row, new_user_msg)
+    raw = _cerebras_call(EXTRACT_PROMPT, user_block,
+                         max_tokens=2000, json_mode=True, label='extract')
     parsed = _parse_response(raw)
     if not parsed:
         return None
-
     su = parsed.get('spec_update') or {}
     norm_su = _empty_spec_update()
     for k in norm_su:
@@ -236,80 +359,207 @@ def extract(row, new_user_msg):
     parsed['spec_update'] = norm_su
     parsed.setdefault('intent', 'unclear')
     parsed.setdefault('spec_clear', [])
+    # Normalize sort_pref to one of the four valid values or None.
+    sp = parsed.get('sort_pref')
+    if sp not in ('miles_asc', 'miles_desc', 'price_asc', 'price_desc'):
+        parsed['sort_pref'] = None
     return parsed
 
 
-# ── Spec merge helper (unchanged) ─────────────────────────────────────────
-_SCALAR_FIELDS = ('year_min', 'year_max', 'make', 'model', 'trim',
-                  'miles_max', 'must_clean_title', 'price_hint',
-                  'customer_name')
-_LIST_FIELDS = ('ext_color', 'int_color', 'options')
+def tone_rewrite(draft, recent_conv=None):
+    """Rewrite a templated reply in EW peer-register voice. Returns the
+    rewritten string, or the original draft on failure (graceful degrade —
+    we never want a tone-rewrite blip to leave the user with nothing).
+    Only call this for branches where stylistic variation helps; skip for
+    deterministic strings (stop/drop, match presentations, handoff_line)."""
+    if not draft or not draft.strip():
+        return draft
+    user_block = _build_rewrite_prompt(draft, recent_conv)
+    raw = _cerebras_call(TONE_REWRITE_PROMPT, user_block,
+                         max_tokens=300, json_mode=False, label='rewrite')
+    if not raw:
+        return draft  # fall back to deterministic draft
+    s = raw.strip()
+    # Strip any accidental wrapper quotes / backticks.
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1].strip()
+    if s.startswith('```'):
+        s = s.lstrip('`').strip()
+        if s.endswith('```'):
+            s = s[:-3].strip()
+    # Sanity: rewrite shouldn't more than double the length; if it does, the
+    # model probably rambled — fall back to draft.
+    if len(s) > max(160, len(draft) * 2):
+        print(f'[sourcing-llm:rewrite] length sanity reject ({len(s)} chars > {len(draft)*2}); using draft', flush=True)
+        return draft
+    return s or draft
 
 
-def merge_spec(row, spec_update, spec_clear=None):
-    """Merge spec_clear (null specified fields) then spec_update (overwrite
-    with non-null values). spec_update wins when both touch the same field.
-    customer_name is identity — never cleared."""
-    changes = {}
-    spec_clear = set(spec_clear or [])
-    spec_clear.discard('customer_name')
-    for k in _SCALAR_FIELDS:
-        if k in spec_clear:
-            row[k] = None
-            changes[k] = None
-        v = spec_update.get(k)
-        if v is not None and v != '':
-            row[k] = v
-            changes[k] = v
-    for k in _LIST_FIELDS:
-        if k in spec_clear:
-            row[k] = None
-            changes[k] = None
-        v = spec_update.get(k)
-        if v is not None and isinstance(v, list) and len(v) > 0:
-            v_norm = [str(x).strip().lower() for x in v if x is not None and str(x).strip()]
-            if v_norm:
-                row[k] = v_norm
-                changes[k] = v_norm
-    return changes
-
-
-# ── Mileage formatter (used by Python templates in sourcing_bot.py) ───────
-def _fmt_miles(m):
-    """'23 mi' / '9k mi' / '?'"""
-    if m is None:
-        return '?'
-    try:
-        n = int(m)
-    except Exception:
-        return '?'
-    if n < 1000:
-        return f'{n} mi'
-    return f'{round(n/1000)}k mi'
-
-
-# ── Time-aware handoff line ──────────────────────────────────────────────
 def handoff_line(name, now_et=None):
-    """Pick the right closing message based on Mon-Fri 9-5 ET rules."""
+    """Deterministic time-of-day picker for the 'we'll get back to you' line
+    after a user has expressed interest in a specific match.
+
+    Used directly (no rewrite) so wording stays predictable. Different from
+    callback_ack() which is used after the where/MSRP/details callback flow."""
     if now_et is None:
         now_et = datetime.now(_TZ)
     first = (name or '').strip().split()[0] if name else None
     h = now_et.hour
     weekday = now_et.weekday()  # 0=Mon, 6=Sun
 
-    # Mon-Fri 9am-5pm
     if weekday < 5 and 9 <= h < 17:
         line = "give us a bit, we'll come back with details"
-    # Friday after 5pm OR Saturday all day OR Sunday before 5pm
     elif (weekday == 4 and h >= 17) or weekday == 5 or (weekday == 6 and h < 17):
         line = "we'll get back to you one way or the other on monday"
-    # Sun-Thu after 5pm
     elif h >= 17 and weekday in (6, 0, 1, 2, 3):
-        line = "back to you tomorrow with details"
-    # Pre-9am weekday
+        line = "we'll come back to you tomorrow with details"
     else:
-        line = "back to you in a bit"
+        line = "we'll come back to you with details"
+    if first:
+        return f"thanks {first.lower()} — {line}."
+    return f"{line}."
+
+
+def callback_ack(name, now_et=None):
+    """Time-aware ack for the 'have someone reach out with details' flow.
+    Different deferral rules from handoff_line() per user spec (2026-05-10):
+      - Mon-Fri before 16:00  -> 'as soon as we can'
+      - Mon-Thu 16:00 onward  -> 'first thing tomorrow'
+      - Friday 16:00 onward   -> 'monday morning'
+      - Saturday / Sunday     -> 'monday morning'
+      - Mon-Fri before 09:00  -> 'first thing this morning' (treated as in-hours)
+
+    Used directly (no rewrite) — exact wording per spec, see project notes
+    in EW_FOLLOWUPS.md / sourcing-bot prompt iteration history."""
+    if now_et is None:
+        now_et = datetime.now(_TZ)
+    first = (name or '').strip().split()[0] if name else None
+    h = now_et.hour
+    weekday = now_et.weekday()  # 0=Mon, 6=Sun
+
+    if weekday == 5 or weekday == 6:
+        timing = "monday morning"
+    elif weekday == 4 and h >= 16:
+        timing = "monday morning"
+    elif weekday < 4 and h >= 16:
+        timing = "first thing tomorrow"
+    else:
+        timing = "as soon as we can"
 
     if first:
-        return f"thanks {first} — {line}."
-    return f"got it — {line}."
+        return f"thanks {first.lower()} — i'll have someone contact you at this number {timing}."
+    return f"got it — someone will contact you at this number {timing}."
+
+
+# Back-compat alias: old code paths called turn() expecting the all-in-one
+# response shape. Hybrid splits that into extract() + Python compose; if any
+# stragglers reference turn() we route to extract().
+def turn(row, new_user_msg, search_results=None, fallback_level=None):
+    return extract(row, new_user_msg)
+
+
+# ── Spec merge helper ─────────────────────────────────────────────────────
+_SCALAR_FIELDS = ('year_min', 'year_max', 'make', 'model', 'trim',
+                  'miles_max', 'must_clean_title', 'price_hint',
+                  'customer_name')
+_LIST_FIELDS = ('ext_color', 'int_color', 'options')
+
+# When spec_clear includes any of these field names, we persist the
+# corresponding relaxation tag onto the row (sourcing_requests.relaxations).
+# This is what stops the "any year -> what year?" loop: future turns see
+# 'year' in row.relaxations and skip the gathering_year branch + skip the
+# year filter in inventory search.
+_SPEC_CLEAR_TO_RELAXATION = {
+    'year_min': 'year', 'year_max': 'year',
+    'ext_color': 'ext_color',
+    'int_color': 'int_color',
+    'trim': 'trim',
+    'miles_max': 'miles_max',
+}
+
+
+def merge_spec(row, spec_update, spec_clear=None):
+    """Merge non-null values from spec_update; explicitly null any field listed
+    in spec_clear. spec_clear takes precedence so 'any color' / 'any year'
+    cleanly drops filters.
+
+    Side effect: when spec_clear includes a relaxable field, append the
+    corresponding tag to row['relaxations']. If make/model is being CHANGED
+    (pivot to a new vehicle), reset relaxations to []. Returns dict of
+    {column: new_value} changes for the SQL UPDATE — if relaxations changed,
+    'relaxations' is in changes."""
+    changes = {}
+    spec_clear = set(spec_clear or [])
+
+    # Pivot detection: if make changes, reset all relaxations.
+    new_make = (spec_update.get('make') or '').strip().lower()
+    cur_make = ((row.get('make') or '').strip().lower())
+    pivoted = bool(new_make and cur_make and new_make != cur_make)
+
+    if pivoted:
+        # On pivot: reset prior relaxations (they were about the OLD vehicle)
+        # AND if the user didn't specify a year for the new vehicle this turn,
+        # treat year as "open" so the bot pivots straight into a search instead
+        # of asking "what year?" again. User can narrow by year afterward.
+        new_relax = []
+        spec_set_year = bool(spec_update.get('year_min') or spec_update.get('year_max'))
+        if not spec_set_year:
+            new_relax.append('year')
+        row['relaxations'] = new_relax
+        changes['relaxations'] = new_relax
+
+    # spec_update wins when both spec_clear and spec_update touch the same
+    # field (clear-old-then-set-new pattern, e.g. pivot from Ferrari->Porsche
+    # where extractor lists 'trim' in spec_clear AND sets a new trim).
+    # Bug from 2026-05-10 testing: previously the spec_clear branch had
+    # `continue` which skipped the spec_update assignment, so 'turbo' got
+    # nulled and the search returned every 911.
+    for k in _SCALAR_FIELDS:
+        v = spec_update.get(k)
+        spec_update_has_value = (v is not None and v != '')
+        if k in spec_clear and not spec_update_has_value:
+            row[k] = None
+            changes[k] = None
+            continue
+        if spec_update_has_value:
+            row[k] = v
+            changes[k] = v
+    for k in _LIST_FIELDS:
+        v = spec_update.get(k)
+        v_norm = None
+        if v is not None and isinstance(v, list) and len(v) > 0:
+            v_norm = [str(x).strip().lower() for x in v
+                      if x is not None and str(x).strip()] or None
+        if k in spec_clear and not v_norm:
+            row[k] = None
+            changes[k] = None
+            continue
+        if v_norm:
+            row[k] = v_norm
+            changes[k] = v_norm
+
+    # Apply relaxations from spec_clear — only for fields that were ACTUALLY
+    # cleared (not for fields that got cleared-then-replaced by spec_update).
+    if not pivoted:
+        cur_relax = set(row.get('relaxations') or [])
+        new_relax = set(cur_relax)
+        for fld in spec_clear:
+            tag = _SPEC_CLEAR_TO_RELAXATION.get(fld)
+            if not tag:
+                continue
+            # Skip relaxation if spec_update set the same field this turn
+            # (clear-and-replace, not user-explicitly-relaxing).
+            if fld in _SCALAR_FIELDS:
+                v = spec_update.get(fld)
+                if v is not None and v != '':
+                    continue
+            elif fld in _LIST_FIELDS:
+                v = spec_update.get(fld)
+                if v and isinstance(v, list) and any(str(x).strip() for x in v if x is not None):
+                    continue
+            new_relax.add(tag)
+        if new_relax != cur_relax:
+            row['relaxations'] = sorted(new_relax)
+            changes['relaxations'] = sorted(new_relax)
+
+    return changes

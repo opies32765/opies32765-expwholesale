@@ -832,6 +832,60 @@ def _ipacket_screenshot_path(screenshot_field):
     return os.path.join(IPACKET_REPORTS_DIR, os.path.basename(s))
 
 
+def _ipacket_with_vin_fallback(cur, bid_id, vin):
+    """Fetch ipacket_lookups for bid_id; if the row has no parsed data and
+    its screenshot is missing/blank (<80KB), substitute the best same-VIN
+    row from another bid. Mirrors the /m/<token> mini-page fallback so the
+    desktop bid card and the SMS-link mini-page render the same sticker.
+    Returns the chosen row dict (possibly a sister bid's), or None."""
+    try:
+        cur.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
+        ipacket = cur.fetchone()
+    except Exception:
+        return None
+    if not ipacket or not vin:
+        return ipacket
+    _cur_path = (ipacket.get('screenshot') or '').lstrip('/')
+    _cur_size = 0
+    try:
+        if _cur_path:
+            _abs = os.path.join('/opt/expwholesale', _cur_path)
+            _cur_size = os.path.getsize(_abs) if os.path.exists(_abs) else 0
+    except Exception:
+        _cur_size = 0
+    _cur_has_data = bool(ipacket.get('total_msrp') or ipacket.get('base_price') or ipacket.get('exterior_color'))
+    if _cur_has_data or _cur_size >= 80_000:
+        return ipacket
+    try:
+        cur.execute("""SELECT * FROM ipacket_lookups
+                        WHERE vin=%s AND bid_id != %s
+                        ORDER BY looked_up_at DESC LIMIT 10""",
+                    (vin, bid_id))
+        candidates = cur.fetchall()
+        best = None
+        best_score = 0
+        for c in candidates:
+            cp = (c.get('screenshot') or '').lstrip('/')
+            cs = 0
+            try:
+                if cp:
+                    ap = os.path.join('/opt/expwholesale', cp)
+                    cs = os.path.getsize(ap) if os.path.exists(ap) else 0
+            except Exception:
+                pass
+            has_data = bool(c.get('total_msrp') or c.get('base_price') or c.get('exterior_color'))
+            score = (1_000_000 if has_data else 0) + cs
+            if score > best_score:
+                best_score = score
+                best = c
+        if best and best_score > _cur_size:
+            print(f'[ipacket-fallback] bid={bid_id} vin={vin} -> sister bid_id={best["bid_id"]} (score {best_score} vs {_cur_size})', flush=True)
+            return best
+    except Exception as _e:
+        print(f'[ipacket-fallback] error bid={bid_id}: {_e}', flush=True)
+    return ipacket
+
+
 def _extract_sticker_options(text):
     """Parse factory option line items from sticker text (OCR or DOM).
     Mirrors enrich/ipacket.py _extract_options so EW + worker agree."""
@@ -952,55 +1006,35 @@ def _parse_sticker_text(text):
 
 
 def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
-    """Extract VIN from image. Google Vision first (cheap), Claude fallback."""
+    """Extract VIN from image.
+
+    Order (2026-05-10): Gemini 2.5 Pro PRIMARY (handwriting prompt + check-digit
+    validation), then Google Vision (cheap OCR fallback) and Gemini Flash as
+    cross-checks if Pro gave nothing valid. Every layer now gates on
+    vin_check_digit_valid() so structurally-valid-but-wrong VINs (e.g. SS read
+    as 55) can no longer slip through silently. Pre-2026-05-10 the order was
+    Vision → Flash → Pro and only Pro validated; that masked OCR errors as
+    "valid 17-char strings" and cost us ingestion accuracy."""
     # v4 routing: if call originated from EW_TEST_USER_PHONE, try the home-machine
     # Qwen2.5-VL-7B + LoRA first. Fall through to Gemini path on miss/timeout.
     if should_use_v4():
         v4_vin = v4_extract(file_bytes, task='vin')
-        if v4_vin and VIN_RE.match(v4_vin):
-            print(f'[OCR] VIN via v4 (test user): {v4_vin}', flush=True)
+        if v4_vin and VIN_RE.match(v4_vin) and vin_check_digit_valid(v4_vin):
+            print(f'[OCR] VIN via v4 (test user, check digit OK): {v4_vin}', flush=True)
             return v4_vin
-        print('[OCR] v4 missed/skipped, falling back to Gemini path', flush=True)
-    # Try Google Vision first — ~$0.0015/call vs Claude ~$0.05/call
-    text = _google_vision_ocr(file_bytes)
-    if text:
-        up = text.upper()
-        # VIN regex: 17 chars, no I/O/Q
-        match = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', up)
-        if match:
-            print(f'[OCR] VIN via Google Vision: {match.group(0)}', flush=True)
-            return match.group(0)
-        # Fallback: 17-char sequences with O/I/Q (likely OCR misreads) —
-        # try substituting O→0, I→1, Q→0 to recover
-        for m in re.finditer(r'\b[A-Z0-9]{17}\b', up):
-            candidate = m.group(0).replace('O', '0').replace('I', '1').replace('Q', '0')
-            if VIN_RE.match(candidate):
-                print(f'[OCR] VIN via Google Vision (O→0 recovered): {candidate}', flush=True)
-                return candidate
-    print('[OCR] Google Vision missed, falling back to Gemini Flash', flush=True)
+        print('[OCR] v4 missed/skipped, going to Gemini Pro', flush=True)
 
-    # Fallback 1: Gemini Flash (printed text, still cheap)
-    result = gemini_call(VIN_PROMPT, image_bytes=file_bytes, mime=media_type,
-                         model='gemini-2.5-flash', max_tokens=100)
-    if result:
-        result = result.strip().upper()
-        if VIN_RE.match(result):
-            print(f'[OCR] VIN via Gemini Flash: {result}', flush=True)
-            return result
-
-    # Fallback 2: Gemini Pro (handles handwriting + ambiguous text)
-    print('[OCR] Gemini Flash missed, trying Gemini Pro (handwriting)', flush=True)
+    # Primary: Gemini 2.5 Pro with handwriting prompt + 2 attempts.
     hw_prompt = (
         'Read the VIN from this image. The image may contain a handwritten note, '
-        'a VIN sticker, or any vehicle identifier. Apply strict VIN rules:\n'
+        'a VIN sticker, a license plate, or any vehicle identifier. Apply strict VIN rules:\n'
         '- Exactly 17 characters (A-Z, 0-9)\n'
         '- Letters I, O, Q are NEVER valid — substitute 1, 0, 0\n'
-        '- Handwriting: resolve 1/7, 0/O/Q, 5/S/G, 2/Z, 4/Y/A confusion\n'
+        '- Handwriting / low-DPI: resolve 1/7, 0/O/Q, 5/S/G, 2/Z, 4/Y/A, 8/B confusion\n'
         '- The 9th character is a math check digit. Common values: 0-9 or X.\n'
         '- Common prefixes: 1G, 1F, 1C, 1H, 2H, 5J, 5Y, 7S, WP, WB, WD, YV\n\n'
         'Reply with ONLY the 17-char VIN. No other text.'
     )
-    # Collect candidates — may run twice if first fails check digit
     candidates = []
     for attempt in range(2):
         result = gemini_call(hw_prompt, image_bytes=file_bytes, mime=media_type,
@@ -1014,12 +1048,42 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
         vin = m.group(0)
         candidates.append(vin)
         if vin_check_digit_valid(vin):
-            print(f'[OCR] VIN via Gemini Pro (check digit OK): {vin}', flush=True)
+            print(f'[OCR] VIN via Gemini Pro (primary, check digit OK): {vin}', flush=True)
             return vin
-
-    # If no check-digit-valid VIN found, return the first candidate with a warning
     if candidates:
-        print(f'[OCR] VIN via Gemini Pro (check digit FAILED, manual review needed): {candidates[0]}', flush=True)
+        print(f'[OCR] Gemini Pro returned candidates but none passed check digit; cross-checking with Vision/Flash. Pro guesses: {candidates}', flush=True)
+
+    # Cross-check 1: Google Vision OCR (cheap). Accept ONLY if check digit valid.
+    text = _google_vision_ocr(file_bytes)
+    if text:
+        up = text.upper()
+        for m in re.finditer(r'\b[A-HJ-NPR-Z0-9]{17}\b', up):
+            cand = m.group(0)
+            if vin_check_digit_valid(cand):
+                print(f'[OCR] VIN via Google Vision cross-check (check digit OK): {cand}', flush=True)
+                return cand
+        # I/O/Q substitution salvage
+        for m in re.finditer(r'\b[A-Z0-9]{17}\b', up):
+            cand = m.group(0).replace('O', '0').replace('I', '1').replace('Q', '0')
+            if VIN_RE.match(cand) and vin_check_digit_valid(cand):
+                print(f'[OCR] VIN via Google Vision (O->0 recovered, check digit OK): {cand}', flush=True)
+                return cand
+
+    # Cross-check 2: Gemini Flash. Accept ONLY if check digit valid.
+    flash_result = gemini_call(VIN_PROMPT, image_bytes=file_bytes, mime=media_type,
+                               model='gemini-2.5-flash', max_tokens=100)
+    if flash_result:
+        flash_vin = flash_result.strip().upper()
+        m = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', flash_vin)
+        if m and vin_check_digit_valid(m.group(0)):
+            print(f'[OCR] VIN via Gemini Flash cross-check (check digit OK): {m.group(0)}', flush=True)
+            return m.group(0)
+
+    # No layer produced a check-digit-valid VIN. Return the first Pro candidate
+    # (best informed guess) with a manual-review log line so the bid still has
+    # SOMETHING to work from instead of NULL.
+    if candidates:
+        print(f'[OCR] All layers failed check digit; returning Pro best-guess for manual review: {candidates[0]}', flush=True)
         return candidates[0]
     return None
 
@@ -1514,13 +1578,9 @@ def bid_detail(bid_id):
     except Exception:
         pass
 
-    # iPacket sticker data
-    ipacket_data = None
-    try:
-        cur.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
-        ipacket_data = cur.fetchone()
-    except Exception:
-        pass
+    # iPacket sticker data — same-VIN fallback for blank/failed captures
+    # (mirrors /m/<token> mini-page so desktop bid card matches the SMS link).
+    ipacket_data = _ipacket_with_vin_fallback(cur, bid_id, bid.get('vin'))
 
     # Tesla auto-decode (if VIN is Tesla)
     tesla_data = None
