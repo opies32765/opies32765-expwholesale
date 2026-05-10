@@ -9128,9 +9128,13 @@ def api_ipacket_submit():
         _has_options = bool(_raw.get('options'))
         _text_chars = int(_raw.get('text_chars') or 0)
         if not _has_data and not _has_options and _text_chars < 200:
-            print(f'[ipacket-submit] REJECTED empty submission for bid={data.get("bid_id")} '
-                  f'(no msrp/base/colors/options, text<200). Worker should retry or mark not_available=True.', flush=True)
-            return jsonify({'error': 'empty submission rejected — set not_available=True if iPacket genuinely had no sticker'}), 422
+            # 2026-05-10: Don't reject — convert to not_available=True so the
+            # bid pipeline doesn't hang waiting on iPacket. The mini-page
+            # same-VIN fallback (Layer 3) will surface a sibling sticker if
+            # any other bid for the same VIN captured one successfully.
+            print(f'[ipacket-submit] empty submission bid={data.get("bid_id")} → coercing not_available=True so assess-gate proceeds', flush=True)
+            data['not_available'] = True
+            data['unavailable_reason'] = data.get('unavailable_reason') or 'empty capture (auto-coerced — likely iPacket repeat-VIN rate-limit)' 
 
     db = get_db()
     cur = db.cursor()
