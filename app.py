@@ -2483,6 +2483,17 @@ def twilio_webhook():
     db.commit()
     db.close()
 
+    # Immediate creation ack so the sender knows we got it. The full bid
+    # card SMS lands later via _notify_driver_if_pending once the
+    # assessment completes.
+    print(f'[bid-ack] entering for bid={bid_id} phone={from_phone!r}', flush=True)
+    if from_phone and not from_phone.startswith('field:'):
+        try:
+            _ack_result = send_sms(from_phone, f"Bid #{bid_id} received — give us a minute.")
+            print(f'[bid-ack] sent bid={bid_id} result={_ack_result}', flush=True)
+        except Exception as _ack_e:
+            print(f'[bid-ack] error bid={bid_id}: {_ack_e}', flush=True)
+
     # Owner-portal push fan-out (best-effort, never blocks)
     _fire_owner_new_bid(bid_id)
 
@@ -9128,13 +9139,15 @@ def api_ipacket_submit():
         _has_options = bool(_raw.get('options'))
         _text_chars = int(_raw.get('text_chars') or 0)
         if not _has_data and not _has_options and _text_chars < 200:
-            # 2026-05-10: Don't reject — convert to not_available=True so the
-            # bid pipeline doesn't hang waiting on iPacket. The mini-page
-            # same-VIN fallback (Layer 3) will surface a sibling sticker if
-            # any other bid for the same VIN captured one successfully.
-            print(f'[ipacket-submit] empty submission bid={data.get("bid_id")} → coercing not_available=True so assess-gate proceeds', flush=True)
+            # 2026-05-10: Worker should never submit empty fields with
+            # not_available=False — worker_main.py was patched to always
+            # call ew_submit_ipacket with not_available=True on
+            # error/skip paths. This server-side guard is the safety net
+            # in case a worker still slips through; coerce to NA rather
+            # than reject so the assess-gate doesn't hang.
+            print(f'[ipacket-submit] empty submission bid={data.get("bid_id")} from {data.get("worker_id")} — coercing to not_available=True (worker bug — worker_main.py should have submitted NA explicitly)', flush=True)
             data['not_available'] = True
-            data['unavailable_reason'] = data.get('unavailable_reason') or 'empty capture (auto-coerced — likely iPacket repeat-VIN rate-limit)' 
+            data['unavailable_reason'] = data.get('unavailable_reason') or 'empty capture (server-coerced safety net — worker should have set not_available=True)' 
 
     db = get_db()
     cur = db.cursor()

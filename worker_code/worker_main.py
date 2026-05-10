@@ -498,7 +498,23 @@ def process_one_bid(item):
             msrp = ipkt.get("total_msrp") or 0
             print(f"  iPacket {'OK' if ok else 'FAIL'}: MSRP=${msrp:,}")
     else:
-        print(f"  iPacket skipped: {ipkt.get('error') if ipkt else 'no result'}")
+        # 2026-05-10: ALWAYS submit something so the assess-gate has
+        # visibility. Previously this branch printed 'skipped' and let
+        # phase=done land on bid_phase_progress without a corresponding
+        # ipacket_lookups row → assess-gate hung forever waiting on
+        # ipkt=True. Now we submit not_available=True with the error so
+        # the bid progresses instead of stalling.
+        _err = ipkt.get('error') if ipkt else 'no result'
+        print(f"  iPacket skipped: {_err} — submitting not_available")
+        try:
+            ok = ew_submit_ipacket({
+                "bid_id": bid_id, "vin": vin,
+                "not_available": True,
+                "unavailable_reason": f"worker error: {_err}",
+            })
+            print(f"  iPacket {'OK' if ok else 'FAIL'}: skipped→NA")
+        except Exception as _se:
+            print(f"  iPacket NA-submit failed: {_se}")
     _post_phase(bid_id, "ipacket", "done")
 
     # Successful bid pipeline → 5 min of synthetic_ok credit for auto-promote
