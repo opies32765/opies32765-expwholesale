@@ -130,6 +130,26 @@ MAKE_NORMALIZE = {
     'chevy': 'Chevrolet', 'mb': 'Mercedes-Benz',
 }
 
+# Whitelist of valid single-token makes (lowercase). Used by _parse_ymm_from_url
+# to reject when the post-year token isn't a real make — e.g. Bentley Denver's
+# slug `bentayga-ewb-bentley-2024-azure-rc026442` puts the make mid-slug, so
+# the post-year token is `azure` (a color). Without this gate the URL parser
+# emitted `make=Azure, model=Rc026442` and the og:title parser (which would
+# have produced `Bentley Bentayga`) was blocked by the existing-value guard
+# in extract_vehicle. Set covers the makes we'd plausibly see at the kinds
+# of dealers EW onboards (mass-market + luxury + exotic); extend as needed.
+_KNOWN_SINGLE_MAKES = frozenset({
+    'acura', 'audi', 'bentley', 'bmw', 'bugatti', 'buick', 'cadillac',
+    'chevrolet', 'chevy', 'chrysler', 'dodge', 'ferrari', 'fiat', 'ford',
+    'genesis', 'gmc', 'honda', 'hummer', 'hyundai', 'infiniti', 'jaguar',
+    'jeep', 'kia', 'koenigsegg', 'lamborghini', 'lexus', 'lincoln',
+    'lotus', 'maserati', 'maybach', 'mazda', 'mclaren', 'mercedes', 'mini',
+    'mitsubishi', 'nissan', 'pagani', 'plymouth', 'polestar', 'pontiac',
+    'porsche', 'ram', 'rivian', 'saab', 'saturn', 'scion', 'shelby',
+    'smart', 'subaru', 'suzuki', 'tesla', 'toyota', 'volkswagen', 'volvo',
+    'vw', 'mb', 'ineos',
+})
+
 
 # ── DB helpers ───────────────────────────────────────────────────────────
 def get_conn():
@@ -202,7 +222,11 @@ def detect_platform(html):
     # Must be checked BEFORE generic WordPress detection.
     if 'aanwordpress' in h or '/themes/aan' in h or '/api/cars' in h:
         return ('aan', 'api')
-    if 'ddc-' in h or 'dealer.com' in h:
+    # dealer.com — fingerprint ONLY the CMS markers, not the analytics tag.
+    # `analytics.dealer.com` is loaded by many non-dealer.com sites for ad
+    # attribution (e.g. Mark Motors, dealer 18 — false-positive 2026-05-10).
+    if 'ddc-' in h or 'cdn.dealer.com' in h or 'cms.dealer.com' in h \
+            or 'static.dealer.com' in h:
         return ('dealer.com', 'jsonld')
     if 'dealerinspire' in h or 'di-sites' in h:
         return ('dealerinspire', 'jsonld')
@@ -224,6 +248,23 @@ def detect_platform(html):
     # handles it; this fingerprint exists to skip the $1-3 AI-discovery spawn.
     if 'dealeron.com' in h or 'dlron.us' in h or '/dealeron.js' in h:
         return ('dealeron', 'sitemap+jsonld')
+    # Greenlight Automotive Solutions — custom React-CRA SPA hosted by
+    # greenlightautomotivesolutions.com (Brooklyn agency). Their VDP image
+    # CDN is s3-us-west-2.amazonaws.com/ethosautos/vdp/. Mark Motors uses
+    # it; any future Greenlight dealer will match the same fingerprints.
+    if 'greenlightautomotivesolutions.com' in h \
+            or 'ethosautos/vdp/' in h \
+            or '/bridge/inventory/inventory.php' in h:
+        return ('greenlight', 'api')
+    # RideMotive — Next.js App Router + RideMotive backend (Tactical Fleet,
+    # tfc.app.ridemotive.com). SSR HTML is empty; data hydrates client-side.
+    # Detail pages emit clean schema.org Car JSON-LD once rendered. Scanner
+    # must run all fetches through FlareSolverr (preferred_tier='flaresolverr').
+    # Fingerprint: 'omniscience.ridemotive.com' is in every page's analytics
+    # bundle — check it BEFORE the generic-Next.js path so we get the
+    # ridemotive handler instead of falling through to 'custom'.
+    if 'app.ridemotive.com' in h or 'omniscience.ridemotive.com' in h:
+        return ('ridemotive', 'jsonld+flaresolverr')
     if 'wp-content' in h or 'wp-includes' in h:
         return ('wordpress', 'jsonld+html')
     if 'vinsolutions' in h:
@@ -232,6 +273,49 @@ def detect_platform(html):
 
 
 # ── AAN platform — JSON API extractor ───────────────────────────────────
+def _fetch_aan_feed(base_url, sess):
+    """Return the AAN inventory JSON list, trying both endpoint variants.
+
+    Older AAN sites (Marino, Marshall Goldman): GET /api/cars → JSON array.
+    Newer AAN sites (Nuccio, post-2024 aanWordpress build): /api/cars is
+    routed to a 404 PNG and the live feed is at
+    /isapi_xml.php?module=inventory&pageID=<N>, where <N> is hardcoded
+    per-dealer inside scripts/inventory_base.js' caller — the dealer's
+    /inventory/ page exposes it as `let pageID = 'NNN'`. Field shape is
+    identical, so _normalize_aan_vehicle handles either source.
+
+    Returns a list (possibly empty) on success, None when neither endpoint
+    yields valid JSON — matches the contract fetch_aan_inventory expects.
+    """
+    code, _f, body = fetch(urljoin(base_url, '/api/cars'), sess)
+    if code == 200 and body:
+        try:
+            d = _json.loads(body)
+            if isinstance(d, list):
+                return d
+        except Exception:
+            pass
+    # Fallback: extract pageID from /inventory/ HTML and hit isapi_xml.
+    code, _f, body = fetch(urljoin(base_url, '/inventory/'), sess)
+    if code != 200 or not body:
+        return None
+    text = body if isinstance(body, str) else body.decode('utf-8', 'ignore')
+    m = re.search(r"pageID\s*=\s*['\"](\d+)['\"]", text)
+    if not m:
+        return None
+    page_id = m.group(1)
+    code, _f, body = fetch(
+        urljoin(base_url, f'/isapi_xml.php?module=inventory&pageID={page_id}'),
+        sess)
+    if code != 200 or not body:
+        return None
+    try:
+        d = _json.loads(body)
+    except Exception:
+        return None
+    return d if isinstance(d, list) else None
+
+
 def fetch_aan_inventory(base_url, sess):
     """AAN dealers expose the full live inventory at /api/cars as a JSON array.
     One call returns everything — VIN, YMM, trim, colors, miles, price, photos,
@@ -239,12 +323,8 @@ def fetch_aan_inventory(base_url, sess):
 
     Returns a list of normalized vehicle dicts, or None if the API is unreachable.
     """
-    code, _f, body = fetch(urljoin(base_url, '/api/cars'), sess)
-    if code != 200 or not body:
-        return None
-    try:
-        data = _json.loads(body)
-    except Exception:
+    data = _fetch_aan_feed(base_url, sess)
+    if data is None:
         return None
     if not isinstance(data, list):
         return None
@@ -374,6 +454,255 @@ def _normalize_aan_vehicle(item, base_url):
         '_aan_coming_soon': coming_soon,
     }
     if not (out.get('vin') or out.get('make') or out.get('year')):
+        return None
+    return out
+
+
+# ── Greenlight Automotive Solutions platform extractor ─────────────────
+# Custom React-CRA SPA shipped by greenlightautomotivesolutions.com (Brooklyn
+# agency). Frontend hits a per-origin `/bridge/inventory/inventory.php` PHP
+# endpoint with `?dealership_id=<slug>&sort_inventory=true` and gets back the
+# entire inventory as plain JSON — no auth, no pagination, no FlareSolverr
+# needed. dealership_id is embedded in the JS bundle as `dealership_id=<slug>`
+# (e.g. `wholesale-262` for Mark Motors). We auto-extract on first scan and
+# cache it in dealers.scrape_config->>'dealership_id' to avoid the bundle
+# round-trip on every run.
+
+_GREENLIGHT_BUNDLE_RE = re.compile(
+    r'<script[^>]+src=["\']([^"\']*static/js/main\.[^"\']+\.js)["\']', re.I)
+# Bundle stores it as an object literal (`dealership_id:"wholesale-262"`)
+# in the axios params block — NOT as a URL query string. Anchor near the
+# `dealership_id` token so we don't pick up unrelated slug-shaped strings
+# elsewhere in the 2MB bundle (e.g. CSS class names, asset hashes).
+_GREENLIGHT_ID_RE = re.compile(
+    r'dealership_id\s*[:=]\s*["\']([a-z]+-\d{2,6})["\']', re.I)
+
+
+def _greenlight_dealership_id(base_url, sess):
+    """Find the dealership_id slug for this Greenlight-hosted dealer by
+    pulling the main bundle and grepping for the inventory.php query string.
+    Returns the slug (e.g. 'wholesale-262') or None."""
+    code, _f, body = fetch(base_url, sess)
+    if code != 200 or not body:
+        return None
+    m = _GREENLIGHT_BUNDLE_RE.search(body)
+    if not m:
+        return None
+    bundle_url = urljoin(base_url, m.group(1))
+    code, _f, bjs = fetch(bundle_url, sess)
+    if code != 200 or not bjs:
+        return None
+    bm = _GREENLIGHT_ID_RE.search(bjs)
+    return bm.group(1) if bm else None
+
+
+def fetch_greenlight_inventory(base_url, sess, dealership_id=None):
+    """Greenlight bridge API. Returns a list of normalized vehicle dicts,
+    or None if the API isn't reachable."""
+    if not dealership_id:
+        dealership_id = _greenlight_dealership_id(base_url, sess)
+        if not dealership_id:
+            return None
+    api_url = urljoin(
+        base_url,
+        f'/bridge/inventory/inventory.php?dealership_id={dealership_id}'
+        f'&sort_inventory=true')
+    code, _f, body = fetch(api_url, sess)
+    if code != 200 or not body:
+        return None
+    try:
+        data = _json.loads(body)
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    vehicles = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        v = _normalize_greenlight_vehicle(item, base_url)
+        if v:
+            vehicles.append(v)
+    return vehicles
+
+
+def _normalize_greenlight_vehicle(item, base_url):
+    vin = (item.get('vin') or '').strip().upper()
+
+    def _int(k):
+        raw = item.get(k)
+        if raw in (None, '', '0'):
+            return None
+        try:
+            return int(str(raw).replace(',', '').replace('$', '').strip())
+        except (ValueError, TypeError):
+            return None
+
+    year_raw = item.get('year')
+    year = int(year_raw) if year_raw and str(year_raw).isdigit() else None
+
+    # image_urls is a CSV string with embedded double-quotes per record:
+    #   "\"https://...jpg,https://...jpg\""
+    # Per the React bundle's own parse: strip wrapping quotes, then split(',').
+    photos = []
+    raw_imgs = item.get('image_urls') or ''
+    if isinstance(raw_imgs, str) and raw_imgs:
+        clean = raw_imgs.strip().strip('"').replace('"', '')
+        photos = [p.strip() for p in clean.split(',') if p.strip()]
+    elif isinstance(raw_imgs, list):
+        photos = [str(p) for p in raw_imgs if p]
+
+    # VDP URL: prefer the API's prebuilt vdp_url slug; fall back to the React
+    # convention `used-<vin>` when missing.
+    vdp_slug = (item.get('vdp_url') or '').strip()
+    if not vdp_slug and vin:
+        vdp_slug = f'used-{vin}'
+    url = urljoin(base_url, f'/vehicle-details/{vdp_slug}') if vdp_slug else None
+
+    out = {
+        'vin': vin,
+        'year': year,
+        'make': (item.get('make') or '').strip() or None,
+        'model': (item.get('model') or '').strip() or None,
+        'trim': (item.get('trim') or '').strip() or None,
+        'ext_color': (item.get('exterior_color') or '').strip() or None,
+        'int_color': (item.get('interior_color') or '').strip() or None,
+        'body_style': (item.get('body_style') or '').strip() or None,
+        'stock_number': (item.get('stockno') or '').strip() or None,
+        'mileage': _int('mileage'),
+        'price': _int('price') or _int('listing_price'),
+        'url': url,
+        'photo_url': photos[0] if photos else None,
+        'photos': photos,
+        'location': (item.get('location') or '').strip() or None,
+    }
+    if not (out.get('vin') or (out.get('make') and out.get('year'))):
+        return None
+    return out
+
+
+# ── RideMotive platform extractor (Algolia-backed) ─────────────────────
+# RideMotive (tacticalfleet.com and the 282K-vehicle network behind
+# tfc.app.ridemotive.com) ships search-only Algolia credentials in the SSR
+# HTML. One POST per location yields the entire dealer's inventory with
+# 160+ structured fields. Locations are derived from VDP URL suffixes:
+# tacticalfleet.com sitemap entries end in `-2358` (Charlotte) or `-2359`
+# (Dallas) — that trailing integer IS the Algolia dealer_id filter.
+# Falls back to discover_via_ridemotive (FlareSolverr render) if Algolia
+# is unreachable for any reason.
+
+_RIDEMOTIVE_ALGOLIA_APP = 'G58LKO3ETJ'
+_RIDEMOTIVE_ALGOLIA_KEY = 'cc3dce06acb2d9fc715bc10c9a624d80'
+_RIDEMOTIVE_INDEX = 'production-inventory-global_price_desc'
+_RIDEMOTIVE_DEALER_RE = re.compile(r'/inventory/[^/<"\s]+-(\d{3,5})(?=[<"\s])')
+
+
+def _ridemotive_dealer_ids(base_url, sess):
+    """Discover the set of Algolia dealer_ids for this site by scanning the
+    sitemap for VDP URLs and extracting the trailing -NNN integer. Returns
+    a set of ints (usually 1-3 per site)."""
+    ids = set()
+    try:
+        code, _f, body = fetch(urljoin(base_url, '/sitemap.xml'), sess)
+        if code != 200 or not body:
+            return ids
+        for m in _RIDEMOTIVE_DEALER_RE.finditer(body):
+            try:
+                ids.add(int(m.group(1)))
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return ids
+
+
+def fetch_ridemotive_inventory(base_url, sess):
+    """Pull all live inventory across this site's dealer_ids via Algolia.
+    Returns a list of normalized vehicle dicts, or None if Algolia call fails.
+    """
+    dealer_ids = _ridemotive_dealer_ids(base_url, sess)
+    if not dealer_ids:
+        return None
+    algolia_url = (f'https://{_RIDEMOTIVE_ALGOLIA_APP}-dsn.algolia.net'
+                   f'/1/indexes/{_RIDEMOTIVE_INDEX}/query')
+    headers = {
+        'X-Algolia-Application-Id': _RIDEMOTIVE_ALGOLIA_APP,
+        'X-Algolia-API-Key':       _RIDEMOTIVE_ALGOLIA_KEY,
+        'Content-Type':            'application/json',
+        'User-Agent':              sess.headers.get('User-Agent', 'Mozilla/5.0'),
+    }
+    vehicles = []
+    seen_vins = set()
+    for did in sorted(dealer_ids):
+        # hitsPerPage=1000 returns the whole dealership in one shot; no site
+        # in the network currently has >1000 listings.
+        payload = {'params': f'hitsPerPage=1000&page=0&filters=dealer_id%3D{did}'}
+        try:
+            r = requests.post(algolia_url, headers=headers, json=payload,
+                              timeout=20)
+            j = r.json()
+        except Exception as e:
+            print(f'  [ridemotive] dealer {did} algolia error: {e}', flush=True)
+            continue
+        hits = j.get('hits') or []
+        for h in hits:
+            v = _normalize_ridemotive_vehicle(h, base_url, did)
+            if not v:
+                continue
+            vin = v.get('vin') or ''
+            if vin and vin in seen_vins:
+                continue
+            if vin:
+                seen_vins.add(vin)
+            vehicles.append(v)
+    return vehicles
+
+
+def _normalize_ridemotive_vehicle(hit, base_url, dealer_id):
+    vin = (hit.get('vin') or '').strip().upper()
+
+    def _int(v):
+        if v in (None, '', '0'):
+            return None
+        try:
+            return int(str(v).replace(',', '').replace('$', '').strip())
+        except (ValueError, TypeError):
+            return None
+
+    year = _int(hit.get('make_year'))
+
+    # VDP URL slug: mirror the site's own rule. Hyphen-join non-empty
+    # fields, replace anything outside [A-Za-z0-9-] with underscore.
+    parts = [hit.get(k) for k in
+             ('car_condition', 'make_year', 'make', 'model', 'car_trim', 'vin')]
+    raw = '-'.join(str(p) for p in parts if p)
+    slug = re.sub(r'[^a-zA-Z0-9-]', '_', raw)
+    # Site uses trailing -<dealer_id> on every VDP URL.
+    url = urljoin(base_url, f'/inventory/{slug}-{dealer_id}')
+
+    # images is a list of CDN keys; full URL is images.app.ridemotive.com/<key>
+    imgs = hit.get('images') or []
+    photos = [f'https://images.app.ridemotive.com/{k}' for k in imgs
+              if isinstance(k, str) and k]
+
+    out = {
+        'vin': vin,
+        'year': year,
+        'make': (hit.get('make') or '').strip() or None,
+        'model': (hit.get('model') or '').strip() or None,
+        'trim': (hit.get('car_trim') or '').strip() or None,
+        'ext_color': (hit.get('exterior_color') or hit.get('ext_color') or '').strip() or None,
+        'int_color': (hit.get('interior_color') or hit.get('int_color') or '').strip() or None,
+        'body_style': (hit.get('body_style') or hit.get('body') or '').strip() or None,
+        'stock_number': (hit.get('stock_number') or '').strip() or None,
+        'mileage': _int(hit.get('odometer')) or _int(hit.get('mileage')),
+        'price': _int(hit.get('price')),
+        'url': url,
+        'photo_url': photos[0] if photos else None,
+        'photos': photos,
+        'location': (hit.get('dealership') or '').strip() or None,
+    }
+    if not (out.get('vin') or (out.get('make') and out.get('year'))):
         return None
     return out
 
@@ -664,6 +993,47 @@ def _normalize_dealer_inspire_vehicle(item, base_url):
 
 
 # ── URL discovery ────────────────────────────────────────────────────────
+def discover_via_ridemotive(base_url, sess):
+    """RideMotive sites (Tactical Fleet) hide all VDP URLs behind client-side
+    React hydration. Sitemap.xml only carries the homepage + a single generic
+    /inventory link, no per-VDP entries. The homepage exposes one inventory
+    page per location at /cars/{slug}-inventory; rendering each via the
+    active fetch tier (must be FlareSolverr) yields a hydrated DOM with
+    /inventory/Used-{year}-{make}-{model}-{vin}-{stockid} hrefs.
+
+    Caller is expected to have set _CURRENT_TIER['tier'] = 'flaresolverr'
+    before this runs; otherwise the rendered hrefs won't be present.
+    """
+    found = set()
+    code, _f, home = fetch(base_url, sess)
+    if code != 200 or not home:
+        return []
+    # Find every /cars/{slug}-inventory link advertised on the homepage.
+    location_paths = set(re.findall(r'href="(/cars/[a-z0-9-]+-inventory)"', home))
+    if not location_paths:
+        # Fallback: assume single-store site exposes /inventory.
+        location_paths = {'/inventory'}
+    for path in location_paths:
+        url = urljoin(base_url, path)
+        # FlareSolverr's request.get returns the DOM as soon as the page's
+        # `load` event fires, which can race the SPA's data hydration. If
+        # we get 0 VDP hrefs on first try, retry up to 2 more times — each
+        # retry hits a fresh Chromium instance, giving the React app another
+        # chance to populate the inventory grid before the snapshot.
+        per_loc = set()
+        for attempt in range(3):
+            code, _f, body = fetch(url, sess)
+            if code != 200 or not body:
+                continue
+            for m in re.finditer(r'href="(/inventory/[^"#?]+)"', body):
+                per_loc.add(urljoin(base_url, m.group(1)))
+            if per_loc:
+                break
+            time.sleep(2)
+        found |= per_loc
+    return list(found)
+
+
 def discover_via_sitemap(base_url, sess):
     """Pull inventory URLs from sitemap(s). Returns list of URLs (deduped).
     Side effect: populates _SITEMAP_LASTMOD[url] with the <lastmod> value per URL
@@ -1072,7 +1442,10 @@ def _parse_ymm_from_url(url):
         tokens = tokens[:-1]
     if not tokens:
         return {'year': year}
-    # Make = known-compound-2-token OR single token
+    # Make = known-compound-2-token OR single token. Only emit when the
+    # candidate is actually a known make; otherwise the slug is non-standard
+    # (e.g. Bentley Denver puts model first, make mid-slug) and we should
+    # let the title-tag parser fill year+make+model instead.
     make = None
     if len(tokens) >= 2:
         two = f'{tokens[0]}-{tokens[1]}'
@@ -1081,8 +1454,13 @@ def _parse_ymm_from_url(url):
             tokens = tokens[2:]
     if make is None and tokens:
         first = tokens[0]
-        make = MAKE_NORMALIZE.get(first, _title_case(first))
-        tokens = tokens[1:]
+        if first in _KNOWN_SINGLE_MAKES or first in MAKE_NORMALIZE:
+            make = MAKE_NORMALIZE.get(first, _title_case(first))
+            tokens = tokens[1:]
+        else:
+            # Unknown first token — slug shape isn't year-make-model-…
+            # Skip make/model/trim emission so the title parser wins.
+            return {'year': year}
     # Model = next token (take single word — most model names are one word)
     model = _title_case(tokens[0]) if tokens else None
     # Trim = everything after model
@@ -2060,6 +2438,72 @@ class DealerScanner:
             stats['tier'] = _CURRENT_TIER['tier']
 
             # 2. Platform-specific fast paths first
+
+            # Greenlight Automotive Solutions — JSON bridge API. One curl
+            # returns full inventory, no FlareSolverr. The greenlight fingerprint
+            # lives inside the JS bundle, not the homepage HTML, so live-detect
+            # can't see it — gate on the dealer's STORED platform (mirrors the
+            # dealerinspire-algolia fast path's logic).
+            if self.dealer.get('platform') == 'greenlight':
+                platform = 'greenlight'  # so _update_dealer preserves it
+                cached_did = None
+                cfg = self.dealer.get('scrape_config') or {}
+                if isinstance(cfg, dict):
+                    cached_did = cfg.get('dealership_id')
+                gl = fetch_greenlight_inventory(self.base_url, self.sess,
+                                                dealership_id=cached_did)
+                if gl is not None:
+                    if not gl:
+                        prior = self._zero_vehicle_abort_check()
+                        if prior:
+                            stats['status'] = 'blocked'
+                            stats['error'] = (
+                                f'greenlight bridge returned 0 vehicles but '
+                                f'{prior} were active — dealership_id may have '
+                                f'rotated, scan aborted, inventory preserved'
+                            )
+                            self._update_dealer(platform, 'api', scan_id,
+                                                stats['error'][:200], stats['tier'])
+                            self._finalize(scan_id, stats, started)
+                            return stats
+                    self._process_aan(scan_id, gl, stats)
+                    stats['colors_detected'] = self._detect_colors()
+                    self._update_dealer(platform, 'api', scan_id, 'ok', stats['tier'])
+                    stats['status'] = 'ok'
+                    self._finalize(scan_id, stats, started)
+                    return stats
+
+            # RideMotive (Tactical Fleet, tfc.app.ridemotive.com network) —
+            # public Algolia search-only credentials embedded in SSR HTML.
+            # POST to Algolia, filter by dealer_id (discovered from sitemap
+            # VDP URL suffixes), get the full inventory in one round-trip.
+            # Order: Algolia first; on failure fall through to the legacy
+            # FlareSolverr-render discovery path inside discover_via_ridemotive.
+            if platform == 'ridemotive':
+                rm = fetch_ridemotive_inventory(self.base_url, self.sess)
+                if rm is not None:
+                    if not rm:
+                        prior = self._zero_vehicle_abort_check()
+                        if prior:
+                            stats['status'] = 'blocked'
+                            stats['error'] = (
+                                f'ridemotive algolia returned 0 vehicles but '
+                                f'{prior} were active — credentials may have '
+                                f'rotated, scan aborted, inventory preserved'
+                            )
+                            self._update_dealer(platform, 'algolia', scan_id,
+                                                stats['error'][:200], stats['tier'])
+                            self._finalize(scan_id, stats, started)
+                            return stats
+                    self._process_aan(scan_id, rm, stats)
+                    stats['colors_detected'] = self._detect_colors()
+                    self._update_dealer(platform, 'algolia', scan_id, 'ok', stats['tier'])
+                    stats['status'] = 'ok'
+                    self._finalize(scan_id, stats, started)
+                    return stats
+                # Algolia missed (no dealer_ids in sitemap, or network) —
+                # fall through to FlareSolverr-render discovery below.
+
             if platform == 'aan':
                 aan = fetch_aan_inventory(self.base_url, self.sess)
                 if aan is not None:
@@ -2129,6 +2573,8 @@ class DealerScanner:
                     if len(urls) < 5:
                         urls = list(set(urls) | set(
                             discover_via_sitemap(self.base_url, self.sess)))
+                elif platform == 'ridemotive':
+                    urls = discover_via_ridemotive(self.base_url, self.sess)
                 else:
                     urls = discover_via_sitemap(self.base_url, self.sess)
                     if len(urls) < 5:

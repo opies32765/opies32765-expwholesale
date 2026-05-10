@@ -158,6 +158,8 @@ PLATFORM_TIER = {
     'unknown':           'direct',
     'dealer.com':        'flaresolverr',
     'dealerinspire':     'flaresolverr',
+    'greenlight':        'direct',
+    'ridemotive':        'flaresolverr',
     'dealer-eprocess':   'flaresolverr',
     'vinsolutions':      'flaresolverr',
     'cdk':               'flaresolverr',
