@@ -21,6 +21,22 @@ except ImportError:
 
 
 _HISTORY_TURNS = 10
+
+
+def _fmt_miles(m):
+    """Format mileage for SMS: '23 mi', '9k mi', '47k mi', or '?' if missing.
+    Avoid 'k' rounding under 1000 (showing '0k' for a 23-mile car is wrong).
+    """
+    if m is None:
+        return '?'
+    try:
+        n = int(m)
+    except Exception:
+        return '?'
+    if n < 1000:
+        return f'{n} mi'
+    return f'{round(n/1000)}k mi'
+
 _MODEL = 'claude-haiku-4-5-20251001'
 
 _anthropic_client = None
@@ -50,7 +66,10 @@ YOUR JOB
 Help the user source a vehicle. Gather just enough spec to search, present matches without revealing price or source, and either close the loop with a handoff or save a 30-day wishlist.
 
 ABSOLUTE RULES
-- NEVER mention or quote a price in any reply.
+- NEVER mention or quote a price (including MSRP, retail, asking, etc.).
+- If the user asks for MORE DETAILS, MSRP, a full options list, photos, or VIN of any specific match: tell them you don't have that info on hand and offer to find out IF they're interested. Combine the offer with a name ask in ONE message. Pattern: "don't have msrp/options info on that one — but if you're interested we can find out and come back to you. what's your name so we know who to text?"
+- Do not list more options than the up-to-3 already in the match description (those are pulled from inventory metadata).
+- When the user provides a name in response → save it to customer_name and reply briefly: "thanks {name}, talk soon." Set next_state='matched'.
 - NEVER name the source dealer, city, state, or any URL.
 - NEVER say you are an AI or assistant.
 - If the user states a price/budget, ACK they said it but DO NOT filter by it. We use it as a soft sort hint only.
@@ -66,9 +85,15 @@ HARD SEARCH MINIMUMS
 year (range OK), make, model. Ask only for what's missing. Do NOT ask budget. Do NOT push for color/miles/options before the first search — most users want to see what's available first.
 
 PRESENTING MATCHES
-Format (≤3 per message):
-{year} {model} {trim}, {ext_color} / {int_color}, {miles/1000}k mi
-If >3 total, append: "got {n} total — want to see the rest?"
+Format (≤3 per message), ONE car per line:
+{year} {model} {trim}, {color}, {miles}
+- {color}: "{ext}" if only ext, "{ext} / {int}" if both, "{int} interior" if only int, omit if neither.
+- {miles}: under 1000 → "{n} mi" (e.g. "181 mi", "23 mi"). 1000+ → "{round(n/1000)}k mi" (e.g. "9k mi", "47k mi"). Never "0k mi".
+
+ALWAYS end the presentation with a follow-up question on its own line:
+- if exactly 1 match: "interested?"
+- if 2-3 matches: "any of these work?"
+- if more than 3 total: "got {n} total — want to see the rest?" (replaces the question, listing only top 3)
 
 CLOSING WHEN USER IS INTERESTED IN A SPECIFIC MATCH
 Use the CURRENT_TIME provided below. Business hours: Mon-Fri 09:00-17:00 ET.
@@ -77,8 +102,22 @@ Use the CURRENT_TIME provided below. Business hours: Mon-Fri 09:00-17:00 ET.
 - After 17:00 Friday, all day Sat, all day Sun before 17:00 → "we'll get back to you one way or the other on monday"
 
 NO MATCHES (search_results.count == 0)
-"nothing matching in our scans right now. want me to flag it and text you the second one shows up?"
-On user yes: "done. saved: {short_desc}. text 'drop it' anytime."
+NEVER silently broaden the search. Instead, offer the user a choice based on what's set in CURRENT_SPEC. Build the offer dynamically:
+- if ext_color is set → option to look at "other colors"
+- if trim is set → option to look at "other trims"
+- if year_min/year_max is narrow → option to look at "other years"
+- always offer to flag it for the wishlist
+Example reply (3 things in spec): "nothing matching right now. want me to look at other colors, other years, or flag it for when one shows up?"
+Example reply (color only in spec): "nothing matching right now. want me to look at other colors, or flag it for when one shows up?"
+
+When the user replies wanting to BROADEN an existing filter, add the field name(s) to spec_clear AND set ready_to_search=true. Examples:
+- "yes other colors" / "any color is fine" → spec_clear: ["ext_color"], ready_to_search: true
+- "open on year" / "any year" → spec_clear: ["year_min", "year_max"], ready_to_search: true
+- "any trim" → spec_clear: ["trim"], ready_to_search: true
+
+When the user PIVOTS to a different vehicle (e.g. was discussing 296, now says "how about a 458"), set the new make/model/trim in spec_update AND clear the prior filters via spec_clear: ["year_min", "year_max", "ext_color", "int_color", "trim", "miles_max"] so old filters from the prior search don't leak into the new query.
+
+When the user says "flag it" / "yes save it" / "yes wishlist" → next_state = "wishlist". Reply: "done. saved: {short_desc}. text 'drop it' anytime. and what's your name so we know who to text?"
 
 NAME CAPTURE
 After the user expresses interest in a specific match (intent=interested) OR agrees to flag it for the wishlist (intent=extend_wishlist), if customer_name is not yet known, append " — what's your name so we know who to call back?" or similar to your reply. ONE sentence. Don't ask for name during the spec-gathering phase.
@@ -98,6 +137,7 @@ Return ONLY a JSON object, no markdown, no prose. Schema:
     "price_hint": int|null,
     "customer_name": str|null
   },
+  "spec_clear": [],
   "intent": "sourcing|interested|not_interested|more_results|drop_it|extend_wishlist|unclear",
   "reply": "the SMS text to send back, or null",
   "ready_to_search": true|false,
@@ -157,7 +197,7 @@ def _format_history(conversation):
     return '\n'.join(lines)
 
 
-def _build_user_prompt(row, new_user_msg, search_results=None):
+def _build_user_prompt(row, new_user_msg, search_results=None, fallback_level=None):
     blocks = [
         f"CURRENT_TIME: {_format_current_time()}",
         f"REQUEST_STATUS: {row.get('status', 'gathering')}",
@@ -166,13 +206,27 @@ def _build_user_prompt(row, new_user_msg, search_results=None):
     ]
     if search_results is not None:
         blocks.append(f"SEARCH_RESULTS_AVAILABLE: count={len(search_results)}")
+        if fallback_level and fallback_level != 'exact':
+            blocks.append(f"SEARCH_FALLBACK_LEVEL: {fallback_level} — matches do NOT exactly satisfy the user's spec; you MUST disclose what was relaxed (color, trim, or both) and offer the matches as alternatives, not exact hits.")
         if search_results:
             descs = []
             for m in search_results[:3]:
-                d = (f"{m.get('year','')} {m.get('model','')} "
-                     f"{m.get('trim') or ''}, "
-                     f"{m.get('ext_color') or '?'} / {m.get('int_color') or '?'}, "
-                     f"{int((m.get('mileage') or 0)/1000)}k mi").strip()
+                ec = m.get('ext_color')
+                ic = m.get('int_color')
+                if ec and ic:
+                    color = f"{ec} / {ic}"
+                elif ec:
+                    color = ec
+                elif ic:
+                    color = f"{ic} interior"
+                else:
+                    color = ''
+                head_parts = [str(m.get('year') or ''), str(m.get('model') or ''), str(m.get('trim') or '')]
+                head = ' '.join(p for p in head_parts if p).strip()
+                pieces = [head]
+                if color: pieces.append(color)
+                pieces.append(_fmt_miles(m.get('mileage')))
+                d = ', '.join(pieces)
                 descs.append(d)
             blocks.append("TOP_MATCHES:\n" + '\n'.join(descs))
     blocks.append(f"NEW_USER_MSG: {new_user_msg or '(internal: search complete, present results)'}")
@@ -237,9 +291,9 @@ def _haiku_call(user_prompt, max_tokens=700, temperature=0.3):
         return None
 
 
-def turn(row, new_user_msg, search_results=None):
+def turn(row, new_user_msg, search_results=None, fallback_level=None):
     """Run one Haiku turn. Returns dict or None on hard failure."""
-    user_block = _build_user_prompt(row, new_user_msg, search_results)
+    user_block = _build_user_prompt(row, new_user_msg, search_results, fallback_level=fallback_level)
     raw = _haiku_call(user_block)
     parsed = _parse_response(raw)
     if not parsed:
@@ -267,14 +321,26 @@ _SCALAR_FIELDS = ('year_min', 'year_max', 'make', 'model', 'trim',
 _LIST_FIELDS = ('ext_color', 'int_color', 'options')
 
 
-def merge_spec(row, spec_update):
+def merge_spec(row, spec_update, spec_clear=None):
+    """Merge non-null values from spec_update; explicitly null any field listed
+    in spec_clear. spec_clear takes precedence so 'any color' / 'any year'
+    cleanly drops filters."""
     changes = {}
+    spec_clear = set(spec_clear or [])
     for k in _SCALAR_FIELDS:
+        if k in spec_clear:
+            row[k] = None
+            changes[k] = None
+            continue
         v = spec_update.get(k)
         if v is not None and v != '':
             row[k] = v
             changes[k] = v
     for k in _LIST_FIELDS:
+        if k in spec_clear:
+            row[k] = None
+            changes[k] = None
+            continue
         v = spec_update.get(k)
         if v is not None and isinstance(v, list) and len(v) > 0:
             v_norm = [str(x).strip().lower() for x in v if x is not None and str(x).strip()]

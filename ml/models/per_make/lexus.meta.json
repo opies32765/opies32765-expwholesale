@@ -1,9 +1,9 @@
 {
   "make_name": "LEXUS",
-  "trained_at": "2026-05-08T08:30:42.533452Z",
-  "n_total": 1156,
+  "trained_at": "2026-05-09T08:30:34.267842Z",
+  "n_total": 1157,
   "n_train": 1092,
-  "n_test": 64,
+  "n_test": 65,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -196,8 +196,8 @@
       "Honda Of Ocala",
       "Rountree Moore Nissan",
       "Tamiami Ford Inc",
-      "Ultimo Northbrook",
       "Wholesale Inc",
+      "Ultimo Northbrook",
       "Alpha One Motors Llc",
       "Parks Chevrolet Huntersville",
       "Johnson Lexus Of Durham",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3682.0,
-    "mape_pct": 7.0,
-    "r2": 0.9551,
-    "within_5pct": 42.2,
-    "within_10pct": 73.4
+    "mae_dollars": 3461.0,
+    "mape_pct": 6.73,
+    "r2": 0.9618,
+    "within_5pct": 40.0,
+    "within_10pct": 73.8
   },
   "baseline_metrics": {
-    "mae_dollars": 4375.0,
-    "mape_pct": 9.47,
+    "mae_dollars": 4340.0,
+    "mape_pct": 9.39,
     "ratio": 1.1085
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.5316461324691772
+      "importance": 0.503266453742981
     },
     {
       "name": "market_asking_price",
-      "importance": 0.2070343941450119
-    },
-    {
-      "name": "original_msrp",
-      "importance": 0.035988595336675644
+      "importance": 0.24092689156532288
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.026934949681162834
+      "importance": 0.049342114478349686
     },
     {
-      "name": "supplier_name_Honda Of Newnan",
-      "importance": 0.015972480177879333
+      "name": "original_msrp",
+      "importance": 0.03327028080821037
     },
     {
       "name": "supplier_name_Thomasville Toyota",
-      "importance": 0.015341746620833874
-    },
-    {
-      "name": "year",
-      "importance": 0.01053470280021429
+      "importance": 0.012242759577929974
     },
     {
       "name": "model_name_RX 350",
-      "importance": 0.010130354203283787
+      "importance": 0.009395935572683811
+    },
+    {
+      "name": "year",
+      "importance": 0.00855846144258976
+    },
+    {
+      "name": "odometer",
+      "importance": 0.008342682383954525
     }
   ]
 }

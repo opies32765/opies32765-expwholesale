@@ -1,6 +1,6 @@
 {
   "make_name": "LINCOLN",
-  "trained_at": "2026-05-08T08:31:24.557764Z",
+  "trained_at": "2026-05-09T08:30:59.917278Z",
   "n_total": 179,
   "n_train": 174,
   "n_test": 5,
@@ -211,10 +211,10 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1075.0,
-    "mape_pct": 3.51,
-    "r2": 0.957,
-    "within_5pct": 80.0,
+    "mae_dollars": 1195.0,
+    "mape_pct": 3.73,
+    "r2": 0.9409,
+    "within_5pct": 60.0,
     "within_10pct": 100.0
   },
   "baseline_metrics": {
@@ -224,36 +224,36 @@
   },
   "top_features": [
     {
-      "name": "base_appraised_value",
-      "importance": 0.39818984270095825
+      "name": "market_asking_price",
+      "importance": 0.3992479741573334
     },
     {
-      "name": "market_asking_price",
-      "importance": 0.345246821641922
+      "name": "base_appraised_value",
+      "importance": 0.36586734652519226
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.16969704627990723
+      "importance": 0.15955230593681335
     },
     {
       "name": "original_msrp",
-      "importance": 0.018623443320393562
+      "importance": 0.019717758521437645
     },
     {
-      "name": "supplier_name_Lake City Chrysler Dodge Jeep Ram",
-      "importance": 0.014188806526362896
-    },
-    {
-      "name": "odometer",
-      "importance": 0.0036644856445491314
-    },
-    {
-      "name": "supplier_name_Infiniti Of Coconut Creek",
-      "importance": 0.0036531100049614906
+      "name": "model_name_Continental Reserve Sedan",
+      "importance": 0.0043058996088802814
     },
     {
       "name": "year",
-      "importance": 0.003631128463894129
+      "importance": 0.004234699532389641
+    },
+    {
+      "name": "odometer",
+      "importance": 0.0039276666939258575
+    },
+    {
+      "name": "supplier_name_Parks Ford",
+      "importance": 0.0032771402038633823
     }
   ]
 }

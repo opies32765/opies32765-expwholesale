@@ -1,6 +1,6 @@
 {
   "make_name": "MAZDA",
-  "trained_at": "2026-05-08T08:31:16.172237Z",
+  "trained_at": "2026-05-09T08:30:55.447060Z",
   "n_total": 317,
   "n_train": 311,
   "n_test": 6,
@@ -219,10 +219,10 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 987.0,
-    "mape_pct": 4.72,
-    "r2": 0.8666,
-    "within_5pct": 66.7,
+    "mae_dollars": 921.0,
+    "mape_pct": 4.34,
+    "r2": 0.8781,
+    "within_5pct": 83.3,
     "within_10pct": 83.3
   },
   "baseline_metrics": {
@@ -233,35 +233,35 @@
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.37430253624916077
+      "importance": 0.40833088755607605
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.23005998134613037
+      "importance": 0.2524733245372772
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.14360181987285614
+      "importance": 0.06766077131032944
     },
     {
       "name": "original_msrp",
-      "importance": 0.04001408815383911
+      "importance": 0.05304822325706482
     },
     {
       "name": "year",
-      "importance": 0.02098935656249523
+      "importance": 0.023900587111711502
     },
     {
-      "name": "supplier_name_Germain Honda Of Naples",
-      "importance": 0.016382072120904922
+      "name": "supplier_name_Oaklawn Mazda",
+      "importance": 0.01644817925989628
     },
     {
       "name": "odometer",
-      "importance": 0.01385790016502142
+      "importance": 0.01532651111483574
     },
     {
-      "name": "supplier_name_Rountree Moore Toyota",
-      "importance": 0.008945923298597336
+      "name": "body_type_OTHER",
+      "importance": 0.00927317701280117
     }
   ]
 }

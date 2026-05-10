@@ -1,9 +1,9 @@
 {
   "make_name": "JEEP",
-  "trained_at": "2026-05-08T08:30:40.377419Z",
-  "n_total": 1211,
+  "trained_at": "2026-05-09T08:30:31.708164Z",
+  "n_total": 1212,
   "n_train": 1169,
-  "n_test": 42,
+  "n_test": 43,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,49 +215,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1841.0,
-    "mape_pct": 6.85,
-    "r2": 0.9723,
-    "within_5pct": 42.9,
-    "within_10pct": 78.6
+    "mae_dollars": 1795.0,
+    "mape_pct": 6.6,
+    "r2": 0.9733,
+    "within_5pct": 48.8,
+    "within_10pct": 81.4
   },
   "baseline_metrics": {
-    "mae_dollars": 2295.0,
-    "mape_pct": 9.12,
+    "mae_dollars": 2255.0,
+    "mape_pct": 8.97,
     "ratio": 1.0595
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.33501777052879333
+      "importance": 0.3361382484436035
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.2751625180244446
+      "importance": 0.2572328448295593
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.20647269487380981
+      "importance": 0.22756297886371613
     },
     {
       "name": "model_name_Wrangler Sport Sport Utility Vehicle",
-      "importance": 0.02960689552128315
+      "importance": 0.02643345482647419
     },
     {
       "name": "odometer",
-      "importance": 0.010507511906325817
-    },
-    {
-      "name": "model_name_Wrangler Rubicon Sport Utility Vehicle",
-      "importance": 0.009588515385985374
+      "importance": 0.009353527799248695
     },
     {
       "name": "supplier_name_Marino Performance Motors",
-      "importance": 0.008175999857485294
+      "importance": 0.008537285029888153
+    },
+    {
+      "name": "year",
+      "importance": 0.005772728938609362
     },
     {
       "name": "original_msrp",
-      "importance": 0.006445496343076229
+      "importance": 0.005709748715162277
     }
   ]
 }

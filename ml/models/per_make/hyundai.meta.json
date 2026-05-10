@@ -1,9 +1,9 @@
 {
   "make_name": "HYUNDAI",
-  "trained_at": "2026-05-08T08:31:07.933173Z",
-  "n_total": 342,
+  "trained_at": "2026-05-09T08:30:51.988185Z",
+  "n_total": 343,
   "n_train": 329,
-  "n_test": 13,
+  "n_test": 14,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -34,10 +34,10 @@
     "model_name_Santa Fe Limited Sport Utility Vehicle",
     "model_name_Santa Fe Limited Wagon 4 Dr.",
     "model_name_Santa Fe SE 2.4 Sport Utility Vehicle",
-    "model_name_Santa Fe SE 2.4 Wagon 4 Dr.",
     "model_name_Santa Fe SEL 2.4 Sport Utility Vehicle",
     "model_name_Santa Fe Sport 2.4 Sport Utility Vehicle",
     "model_name_Santa Fe Sport Sport Utility Vehicle",
+    "model_name_Sonata",
     "model_name_Sonata Limited Sedan",
     "model_name_Sonata SE Sedan",
     "model_name_Sonata SEL Plus Sedan",
@@ -148,7 +148,7 @@
       "Tucson SE Wagon 4 Dr.",
       "Tucson Limited Wagon 4 Dr.",
       "Santa Fe Limited Wagon 4 Dr.",
-      "Santa Fe SE 2.4 Wagon 4 Dr."
+      "Sonata"
     ],
     "body_type": [
       "SUV",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1486.0,
-    "mape_pct": 6.14,
-    "r2": 0.8966,
-    "within_5pct": 53.8,
-    "within_10pct": 84.6
+    "mae_dollars": 1428.0,
+    "mape_pct": 6.01,
+    "r2": 0.9175,
+    "within_5pct": 57.1,
+    "within_10pct": 78.6
   },
   "baseline_metrics": {
-    "mae_dollars": 1401.0,
-    "mape_pct": 5.45,
+    "mae_dollars": 1459.0,
+    "mape_pct": 5.53,
     "ratio": 1.0168
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.34820112586021423
+      "importance": 0.3504702150821686
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.24451524019241333
+      "importance": 0.21809075772762299
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.14418449997901917
+      "importance": 0.14360739290714264
     },
     {
-      "name": "supplier_name_Germain Ford Of Beavercreek",
-      "importance": 0.019747119396924973
+      "name": "supplier_name_Lifetime Automotive Group",
+      "importance": 0.049102503806352615
     },
     {
       "name": "year",
-      "importance": 0.0194512028247118
+      "importance": 0.016765043139457703
+    },
+    {
+      "name": "model_name_Tucson",
+      "importance": 0.013018366880714893
     },
     {
       "name": "original_msrp",
-      "importance": 0.014236027374863625
+      "importance": 0.012692463584244251
     },
     {
-      "name": "model_name_Sonata SEL Sedan",
-      "importance": 0.011183944530785084
-    },
-    {
-      "name": "model_name_Santa Fe Limited Sport Utility Vehicle",
-      "importance": 0.010714069940149784
+      "name": "model_name_Tucson SE Sport Utility Vehicle",
+      "importance": 0.012445910833775997
     }
   ]
 }

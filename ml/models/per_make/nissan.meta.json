@@ -1,6 +1,6 @@
 {
   "make_name": "NISSAN",
-  "trained_at": "2026-05-08T08:30:57.913512Z",
+  "trained_at": "2026-05-09T08:30:45.751219Z",
   "n_total": 516,
   "n_train": 490,
   "n_test": 26,
@@ -227,11 +227,11 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 5138.0,
-    "mape_pct": 14.7,
-    "r2": 0.896,
-    "within_5pct": 34.6,
-    "within_10pct": 50.0
+    "mae_dollars": 4955.0,
+    "mape_pct": 14.09,
+    "r2": 0.8999,
+    "within_5pct": 30.8,
+    "within_10pct": 57.7
   },
   "baseline_metrics": {
     "mae_dollars": 1822.0,
@@ -241,35 +241,35 @@
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.4940547049045563
+      "importance": 0.5002099871635437
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.3188091516494751
+      "importance": 0.2926163673400879
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.07789569348096848
+      "importance": 0.09808579087257385
     },
     {
       "name": "original_msrp",
-      "importance": 0.021027132868766785
+      "importance": 0.02039642445743084
     },
     {
       "name": "year",
-      "importance": 0.006281982641667128
+      "importance": 0.006212370004504919
     },
     {
       "name": "supplier_name_I-75 Autos",
-      "importance": 0.004326350055634975
+      "importance": 0.004422537516802549
+    },
+    {
+      "name": "body_type_SUV",
+      "importance": 0.0036912683863192797
     },
     {
       "name": "body_type_Van",
-      "importance": 0.003485162043944001
-    },
-    {
-      "name": "supplier_name_h Greg Nissan Delray",
-      "importance": 0.0033390342723578215
+      "importance": 0.0036711974535137415
     }
   ]
 }

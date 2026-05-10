@@ -53,16 +53,20 @@ def _is_business_hours(dt_et=None):
 
 def _format_match_desc(m):
     parts = []
-    if m.get('year'):
-        parts.append(str(m['year']))
-    if m.get('model'):
-        parts.append(m['model'])
-    if m.get('trim'):
-        parts.append(m['trim'])
+    if m.get('year'): parts.append(str(m['year']))
+    if m.get('model'): parts.append(m['model'])
+    if m.get('trim'): parts.append(m['trim'])
     head = ' '.join(parts)
-    color = (f"{m.get('ext_color') or '?'} / {m.get('int_color') or '?'}")
-    miles = f"{int((m.get('mileage') or 0) / 1000)}k mi"
-    return f"{head}, {color}, {miles}".strip()
+    ec, ic = m.get('ext_color'), m.get('int_color')
+    if ec and ic: color = f"{ec} / {ic}"
+    elif ec: color = ec
+    elif ic: color = f"{ic} interior"
+    else: color = ''
+    miles = _fmt_miles_cron(m.get('mileage'))
+    bits = [head]
+    if color: bits.append(color)
+    bits.append(miles)
+    return ', '.join(bits)
 
 
 def _format_request_desc(req):

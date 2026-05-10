@@ -1,6 +1,6 @@
 {
   "make_name": "TESLA",
-  "trained_at": "2026-05-08T08:30:53.906676Z",
+  "trained_at": "2026-05-09T08:30:42.136512Z",
   "n_total": 734,
   "n_train": 698,
   "n_test": 36,
@@ -127,8 +127,8 @@
       "Model 3 Performance Sport Utility Vehicle",
       "Model S Plaid Hatchback",
       "Model 3 Sedan",
-      "Model Y",
       "Model S Long Range Hatchback",
+      "Model Y",
       "Model 3 Standard Range Plus Sedan",
       "Model X Sport Utility Vehicle",
       "Model 3",
@@ -221,11 +221,11 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2391.0,
-    "mape_pct": 7.99,
-    "r2": 0.9838,
-    "within_5pct": 38.9,
-    "within_10pct": 83.3
+    "mae_dollars": 2487.0,
+    "mape_pct": 8.37,
+    "r2": 0.9818,
+    "within_5pct": 41.7,
+    "within_10pct": 86.1
   },
   "baseline_metrics": {
     "mae_dollars": 2904.0,
@@ -235,35 +235,35 @@
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.36850348114967346
+      "importance": 0.35996443033218384
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.27113351225852966
+      "importance": 0.2697063982486725
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.16385653614997864
+      "importance": 0.18189001083374023
     },
     {
       "name": "model_name_Model X 100D Sport Utility Vehicle",
-      "importance": 0.02100454457104206
+      "importance": 0.019382813945412636
     },
     {
       "name": "supplier_name_Oak Hill Sourcing",
-      "importance": 0.015651697292923927
+      "importance": 0.012979298830032349
     },
     {
       "name": "sold_year",
-      "importance": 0.012249222956597805
+      "importance": 0.012664323672652245
     },
     {
       "name": "supplier_name_Napleton's Goldcoast Imports Inc.",
-      "importance": 0.00992369744926691
+      "importance": 0.00944244023412466
     },
     {
-      "name": "original_msrp",
-      "importance": 0.004902514163404703
+      "name": "body_type_SUV",
+      "importance": 0.006223833654075861
     }
   ]
 }

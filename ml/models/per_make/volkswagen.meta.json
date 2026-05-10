@@ -1,6 +1,6 @@
 {
   "make_name": "VOLKSWAGEN",
-  "trained_at": "2026-05-08T08:31:11.076738Z",
+  "trained_at": "2026-05-09T08:30:53.111261Z",
   "n_total": 339,
   "n_train": 323,
   "n_test": 16,
@@ -129,8 +129,8 @@
       "Passat SE Sedan",
       "Jetta SE Sedan 4 Dr.",
       "Atlas",
-      "Tiguan S Wagon 4 Dr.",
       "Jetta",
+      "Tiguan S Wagon 4 Dr.",
       "Beetle",
       "Passat SE Sedan 4 Dr.",
       "Golf GTI S Hatchback",
@@ -196,6 +196,7 @@
       "Tallahassee Dodge Chrysler Jeep Ram Fiat",
       "Parks Chevrolet Huntersville",
       "Germain Ford Of Beavercreek",
+      "Carworks",
       "Lenders Assistance Corp",
       "Autosport Usa Gotspeed",
       "Samuel Cili",
@@ -203,7 +204,6 @@
       "Jim Ellis Chevrolet",
       "Chris Delgado",
       "Gainesville Mitsubishi",
-      "Carworks",
       "Brickell Luxury Motors ",
       "Warren Henry Infiniti",
       "Rick Hendrick Chevrolet Naples",
@@ -219,11 +219,11 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1244.0,
-    "mape_pct": 10.33,
-    "r2": 0.92,
-    "within_5pct": 50.0,
-    "within_10pct": 81.2
+    "mae_dollars": 1228.0,
+    "mape_pct": 10.5,
+    "r2": 0.9152,
+    "within_5pct": 43.8,
+    "within_10pct": 75.0
   },
   "baseline_metrics": {
     "mae_dollars": 1929.0,
@@ -233,35 +233,35 @@
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.4168493151664734
-    },
-    {
-      "name": "base_appraised_value",
-      "importance": 0.1326858252286911
+      "importance": 0.44350466132164
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.12372251600027084
+      "importance": 0.12980078160762787
+    },
+    {
+      "name": "base_appraised_value",
+      "importance": 0.11599823087453842
     },
     {
       "name": "body_type_Convertible",
-      "importance": 0.038399361073970795
+      "importance": 0.03849110007286072
     },
     {
       "name": "original_msrp",
-      "importance": 0.02618701197206974
-    },
-    {
-      "name": "model_name_Passat Wolfsburg Edition Sedan",
-      "importance": 0.018278272822499275
-    },
-    {
-      "name": "model_name_Touareg Wolfsburg Edition Sport Utility Vehicle",
-      "importance": 0.01602357253432274
+      "importance": 0.02746029756963253
     },
     {
       "name": "year",
-      "importance": 0.013160882517695427
+      "importance": 0.0177215114235878
+    },
+    {
+      "name": "odometer",
+      "importance": 0.01493796892464161
+    },
+    {
+      "name": "supplier_name_Brickell Luxury Motors ",
+      "importance": 0.013201759196817875
     }
   ]
 }

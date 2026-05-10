@@ -1,9 +1,9 @@
 {
   "make_name": "CHEVROLET",
-  "trained_at": "2026-05-08T08:30:29.611064Z",
-  "n_total": 2251,
+  "trained_at": "2026-05-09T08:30:22.927236Z",
+  "n_total": 2253,
   "n_train": 2123,
-  "n_test": 128,
+  "n_test": 130,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -227,49 +227,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3075.0,
-    "mape_pct": 6.54,
-    "r2": 0.9429,
-    "within_5pct": 46.1,
-    "within_10pct": 77.3
+    "mae_dollars": 3056.0,
+    "mape_pct": 6.45,
+    "r2": 0.9503,
+    "within_5pct": 48.5,
+    "within_10pct": 80.8
   },
   "baseline_metrics": {
-    "mae_dollars": 2998.0,
-    "mape_pct": 7.12,
+    "mae_dollars": 3061.0,
+    "mape_pct": 7.22,
     "ratio": 1.048
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.42863669991493225
+      "importance": 0.3611682653427124
     },
     {
       "name": "market_asking_price",
-      "importance": 0.32112324237823486
+      "importance": 0.29670482873916626
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.15740542113780975
+      "importance": 0.2507210373878479
     },
     {
       "name": "supplier_name_Classic Cars Of Palm Beach Llc",
-      "importance": 0.0035505176056176424
+      "importance": 0.004018778447061777
     },
     {
       "name": "supplier_name_Nissan Of Orange Park",
-      "importance": 0.0035312187392264605
+      "importance": 0.003812001319602132
     },
     {
       "name": "supplier_name_Ultimo Northbrook",
-      "importance": 0.003393423743546009
+      "importance": 0.0032753131818026304
     },
     {
       "name": "sold_year",
-      "importance": 0.00333597743883729
+      "importance": 0.0029496310744434595
     },
     {
-      "name": "model_name_Silverado 1500 LT Pickup Truck",
-      "importance": 0.002602620981633663
+      "name": "model_name_OTHER",
+      "importance": 0.002682021353393793
     }
   ]
 }

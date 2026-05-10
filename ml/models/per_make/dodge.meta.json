@@ -1,6 +1,6 @@
 {
   "make_name": "DODGE",
-  "trained_at": "2026-05-08T08:30:51.456544Z",
+  "trained_at": "2026-05-09T08:30:40.920411Z",
   "n_total": 753,
   "n_train": 715,
   "n_test": 38,
@@ -223,11 +223,11 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2050.0,
-    "mape_pct": 8.74,
-    "r2": 0.973,
+    "mae_dollars": 1878.0,
+    "mape_pct": 7.37,
+    "r2": 0.98,
     "within_5pct": 57.9,
-    "within_10pct": 68.4
+    "within_10pct": 76.3
   },
   "baseline_metrics": {
     "mae_dollars": 2760.0,
@@ -237,35 +237,35 @@
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.4609907269477844
+      "importance": 0.5076446533203125
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.2699296176433563
+      "importance": 0.23770059645175934
     },
     {
       "name": "original_msrp",
-      "importance": 0.10715829581022263
+      "importance": 0.08048435300588608
     },
     {
       "name": "supplier_name_Rountree Moore Ford",
-      "importance": 0.01724039949476719
+      "importance": 0.024703072383999825
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.013137450441718102
+      "importance": 0.016097649931907654
+    },
+    {
+      "name": "model_name_Durango SRT Hellcat Sport Utility Vehicle",
+      "importance": 0.008408025838434696
     },
     {
       "name": "odometer",
-      "importance": 0.008526768535375595
+      "importance": 0.007107053883373737
     },
     {
       "name": "sold_year",
-      "importance": 0.006281137932091951
-    },
-    {
-      "name": "model_name_Challenger R/T Plus Coupe",
-      "importance": 0.00527766952291131
+      "importance": 0.00503204669803381
     }
   ]
 }

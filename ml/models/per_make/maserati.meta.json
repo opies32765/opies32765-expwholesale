@@ -1,9 +1,9 @@
 {
   "make_name": "MASERATI",
-  "trained_at": "2026-05-08T08:31:01.692765Z",
-  "n_total": 484,
+  "trained_at": "2026-05-09T08:30:47.621409Z",
+  "n_total": 486,
   "n_train": 469,
-  "n_test": 15,
+  "n_test": 17,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,49 +215,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 4461.0,
-    "mape_pct": 11.59,
-    "r2": 0.9883,
-    "within_5pct": 33.3,
-    "within_10pct": 53.3
+    "mae_dollars": 4448.0,
+    "mape_pct": 11.98,
+    "r2": 0.9876,
+    "within_5pct": 35.3,
+    "within_10pct": 52.9
   },
   "baseline_metrics": {
-    "mae_dollars": 7001.0,
-    "mape_pct": 15.98,
+    "mae_dollars": 6678.0,
+    "mape_pct": 15.58,
     "ratio": 0.9868
   },
   "top_features": [
     {
       "name": "original_msrp",
-      "importance": 0.2635122537612915
-    },
-    {
-      "name": "base_appraised_value",
-      "importance": 0.23187091946601868
+      "importance": 0.26664409041404724
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.20458099246025085
+      "importance": 0.24856947362422943
+    },
+    {
+      "name": "base_appraised_value",
+      "importance": 0.2182888239622116
     },
     {
       "name": "market_asking_price",
-      "importance": 0.1843549609184265
-    },
-    {
-      "name": "model_name_GranTurismo Sport Coupe",
-      "importance": 0.005213093478232622
-    },
-    {
-      "name": "model_name_Quattroporte_DELETED",
-      "importance": 0.0050117443315684795
-    },
-    {
-      "name": "model_name_Ghibli",
-      "importance": 0.004915077239274979
+      "importance": 0.15908406674861908
     },
     {
       "name": "model_name_Levante",
-      "importance": 0.004698136821389198
+      "importance": 0.0049750725738704205
+    },
+    {
+      "name": "odometer",
+      "importance": 0.004144630860537291
+    },
+    {
+      "name": "body_type_SUV",
+      "importance": 0.003955161664634943
+    },
+    {
+      "name": "supplier_name_Mall Of Georgia Mazda",
+      "importance": 0.0037878314033150673
     }
   ]
 }

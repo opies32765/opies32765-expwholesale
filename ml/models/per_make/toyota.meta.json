@@ -1,6 +1,6 @@
 {
   "make_name": "TOYOTA",
-  "trained_at": "2026-05-08T08:30:43.734548Z",
+  "trained_at": "2026-05-09T08:30:34.978417Z",
   "n_total": 1142,
   "n_train": 1071,
   "n_test": 71,
@@ -225,11 +225,11 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1972.0,
-    "mape_pct": 8.07,
-    "r2": 0.9567,
-    "within_5pct": 45.1,
-    "within_10pct": 81.7
+    "mae_dollars": 2020.0,
+    "mape_pct": 8.3,
+    "r2": 0.9557,
+    "within_5pct": 46.5,
+    "within_10pct": 78.9
   },
   "baseline_metrics": {
     "mae_dollars": 10482.0,
@@ -239,35 +239,35 @@
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.28930386900901794
+      "importance": 0.3362478017807007
     },
     {
       "name": "market_asking_price",
-      "importance": 0.2604369521141052
-    },
-    {
-      "name": "body_type_Coupe",
-      "importance": 0.15581999719142914
+      "importance": 0.29287853837013245
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.14692097902297974
+      "importance": 0.11697889119386673
+    },
+    {
+      "name": "body_type_Coupe",
+      "importance": 0.08597559481859207
     },
     {
       "name": "original_msrp",
-      "importance": 0.03525153547525406
+      "importance": 0.038789052516222
     },
     {
       "name": "days_since_purchase",
-      "importance": 0.009866184554994106
+      "importance": 0.01156728994101286
     },
     {
       "name": "odometer",
-      "importance": 0.006717688869684935
+      "importance": 0.00744238356128335
     },
     {
-      "name": "model_name_Tundra SR5 Pickup Truck",
-      "importance": 0.005397704429924488
+      "name": "year",
+      "importance": 0.006918685510754585
     }
   ]
 }

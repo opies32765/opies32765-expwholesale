@@ -1,6 +1,6 @@
 {
   "make_name": "GMC",
-  "trained_at": "2026-05-08T08:30:48.954083Z",
+  "trained_at": "2026-05-09T08:30:38.924538Z",
   "n_total": 788,
   "n_train": 727,
   "n_test": 61,
@@ -217,10 +217,10 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2615.0,
-    "mape_pct": 6.19,
-    "r2": 0.9737,
-    "within_5pct": 52.5,
+    "mae_dollars": 2657.0,
+    "mape_pct": 6.48,
+    "r2": 0.9729,
+    "within_5pct": 47.5,
     "within_10pct": 90.2
   },
   "baseline_metrics": {
@@ -231,35 +231,35 @@
   "top_features": [
     {
       "name": "base_appraised_value",
-      "importance": 0.47058209776878357
+      "importance": 0.4699139893054962
     },
     {
       "name": "market_asking_price",
-      "importance": 0.2337384968996048
+      "importance": 0.23288755118846893
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.20190635323524475
+      "importance": 0.2066640704870224
     },
     {
       "name": "sold_year",
-      "importance": 0.019379381090402603
+      "importance": 0.01718083955347538
     },
     {
       "name": "original_msrp",
-      "importance": 0.008232491090893745
+      "importance": 0.00803906936198473
     },
     {
       "name": "odometer",
-      "importance": 0.0038254207465797663
+      "importance": 0.004176996648311615
     },
     {
       "name": "body_type_OTHER",
-      "importance": 0.00329547724686563
+      "importance": 0.0030208290554583073
     },
     {
       "name": "mileage_adjustment_value",
-      "importance": 0.0029091129545122385
+      "importance": 0.0029595971573144197
     }
   ]
 }

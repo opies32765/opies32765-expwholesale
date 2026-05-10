@@ -1,6 +1,6 @@
 {
   "make_name": "HONDA",
-  "trained_at": "2026-05-08T08:30:56.452051Z",
+  "trained_at": "2026-05-09T08:30:44.441226Z",
   "n_total": 663,
   "n_train": 614,
   "n_test": 49,
@@ -225,11 +225,11 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1664.0,
-    "mape_pct": 8.92,
-    "r2": 0.9407,
-    "within_5pct": 36.7,
-    "within_10pct": 79.6
+    "mae_dollars": 1704.0,
+    "mape_pct": 8.79,
+    "r2": 0.9418,
+    "within_5pct": 30.6,
+    "within_10pct": 73.5
   },
   "baseline_metrics": {
     "mae_dollars": 1738.0,
@@ -239,35 +239,35 @@
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.4312971532344818
+      "importance": 0.4635882079601288
     },
     {
       "name": "market_asking_price",
-      "importance": 0.19156137108802795
+      "importance": 0.1530522257089615
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.0763409286737442
+      "importance": 0.0689774751663208
     },
     {
-      "name": "supplier_name_Mall Of Georgia Mini",
-      "importance": 0.02229429967701435
+      "name": "supplier_name_Honda Of Ocala",
+      "importance": 0.02688128501176834
     },
     {
       "name": "year",
-      "importance": 0.014016098342835903
+      "importance": 0.017385460436344147
     },
     {
-      "name": "body_type_Hatchback",
-      "importance": 0.010523329488933086
+      "name": "supplier_name_OTHER",
+      "importance": 0.015764562413096428
+    },
+    {
+      "name": "supplier_name_Mall Of Georgia Mini",
+      "importance": 0.013307193294167519
     },
     {
       "name": "model_name_Accord",
-      "importance": 0.00979128573089838
-    },
-    {
-      "name": "days_on_lot",
-      "importance": 0.009731458500027657
+      "importance": 0.010741564445197582
     }
   ]
 }

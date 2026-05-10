@@ -170,7 +170,7 @@ def _run_gemini_and_persist(db, cur, request_id, row, user_text, num_media=0,
                                        raw={'gemini': parsed})
 
     # Merge spec updates into the row (mutates), then build the UPDATE.
-    changes = merge_spec(row, spec_update)
+    changes = merge_spec(row, spec_update, spec_clear=parsed.get('spec_clear') or [])
     set_clauses, params = _build_spec_update_sql(changes)
     set_clauses += [
         "conversation = %s::jsonb",
@@ -197,10 +197,9 @@ def _run_gemini_and_persist(db, cur, request_id, row, user_text, num_media=0,
     # presentation result as the single SMS for this inbound.
     if ready:
         try:
-            from sourcing_search import search_with_fallback, to_match_descs
-            matches, fallback_level = search_with_fallback(row, limit=20)
-            if fallback_level != 'exact' and matches:
-                print(f"[sourcing] id={request_id} fallback={fallback_level} matches={len(matches)}", flush=True)
+            from sourcing_search import search as inv_search, to_match_descs
+            matches = inv_search(row, limit=20)
+            fallback_level = 'exact'  # we only do strict; user must opt-in to broaden
         except Exception as _se:
             print(f"[sourcing] search error id={request_id}: {_se}", flush=True)
             matches = []
@@ -208,7 +207,7 @@ def _run_gemini_and_persist(db, cur, request_id, row, user_text, num_media=0,
 
         match_descs = to_match_descs(matches)
         from sourcing_gemini import turn as gemini_turn
-        parsed2 = gemini_turn(row, "", search_results=match_descs)
+        parsed2 = gemini_turn(row, "", search_results=match_descs, fallback_level=fallback_level)
 
         if parsed2:
             reply2 = parsed2.get("reply") or "one sec."
@@ -216,10 +215,16 @@ def _run_gemini_and_persist(db, cur, request_id, row, user_text, num_media=0,
         else:
             if matches:
                 m = match_descs[0]
-                reply2 = (f"got 1: {m['year']} {m['model']} "
-                          f"{m.get('trim') or ''}, "
-                          f"{m.get('ext_color') or '?'} / {m.get('int_color') or '?'}, "
-                          f"{int((m.get('mileage') or 0)/1000)}k mi. interested?")
+                ec = m.get('ext_color'); ic = m.get('int_color')
+                if ec and ic: color = f"{ec} / {ic}"
+                elif ec: color = ec
+                elif ic: color = f"{ic} interior"
+                else: color = ''
+                head = f"{m['year']} {m['model']} {m.get('trim') or ''}".strip()
+                bits = [head]
+                if color: bits.append(color)
+                bits.append(_fmt_miles_sb(m.get('mileage')))
+                reply2 = 'got 1: ' + ', '.join(bits) + '. interested?' 
                 next_state2 = "presented"
             else:
                 reply2 = ("nothing matching in our scans right now. want me "
