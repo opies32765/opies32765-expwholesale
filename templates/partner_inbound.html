@@ -304,21 +304,18 @@
 
 {# ─────────────────── MMR Auction Floor (wholesale; mirrors EW dashboard) ─────────────────── #}
 {% set mh = (market_intel.manheim if market_intel else None) or {} %}
-{% set manheim_raw = vauto.manheim_transactions if (vauto and vauto.manheim_transactions) else None %}
-{% set manheim_summary = manheim_raw.summary if (manheim_raw and manheim_raw is mapping) else None %}
-{% set manheim_tx = manheim_raw.transactions if (manheim_raw and manheim_raw is mapping) else None %}
-{% if mh.n_transactions or mh.base_mmr or manheim_summary or manheim_tx %}
+{% if mh.n_transactions or mh.base_mmr or mh.adjusted_mmr or mh.mmr_median %}
 <details class="card manheim">
   <summary>
     <span class="title">MMR Auction Floor</span>
-    <span class="summary-text">WHOLESALE{% if mh.mmr_median %} · median ${{ '{:,}'.format(mh.mmr_median|int) }}{% elif manheim_tx %} · {{ manheim_tx|length }} sales{% endif %}</span>
+    <span class="summary-text">WHOLESALE{% if mh.mmr_median %} · median ${{ '{:,}'.format(mh.mmr_median|int) }}{% endif %}</span>
   </summary>
   <div class="body">
     {% if mh.mmr_median or mh.mmr_min %}
     <div style="margin-top:6px;padding:12px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.30);border-radius:8px">
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
         <span style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Hammer prices</span>
-        <span style="font-size:11px;color:#64748b;font-family:ui-monospace,Consolas,monospace">{% if mh.n_transactions %}{{ mh.n_transactions }} transactions{% endif %}{% if mh.first_sold_at and mh.last_sold_at %} · {{ mh.first_sold_at }} → {{ mh.last_sold_at }}{% endif %}</span>
+        <span style="font-size:11px;color:#64748b;font-family:ui-monospace,Consolas,monospace">{% if mh.n_transactions %}{{ mh.n_transactions }} transactions{% endif %}{% if mh.date_range %} · {{ mh.date_range }}{% endif %}</span>
       </div>
       <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;font-family:ui-monospace,Consolas,monospace">
         {% if mh.mmr_median %}<span style="color:#fbbf24;font-size:24px;font-weight:800">${{ '{:,}'.format(mh.mmr_median|int) }}</span><span style="font-size:11px;color:#94a3b8">median</span>{% endif %}
@@ -326,25 +323,40 @@
         <span style="font-size:11px;color:#64748b">range ${{ '{:,}'.format(mh.mmr_min|int) }}&ndash;${{ '{:,}'.format(mh.mmr_max|int) }}</span>
         {% endif %}
       </div>
-      {% if mh.p25 and mh.p75 %}
-      <div style="margin-top:6px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#94a3b8">p25–p75 ${{ '{:,}'.format(mh.p25|int) }}&ndash;${{ '{:,}'.format(mh.p75|int) }}</div>
+      {% if mh.mmr_p25 and mh.mmr_p75 %}
+      <div style="margin-top:6px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#94a3b8">p25&ndash;p75 ${{ '{:,}'.format(mh.mmr_p25|int) }}&ndash;${{ '{:,}'.format(mh.mmr_p75|int) }}</div>
       {% endif %}
     </div>
     {% endif %}
 
-    {% if manheim_summary %}
+    {% if mh.base_mmr or mh.adjusted_mmr %}
     <div style="margin-top:10px;padding:10px 12px;background:#0f141d;border:1px solid #1f2937;border-radius:6px;font-family:ui-monospace,Consolas,monospace;font-size:12px">
       <div style="font-size:10px;font-weight:700;color:#c4b5fd;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">vAuto MMR</div>
-      {% if manheim_summary.base_mmr %}<div>Base: <span style="color:#e8ebf0;font-weight:700">${{ '{:,}'.format(manheim_summary.base_mmr|int) }}</span></div>{% endif %}
-      {% if manheim_summary.adjusted_mmr %}<div>Adjusted: <span style="color:#e8ebf0;font-weight:700">${{ '{:,}'.format(manheim_summary.adjusted_mmr|int) }}</span>{% if manheim_summary.avg_cr_grade %} · avg grade {{ manheim_summary.avg_cr_grade }}{% endif %}</div>{% endif %}
-      {% if manheim_summary.avg_odometer %}<div>Avg odometer in comps: {{ '{:,}'.format(manheim_summary.avg_odometer|int) }}</div>{% endif %}
-      {% if manheim_summary.pricing_date %}<div>Pricing date: {{ manheim_summary.pricing_date }}</div>{% endif %}
+      {% if mh.base_mmr %}<div>Base: <span style="color:#e8ebf0;font-weight:700">${{ '{:,}'.format(mh.base_mmr|int) }}</span></div>{% endif %}
+      {% if mh.adjusted_mmr %}<div>Adjusted: <span style="color:#e8ebf0;font-weight:700">${{ '{:,}'.format(mh.adjusted_mmr|int) }}</span>{% if mh.avg_cr_grade %} · avg grade {{ mh.avg_cr_grade }}{% endif %}</div>{% endif %}
+      {% if mh.avg_odometer %}<div>Avg odometer in comps: {{ '{:,}'.format(mh.avg_odometer|int) }}</div>{% endif %}
+      {% if mh.pricing_date %}<div>Pricing date: {{ mh.pricing_date }}</div>{% endif %}
     </div>
     {% endif %}
 
-    {% if manheim_tx %}
-    <div style="margin-top:10px;font-size:10px;font-weight:700;color:#c4b5fd;text-transform:uppercase;letter-spacing:.5px">Recent sales ({{ manheim_tx|length }})</div>
-    {% for t in manheim_tx[:8] %}
+    {% if mh.closest_1 and bid.mileage %}
+    {% set c1 = mh.closest_1 %}
+    {% set c1_delta = (c1.odometer or 0)|int - bid.mileage|int %}
+    {% set c1_sign = '+' if c1_delta >= 0 else '' %}
+    <div style="margin-top:10px;padding:10px 12px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.55);border-radius:6px;font-family:ui-monospace,Consolas,monospace">
+      <div style="font-size:10px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">&#9733; Closest-mile MMR sale · subject {{ '{:,}'.format(bid.mileage|int) }} mi</div>
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span style="font-size:14px;font-weight:700;color:#e8ebf0">{{ '{:,}'.format(c1.odometer|int) if c1.odometer else '?' }} mi {% if c1.odometer %}<span style="font-size:11px;font-weight:400;color:#64748b">({{ c1_sign }}{{ '{:,}'.format(c1_delta) }})</span>{% endif %}</span>
+        {% if c1.sale_price %}<span style="font-size:14px;font-weight:700;color:#fbbf24">${{ '{:,}'.format(c1.sale_price|int) }}</span>{% endif %}
+        {% if c1.date_sold %}<span style="font-size:11px;color:#94a3b8">sold {{ c1.date_sold }}</span>{% endif %}
+      </div>
+      <div style="margin-top:3px;font-size:11px;color:#64748b">{% if c1.auction %}{{ c1.auction }}{% endif %}{% if c1.condition %} · grade {{ c1.condition }}{% endif %}{% if c1.color %} · {{ c1.color }}{% endif %}</div>
+    </div>
+    {% endif %}
+
+    {% if mh.transactions %}
+    <div style="margin-top:10px;font-size:10px;font-weight:700;color:#c4b5fd;text-transform:uppercase;letter-spacing:.5px">Recent sales ({{ mh.transactions|length }})</div>
+    {% for t in mh.transactions[:8] %}
     <div class="comp">
       <div class="top-line">
         <span class="miles-l">{{ '{:,}'.format(t.odometer|int) if t.odometer else '?' }} mi</span>
