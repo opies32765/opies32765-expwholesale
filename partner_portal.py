@@ -492,7 +492,16 @@ def dashboard(slug):
              LIMIT 25
         """, (dealer['id'],))
         inbound_pushes = cur.fetchall()
-        inbound_unread = sum(1 for p in inbound_pushes if p['viewed_at'] is None)
+        # Unread count must reflect ALL pushes for this dealer (not just the
+        # LIMIT-25 visible slice) so the banner stays accurate when there
+        # are >25 pushes — otherwise older unread rows fall outside the
+        # window and the badge under-counts.
+        cur.execute("""
+            SELECT COUNT(*) AS n FROM bid_pushes
+             WHERE dealer_id = %s AND viewed_at IS NULL
+        """, (dealer['id'],))
+        _row = cur.fetchone()
+        inbound_unread = int((_row.get('n') if hasattr(_row, 'get') else _row[0]) or 0)
 
     return render_template('partner_dashboard.html',
                            user=user, dealer=dealer, slug=slug,
