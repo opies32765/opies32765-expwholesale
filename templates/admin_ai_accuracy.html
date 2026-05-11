@@ -43,6 +43,7 @@ tr:hover td{background:#0f172a}
 <body>
 <h1>AI Accuracy &nbsp;<span style="font-size:11px;color:#64748b;font-weight:500">v2 prompt vs LSL purchase reality</span></h1>
 <div class="sub">Reconciles ai_assessment_log → LSL deals.purchase_cost via VIN match. Updated daily at 6 AM ET.</div>
+<div id="quickSummary" style="display:none;padding:11px 18px;background:#0f1729;border:1px solid #1e293b;border-radius:8px;margin:0 0 14px;font-family:ui-monospace,Consolas,monospace"></div>
 
 <div class="window-tabs" style="flex-wrap:wrap;align-items:center;gap:6px">
   <span class="win-tab" data-preset="today">Today</span>
@@ -192,12 +193,65 @@ async function loadData(from, to, label){
   const url = `/api/admin/ai-accuracy/data?from=${from}&to=${to}`;
   const r = await fetch(url);
   const d = await r.json();
+  renderQuickSummary(d);
   renderMetrics(d.stats);
   renderHist(d.histogram);
   renderTrend(d.trend);
   renderScatter(d.rows);
   renderMakeTable(d.per_make);
   renderRowsTable(d.rows);
+}
+
+// 2026-05-11: one-line "last 7 days" pulse — independent of the chosen
+// window so you always see the latest week regardless of which tab is active.
+function renderQuickSummary(d) {
+  const el = document.getElementById('quickSummary');
+  if (!el) return;
+  const trend = (d.trend || []).slice();
+  const rows = d.rows || [];
+  // Trend rows have a `day` field. Keep last 7 calendar days.
+  const cutoff = new Date(); cutoff.setHours(0,0,0,0);
+  cutoff.setDate(cutoff.getDate() - 6); // inclusive of today => last 7 calendar days
+  const recent = trend.filter(t => {
+    const d2 = new Date(t.day);
+    return !isNaN(d2) && d2 >= cutoff;
+  }).sort((a,b) => new Date(a.day) - new Date(b.day));
+  if (recent.length === 0) { el.style.display = 'none'; return; }
+  // Median of the daily medians
+  const meds = recent.map(t => Number(t.median_abs_pct)).filter(v => !isNaN(v)).sort((a,b)=>a-b);
+  const med7d = meds.length ? meds[Math.floor(meds.length/2)] : null;
+  // In-range % over rows whose purchase landed in the last 7 days
+  const recentRows = rows.filter(r => {
+    if (!r.actual_purchased_at) return false;
+    return new Date(r.actual_purchased_at) >= cutoff;
+  });
+  const inRange = recentRows.filter(r => r.in_confidence_range).length;
+  const inRangePct = recentRows.length ? Math.round(100 * inRange / recentRows.length) : null;
+  // Slope: avg of first half vs second half of the recent window (in pp).
+  let slopeHtml = '';
+  if (recent.length >= 4) {
+    const mid = Math.floor(recent.length / 2);
+    const head = recent.slice(0, mid).map(t=>Number(t.median_abs_pct)).filter(v=>!isNaN(v));
+    const tail = recent.slice(mid).map(t=>Number(t.median_abs_pct)).filter(v=>!isNaN(v));
+    if (head.length && tail.length) {
+      const avgHead = head.reduce((a,b)=>a+b,0) / head.length;
+      const avgTail = tail.reduce((a,b)=>a+b,0) / tail.length;
+      const diff = avgTail - avgHead;
+      if (Math.abs(diff) < 0.3) slopeHtml = `<span style="color:#94a3b8">flat</span>`;
+      else if (diff < 0) slopeHtml = `<span style="color:#86efac">↓ ${Math.abs(diff).toFixed(1)}pp</span>`;
+      else slopeHtml = `<span style="color:#fca5a5">↑ ${diff.toFixed(1)}pp</span>`;
+    }
+  }
+  const medColor = med7d == null ? '#94a3b8' : (med7d <= 5 ? '#86efac' : med7d <= 10 ? '#fbbf24' : '#ef4444');
+  const rangeColor = inRangePct == null ? '#94a3b8' : (inRangePct >= 50 ? '#86efac' : inRangePct >= 25 ? '#fbbf24' : '#ef4444');
+  const sep = '<span style="color:#475569;margin:0 10px">·</span>';
+  el.style.display = 'block';
+  el.innerHTML =
+    `<span style="color:#94a3b8;font-size:12px;text-transform:uppercase;letter-spacing:.5px;font-weight:700;margin-right:14px">Last 7 days</span>` +
+    `<span style="color:${medColor};font-size:14px;font-weight:700">median |Δ| ${med7d != null ? med7d.toFixed(2) + '%' : '—'}</span>` + sep +
+    `<span style="color:${rangeColor};font-size:14px;font-weight:700">in-range ${inRangePct != null ? inRangePct + '%' : '—'}</span>` + sep +
+    `<span style="font-size:13px">trend ${slopeHtml || '<span style="color:#94a3b8">—</span>'}</span>` + sep +
+    `<span style="color:#64748b;font-size:12px">${recent.length} day${recent.length===1?'':'s'} · ${recentRows.length} reconciled</span>`;
 }
 
 function loadPreset(preset){
