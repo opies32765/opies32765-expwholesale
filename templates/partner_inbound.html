@@ -173,32 +173,48 @@
 </details>
 {% endif %}
 
-{# ─────────────────── Carfax + AutoCheck (vauto_lookups screenshots, served direct) ─────────────────── #}
-{% if vauto and (vauto.carfax_screenshot or vauto.autocheck_screenshot) or carfax_urls %}
+{# ─────────────────── Carfax (own card) ─────────────────── #}
+{% if vauto and vauto.carfax_screenshot %}
 <details class="card history">
   <summary>
-    <span class="title">Vehicle History Reports</span>
-    <span class="summary-text">{% if vauto and vauto.carfax_screenshot %}Carfax{% endif %}{% if vauto and vauto.carfax_screenshot and vauto.autocheck_screenshot %} · {% endif %}{% if vauto and vauto.autocheck_screenshot %}AutoCheck{% endif %}{% if carfax_urls %}{% if vauto and (vauto.carfax_screenshot or vauto.autocheck_screenshot) %} · {% endif %}{{ carfax_urls|length }} other{% endif %}</span>
+    <span class="title">Carfax Report</span>
+    <span class="summary-text">screenshot</span>
   </summary>
   <div class="body">
-    {% if vauto and vauto.carfax_screenshot %}
-    <div style="font-size:11px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.5px;margin:6px 0">Carfax</div>
     <img src="{{ vauto.carfax_screenshot }}"
-         style="width:100%;border-radius:6px;margin-bottom:12px;cursor:zoom-in;display:block;background:#0a1018"
+         style="width:100%;border-radius:6px;cursor:zoom-in;display:block;background:#0a1018"
          loading="lazy"
          onclick="lbOpen(this.src)"
          onerror="this.style.display='none'">
-    {% endif %}
-    {% if vauto and vauto.autocheck_screenshot %}
-    <div style="font-size:11px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.5px;margin:6px 0">AutoCheck</div>
+  </div>
+</details>
+{% endif %}
+
+{# ─────────────────── AutoCheck (own card) ─────────────────── #}
+{% if vauto and vauto.autocheck_screenshot %}
+<details class="card history">
+  <summary>
+    <span class="title">AutoCheck Report</span>
+    <span class="summary-text">screenshot</span>
+  </summary>
+  <div class="body">
     <img src="{{ vauto.autocheck_screenshot }}"
-         style="width:100%;border-radius:6px;margin-bottom:12px;cursor:zoom-in;display:block;background:#0a1018"
+         style="width:100%;border-radius:6px;cursor:zoom-in;display:block;background:#0a1018"
          loading="lazy"
          onclick="lbOpen(this.src)"
          onerror="this.style.display='none'">
-    {% endif %}
-    {% if carfax_urls %}
-    <div style="font-size:11px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.5px;margin:6px 0">Additional report screenshots ({{ carfax_urls|length }})</div>
+  </div>
+</details>
+{% endif %}
+
+{# ─────────────────── Other report screenshots (Carfax/AutoCheck via SMS / bid_photos) ─────────────────── #}
+{% if carfax_urls %}
+<details class="card history">
+  <summary>
+    <span class="title">Additional History Screenshots</span>
+    <span class="summary-text">{{ carfax_urls|length }} screenshot{% if carfax_urls|length != 1 %}s{% endif %}</span>
+  </summary>
+  <div class="body">
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
       {% for u in carfax_urls %}
       <img src="{{ u|thumb_url('mobile') }}"
@@ -208,7 +224,6 @@
            onerror="this.style.display='none'">
       {% endfor %}
     </div>
-    {% endif %}
   </div>
 </details>
 {% endif %}
@@ -230,69 +245,117 @@
 </details>
 {% endif %}
 
-{# ─────────────────── Manheim auction transactions ─────────────────── #}
-{% set manheim_tx = None %}
-{% if vauto and vauto.manheim_transactions %}
-  {% set manheim_raw = vauto.manheim_transactions %}
-  {% if manheim_raw is mapping %}
-    {% set manheim_tx = manheim_raw.transactions %}
-  {% endif %}
-{% endif %}
-{% if manheim_tx %}
-<details class="card manheim">
+{# ─────────────────── rBook Retail Comps (mirrors EW dashboard) ─────────────────── #}
+{% set rb = (market_intel.rbook if market_intel else None) or {} %}
+{% if rb.n_visible or rb.retail_median or rb.closest_3 %}
+<details class="card rbook">
   <summary>
-    <span class="title">Manheim Auction (Wholesale)</span>
-    <span class="summary-text">{{ manheim_tx|length }} recent sale{% if manheim_tx|length != 1 %}s{% endif %}</span>
+    <span class="title">rBook Retail Comps</span>
+    <span class="summary-text">RETAIL{% if rb.retail_median %} · median ${{ '{:,}'.format(rb.retail_median|int) }}{% endif %}{% if rb.n_visible %} · {{ rb.n_visible }} comps{% endif %}</span>
   </summary>
   <div class="body">
-    {% set prices = manheim_tx|selectattr('sale_price')|map(attribute='sale_price')|list %}
-    {% if prices %}
-      {% set med = prices|sort %}
-      <div class="row"><span class="lbl">Sales count</span><span class="val">{{ prices|length }}</span></div>
-      <div class="row"><span class="lbl">Median</span><span class="val">${{ '{:,}'.format(med[med|length//2]|int) }}</span></div>
-      <div class="row"><span class="lbl">Range</span><span class="val">${{ '{:,}'.format(med[0]|int) }} – ${{ '{:,}'.format(med[-1]|int) }}</span></div>
+    {% if rb.retail_median %}
+    <div style="margin-top:6px;padding:12px;background:rgba(34,197,94,.10);border:1px solid rgba(34,197,94,.30);border-radius:8px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+        <span style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Asking price</span>
+        <span style="font-size:11px;color:#64748b;font-family:ui-monospace,Consolas,monospace">{% if rb.n_visible %}{{ rb.n_visible }} comps{% endif %}{% if rb.count_text %} · vAuto reports {{ rb.count_text }}{% endif %}</span>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;font-family:ui-monospace,Consolas,monospace">
+        <span style="color:#86efac;font-size:24px;font-weight:800">${{ '{:,}'.format(rb.retail_median|int) }}</span>
+        <span style="font-size:11px;color:#94a3b8">median</span>
+        {% if rb.retail_min and rb.retail_max %}
+        <span style="font-size:11px;color:#64748b">range ${{ '{:,}'.format(rb.retail_min|int) }}&ndash;${{ '{:,}'.format(rb.retail_max|int) }}</span>
+        {% endif %}
+      </div>
+      {% if rb.median_days_on_lot or rb.avg_mileage %}
+      <div style="margin-top:6px;display:flex;gap:14px;flex-wrap:wrap;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#94a3b8">
+        {% if rb.median_days_on_lot %}<div>median {{ rb.median_days_on_lot }}d on lot</div>{% endif %}
+        {% if rb.avg_mileage %}<div>avg {{ '{:,}'.format(rb.avg_mileage|int) }} mi in comps</div>{% endif %}
+      </div>
+      {% endif %}
+    </div>
     {% endif %}
-    <div style="margin-top:12px;font-size:11px;font-weight:700;color:#c4b5fd;text-transform:uppercase;letter-spacing:.5px">Recent sales</div>
-    {% for t in manheim_tx[:8] %}
-    <div class="comp">
-      <div class="top-line">
-        <span class="miles-l">{{ '{:,}'.format(t.odometer|int) if t.odometer else '?' }} mi</span>
-        {% if t.sale_price %}<span class="price-l">${{ '{:,}'.format(t.sale_price|int) }}</span>{% endif %}
+
+    {% if rb.closest_3 and bid.mileage %}
+    <div style="margin-top:14px;font-size:11px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.5px">Closest-mile comps · subject {{ '{:,}'.format(bid.mileage|int) }} mi</div>
+    {% for c in rb.closest_3 %}
+    {% set delta = (c.mileage or 0)|int - bid.mileage|int %}
+    {% set sign = '+' if delta >= 0 else '' %}
+    {% set is_top = loop.index == 1 %}
+    <div style="margin-top:8px;padding:10px 12px;background:{% if is_top %}rgba(34,197,94,.16){% else %}rgba(34,197,94,.06){% endif %};border:1px solid {% if is_top %}rgba(34,197,94,.55){% else %}rgba(34,197,94,.20){% endif %};border-radius:6px;font-family:ui-monospace,Consolas,monospace">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span style="font-size:11px;color:{% if is_top %}#86efac{% else %}#94a3b8{% endif %};font-weight:700">#{{ loop.index }}{% if is_top %} &#9733;{% endif %}</span>
+        <span style="font-size:14px;font-weight:700;color:#e8ebf0">{{ '{:,}'.format(c.mileage|int) if c.mileage else '?' }} mi {% if c.mileage %}<span style="font-size:11px;font-weight:400;color:#64748b">({{ sign }}{{ '{:,}'.format(delta) }})</span>{% endif %}</span>
+        <span style="font-size:14px;font-weight:700;color:{% if c.price %}#86efac{% else %}#475569{% endif %}">{% if c.price %}${{ '{:,}'.format(c.price|int) }}{% else %}—{% endif %}</span>
+        <span style="font-size:11px;font-weight:700;{% if c.days_on_lot is none %}color:#475569{% else %}{% set dol = c.days_on_lot|int %}color:{% if dol <= 15 %}#86efac{% elif dol <= 45 %}#fbbf24{% else %}#fca5a5{% endif %}{% endif %}">{% if c.days_on_lot is not none %}{{ c.days_on_lot|int }}d on lot{% else %}—{% endif %}</span>
       </div>
-      <div class="meta-line">
-        {% if t.sale_date %}{{ t.sale_date }}{% endif %}{% if t.auction_location %} · {{ t.auction_location }}{% endif %}{% if t.condition_grade %} · grade {{ t.condition_grade }}{% endif %}
+      {% if c.dealer or c.dealer_city or c.detail_uri %}
+      <div style="margin-top:5px;font-size:11px;color:#64748b">
+        {% if c.detail_uri %}<a href="{{ c.detail_uri }}" target="_blank" rel="noopener" style="color:#7dd3fc">{{ c.dealer or 'unknown dealer' }}{% if c.dealer_city %} · {{ c.dealer_city }}{% if c.dealer_state %}, {{ c.dealer_state }}{% endif %}{% endif %}</a>{% else %}{{ c.dealer or 'unknown dealer' }}{% if c.dealer_city %} · {{ c.dealer_city }}{% if c.dealer_state %}, {{ c.dealer_state }}{% endif %}{% endif %}{% endif %}
       </div>
+      {% endif %}
     </div>
     {% endfor %}
+    <div style="margin-top:8px;font-size:10px;color:#475569;text-align:right;font-family:ui-monospace,Consolas,monospace">green DOL &le;15d · yellow 16-45d · red &gt;45d</div>
+    {% endif %}
   </div>
 </details>
 {% endif %}
 
-{# ─────────────────── rBook closest-3 comps (top 3 retail market) ─────────────────── #}
-{% set rbook = market_intel.rbook if market_intel else None %}
-{% set closest = rbook.closest_3 if rbook else None %}
-{% if closest %}
-<details class="card rbook">
+{# ─────────────────── MMR Auction Floor (wholesale; mirrors EW dashboard) ─────────────────── #}
+{% set mh = (market_intel.manheim if market_intel else None) or {} %}
+{% set manheim_raw = vauto.manheim_transactions if (vauto and vauto.manheim_transactions) else None %}
+{% set manheim_summary = manheim_raw.summary if (manheim_raw and manheim_raw is mapping) else None %}
+{% set manheim_tx = manheim_raw.transactions if (manheim_raw and manheim_raw is mapping) else None %}
+{% if mh.n_transactions or mh.base_mmr or manheim_summary or manheim_tx %}
+<details class="card manheim">
   <summary>
-    <span class="title">rBook Market Comps</span>
-    <span class="summary-text">Top {{ closest|length }} closest retail listings</span>
+    <span class="title">MMR Auction Floor</span>
+    <span class="summary-text">WHOLESALE{% if mh.mmr_median %} · median ${{ '{:,}'.format(mh.mmr_median|int) }}{% elif manheim_tx %} · {{ manheim_tx|length }} sales{% endif %}</span>
   </summary>
   <div class="body">
-    {% if rbook.median %}<div class="row"><span class="lbl">rBook median (full set)</span><span class="val">${{ '{:,}'.format(rbook.median|int) }}</span></div>{% endif %}
-    {% if rbook.avg_price %}<div class="row"><span class="lbl">rBook average</span><span class="val">${{ '{:,}'.format(rbook.avg_price|int) }}</span></div>{% endif %}
-    <div style="margin-top:12px;font-size:11px;font-weight:700;color:#67e8f9;text-transform:uppercase;letter-spacing:.5px">Closest 3 by miles</div>
-    {% for c in closest %}
+    {% if mh.mmr_median or mh.mmr_min %}
+    <div style="margin-top:6px;padding:12px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.30);border-radius:8px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+        <span style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Hammer prices</span>
+        <span style="font-size:11px;color:#64748b;font-family:ui-monospace,Consolas,monospace">{% if mh.n_transactions %}{{ mh.n_transactions }} transactions{% endif %}{% if mh.first_sold_at and mh.last_sold_at %} · {{ mh.first_sold_at }} → {{ mh.last_sold_at }}{% endif %}</span>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;font-family:ui-monospace,Consolas,monospace">
+        {% if mh.mmr_median %}<span style="color:#fbbf24;font-size:24px;font-weight:800">${{ '{:,}'.format(mh.mmr_median|int) }}</span><span style="font-size:11px;color:#94a3b8">median</span>{% endif %}
+        {% if mh.mmr_min and mh.mmr_max %}
+        <span style="font-size:11px;color:#64748b">range ${{ '{:,}'.format(mh.mmr_min|int) }}&ndash;${{ '{:,}'.format(mh.mmr_max|int) }}</span>
+        {% endif %}
+      </div>
+      {% if mh.p25 and mh.p75 %}
+      <div style="margin-top:6px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#94a3b8">p25–p75 ${{ '{:,}'.format(mh.p25|int) }}&ndash;${{ '{:,}'.format(mh.p75|int) }}</div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    {% if manheim_summary %}
+    <div style="margin-top:10px;padding:10px 12px;background:#0f141d;border:1px solid #1f2937;border-radius:6px;font-family:ui-monospace,Consolas,monospace;font-size:12px">
+      <div style="font-size:10px;font-weight:700;color:#c4b5fd;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">vAuto MMR</div>
+      {% if manheim_summary.base_mmr %}<div>Base: <span style="color:#e8ebf0;font-weight:700">${{ '{:,}'.format(manheim_summary.base_mmr|int) }}</span></div>{% endif %}
+      {% if manheim_summary.adjusted_mmr %}<div>Adjusted: <span style="color:#e8ebf0;font-weight:700">${{ '{:,}'.format(manheim_summary.adjusted_mmr|int) }}</span>{% if manheim_summary.avg_cr_grade %} · avg grade {{ manheim_summary.avg_cr_grade }}{% endif %}</div>{% endif %}
+      {% if manheim_summary.avg_odometer %}<div>Avg odometer in comps: {{ '{:,}'.format(manheim_summary.avg_odometer|int) }}</div>{% endif %}
+      {% if manheim_summary.pricing_date %}<div>Pricing date: {{ manheim_summary.pricing_date }}</div>{% endif %}
+    </div>
+    {% endif %}
+
+    {% if manheim_tx %}
+    <div style="margin-top:10px;font-size:10px;font-weight:700;color:#c4b5fd;text-transform:uppercase;letter-spacing:.5px">Recent sales ({{ manheim_tx|length }})</div>
+    {% for t in manheim_tx[:8] %}
     <div class="comp">
       <div class="top-line">
-        <span class="miles-l">{{ '{:,}'.format(c.mileage|int) if c.mileage else '?' }} mi</span>
-        {% if c.price %}<span class="price-l">${{ '{:,}'.format(c.price|int) }}</span>{% endif %}
+        <span class="miles-l">{{ '{:,}'.format(t.odometer|int) if t.odometer else '?' }} mi</span>
+        {% if t.sale_price %}<span class="price-l" style="color:#fbbf24">${{ '{:,}'.format(t.sale_price|int) }}</span>{% endif %}
       </div>
       <div class="meta-line">
-        {{ c.year or '' }} {{ c.make or '' }} {{ c.model or '' }}{% if c.trim %} · {{ c.trim }}{% endif %}{% if c.days_on_lot %} · {{ c.days_on_lot }}d on lot{% endif %}
+        {% if t.date_sold %}sold {{ t.date_sold }}{% endif %}{% if t.auction %} · {{ t.auction }}{% endif %}{% if t.condition %} · grade {{ t.condition }}{% endif %}{% if t.color %} · {{ t.color }}{% endif %}
       </div>
-      {% if c.url %}<div class="meta-line"><a href="{{ c.url }}" target="_blank" rel="noopener">View listing →</a></div>{% endif %}
     </div>
     {% endfor %}
+    {% endif %}
   </div>
 </details>
 {% endif %}
@@ -323,15 +386,15 @@
 
 {# ─────────────────── Offer form ─────────────────── #}
 <div class="offer">
-  <h2>💰 Submit your offer</h2>
+  <h2>💰 If interested let us know what you would pay</h2>
   <form method="POST" action="/partner/{{ slug }}/inbound/{{ bid.id }}/offer">
-    <label for="offer_amount">Your offer ($)</label>
+    <label for="offer_amount">Your bid ($)</label>
     <input type="text" name="offer_amount" id="offer_amount" inputmode="decimal"
            placeholder="e.g. 48000" required autocomplete="off">
     <label for="message">Optional note (delivery, recon plans, etc.)</label>
     <textarea name="message" id="message" maxlength="1000"
               placeholder="Anything else our salesperson should know?"></textarea>
-    <button type="submit">Send Offer to {{ dealer.salesperson or 'Experience Wholesale' }}</button>
+    <button type="submit">Send BID to EW</button>
   </form>
 
   {% if prior_offers %}

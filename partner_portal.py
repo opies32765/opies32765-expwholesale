@@ -1341,18 +1341,23 @@ def inbound_bid_view(slug, bid_id):
         cur.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s",
                     (bid_id,))
         ipacket = cur.fetchone()
-        # Partner-safe slice of ai_assessment_log: ONLY market_intel (rBook
-        # closest_3 + Manheim transactions). Explicitly NOT dealer_intel,
+        # Partner-safe market_intel. We prefer vauto_lookups.market_intel_cached
+        # because it has the richer computed stats (retail_median, closest_3,
+        # median_days_on_lot, stocking_report, manheim summary) that match
+        # what the EW operator sees. Fall back to ai_assessment_log if the
+        # cache isn't populated yet. Explicitly NOT loading dealer_intel,
         # buyer_intel, ai reasoning, target_buy, confidence, flags.
         import json as _json
-        cur.execute("""
-            SELECT market_intel
-              FROM ai_assessment_log
-             WHERE bid_id = %s
-             ORDER BY created_at DESC LIMIT 1
-        """, (bid_id,))
-        ass = cur.fetchone() or {}
-        mi = ass.get('market_intel') if ass else None
+        mi = None
+        if vauto and vauto.get('market_intel_cached'):
+            mi = vauto['market_intel_cached']
+        else:
+            cur.execute("""
+                SELECT market_intel FROM ai_assessment_log
+                 WHERE bid_id = %s ORDER BY created_at DESC LIMIT 1
+            """, (bid_id,))
+            ass = cur.fetchone() or {}
+            mi = ass.get('market_intel') if ass else None
         if isinstance(mi, str):
             try: mi = _json.loads(mi)
             except Exception: mi = None
