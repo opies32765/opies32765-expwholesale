@@ -1680,6 +1680,25 @@ def dashboard():
         sourcing_active = []
         sourcing_unseen_count = 0
 
+    # 2026-05-11: partner offer counts per bid for the yellow-star indicator
+    # in the bid list. One UNION query — cheap.
+    partner_offer_counts = {}
+    try:
+        _poc_cur = db.cursor()
+        _poc_cur.execute("""
+            SELECT bid_id, COUNT(*) AS n,
+                   COUNT(*) FILTER (WHERE ew_seen_at IS NULL) AS unseen
+              FROM bid_partner_offers
+             GROUP BY bid_id
+        """)
+        for r in _poc_cur.fetchall():
+            partner_offer_counts[r['bid_id']] = {
+                'n': int(r['n']),
+                'unseen': int(r['unseen']),
+            }
+    except Exception as _poc_err:
+        print(f'[index] partner_offer_counts err: {_poc_err}', flush=True)
+
     return render_template('index.html', bids=bids, stats=stats,
                            status_filter=status_filter, rep_filter=rep_filter,
                            reps=reps, photo_counts=photo_counts,
@@ -1688,6 +1707,7 @@ def dashboard():
                            active_workers=active_workers,
                            sourcing_active=sourcing_active,
                            sourcing_unseen_count=sourcing_unseen_count,
+                           partner_offer_counts=partner_offer_counts,
                            time_ago=time_ago)
 
 
@@ -2062,10 +2082,13 @@ def bid_detail(bid_id):
     except Exception as _ml_err:
         print(f'[bid_detail] ml_predict err: {_ml_err}', flush=True)
 
-    # 2026-05-11: offers from subscribed partner dealers on this bid
+    # 2026-05-11: offers from subscribed partner dealers on this bid.
+    # Uses a fresh connection — the main `db` is already closed at this
+    # point in the request, so cursor reuse throws "connection already closed".
     partner_offers = []
     try:
-        _po_cur = db.cursor()
+        _po_db = get_db()
+        _po_cur = _po_db.cursor()
         _po_cur.execute("""
             SELECT o.id, o.offer_amount, o.message, o.submitted_at,
                    o.ew_seen_at, o.ew_action,
@@ -2078,6 +2101,7 @@ def bid_detail(bid_id):
              ORDER BY o.submitted_at DESC
         """, (bid_id,))
         partner_offers = _po_cur.fetchall()
+        _po_db.close()
     except Exception as _po_err:
         print(f'[bid_detail] partner_offers err: {_po_err}', flush=True)
 

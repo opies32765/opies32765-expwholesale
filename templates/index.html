@@ -395,6 +395,7 @@ setInterval(() => {
         <th>Ask</th>
         <th>AI Price</th>
         <th>Bid</th>
+        <th title="Partner offer received">Partner Bid</th>
         <th>Photos</th>
         <th>Status</th>
         <th></th>
@@ -402,9 +403,10 @@ setInterval(() => {
     </thead>
     <tbody>
       {% for bid in bids %}
+      {% set _po = partner_offer_counts.get(bid.id, {'n':0,'unseen':0}) if partner_offer_counts is defined else {'n':0,'unseen':0} %}
       <tr data-id="{{ bid.id }}" data-created="{{ bid.created_at.isoformat() if bid.created_at else '' }}" data-unread="{{ '1' if bid.has_unread else '0' }}" class="status-{{ bid.status }}">
         <td>
-          <div class="bid-num">{% if bid.has_unread %}<span class="unread-star" title="Unread message">&#9733;</span>{% endif %}#{{ bid.id }}</div>
+          <div class="bid-num">{% if bid.has_unread %}<span class="unread-star" title="Unread message">&#9733;</span>{% endif %}{% if _po.n %}<span title="{{ _po.n }} partner offer{% if _po.n != 1 %}s{% endif %} received{% if _po.unseen %} ({{ _po.unseen }} new){% endif %}" style="color:#fbbf24;font-weight:700;margin-right:3px">&#9733;</span>{% endif %}#{{ bid.id }}</div>
           <div class="bid-time">{{ time_ago(bid.created_at) }}</div>
           {% set _active = active_workers.get(bid.id, []) if active_workers else [] %}
           {% if _active %}
@@ -426,9 +428,20 @@ setInterval(() => {
             {% if bid.partner_dealer_name %}<div class="contact-company" style="color:#94a3b8;font-size:11px">{{ bid.partner_dealer_name }}</div>{% endif %}
             <div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3);border-radius:3px;font-size:9px;font-weight:700;color:#a78bfa;letter-spacing:.4px;text-transform:uppercase">Dealer DB</span></div>
           {% else %}
-            <div class="contact-name">{{ bid.contact_name or bid.phone }}</div>
-            {% if bid.contact_name %}<div class="contact-phone">{{ bid.phone }}</div>{% endif %}
-            {% if bid.contact_company %}<div class="contact-company">{{ bid.contact_company }}</div>{% endif %}
+            {% if bid.awaiting_name %}
+              <div class="contact-name" style="color:#fbbf24">Awaiting name…</div>
+              <div class="contact-phone">{{ bid.phone }}</div>
+            {% elif bid.bidder_name %}
+              <div class="contact-name">{{ bid.bidder_name }}</div>
+              {% if bid.partner_dealer_name %}
+                <div class="contact-company" style="color:#a78bfa;font-size:11px">{{ bid.partner_dealer_name }}</div>
+              {% endif %}
+              <div class="contact-phone">{{ bid.phone }}</div>
+            {% else %}
+              <div class="contact-name">{{ bid.contact_name or bid.phone }}</div>
+              {% if bid.contact_name %}<div class="contact-phone">{{ bid.phone }}</div>{% endif %}
+              {% if bid.contact_company %}<div class="contact-company">{{ bid.contact_company }}</div>{% endif %}
+            {% endif %}
           {% endif %}
         </td>
         <td>
@@ -463,6 +476,13 @@ setInterval(() => {
         <td>
           {% if bid.bid_amount %}
             <div style="font-size:15px;font-weight:700;color:#34d399">${{ '{:,.0f}'.format(bid.bid_amount) }}</div>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if _po.n %}
+            <a href="/bid/{{ bid.id }}#partner-offers-card" style="display:inline-flex;align-items:center;gap:6px;padding:5px 9px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.4);border-radius:6px;text-decoration:none;font-size:13px;font-weight:700;color:#fbbf24;font-family:ui-monospace,Consolas,monospace" title="Click to view partner offers">
+              &#9733; {{ _po.n }} offer{% if _po.n != 1 %}s{% endif %}{% if _po.unseen %} <span style="font-size:9px;background:#fbbf24;color:#0f172a;padding:1px 5px;border-radius:3px;letter-spacing:.3px">{{ _po.unseen }} NEW</span>{% endif %}
+            </a>
           {% else %}—{% endif %}
         </td>
         <td>
@@ -631,7 +651,13 @@ function renderRow(b, pc, fp, activeWorker) {
     ? `<div class="contact-name" style="color:#a78bfa">EW Search</div>`
       + (b.partner_dealer_name ? `<div class="contact-company" style="color:#94a3b8;font-size:11px">${b.partner_dealer_name}</div>` : '')
       + `<div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3);border-radius:3px;font-size:9px;font-weight:700;color:#a78bfa;letter-spacing:.4px;text-transform:uppercase">Dealer DB</span></div>`
-    : `<div class="contact-name">${b.contact_name||b.phone}</div>${b.contact_name?`<div class="contact-phone">${b.phone}</div>`:''}${b.contact_company?`<div class="contact-company">${b.contact_company}</div>`:''}`;
+    : (b.awaiting_name
+        ? `<div class="contact-name" style="color:#fbbf24">Awaiting name…</div><div class="contact-phone">${b.phone}</div>`
+        : (b.bidder_name
+            ? `<div class="contact-name">${b.bidder_name}</div>`
+              + (b.partner_dealer_name ? `<div class="contact-company" style="color:#a78bfa;font-size:11px">${b.partner_dealer_name}</div>` : '')
+              + `<div class="contact-phone">${b.phone}</div>`
+            : `<div class="contact-name">${b.contact_name||b.phone}</div>${b.contact_name?`<div class="contact-phone">${b.phone}</div>`:''}${b.contact_company?`<div class="contact-company">${b.contact_company}</div>`:''}`));
   const rowClass = ['status-'+b.status, b.is_new ? 'row-new' : ''].filter(Boolean).join(' ');
   const askPrice = b.asking_price ? `<div style="font-size:15px;font-weight:700;color:#94a3b8">$${Math.round(b.asking_price).toLocaleString()}</div>` : '—';
   const aiPrice  = b.ai_price    ? `<div style="font-size:15px;font-weight:700;color:#a78bfa">$${Math.round(b.ai_price).toLocaleString()}</div>` : '—';
