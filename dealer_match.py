@@ -200,7 +200,13 @@ def find_dealer_matches(db_conn, year, make, model,
     empty = {'active': [], 'recent_sales': [], 'patterns': [],
              'top_pitch': [], 'config_used': {}, 'tier_used': 'none',
              'tier_confidence': 'none'}
+    # DIAGNOSTIC: tag every call so we can correlate worker behavior with
+    # what params find_dealer_matches actually saw. Easy grep: `dm-diag`.
+    print(f'[dm-diag] ENTER bid_id={bid_id} year={year!r} make={make!r} '
+          f'model={model!r} trim={trim!r} cfg_has_dealer_match='
+          f'{bool((config or {}).get("dealer_match"))}', flush=True)
     if not (year and make and model):
+        print(f'[dm-diag] EMPTY bid_id={bid_id} reason=missing_ymm', flush=True)
         return empty
 
     cfg = {**DEFAULT_CONFIG, **(config or {}).get('dealer_match', {})}
@@ -208,6 +214,7 @@ def find_dealer_matches(db_conn, year, make, model,
 
     # If bid_id passed, prefer canon_* from DB (more authoritative than args)
     canon_year = canon_make = canon_model = canon_trim = None
+    canon_lookup_ok = None  # None = not attempted, True/False = result
     if bid_id is not None:
         try:
             # Use a fresh tuple cursor (caller's db_conn may be RealDictCursor)
@@ -226,8 +233,11 @@ def find_dealer_matches(db_conn, year, make, model,
                         canon_trim  = row.get('canon_trim')
                     else:
                         canon_year, canon_make, canon_model, canon_trim = row
+                canon_lookup_ok = True
         except Exception as _e:
-            print(f'[dealer_match v2] canon lookup err: {_e}', flush=True)
+            canon_lookup_ok = False
+            print(f'[dm-diag] canon lookup err bid_id={bid_id}: {_e!r}',
+                  flush=True)
             try: db_conn.rollback()
             except Exception: pass
 
@@ -256,6 +266,7 @@ def find_dealer_matches(db_conn, year, make, model,
     chosen_tier = None
     chosen_conf = None
     active_rows = []
+    tier_diag = []  # per-tier (name, row_count_or_err) for diagnostic
     for tier_name, conf, (where, params) in tier_attempts:
         sql, full_params = _select_active(where, params, max_active)
         # Use a fresh cursor per tier so errors don't poison the connection.
@@ -270,10 +281,13 @@ def find_dealer_matches(db_conn, year, make, model,
                 for rr in raw_rows:
                     rows.append(rr if isinstance(rr, dict) else dict(zip(cols, rr)))
         except Exception as e:
-            print(f'[dealer_match v2] tier {tier_name} err: {e}', flush=True)
+            tier_diag.append((tier_name, f'err:{type(e).__name__}:{e!r}'))
+            print(f'[dm-diag] tier {tier_name} err bid_id={bid_id}: '
+                  f'{type(e).__name__}: {e!r}', flush=True)
             try: db_conn.rollback()
             except Exception: pass
             continue
+        tier_diag.append((tier_name, f'rows={len(rows)}'))
         if rows:
             for r in rows:
                 r['match_tier'] = tier_name
@@ -283,7 +297,14 @@ def find_dealer_matches(db_conn, year, make, model,
             break
 
     if not chosen_tier:
+        print(f'[dm-diag] EMPTY bid_id={bid_id} reason=no_tier_matched '
+              f'canon_lookup_ok={canon_lookup_ok} has_canon={has_canon_bid} '
+              f'eff_ymm={eff_year!r}/{eff_make!r}/{eff_model!r}/{eff_trim!r} '
+              f'tiers={tier_diag} cfg.recent_days={cfg.get("recent_days")} '
+              f'cfg.max_active={cfg.get("max_active")}', flush=True)
         return empty
+    print(f'[dm-diag] OK bid_id={bid_id} tier={chosen_tier} '
+          f'active={len(active_rows)}', flush=True)
 
     # Recent-sales tier query — same WHERE on whichever tier hit
     # (intentionally simpler — match on the tier that produced active rows

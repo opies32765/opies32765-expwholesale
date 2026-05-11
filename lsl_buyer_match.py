@@ -216,7 +216,12 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None,
         'recent_buyers': [], 'top_pitch_buyers': [],
         'config_used': {},
     }
+    # DIAGNOSTIC: tag every call. Easy grep: `lsl-diag`.
+    print(f'[lsl-diag] ENTER year={year!r} make={make!r} model={model!r} '
+          f'trim={trim!r} canon_trim={canon_trim!r} mileage={mileage!r}',
+          flush=True)
     if not (year and make and model):
+        print(f'[lsl-diag] EMPTY reason=missing_ymm', flush=True)
         return empty
 
     year_tol = int(_cfg(config, 'year_tolerance', 0))
@@ -237,6 +242,7 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None,
     try:
         y = int(year)
     except (ValueError, TypeError):
+        print(f'[lsl-diag] EMPTY reason=year_not_int year={year!r}', flush=True)
         return empty
     y_lo, y_hi = y - year_tol, y + year_tol
     year_prefix_clause = ' OR '.join(["vehicle_info LIKE ?" for _ in range(y_lo, y_hi + 1)])
@@ -572,6 +578,10 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None,
         scored.sort(key=lambda x: -x['pitch_score'])
         top_pitch = scored[:max_pitch]
 
+        print(f'[lsl-diag] OK deals={len(deals)} '
+              f'total_deals={(patterns or {}).get("total_deals")} '
+              f'unique_buyers={(patterns or {}).get("unique_buyers")}',
+              flush=True)
         return {
             'deals':            deals,
             'patterns':         patterns,
@@ -587,7 +597,10 @@ def find_same_ymm_deals(year, make, model, mileage=None, config=None, trim=None,
             },
         }
     except Exception as e:
-        print(f'lsl_buyer_match error: {type(e).__name__}: {e}', flush=True)
+        import traceback
+        print(f'[lsl-diag] EMPTY reason=exception {type(e).__name__}: {e!r}',
+              flush=True)
+        print(f'[lsl-diag] traceback: {traceback.format_exc()}', flush=True)
         return empty
 
 
