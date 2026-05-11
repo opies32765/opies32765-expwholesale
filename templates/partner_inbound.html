@@ -149,7 +149,7 @@
 
 {# ─────────────────── iPacket OEM Window Sticker (numbers only — images hidden for v1) ─────────────────── #}
 {% if ipacket %}
-<details class="card sticker" open>
+<details class="card sticker">
   <summary>
     <span class="title">OEM Window Sticker (iPacket)</span>
     <span class="summary-text">{% if ipacket.total_msrp %}MSRP ${{ '{:,}'.format(ipacket.total_msrp|int) }}{% elif ipacket.not_available %}not available{% else %}received{% endif %}</span>
@@ -175,7 +175,7 @@
 
 {# ─────────────────── Carfax + AutoCheck (vauto_lookups screenshots, served direct) ─────────────────── #}
 {% if vauto and (vauto.carfax_screenshot or vauto.autocheck_screenshot) or carfax_urls %}
-<details class="card history" open>
+<details class="card history">
   <summary>
     <span class="title">Vehicle History Reports</span>
     <span class="summary-text">{% if vauto and vauto.carfax_screenshot %}Carfax{% endif %}{% if vauto and vauto.carfax_screenshot and vauto.autocheck_screenshot %} · {% endif %}{% if vauto and vauto.autocheck_screenshot %}AutoCheck{% endif %}{% if carfax_urls %}{% if vauto and (vauto.carfax_screenshot or vauto.autocheck_screenshot) %} · {% endif %}{{ carfax_urls|length }} other{% endif %}</span>
@@ -215,7 +215,7 @@
 
 {# ─────────────────── AccuTrade Report (screenshot of the appraisal page) ─────────────────── #}
 {% if accutrade and accutrade.screenshot %}
-<details class="card sticker" open>
+<details class="card sticker">
   <summary>
     <span class="title">AccuTrade Report</span>
     <span class="summary-text">{% if accutrade.guaranteed_offer %}Guaranteed Offer ${{ '{:,}'.format(accutrade.guaranteed_offer|int) }}{% else %}captured{% endif %}</span>
@@ -239,7 +239,7 @@
   {% endif %}
 {% endif %}
 {% if manheim_tx %}
-<details class="card manheim" open>
+<details class="card manheim">
   <summary>
     <span class="title">Manheim Auction (Wholesale)</span>
     <span class="summary-text">{{ manheim_tx|length }} recent sale{% if manheim_tx|length != 1 %}s{% endif %}</span>
@@ -272,7 +272,7 @@
 {% set rbook = market_intel.rbook if market_intel else None %}
 {% set closest = rbook.closest_3 if rbook else None %}
 {% if closest %}
-<details class="card rbook" open>
+<details class="card rbook">
   <summary>
     <span class="title">rBook Market Comps</span>
     <span class="summary-text">Top {{ closest|length }} closest retail listings</span>
@@ -299,7 +299,7 @@
 
 {# ─────────────────── AccuTrade & vAuto book values ─────────────────── #}
 {% if accutrade or vauto %}
-<details class="card books" open>
+<details class="card books">
   <summary>
     <span class="title">Book Values</span>
     <span class="summary-text">vAuto · AccuTrade</span>
