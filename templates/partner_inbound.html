@@ -148,17 +148,38 @@
 </div>
 
 {# ─────────────────── iPacket OEM Window Sticker (numbers only — images hidden for v1) ─────────────────── #}
-{% if ipacket and (ipacket.total_msrp or ipacket.base_price) %}
+{% if ipacket %}
 <details class="card sticker" open>
   <summary>
-    <span class="title">OEM Window Sticker</span>
-    <span class="summary-text">iPacket{% if ipacket.total_msrp %} · MSRP ${{ '{:,}'.format(ipacket.total_msrp|int) }}{% endif %}</span>
+    <span class="title">OEM Window Sticker (iPacket)</span>
+    <span class="summary-text">{% if ipacket.total_msrp %}MSRP ${{ '{:,}'.format(ipacket.total_msrp|int) }}{% elif ipacket.not_available %}not available{% else %}received{% endif %}</span>
   </summary>
   <div class="body">
     {% if ipacket.total_msrp %}<div class="row"><span class="lbl">Total MSRP</span><span class="val">${{ '{:,}'.format(ipacket.total_msrp|int) }}</span></div>{% endif %}
     {% if ipacket.base_price %}<div class="row"><span class="lbl">Base Price</span><span class="val">${{ '{:,}'.format(ipacket.base_price|int) }}</span></div>{% endif %}
     {% if ipacket.exterior_color %}<div class="row"><span class="lbl">Exterior</span><span class="val">{{ ipacket.exterior_color }}</span></div>{% endif %}
     {% if ipacket.interior_color %}<div class="row"><span class="lbl">Interior</span><span class="val">{{ ipacket.interior_color }}</span></div>{% endif %}
+    {% if ipacket.not_available and not ipacket.total_msrp and not ipacket.base_price %}
+    <div class="empty">iPacket sticker not available for this VIN{% if ipacket.unavailable_reason %} · {{ ipacket.unavailable_reason }}{% endif %}</div>
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+{# ─────────────────── Vehicle History Reports (count only — images hidden for v1) ─────────────────── #}
+{% if carfax_count %}
+<details class="card history">
+  <summary>
+    <span class="title">Vehicle History Reports</span>
+    <span class="summary-text">{{ carfax_count }} report{% if carfax_count != 1 %}s{% endif %} on file</span>
+  </summary>
+  <div class="body">
+    <div style="font-size:13px;color:#cbd5e1;line-height:1.55">
+      {{ carfax_count }} Carfax / AutoCheck screenshot{% if carfax_count != 1 %}s{% endif %}
+      capture{% if carfax_count == 1 %}d{% else %}d{% endif %} for this VIN. Image rendering disabled in this view —
+      contact your salesperson{% if dealer.salesperson %} ({{ dealer.salesperson }}){% endif %}
+      for the full report.
+    </div>
   </div>
 </details>
 {% endif %}
@@ -172,7 +193,7 @@
   {% endif %}
 {% endif %}
 {% if manheim_tx %}
-<details class="card manheim">
+<details class="card manheim" open>
   <summary>
     <span class="title">Manheim Auction (Wholesale)</span>
     <span class="summary-text">{{ manheim_tx|length }} recent sale{% if manheim_tx|length != 1 %}s{% endif %}</span>
@@ -205,7 +226,7 @@
 {% set rbook = market_intel.rbook if market_intel else None %}
 {% set closest = rbook.closest_3 if rbook else None %}
 {% if closest %}
-<details class="card rbook">
+<details class="card rbook" open>
   <summary>
     <span class="title">rBook Market Comps</span>
     <span class="summary-text">Top {{ closest|length }} closest retail listings</span>
@@ -232,7 +253,7 @@
 
 {# ─────────────────── AccuTrade & vAuto book values ─────────────────── #}
 {% if accutrade or vauto %}
-<details class="card books">
+<details class="card books" open>
   <summary>
     <span class="title">Book Values</span>
     <span class="summary-text">vAuto · AccuTrade</span>

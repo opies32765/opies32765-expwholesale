@@ -488,7 +488,7 @@ def dashboard(slug):
               FROM bid_pushes bp
               JOIN bids b ON b.id = bp.bid_id
              WHERE bp.dealer_id = %s
-             ORDER BY bp.pushed_at DESC
+             ORDER BY b.id DESC
              LIMIT 25
         """, (dealer['id'],))
         inbound_pushes = cur.fetchall()
@@ -1364,17 +1364,18 @@ def inbound_bid_view(slug, bid_id):
              ORDER BY submitted_at DESC
         """, (bid_id, dealer['id']))
         prior_offers = cur.fetchall()
-        # Look for any Carfax / AutoCheck report screenshots on this bid
-        cur.execute("""
-            SELECT url FROM bid_reports WHERE bid_id = %s ORDER BY id
-        """, (bid_id,)) if False else None
-        # bid_reports table may not exist on every install — pull via fallback
-        carfax_urls = []
+        # Vehicle history reports — bid_photos with is_car=FALSE are the
+        # Carfax / AutoCheck screenshots that came in via SMS (operator
+        # uploads, _process_carfax_async detection). We only need the count
+        # for v1 — no image rendering per the "no images" rule.
+        carfax_count = 0
         try:
             cur.execute("""
-                SELECT url FROM bid_reports WHERE bid_id = %s ORDER BY id
+                SELECT COUNT(*) AS n FROM bid_photos
+                 WHERE bid_id = %s AND is_car = FALSE
             """, (bid_id,))
-            carfax_urls = [r['url'] for r in cur.fetchall()]
+            row = cur.fetchone()
+            carfax_count = (row.get('n') if hasattr(row, 'get') else row[0]) or 0
         except Exception:
             conn.rollback()
     return render_template('partner_inbound.html',
@@ -1384,7 +1385,7 @@ def inbound_bid_view(slug, bid_id):
                            accutrade=dict(accutrade) if accutrade else None,
                            ipacket=dict(ipacket) if ipacket else None,
                            market_intel=mi,
-                           carfax_urls=carfax_urls,
+                           carfax_count=carfax_count,
                            prior_offers=[dict(o) for o in prior_offers],
                            slug=slug,
                            user=user)
