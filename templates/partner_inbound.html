@@ -173,14 +173,32 @@
 </details>
 {% endif %}
 
-{# ─────────────────── Vehicle History Reports (Carfax / AutoCheck screenshots) ─────────────────── #}
-{% if carfax_urls %}
+{# ─────────────────── Carfax + AutoCheck (vauto_lookups screenshots, served direct) ─────────────────── #}
+{% if vauto and (vauto.carfax_screenshot or vauto.autocheck_screenshot) or carfax_urls %}
 <details class="card history" open>
   <summary>
     <span class="title">Vehicle History Reports</span>
-    <span class="summary-text">{{ carfax_urls|length }} report{% if carfax_urls|length != 1 %}s{% endif %}</span>
+    <span class="summary-text">{% if vauto and vauto.carfax_screenshot %}Carfax{% endif %}{% if vauto and vauto.carfax_screenshot and vauto.autocheck_screenshot %} · {% endif %}{% if vauto and vauto.autocheck_screenshot %}AutoCheck{% endif %}{% if carfax_urls %}{% if vauto and (vauto.carfax_screenshot or vauto.autocheck_screenshot) %} · {% endif %}{{ carfax_urls|length }} other{% endif %}</span>
   </summary>
   <div class="body">
+    {% if vauto and vauto.carfax_screenshot %}
+    <div style="font-size:11px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.5px;margin:6px 0">Carfax</div>
+    <img src="{{ vauto.carfax_screenshot }}"
+         style="width:100%;border-radius:6px;margin-bottom:12px;cursor:zoom-in;display:block;background:#0a1018"
+         loading="lazy"
+         onclick="lbOpen(this.src)"
+         onerror="this.style.display='none'">
+    {% endif %}
+    {% if vauto and vauto.autocheck_screenshot %}
+    <div style="font-size:11px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.5px;margin:6px 0">AutoCheck</div>
+    <img src="{{ vauto.autocheck_screenshot }}"
+         style="width:100%;border-radius:6px;margin-bottom:12px;cursor:zoom-in;display:block;background:#0a1018"
+         loading="lazy"
+         onclick="lbOpen(this.src)"
+         onerror="this.style.display='none'">
+    {% endif %}
+    {% if carfax_urls %}
+    <div style="font-size:11px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.5px;margin:6px 0">Additional report screenshots ({{ carfax_urls|length }})</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
       {% for u in carfax_urls %}
       <img src="{{ u|thumb_url('mobile') }}"
@@ -190,6 +208,24 @@
            onerror="this.style.display='none'">
       {% endfor %}
     </div>
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+{# ─────────────────── AccuTrade Report (screenshot of the appraisal page) ─────────────────── #}
+{% if accutrade and accutrade.screenshot %}
+<details class="card sticker" open>
+  <summary>
+    <span class="title">AccuTrade Report</span>
+    <span class="summary-text">{% if accutrade.guaranteed_offer %}Guaranteed Offer ${{ '{:,}'.format(accutrade.guaranteed_offer|int) }}{% else %}captured{% endif %}</span>
+  </summary>
+  <div class="body">
+    <img src="{{ accutrade.screenshot }}"
+         style="width:100%;border-radius:6px;cursor:zoom-in;display:block;background:#0a1018"
+         loading="lazy"
+         onclick="lbOpen(this.src)"
+         onerror="this.style.display='none'">
   </div>
 </details>
 {% endif %}
