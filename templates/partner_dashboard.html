@@ -381,12 +381,14 @@
         if (card && sessionStorage.getItem(cardKey) === '1') card.open = true;
       } catch (e) {}
 
-      // Show banner iff there are unacknowledged unread bids AND the card
-      // is currently closed (no point banner-ing while they ARE looking).
+      // Show banner whenever there are unacknowledged unread bids,
+      // regardless of card state. Card-open is its own acknowledgement
+      // gesture (the toggle handler below sets ack = unread), so the
+      // banner hides at the moment Mark opens the card and stays hidden
+      // until a NEW push arrives beyond that ack count.
       function refreshBanner() {
         if (!banner) return;
-        var visible = (unread > ack) && !(card && card.open);
-        banner.style.display = visible ? 'block' : 'none';
+        banner.style.display = (unread > ack) ? 'block' : 'none';
       }
       refreshBanner();
 
