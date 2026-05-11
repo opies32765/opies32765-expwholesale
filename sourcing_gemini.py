@@ -88,7 +88,7 @@ INTENT GUIDE
 - "more_details": user asks for MSRP / original sticker / options / photos / VIN / location / "where is it" / "what state" / "is it still available" / pricing or any info we can NOT answer about a specific match. Examples: "where is it?", "what state?", "what was msrp?", "original sticker?", "do you have photos?", "is it still available?", "where's it located?"
 - "callback_yes": user said yes to a "want me to have someone reach out / contact you?" offer (only valid when BOT_LAST_TURN was that offer). Affirmatives: "yes", "sure", "please", "ok do that", "go ahead", "yeah"
 - "sort_request": user wants the same matches re-sorted ("show ascending miles", "lowest miles first", "highest miles", "cheapest first", "most expensive", "lowest price", "highest price")
-- "confirm_recap": user confirmed the bot's recap of their request ("yes", "correct", "looks good", "yep that's it", "perfect", "right") — only valid when BOT_LAST_TURN starts with "ok to recap" or "got it — to recap"
+- "confirm_recap": user confirmed the bot's recap of their request ("yes", "correct", "looks good", "yep", "yep that's it", "perfect", "right", "yeah", "sure", "ok"). Valid whenever BOT_LAST_TURN was a RECAP question — recognizable by ending with "correct?" / "sound right?" / "that right?" / "confirm?" AND containing make/model spec readback. Common opener variants include "great — just to confirm...", "got it. {brief} — sound right?", "noted. just confirming — ...", "ok — you're looking for ...". Bare "yes" / "yeah" / "yep" / "sure" / "correct" after ANY of these = confirm_recap.
 - "skip_recap": user explicitly wants to bypass the recap and search now ("just search", "show me what you have", "skip the recap", "search now", "go ahead and search")
 - "unclear": cannot tell — be honest, do not guess
 
@@ -117,7 +117,9 @@ Prior conversation matters. Use BOT_LAST_TURN to disambiguate yes/no/any replies
 - bot asked "still {make}? if not, what make?" + user "no"/"open to others"/"any make" -> intent="sourcing", spec_clear: ["make"]
 - bot asked extras question ("any preference on trim, color, transmission, max miles, or budget?") + user "no"/"none"/"just search"/"show me" -> intent="skip_recap" (bypass recap, search now)
 - bot asked extras question + user gives multiple specs ("manual, 28k miles, 130k") -> intent="sourcing", spec_update with each field parsed
-- bot did recap ("ok to recap...") + user "yes"/"correct"/"looks good"/"yep"/"perfect" -> intent="confirm_recap"
+- bot did recap (any variant ending in "correct?" / "sound right?" / "that right?" / "confirm?" with spec readback like "porsche 911" or "yellow ferrari 296") + user "yes" / "yeah" / "yep" / "correct" / "looks good" / "perfect" / "right" / "sure" / "ok" -> intent="confirm_recap"
+- after bot asked "any preference on year, color, mileage..." + user "yes" / "no" / "just show me" / "no preferences" / "go ahead" (no specifics) -> intent="skip_recap"
+- after bot asked "any preference on year, color..." + user gives specifics ("yellow 2022 under 30k") -> intent="sourcing" with spec_update populated
 - bot did recap + user adds correction ("actually any year", "no make it red and white") -> intent="sourcing" with corrections in spec_update / spec_clear; bot will re-recap
 
 SPEC EXTRACTION
@@ -156,10 +158,12 @@ Bare model numbers/names usually map to one make. When user gives just a model w
 If a bare model could match more than one make (rare), leave make=null and let the bot ask. Otherwise, fill make from the hint above so we don't waste a turn.
 
 PIVOT
-When user changes vehicle entirely (was 296, now "how about a 458"), set new make/model/trim in spec_update AND list prior soft filters in spec_clear: ["year_min","year_max","ext_color","int_color","trim","miles_max"].
+PIVOT only fires when make OR model in this turn DIFFERS from CURRENT_SPEC. If the user re-states the same make/model/trim ("any 911 turbos" while CURRENT_SPEC is already porsche/911/turbo), that is NOT a pivot — leave spec_clear empty (or contain ONLY fields the user explicitly said to drop in plain language).
+
+When pivot DOES apply (user truly changes vehicle, e.g. was 296, now "how about a 458"), set new make/model/trim in spec_update AND list prior soft filters in spec_clear: ["year_min","year_max","ext_color","int_color","trim","miles_max"].
 
 BROADEN
-When user explicitly relaxes a filter ("any color", "any year", "open on trim"), put the relevant field name(s) in spec_clear.
+When user explicitly relaxes a filter ("any color", "any year", "open on trim"), put the relevant field name(s) in spec_clear. Standalone phrases — NOT "any X" where X is a vehicle attribute.
 
 NEVER put "customer_name" in spec_clear — identity, not request-specific.
 
@@ -336,17 +340,36 @@ def _cerebras_call(system_prompt, user_prompt, max_tokens=2500,
         payload['reasoning_effort'] = 'low'
     if json_mode:
         payload['response_format'] = {'type': 'json_object'}
-    _t0 = _time.monotonic()
-    try:
-        resp = requests.post(_CEREBRAS_URL, headers=headers, json=payload,
-                             timeout=_CEREBRAS_TIMEOUT_SEC)
-    except Exception as e:
+    # Retry on transient errors (429 queue_exceeded, 502/503/504 transient
+    # backend). Cerebras can burst-cap on shared accounts; most 429s clear
+    # within ~1s. Don't retry on 4xx that aren't 429 (bad request, auth,
+    # model_not_found) — those are deterministic failures.
+    _RETRYABLE_STATUS = {429, 502, 503, 504}
+    max_attempts = 3
+    resp = None
+    _dt = 0
+    for attempt in range(1, max_attempts + 1):
+        _t0 = _time.monotonic()
+        try:
+            resp = requests.post(_CEREBRAS_URL, headers=headers, json=payload,
+                                 timeout=_CEREBRAS_TIMEOUT_SEC)
+        except Exception as e:
+            _dt = (_time.monotonic() - _t0) * 1000
+            print(f'[sourcing-llm:{label}] request error after {_dt:.0f}ms attempt {attempt}/{max_attempts}: {e}', flush=True)
+            if attempt < max_attempts:
+                _time.sleep(0.5 * (2 ** (attempt - 1)))
+                continue
+            return None
         _dt = (_time.monotonic() - _t0) * 1000
-        print(f'[sourcing-llm:{label}] request error after {_dt:.0f}ms: {e}', flush=True)
-        return None
-    _dt = (_time.monotonic() - _t0) * 1000
-    if resp.status_code != 200:
-        print(f'[sourcing-llm:{label}] HTTP {resp.status_code} after {_dt:.0f}ms: {resp.text[:300]}', flush=True)
+        if resp.status_code in _RETRYABLE_STATUS and attempt < max_attempts:
+            print(f'[sourcing-llm:{label}] HTTP {resp.status_code} after {_dt:.0f}ms attempt {attempt}/{max_attempts}, retrying...', flush=True)
+            _time.sleep(0.5 * (2 ** (attempt - 1)))
+            continue
+        break
+    if resp is None or resp.status_code != 200:
+        code = resp.status_code if resp is not None else 'no-response'
+        body = (resp.text[:300] if resp is not None else '')
+        print(f'[sourcing-llm:{label}] HTTP {code} final after {_dt:.0f}ms: {body}', flush=True)
         return None
     try:
         data = resp.json()
@@ -377,10 +400,8 @@ _TRANS_PATTERNS = (
 
 def _heuristic_transmission(text):
     """Server-side fallback: detect transmission keywords in raw user text
-    when the extractor missed it. gpt-oss-120b occasionally drops fields
-    when the user types a dense comma-list of specs ('yellow, manual, 28k,
-    130k'); this regex catches the common ones so the recap doesn't drop
-    'manual' from the readback."""
+    when the extractor missed it. Models occasionally drop fields in dense
+    comma-lists ('yellow, manual, 28k, 130k')."""
     if not text:
         return None
     s = text.lower()
@@ -390,15 +411,109 @@ def _heuristic_transmission(text):
     return None
 
 
+# Lowercased color words the regex backstop recognizes. Order matters:
+# longer/more-specific phrases first so 'jet black' beats 'black' alone.
+_BACKSTOP_COLOR_WORDS = (
+    'red', 'blue', 'black', 'white', 'grey', 'gray', 'silver', 'green',
+    'yellow', 'orange', 'purple', 'brown', 'beige', 'gold', 'tan',
+    'champagne', 'ivory', 'burgundy', 'maroon', 'navy', 'teal',
+)
+
+
+def _regex_only_extract(user_text):
+    """Cheap regex-only extract used when the LLM is unavailable (rate
+    limit, timeout, outage). Catches the most common single-message
+    refinements (color, year, mileage cap, transmission) so the bot can
+    keep limping forward through a rate-limit window. Returns the same
+    shape as extract() — {intent, spec_update, spec_clear, sort_pref} —
+    or None if nothing useful was parsed.
+
+    Marked with '_heuristic_only' in the response so downstream code can
+    log/treat it differently if needed."""
+    if not user_text:
+        return None
+    s = user_text.lower()
+    su = _empty_spec_update()
+    matched = False
+
+    # Color(s)
+    found_colors = []
+    for c in _BACKSTOP_COLOR_WORDS:
+        if re.search(rf'\b{c}\b', s) and c not in found_colors:
+            found_colors.append(c)
+    if found_colors:
+        su['ext_color'] = found_colors
+        matched = True
+
+    # Year — single year or range like "2022-2024" / "21-23"
+    yr_range = re.search(r'\b(?:20)?(\d{2,4})\s*[-to]+\s*(?:20)?(\d{2,4})\b', s)
+    if yr_range:
+        y1 = int(yr_range.group(1))
+        y2 = int(yr_range.group(2))
+        if y1 < 100: y1 += 2000
+        if y2 < 100: y2 += 2000
+        if 1990 <= y1 <= 2100 and 1990 <= y2 <= 2100:
+            su['year_min'] = min(y1, y2)
+            su['year_max'] = max(y1, y2)
+            matched = True
+    else:
+        yr_single = re.search(r'\b(19|20)\d{2}\b', s)
+        if yr_single:
+            y = int(yr_single.group(0))
+            su['year_min'] = y
+            su['year_max'] = y
+            matched = True
+
+    # Mileage cap: "under 30k mi" / "max 50k miles" / "less than 28000"
+    miles_pat = re.search(
+        r'(?:under|less than|max|<=?|below|up to)?\s*(\d{1,3})\s*[k]?\s*(?:mi|miles|mile)\b',
+        s,
+    )
+    if miles_pat:
+        n = int(miles_pat.group(1))
+        if 'k' in miles_pat.group(0).lower():
+            n *= 1000
+        if 100 <= n <= 999999:
+            su['miles_max'] = n
+            matched = True
+
+    # Transmission via the existing helper
+    tx = _heuristic_transmission(user_text)
+    if tx:
+        su['transmission'] = tx
+        matched = True
+
+    if not matched:
+        return None
+    return {
+        'intent': 'sourcing',
+        'spec_update': su,
+        'spec_clear': [],
+        'sort_pref': None,
+        '_heuristic_only': True,
+    }
+
+
 def extract(row, new_user_msg):
     """JSON-only extraction pass. Returns dict
     {intent, sort_pref, spec_update, spec_clear} or None on failure. No reply
-    text — Python composes that downstream."""
+    text — Python composes that downstream.
+
+    Failure path: when Cerebras returns nothing (rate limit, outage,
+    timeout, parse failure), we try the regex-only backstop so simple
+    refinements ('any white ones', '2024', 'under 30k mi') still progress
+    instead of hitting the silent fallback ack."""
     user_block = _build_extract_prompt(row, new_user_msg)
     raw = _cerebras_call(EXTRACT_PROMPT, user_block,
                          max_tokens=2000, json_mode=True, label='extract')
     parsed = _parse_response(raw)
     if not parsed:
+        backstop = _regex_only_extract(new_user_msg)
+        if backstop:
+            print(f'[sourcing-llm:extract] LLM unavailable, regex backstop hit: '
+                  f'{[(k,v) for k,v in (backstop["spec_update"] or {}).items() if v not in (None,[],False)]}',
+                  flush=True)
+            return backstop
         return None
     su = parsed.get('spec_update') or {}
     norm_su = _empty_spec_update()
@@ -451,60 +566,45 @@ def tone_rewrite(draft, recent_conv=None):
     return s or draft
 
 
-def handoff_line(name, now_et=None):
-    """Deterministic time-of-day picker for the 'we'll get back to you' line
-    after a user has expressed interest in a specific match.
+def _eta_phrase(now_et=None):
+    """Pick the concrete ETA bucket the bot promises wholesalers.
 
-    Used directly (no rewrite) so wording stays predictable. Different from
-    callback_ack() which is used after the where/MSRP/details callback flow."""
+    Simplified 2026-05-11 per user spec — only two windows now:
+      - Friday after 4pm + all weekend  -> "sometime on monday"
+      - Everything else                 -> "within 24 hours one way or another"
+    Same phrasing used by both handoff_line (after 'interested' signal) and
+    callback_ack (after where/MSRP/options question)."""
     if now_et is None:
         now_et = datetime.now(_TZ)
-    first = (name or '').strip().split()[0] if name else None
     h = now_et.hour
     weekday = now_et.weekday()  # 0=Mon, 6=Sun
+    if weekday == 5 or weekday == 6:
+        return "sometime on monday"
+    if weekday == 4 and h >= 16:
+        return "sometime on monday"
+    return "within 24 hours one way or another"
 
-    if weekday < 5 and 9 <= h < 17:
-        line = "give us a bit, we'll come back with details"
-    elif (weekday == 4 and h >= 17) or weekday == 5 or (weekday == 6 and h < 17):
-        line = "we'll get back to you one way or the other on monday"
-    elif h >= 17 and weekday in (6, 0, 1, 2, 3):
-        line = "we'll come back to you tomorrow with details"
-    else:
-        line = "we'll come back to you with details"
+
+def handoff_line(name, now_et=None):
+    """Reply sent after the user signals interest in a specific match.
+    Deterministic — exact wording matters for wholesaler ETA expectations.
+    Used directly (no tone-rewrite)."""
+    first = (name or '').strip().split()[0] if name else None
+    eta = _eta_phrase(now_et)
     if first:
-        return f"thanks {first.lower()} — {line}."
-    return f"{line}."
+        return f"thanks {first.lower()} — someone will contact you back {eta}."
+    return f"someone will contact you back {eta}."
 
 
 def callback_ack(name, now_et=None):
-    """Time-aware ack for the 'have someone reach out with details' flow.
-    Different deferral rules from handoff_line() per user spec (2026-05-10):
-      - Mon-Fri before 16:00  -> 'as soon as we can'
-      - Mon-Thu 16:00 onward  -> 'first thing tomorrow'
-      - Friday 16:00 onward   -> 'monday morning'
-      - Saturday / Sunday     -> 'monday morning'
-      - Mon-Fri before 09:00  -> 'first thing this morning' (treated as in-hours)
-
-    Used directly (no rewrite) — exact wording per spec, see project notes
-    in EW_FOLLOWUPS.md / sourcing-bot prompt iteration history."""
-    if now_et is None:
-        now_et = datetime.now(_TZ)
+    """Reply sent after the user asks 'where is it / how much / what
+    options / etc.' Same ETA window as handoff_line — staff covers the
+    specifics when they reach out."""
     first = (name or '').strip().split()[0] if name else None
-    h = now_et.hour
-    weekday = now_et.weekday()  # 0=Mon, 6=Sun
-
-    if weekday == 5 or weekday == 6:
-        timing = "monday morning"
-    elif weekday == 4 and h >= 16:
-        timing = "monday morning"
-    elif weekday < 4 and h >= 16:
-        timing = "first thing tomorrow"
-    else:
-        timing = "as soon as we can"
-
+    eta = _eta_phrase(now_et)
     if first:
-        return f"thanks {first.lower()} — i'll have someone contact you at this number {timing}."
-    return f"got it — someone will contact you at this number {timing}."
+        return f"thanks {first.lower()} — someone will contact you at this number {eta}."
+    return f"someone will contact you at this number {eta}."
 
 
 # Back-compat alias: old code paths called turn() expecting the all-in-one
@@ -662,16 +762,39 @@ def merge_spec(row, spec_update, spec_clear=None):
         # now asking about a different vehicle, reset to 'gathering' so the
         # search-trigger gate in _run_turn passes. _decide will move it to
         # 'presented' (or 'matched' again) downstream after search.
-        if row.get('status') in ('matched', 'wishlist'):
+        # Pivots from ANY active state reset to 'gathering' so the recap
+        # loop fires for the new vehicle. The user wants a confirm step
+        # before searching every new spec.
+        if row.get('status') in ('presented', 'matched', 'wishlist', 'searching'):
             row['status'] = 'gathering'
             changes['status'] = 'gathering'
 
+    # Defense against extractor over-applying the PIVOT rule on non-pivot
+    # turns. The prompt asks for clearing 6 soft filters at once when the
+    # user changes vehicles. If we see that pattern but our pivot
+    # detection (make/model unchanged) disagrees, strip those pivot-shaped
+    # clears and keep only fields the user explicitly relaxed. Without
+    # this, "any 911 turbos" while already on porsche 911 turbo wipes
+    # year/color/miles/transmission filters AND adds them to relaxations,
+    # disabling them for the rest of the conversation.
+    _PIVOT_BATCH_FIELDS = {'year_min', 'year_max', 'ext_color', 'int_color',
+                           'trim', 'miles_max', 'transmission', 'price_hint'}
+    sc_set = set(spec_clear)
+    if not pivoted and len(sc_set & _PIVOT_BATCH_FIELDS) >= 3:
+        # Likely extractor error — strip the pivot-shaped clears so they
+        # don't relax filters the user never asked to relax. Keep any
+        # OTHER spec_clear entries (e.g. 'make' alone is fine).
+        kept = [f for f in spec_clear if f not in _PIVOT_BATCH_FIELDS]
+        print(f'[merge_spec] stripped pivot-shaped spec_clear (not pivoting); '
+              f'dropped={[f for f in spec_clear if f in _PIVOT_BATCH_FIELDS]} '
+              f'kept={kept}', flush=True)
+        spec_clear = set(kept)
+
     # spec_update wins when both spec_clear and spec_update touch the same
-    # field (clear-old-then-set-new pattern, e.g. pivot from Ferrari->Porsche
-    # where extractor lists 'trim' in spec_clear AND sets a new trim).
-    # Bug from 2026-05-10 testing: previously the spec_clear branch had
-    # `continue` which skipped the spec_update assignment, so 'turbo' got
-    # nulled and the search returned every 911.
+    # field (clear-old-then-set-new pattern). Bug from 2026-05-10 testing:
+    # previously the spec_clear branch had `continue` which skipped the
+    # spec_update assignment, so 'turbo' got nulled and the search
+    # returned every 911.
     for k in _SCALAR_FIELDS:
         v = spec_update.get(k)
         spec_update_has_value = (v is not None and v != '')
@@ -696,26 +819,52 @@ def merge_spec(row, spec_update, spec_clear=None):
             row[k] = v_norm
             changes[k] = v_norm
 
-    # Apply relaxations from spec_clear — only for fields that were ACTUALLY
-    # cleared (not for fields that got cleared-then-replaced by spec_update).
+    # Maintain row.relaxations:
+    #   1. REMOVE any relaxation whose underlying field is being set this
+    #      turn via spec_update — the user is explicitly re-filtering on
+    #      it, so the old "any X" relaxation no longer applies.
+    #   2. ADD relaxations from spec_clear entries that aren't being
+    #      simultaneously set in spec_update (clear-and-replace doesn't
+    #      count as a relaxation).
+    # Without #1, a stale relaxation can survive forever (e.g. 'year' got
+    # added on a buggy turn, then even when the user types 'any 2025' the
+    # search keeps ignoring the year filter because the relaxation tag
+    # persists. Adding #1 makes the invariant: relaxations only contains
+    # tags the user CURRENTLY wants relaxed.
     if not pivoted:
         cur_relax = set(row.get('relaxations') or [])
         new_relax = set(cur_relax)
+
+        # Step 1: spec_update setting a field UN-relaxes its tag.
+        for fld in _SCALAR_FIELDS:
+            v = spec_update.get(fld)
+            if v not in (None, '', False):
+                tag = _SPEC_CLEAR_TO_RELAXATION.get(fld)
+                if tag and tag in new_relax:
+                    new_relax.discard(tag)
+        for fld in _LIST_FIELDS:
+            v = spec_update.get(fld)
+            if v and isinstance(v, list) and any(str(x).strip() for x in v if x is not None):
+                tag = _SPEC_CLEAR_TO_RELAXATION.get(fld)
+                if tag and tag in new_relax:
+                    new_relax.discard(tag)
+
+        # Step 2: spec_clear entries that aren't simultaneously set in
+        # spec_update become relaxations.
         for fld in spec_clear:
             tag = _SPEC_CLEAR_TO_RELAXATION.get(fld)
             if not tag:
                 continue
-            # Skip relaxation if spec_update set the same field this turn
-            # (clear-and-replace, not user-explicitly-relaxing).
             if fld in _SCALAR_FIELDS:
                 v = spec_update.get(fld)
                 if v is not None and v != '':
-                    continue
+                    continue  # clear-and-replace, not a relaxation
             elif fld in _LIST_FIELDS:
                 v = spec_update.get(fld)
                 if v and isinstance(v, list) and any(str(x).strip() for x in v if x is not None):
                     continue
             new_relax.add(tag)
+
         if new_relax != cur_relax:
             row['relaxations'] = sorted(new_relax)
             changes['relaxations'] = sorted(new_relax)

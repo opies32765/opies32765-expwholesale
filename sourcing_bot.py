@@ -23,9 +23,26 @@ import json
 from datetime import datetime, timezone
 
 # ── Config ────────────────────────────────────────────────────────────────
-_GATE = os.getenv('SOURCING_PHONE_GATE', '+14074309675')
-_GATED_PHONES = {p.strip() for p in _GATE.split(',') if p.strip()}
-_GATE_OPEN = '*' in _GATED_PHONES
+# Falls back to PHASE2_PHONE_GATE so we have a single source of truth for
+# the Phase-2 / sourcing wholesaler whitelist. Either env accepts digit-only
+# (4074309675), E.164 (+14074309675), or formatted (407-430-9675) — all
+# normalize to the same 10-digit key for comparison. '*' opens to all.
+_GATE = (os.getenv('SOURCING_PHONE_GATE')
+         or os.getenv('PHASE2_PHONE_GATE')
+         or '+14074309675')
+_GATED_PHONES_RAW = {p.strip() for p in _GATE.replace(',', ' ').split() if p.strip()}
+_GATE_OPEN = '*' in _GATED_PHONES_RAW
+
+
+def _digits(p):
+    """Normalize a phone to its last 10 digits ('+14074309675'→'4074309675')."""
+    d = ''.join(c for c in (p or '') if c.isdigit())
+    if len(d) == 11 and d[0] == '1':
+        d = d[1:]
+    return d
+
+
+_GATED_DIGITS = {_digits(p) for p in _GATED_PHONES_RAW if _digits(p)}
 # Threads are now effectively indefinite — wholesalers should be able to
 # come back weeks/months later and pick up where they left off, like a real
 # broker would remember a regular client. The re_engagement branch primes
@@ -130,7 +147,7 @@ def _has_recent_sms_bid(cur, phone):
 def _phone_allowed(phone):
     if _GATE_OPEN:
         return True
-    return phone in _GATED_PHONES
+    return _digits(phone) in _GATED_DIGITS
 
 
 def _append_msg(conversation, role, text, raw=None):
@@ -240,23 +257,19 @@ def _short_desc(row):
 
 
 def _present_results(matches, price_hint_set=False):
-    """Format the top 3 matches + a follow-up question.
+    """Format the top 3 matches followed by the AUTO callback offer.
 
-    When the result set is >3 AND we don't yet have a price_hint, add a
-    budget ask to the trailer so the user can narrow by price (which sorts
-    by proximity to price_hint) instead of paginating through everything.
-    Per never-quote-prices rule we don't show prices in the matches; the
-    budget hint is used as a server-side sort key only."""
+    Per simplified architecture (2026-05-11): after presenting matches we
+    immediately pivot to 'want staff to reach out?' — no menu of pick-one
+    options, no 'which works best?' question. Wholesaler either confirms
+    (any non-spec response) or refines (sends a new spec, which loops back
+    to recap)."""
     body = '\n'.join(_format_match(m) for m in matches[:3])
     n = len(matches)
     if n > 3:
-        if not price_hint_set:
-            return (f"{body}\ngot {n} total — any budget to narrow down, "
-                    f"or want to see the rest?")
-        return f"{body}\ngot {n} total — want to see the rest?"
-    if n > 1:
-        return f"{body}\nany of these work?"
-    return f"{body}\ninterested?"
+        return (f"{body}\ngot {n} total. want someone from our staff to "
+                f"reach out, or want to see the rest?")
+    return f"{body}\nwant someone from our staff to reach out about this?"
 
 
 def _no_match_offer(row):
@@ -291,13 +304,12 @@ _PRICE_QUESTION_PATTERNS = (
     r'what.{0,10}price', r"what'?s\s+the\s+price", r'asking price',
     r'price tag', r'sticker price', r'\bmsrp\b',
     r"what'?s\s+it\s+go(?:ing)?\s+for", r"what.{0,15}they\s+go(?:ing)?\s+for",
+    r'\bprice\b', r'\bcost\b', r'\bbudget\b',
 )
 
 
 def _mentions_price_question(text):
-    """Cheap regex check for 'how much'/'what's the cost'/etc. in user text.
-    Used to fold a pricing note into handoff replies when the user asked
-    about price in the same message that signaled interest."""
+    """Cheap regex check for 'how much'/'what's the cost'/etc. in user text."""
     if not text:
         return False
     import re as _re
@@ -306,6 +318,88 @@ def _mentions_price_question(text):
         if _re.search(pat, s):
             return True
     return False
+
+
+# Broader specific-question detector — generalizes _mentions_price_question
+# across the full vocabulary of "I want detail X on this car" questions
+# (location, options, photos, VIN, carfax, miles). Used to fold a tailored
+# 'staff will cover X' clause into callback_ack / handoff_line replies so
+# the bot doesn't drop the specifics the user asked about.
+_TOPIC_PATTERNS = (
+    ('price',    _PRICE_QUESTION_PATTERNS),
+    ('location', (r'\bwhere\b', r'\blocation\b', r'\bwhat\s+state\b',
+                  r'\bwhat\s+city\b', r'\bzip\s*code\b', r'\bnearest\b')),
+    ('options',  (r'\boption(?:s|\s+list|\s+sheet)?\b', r'\bequipment\b',
+                  r'\bfeatures?\b', r'\bpackage[ds]?\b', r'\bspec[s]?\b',
+                  r'\bbuild\s+sheet\b', r'\bsticker\b', r'\bwindow\s+sticker\b')),
+    ('photos',   (r'\bphotos?\b', r'\bpic(?:tures?|s)?\b', r'\bimages?\b',
+                  r'\bsee\s+it\b')),
+    ('vin',      (r'\bvin\b', r'\bvin\s*#', r'\bvin\s*number\b')),
+    ('history',  (r'\bcarfax\b', r'\bautocheck\b', r'\bhistory\b',
+                  r'\baccidents?\b', r'\btitle\s+status\b', r'\bclean\s+title\b')),
+    ('miles',    (r'\bhow\s+many\s+miles\b', r'\bactual\s+mileage\b',
+                  r'\bodometer\b', r'\breal\s+miles\b')),
+)
+
+
+def _specific_question_topics(text):
+    """Return a list of topic tags (['price','location','options',...]) for
+    every specific-info question detected in the user's text. Order follows
+    _TOPIC_PATTERNS (price first since it's most common). Each topic
+    appears at most once even if multiple patterns hit."""
+    if not text:
+        return []
+    import re as _re
+    s = (text or '').strip().lower()
+    found = []
+    for topic, patterns in _TOPIC_PATTERNS:
+        for pat in patterns:
+            if _re.search(pat, s):
+                found.append(topic)
+                break
+    return found
+
+
+def _topic_clarifier(topics):
+    """Build the trailing 'staff will cover X' clause appended to
+    callback_ack / handoff_line based on which specific topics the user
+    asked about. Returns None if no topics — caller uses the plain ack.
+    Pricing gets a special disclosure ('not something we quote here')
+    per the never-quote-prices rule."""
+    if not topics:
+        return None
+    # Labels kept short and single-word where possible — when stitched into
+    # "staff will cover X, Y, and Z", multi-word labels with their own "and"
+    # ("options and equipment") read awkwardly alongside other items.
+    label_map = {
+        'price':    'pricing',
+        'location': 'location',
+        'options':  'options',
+        'photos':   'photos',
+        'vin':      'the VIN',
+        'history':  'carfax',
+        'miles':    'mileage',
+    }
+    labels = [label_map[t] for t in topics if t in label_map]
+    if not labels:
+        return None
+    if topics == ['price']:
+        return "pricing's not something we quote here — staff will cover it when they reach out."
+    if 'price' in topics:
+        others = [label_map[t] for t in topics if t != 'price']
+        if len(others) == 1:
+            others_text = others[0]
+        elif len(others) == 2:
+            others_text = f"{others[0]} and {others[1]}"
+        else:
+            others_text = f"{', '.join(others[:-1])}, and {others[-1]}"
+        return (f"on pricing — not something we quote here, but staff will cover "
+                f"{others_text} (and pricing) when they reach out.")
+    if len(labels) == 1:
+        return f"staff will cover {labels[0]} when they reach out."
+    if len(labels) == 2:
+        return f"staff will cover {labels[0]} and {labels[1]} when they reach out."
+    return f"staff will cover {', '.join(labels[:-1])}, and {labels[-1]} when they reach out."
 
 
 _MAKE_SPECIFIC_TRIMS = {
@@ -355,24 +449,46 @@ def _is_ambiguous_trim_pivot(row, parsed, user_text):
 
 # Branch labels returned by _decide(). _REWRITE_BRANCHES picks which ones
 # get sent through the tone-rewrite layer; the rest go out verbatim.
-_REWRITE_BRANCHES = {
-    'gathering_make_model',
-    'gathering_model_for_make',
-    'gathering_year',
-    'gathering_extras',
-    'no_match_offer',
-    'ambiguous_trim_probe',
-    'interested_no_name',
-    'interested_no_name_price',
-    'more_details_offer',
-    'callback_name_ask',
-    'extend_wishlist_no_name',
-    'more_details_declined',
-    're_engagement',
-}
-# Branches whose wording is intentionally exact (recap text, time-aware
-# acks, match presentations, stop/drop) bypass _REWRITE_BRANCHES — see
-# _run_turn for the gate.
+# Simplified architecture (2026-05-11) — all replies are templated.
+# Tone-rewrite layer is gone; the templates ARE the voice. _REWRITE_BRANCHES
+# kept as an empty set so the rewrite call in _run_turn becomes a no-op
+# without restructuring the call site.
+_REWRITE_BRANCHES = set()
+
+
+# Deterministic rotation of opener phrases for the recap question so the
+# bot doesn't say "great — just to confirm..." identically every turn. Index
+# = turn count modulo len, so same input from the same row position always
+# produces the same opener (predictable for debugging).
+_RECAP_OPENERS = (
+    "great — just to confirm, you're looking for {brief}. correct?",
+    "got it. {brief} — sound right?",
+    "ok — you're looking for {brief}. that right?",
+    "noted. just confirming — {brief}. correct?",
+)
+
+
+def _pick_recap_phrase(row, brief):
+    conv_len = len(row.get('conversation') or [])
+    template = _RECAP_OPENERS[conv_len % len(_RECAP_OPENERS)]
+    return template.format(brief=brief)
+
+
+# Steer-toward-task openers for users who chit-chat instead of giving a
+# spec ("hi" / "how are you" / "thanks"). Always asks for make+model so
+# they know what to give us. Rotates to avoid sounding like a broken
+# record on consecutive non-spec messages.
+_COLD_OPEN_VARIANTS = (
+    "hey — what make and model are you looking for?",
+    "what car can i help you find? make and model is enough to start.",
+    "what are you in the market for? drop a make and model.",
+    "hey — give me a make and model and i'll see what we've got.",
+)
+
+
+def _pick_cold_open(row):
+    n = len(row.get('conversation') or [])
+    return _COLD_OPEN_VARIANTS[n % len(_COLD_OPEN_VARIANTS)]
 
 
 def _last_bot_branch(conversation):
@@ -436,20 +552,37 @@ def _decide(row, parsed, search_results, user_text):
     status = row.get('status', 'gathering')
     last_branch = _last_bot_branch(row.get('conversation'))
 
-    # Stop / drop intents — deterministic, no rewrite.
+    # Whether the extractor returned any new spec/clear data this turn.
+    # Used below to distinguish "user is refining the search" from "user is
+    # responding to our auto-callback offer". customer_name is identity
+    # (user volunteering a name) NOT a search-filter change, so it
+    # doesn't count toward spec_changed — otherwise giving a name after
+    # present_matches falls through to default recap instead of routing
+    # to the callback flow.
+    spec_update = parsed.get('spec_update') or {}
+    spec_clear = parsed.get('spec_clear') or []
+    _NON_FILTER_FIELDS = {'customer_name'}
+    spec_changed = (
+        any(v not in (None, [], False)
+            for k, v in spec_update.items() if k not in _NON_FILTER_FIELDS)
+        or bool(spec_clear)
+    )
+    # no_match_offer is intentionally NOT in this tuple — when no matches
+    # exist, there's no callback path, only the watch-list flow handled by
+    # the dedicated `last_branch == 'no_match_offer'` block below.
+    present_branches = ('present_matches', 'present_matches_sorted',
+                        'present_all')
+
+    # ── Hard stops ────────────────────────────────────────────────────────
     if intent == 'stop':
         return ("ok, stopped. text us anytime.", 'archived', False, 'stop')
     if intent == 'drop_it':
         return ("ok, dropped. text us anytime.", 'archived', False, 'drop')
 
-    # Re-engagement: known matched/wishlist customer comes back with a
-    # greeting or unclear short message ("hi", "hello", "any updates",
-    # "anything new"). Cold fallback would read robotic for a returning
-    # customer. If they haven't texted in >24h AND we have a narrative_brief
-    # on the row, prime the convo with the last vehicle context so they
-    # don't have to re-explain themselves.
+    # ── Re-engagement for returning matched/wishlist users ───────────────
     if (intent == 'unclear' and has_name
         and status in ('matched', 'wishlist')
+        and not spec_changed
         and len((user_text or '').strip()) <= 60):
         hours_since = None
         last_msg = row.get('last_msg_at')
@@ -468,39 +601,195 @@ def _decide(row, parsed, search_results, user_text):
         return (f"hey {name_first} — anything else you want to look at?",
                 status, False, 're_engagement')
 
-    # ── Callback flow (3-step) ────────────────────────────────────────────
-    # Step 3: User just gave name after we asked for it in callback flow.
-    if last_branch == 'callback_name_ask' and has_name and intent in ('name_provided', 'sourcing', 'unclear'):
-        return (callback_ack(row['customer_name']), 'matched', False, 'callback_ack')
-
-    # Step 2: User said yes to "want me to have someone reach out?".
-    if last_branch == 'more_details_offer' and intent == 'callback_yes':
+    # ── Auto-callback flow after present ─────────────────────────────────
+    # When the bot's last reply was a match presentation (or no-match offer)
+    # AND user responds without a spec change, treat it as accepting the
+    # auto-callback question. Refinements (spec changes) fall through to
+    # the recap path below for re-confirmation.
+    if last_branch in present_branches and not spec_changed:
+        if intent == 'not_interested':
+            return ("ok — let me know if you want to look at something else.",
+                    'presented', False, 'declined_callback')
+        # Anything else = "yes, want callback" (callback_yes, interested,
+        # more_details, sourcing-with-no-data, name_provided, unclear).
+        topics = _specific_question_topics(user_text)
+        clarifier = _topic_clarifier(topics)
         if has_name:
-            return (callback_ack(row['customer_name']), 'matched', False, 'callback_ack')
-        return ("what's your name so we know who to reach out to?",
+            base = callback_ack(row['customer_name'])
+            if clarifier:
+                return (f"{base} {clarifier}", 'matched', False, 'callback_ack_specific')
+            return (base, 'matched', False, 'callback_ack')
+        # No name yet — ask.
+        return ("what's your name so we can have someone reach out?",
                 'presented', False, 'callback_name_ask')
 
-    # User declined the callback offer.
-    if last_branch == 'more_details_offer' and intent == 'not_interested':
-        return ("ok — let me know if there's something else you want to look at.",
-                'presented', False, 'more_details_declined')
+    # ── Name capture after callback name ask ─────────────────────────────
+    if last_branch == 'callback_name_ask' and has_name:
+        return (callback_ack(row['customer_name']), 'matched', False, 'callback_ack')
 
-    # Step 1: User asked WHERE / MSRP / options / details of a match.
-    # If we already have their name (matched/wishlist customer asking about
-    # a NEW vehicle), skip the "want me to reach out?" offer entirely and
-    # send the time-aware ack directly. They've already opted in once;
-    # making them re-confirm for every car is friction.
-    if intent == 'more_details':
+    # ── Recap confirm → either drill for extras OR trigger search ────────
+    # On FIRST confirm with a bare spec (just make+model, no year/color/
+    # mileage/budget), drill for extras before searching — the user said
+    # "yes to my porsche 911" but we don't know what kind. After they give
+    # extras, the default-recap path fires again with the richer brief.
+    # If extras already exist OR user explicitly skips, fall through to
+    # the interim "locked in" → search → present pipeline.
+    # Drill ONCE per VEHICLE SESSION for extras, regardless of how rich
+    # the initial spec is. Even if the user volunteered "porsche 911 turbo
+    # s" up front, we still surface the year/color/mileage/budget menu on
+    # the first confirm — narrows wide result sets and gives a uniform UX.
+    # "Session" = since the last make pivot. Scanning the full history was
+    # broken for long-lived rows: a drill from months ago would suppress
+    # drill on a brand-new vehicle search. We now scan backwards and stop
+    # at the most recent make change.
+    already_drilled = False
+    _curr_make = (row.get('make') or '').lower()
+    for _msg in reversed(row.get('conversation') or []):
+        _raw = _msg.get('raw') or {}
+        _br = _raw.get('branch')
+        if _br in ('gathering_extras', 'recap_skipped', 'recap_confirmed'):
+            already_drilled = True
+            break
+        # Pivot detection: a prior extract that proposed a different make
+        # marks the boundary of the current vehicle session.
+        _extr = _raw.get('extract') or {}
+        _su = _extr.get('spec_update') or {}
+        _mk = (_su.get('make') or '').lower() if isinstance(_su, dict) else ''
+        if _mk and _curr_make and _mk != _curr_make:
+            break
+    if intent == 'confirm_recap' and last_branch == 'recap_pending' and search_results is None:
+        if not already_drilled:
+            return ("great. any preference on year, color, mileage, transmission, "
+                    "or budget? or just want to see what we've got?",
+                    'gathering', False, 'gathering_extras')
+        return ("locked in. one sec.", 'searching', False, 'recap_confirmed')
+
+    # After we asked for extras, a non-spec response ("yes" / "no preference"
+    # / "just show me") triggers the search. Spec response falls through to
+    # default recap with the updated brief.
+    if last_branch == 'gathering_extras' and not spec_changed:
+        if intent in ('not_interested', 'drop_it'):
+            return ("ok — let me know if you change your mind.",
+                    'presented', False, 'declined_extras')
+        return ("locked in. one sec.", 'searching', False, 'recap_skipped')
+
+    # ── After no_match_offer: route based on user's reply ───────────────
+    # Offer is compound ("flag for watch list, OR look at something else?")
+    # so a bare "yes" is ambiguous about which option they picked. Routing:
+    #   * Explicit watch-list keyword (flag/alert/watch/notify) → wishlist
+    #   * Explicit pivot keyword (else/different/another) → cold_open_redirect
+    #   * Bare "yes" / "sure" / "ok" with no keyword → wishlist_clarify
+    #     (ask one binary follow-up before committing)
+    #   * Explicit "no" / not_interested → cold_open_redirect (restate)
+    #   * Anything else with no spec change → cold_open_redirect (restate)
+    if last_branch == 'no_match_offer' and not spec_changed:
+        text_lc = (user_text or '').strip().lower()
+        # Numbered shortcuts first — "1" / "1." / "one" → watch list,
+        # "2" / "2." / "two" → look at something else. These bypass all
+        # keyword/intent heuristics so the user can answer unambiguously
+        # with a single digit.
+        first_tok = text_lc.split()[0].rstrip('.') if text_lc else ''
+        if first_tok in ('1', 'one', '#1'):
+            brief = build_recap(row) or 'that'
+            if has_name:
+                return (f"saved {brief} to the watch list, {name_first}. "
+                        f"we'll contact you when one shows up.",
+                        'wishlist', False, 'wishlist_saved_with_name')
+            return ("great — what's your name so we know who to contact "
+                    "when one shows up?",
+                    'wishlist', False, 'wishlist_name_ask')
+        if first_tok in ('2', 'two', '#2'):
+            return ("ok — what would you like to look at instead?",
+                    'gathering', False, 'cold_open_redirect')
+        _WATCH_WORDS = ('watch list', 'watchlist', 'wishlist', 'wish list',
+                        'put it on', 'put me on', 'alert me', 'alert',
+                        'notify', 'flag it', 'flag', 'let me know',
+                        'when one', 'when it', 'when you find',
+                        'when you get', 'when you have', 'first one',
+                        'contact me when')
+        _ELSE_WORDS = ('something else', 'different', 'another car',
+                       'another one', 'other car', 'instead', 'else',
+                       'no thanks', 'no thx', 'no thank you')
+        _BARE_YES = {'yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay',
+                     'k', 'kk', 'y', 'fine', 'sounds good', 'please',
+                     'do it', 'go ahead'}
+        is_bare_yes = text_lc in _BARE_YES
+        has_watch_kw = any(w in text_lc for w in _WATCH_WORDS)
+        has_else_kw = any(w in text_lc for w in _ELSE_WORDS)
+        # Explicit watch-list signal
+        if has_watch_kw and not has_else_kw:
+            brief = build_recap(row) or 'that'
+            if has_name:
+                return (f"saved {brief} to the watch list, {name_first}. "
+                        f"we'll contact you when one shows up.",
+                        'wishlist', False, 'wishlist_saved_with_name')
+            return ("great — what's your name so we know who to contact "
+                    "when one shows up?",
+                    'wishlist', False, 'wishlist_name_ask')
+        # Explicit pivot signal
+        if has_else_kw and not has_watch_kw:
+            return ("ok — what would you like to look at instead?",
+                    'gathering', False, 'cold_open_redirect')
+        # Bare yes — they meant one of the two options but didn't say
+        # which. Re-prompt with the same numbered menu so the answer
+        # space is unambiguous.
+        if is_bare_yes:
+            brief = build_recap(row) or 'that'
+            return (f"which one? reply 1 to flag {brief} for the watch "
+                    f"list, or 2 to look at something else.",
+                    'presented', False, 'wishlist_clarify')
+        # Decline
+        if intent in ('not_interested', 'drop_it'):
+            return ("ok — what would you like to look at instead?",
+                    'gathering', False, 'cold_open_redirect')
+        # Anything else: assume pivot and restate
+        return ("ok — what would you like to look at instead?",
+                'gathering', False, 'cold_open_redirect')
+
+    # ── After wishlist_clarify: 1/2 or yes/no on watch-list ──────────────
+    if last_branch == 'wishlist_clarify' and not spec_changed:
+        text_lc = (user_text or '').strip().lower()
+        first_tok = text_lc.split()[0].rstrip('.') if text_lc else ''
+        if first_tok in ('2', 'two', '#2'):
+            return ("ok — what would you like to look at instead?",
+                    'gathering', False, 'cold_open_redirect')
+        if first_tok in ('1', 'one', '#1'):
+            brief = build_recap(row) or 'that'
+            if has_name:
+                return (f"saved {brief} to the watch list, {name_first}. "
+                        f"we'll contact you when one shows up.",
+                        'wishlist', False, 'wishlist_saved_with_name')
+            return ("great — what's your name so we know who to contact "
+                    "when one shows up?",
+                    'wishlist', False, 'wishlist_name_ask')
+        _NO_WORDS = ('no', 'nope', 'nah', 'not', 'else', 'different',
+                     'another', 'instead', 'look at')
+        is_no = (intent in ('not_interested', 'drop_it')
+                 or any(w in text_lc.split() for w in _NO_WORDS)
+                 or 'something else' in text_lc)
+        if is_no:
+            return ("ok — what would you like to look at instead?",
+                    'gathering', False, 'cold_open_redirect')
+        # Anything that looks like yes (bare yes, watch-list keyword,
+        # extend_wishlist intent) → commit to watch list.
+        brief = build_recap(row) or 'that'
         if has_name:
-            return (callback_ack(row['customer_name']), 'matched', False, 'callback_ack')
-        return ("honestly not sure on that one — want me to have someone reach out with the details?",
-                'presented', False, 'more_details_offer')
+            return (f"saved {brief} to the watch list, {name_first}. "
+                    f"we'll contact you when one shows up.",
+                    'wishlist', False, 'wishlist_saved_with_name')
+        return ("great — what's your name so we know who to contact "
+                "when one shows up?",
+                'wishlist', False, 'wishlist_name_ask')
 
-    # Name capture after an interest signal — uses handoff_line, not callback_ack.
-    if intent == 'name_provided' and has_name:
-        return (handoff_line(row['customer_name']), 'matched', False, 'name_provided')
+    # ── After wishlist_name_ask: user gave name, save and confirm ────────
+    if last_branch == 'wishlist_name_ask' and has_name:
+        brief = row.get('narrative_brief') or build_recap(row) or 'that'
+        return (f"thanks {name_first} — saved {brief} to the watch list. "
+                f"we'll contact you when one shows up.",
+                'wishlist', False, 'wishlist_saved_with_name')
 
-    # Wishlist save.
+    # ── Wishlist explicit save (legacy intent='extend_wishlist' from
+    # other contexts than no_match_offer — e.g. user volunteers a flag) ──
     if intent == 'extend_wishlist':
         desc = _short_desc(row)
         if has_name:
@@ -509,144 +798,52 @@ def _decide(row, parsed, search_results, user_text):
         return (f"done. saved: {desc}. text 'drop it' anytime. and what's your name so we know who to text?",
                 'wishlist', False, 'extend_wishlist_no_name')
 
-    # User signaled interest in a specific match.
-    if intent == 'interested':
-        if has_name:
-            # If the same message asked about price ("yes how much"),
-            # acknowledge it explicitly in the handoff so the user doesn't
-            # feel ignored on that beat. Per the never-quote-prices rule we
-            # don't share a number — staff covers pricing on callback.
-            if _mentions_price_question(user_text):
-                base = handoff_line(row['customer_name'])
-                return (f"{base} pricing's not something we quote here — staff will cover it when they reach out.",
-                        'matched', False, 'interested_with_name_price')
-            return (handoff_line(row['customer_name']), 'matched', False, 'interested_with_name')
-        if _mentions_price_question(user_text):
-            return ("on pricing — that's not something we share here, but if you want it we'll have staff reach out with the full picture. what's your name so we know who to text?",
-                    'presented', False, 'interested_no_name_price')
-        return ("if you want it we'll get back to you with all the details. what's your name so we know who to text?",
-                'presented', False, 'interested_no_name')
-
-    # Ambiguous bare-trim pivot — ask before searching. Wording chosen so
-    # a bare "yes" reads as "still {make}" (the safe default), not as
-    # "open to other makes" (which would clear the make and force the user
-    # to re-specify everything). Earlier wording "still {make}, or open to
-    # other makes?" tripped the extractor into clearing make on "yes".
-    if _is_ambiguous_trim_pivot(row, parsed, user_text):
-        return (f"still {row['make']}? if not, what make?",
-                status, False, 'ambiguous_trim_probe')
-
-    # Spec-gathering ladder. No "got it" prefix — the rewrite layer can vary
-    # the opener; users complained about repetitive acks across consecutive
-    # turns. Bare questions read tighter.
-    if not has_make:
-        return ("what make and model are you looking at?",
-                'gathering', False, 'gathering_make_model')
-    if not has_model:
-        # Use the taxonomy view to suggest the top models we actually carry
-        # for this make. Beats a generic "what porsche model?" — the user
-        # sees the menu instantly. Fallback to bare question if lookup fails.
-        try:
-            from sourcing_search import models_for_make
-            top = models_for_make(row['make'], limit=6)
-            if top:
-                names = ', '.join(m['model'] for m in top[:5])
-                more = ' (+more)' if len(top) > 5 else ''
-                return (f"what {row['make']} model? we've got {names}{more}.",
-                        'gathering', False, 'gathering_model_for_make')
-        except Exception as _e:
-            print(f'[sourcing] models_for_make lookup err: {_e}', flush=True)
-        return (f"what {row['make']} model?",
-                'gathering', False, 'gathering_model_for_make')
-    if not has_year:
-        return ("what year range?",
-                'gathering', False, 'gathering_year')
-
-    # ── Recap flow ────────────────────────────────────────────────────────
-    # After the spec-gathering ladder is satisfied (make+model+year all set
-    # or relaxed), the bot probes for granular detail (trim, color,
-    # transmission, miles, budget) and REPLAYS the spec back for confirm.
-    # Only after explicit "yes" do we run search.
-    #
-    # CRITICAL: this whole block is gated on `search_results is None` —
-    # i.e. only fires on the FIRST _decide pass (before search has run).
-    # On the second pass (caller fed us match results), we skip this and
-    # fall through to the present_matches / no_match_offer branches below.
-    # Without this gate, intent='confirm_recap' would loop back to the
-    # "locked in..." interim message even with results in hand, and the
-    # user would never see the matches (the bug observed on bid 27 / SF90).
-    recap_done = bool(row.get('recap_confirmed_at'))
-
-    if not recap_done and search_results is None:
-        # Step 1: ask the omnibus extras question (one chance, marked by
-        # last_branch == 'gathering_extras' so we don't re-ask).
-        if last_branch not in ('gathering_extras', 'recap_pending'):
-            return ("any preference on trim, color, transmission, max miles, "
-                    "or budget? or just want to see what we have?",
-                    'gathering', False, 'gathering_extras')
-
-        # Step 2: user explicitly bypassed the recap.
-        if intent == 'skip_recap':
-            return (f"got it — {build_recap(row)}. searching now.",
-                    'searching', False, 'recap_skipped')
-
-        # Step 3: user confirmed the recap. Return the interim "locked in"
-        # message; _run_turn then runs search and re-enters _decide with
-        # results, which falls through to present_matches below.
-        if intent == 'confirm_recap' and last_branch == 'recap_pending':
-            return (f"locked in — {build_recap(row)}. one sec.",
-                    'searching', False, 'recap_confirmed')
-
-        # Step 4: user just answered the extras question OR is correcting a
-        # prior recap → build/rebuild the recap and ask to confirm.
-        return (f"ok to recap — {build_recap(row)}. sound right?",
-                'gathering', False, 'recap_pending')
-
-    # Sort request — return the existing search results re-sorted.
+    # ── Sort request (after presenting matches) ──────────────────────────
     if intent == 'sort_request' and search_results:
         return (_present_results(search_results, price_hint_set=bool(row.get('price_hint'))),
                 'presented', True, 'present_matches_sorted')
 
-    # "Show me the rest" / "list them all". Twilio drops/delays SMS that span
-    # too many segments (>10 segments = ~1600 chars often fails on carrier
-    # delivery), so cap at 10 vehicles per SMS and tell the user how many
-    # remain. They can narrow down rather than chase a 50-row list.
+    # ── "Show me the rest" pagination ────────────────────────────────────
     if intent == 'more_results' and search_results:
         n = len(search_results)
         cap = 10
         body = '\n'.join(_format_match(m) for m in search_results[:cap])
-        if n > cap:
-            tail = (f"\nthat's {cap} of {n}. narrow down by year, color, or miles "
-                    f"and i'll show the rest?")
-            return (body + tail, 'presented', True, 'present_all')
-        if n > 1:
-            return (f"{body}\nany of these?", 'presented', True, 'present_all')
-        return (f"{body}\ninterested?", 'presented', True, 'present_all')
+        tail = (f"\nthat's {cap} of {n}. " if n > cap else f"\n")
+        tail += "want someone from our staff to reach out about any of these?"
+        return (body + tail, 'presented', True, 'present_all')
 
-    # Hard minimums met — search and present.
+    # ── Search results in hand (second decide pass) ──────────────────────
     if search_results is not None:
         if search_results:
             return (_present_results(search_results, price_hint_set=bool(row.get('price_hint'))),
                     'presented', True, 'present_matches')
-        # 0 matches: check inventory_taxonomy for sibling models in same make,
-        # so we can offer concrete alternatives rather than just "different model?".
-        siblings = []
-        try:
-            from sourcing_search import models_for_make
-            cur_model = (row.get('model') or '').lower()
-            siblings_full = models_for_make(row.get('make'), limit=8)
-            siblings = [m['model'] for m in siblings_full
-                        if m.get('model') and m['model'].lower() != cur_model][:4]
-        except Exception as _e:
-            print(f'[sourcing] sibling models lookup err: {_e}', flush=True)
-        return (_no_match_offer_relax_aware(row, siblings),
+        # 0 matches — ask ONE binary question first (watch list yes/no).
+        # If yes → wishlist_name_ask. If anything else → assume they'd
+        # rather pivot, and explicitly restate the second path ("what would
+        # you like to look at instead?") so they're never confused about
+        # what "yes" / "no" committed them to.
+        brief = build_recap(row) or 'that'
+        return (f"no exact match for {brief}.\n"
+                f"  1. flag it for the watch list (we'll contact you when "
+                f"one shows up)\n"
+                f"  2. look at something else\n"
+                f"reply 1 or 2.",
                 'presented', True, 'no_match_offer')
 
-    # Catch-all: extractor didn't surface a clear intent and we couldn't
-    # search either. Don't go silent — acknowledge + open-ended question
-    # so the user knows they were heard. Was 'got it.' which read robotic.
-    return ("not sure i caught that — what are you looking for?",
-            status, False, 'fallback')
+    # ── Cold open: no spec at all yet ────────────────────────────────────
+    if not has_make and not has_model:
+        return (_pick_cold_open(row),
+                'gathering', False, 'cold_open')
+
+    # ── DEFAULT: recap + ask to confirm ──────────────────────────────────
+    # Every other path lands here. Build a readback from current row state
+    # and ask the user to confirm. They either say "yes" (-> search) or
+    # send another message that adjusts the spec (-> loop back here with
+    # an updated recap). Single LLM call per turn (the extract pass);
+    # everything else is Python templating.
+    brief = build_recap(row)
+    return (_pick_recap_phrase(row, brief),
+            'gathering', False, 'recap_pending')
 
 
 # ── Main turn handler — reusable for both new + continuing requests ───────
@@ -695,6 +892,12 @@ def _run_turn(db, cur, request_id, row, user_text, num_media=0,
     # First decision pass — without search results. Tells us if we have
     # enough spec to search or need to ask another question.
     reply, next_state, did_search, branch = _decide(row, parsed, None, user_text)
+    # Capture the first-pass branch so the persist gate sees 'recap_confirmed'
+    # / 'recap_skipped' even after the search-triggered second pass
+    # overwrites `branch` with 'present_matches' / 'no_match_offer'. Without
+    # this, recap_confirmed_at never gets persisted and the recap loop
+    # fires again on the next turn.
+    first_pass_branch = branch
 
     # Decide if we should run inventory search this turn. Search is gated
     # on:
@@ -707,20 +910,18 @@ def _run_turn(db, cur, request_id, row, user_text, num_media=0,
     #   gate is what makes the bot ask "ok to recap...?" before just dumping
     #   matches.
     relaxed = set(row.get('relaxations') or [])
-    year_ok = bool(row.get('year_min') or row.get('year_max') or 'year' in relaxed)
     recap_authorized = bool(
         row.get('recap_confirmed_at')
         or branch in ('recap_confirmed', 'recap_skipped')
+        or first_pass_branch in ('recap_confirmed', 'recap_skipped')
         or row.get('status') in ('searching', 'presented', 'matched', 'wishlist')
     )
-    # Search-eligible statuses include 'matched' and 'wishlist' — once a
-    # user is at handoff or on the wishlist, they should still be able to
-    # refine ("any black sf90 instead?") and get fresh results, not get
-    # frozen at fallback. Status moves back to 'presented' downstream when
-    # the new result set is delivered. Without 'matched'/'wishlist' here,
-    # any post-handoff refinement falls to "not sure i caught that".
+    # Year is no longer required to be set OR relaxed — sourcing_search
+    # handles missing year by simply not adding a year filter to the
+    # WHERE clause. The recap-confirm gate above already prevents
+    # premature search; we don't need a separate year_ok check.
     matches = []
-    if (row.get('make') and row.get('model') and year_ok and recap_authorized
+    if (row.get('make') and row.get('model') and recap_authorized
         and row.get('status') in ('gathering', 'searching', 'presented',
                                    'matched', 'wishlist')
         and parsed.get('intent') in ('sourcing', 'more_results', 'sort_request',
@@ -751,7 +952,23 @@ def _run_turn(db, cur, request_id, row, user_text, num_media=0,
     )
 
     # Persist: spec changes + conversation + status + maybe wishlist_until.
-    set_clauses, params = _build_spec_update_sql(changes)
+    # Strip fields that get set explicitly below (or need special casts) to
+    # avoid Postgres "multiple assignments to same column" errors. status
+    # in particular gets set both by merge_spec (on pivot reset) and by us
+    # below from next_state — without this filter, the SET clause repeats.
+    _SQL_SPECIAL_HANDLED = {
+        'status', 'narrative_brief', 'recap_confirmed_at',
+        'last_msg_at', 'last_inbound_at', 'last_scan_at',
+        'wishlist_until', 'vehicle_interests',
+    }
+    sql_changes = {k: v for k, v in changes.items() if k not in _SQL_SPECIAL_HANDLED}
+    set_clauses, params = _build_spec_update_sql(sql_changes)
+    # vehicle_interests is JSONB — needs explicit cast so a JSON-string
+    # param doesn't get stored as text. Only emit if it changed this turn.
+    if 'vehicle_interests' in changes:
+        set_clauses.append("vehicle_interests = %s::jsonb")
+        v = changes['vehicle_interests']
+        params.append(v if isinstance(v, str) else json.dumps(v))
     set_clauses += [
         "conversation = %s::jsonb",
         "status = %s",
@@ -767,12 +984,26 @@ def _run_turn(db, cur, request_id, row, user_text, num_media=0,
     # staff (and the search) have the canonical statement of intent. Once
     # set, the recap gate stays open for this vehicle until a pivot resets
     # both narrative_brief and recap_confirmed_at via merge_spec.
-    if branch in ('recap_confirmed', 'recap_skipped'):
+    # We check the FIRST-PASS branch too because the second decide pass
+    # (after search) typically replaces the branch with present_matches.
+    if (branch in ('recap_confirmed', 'recap_skipped')
+        or first_pass_branch in ('recap_confirmed', 'recap_skipped')):
         from sourcing_gemini import build_recap as _bld
         narrative = _bld(row)
         set_clauses.append("narrative_brief = %s")
         params.append(narrative)
         set_clauses.append("recap_confirmed_at = NOW()")
+    # User picked "something else" after a no_match_offer. Wipe the prior
+    # vehicle spec so the next message starts a clean recap loop rather than
+    # inheriting (e.g.) year=2011 from the failed 911 search.
+    if branch == 'cold_open_redirect' or first_pass_branch == 'cold_open_redirect':
+        for _col in ('make', 'model', 'trim', 'year_min', 'year_max',
+                     'miles_max', 'price_hint', 'transmission',
+                     'ext_color', 'int_color'):
+            set_clauses.append(f"{_col} = NULL")
+        set_clauses.append("relaxations = '{}'::text[]")
+        set_clauses.append("narrative_brief = NULL")
+        set_clauses.append("recap_confirmed_at = NULL")
     sql = f"UPDATE sourcing_requests SET {', '.join(set_clauses)} WHERE id = %s"
     params.append(request_id)
     cur.execute(sql, params)
@@ -845,7 +1076,11 @@ def try_handle_sourcing(from_phone, body, db, cur, intake_log_id=None,
     # pure digits, length >= 4, OR an explicit hint phrase.
     if _looks_like_bid_intake(body, num_media):
         return False
-    if not _is_plausible_sourcing(body):
+    # Plausibility filter is only needed when the gate is OPEN (anyone can
+    # text in). For an explicit whitelist of approved wholesalers, treat
+    # every inbound as intentional — even a bare "hello" — and let the
+    # cold_open branch greet them and lead them into the sourcing flow.
+    if _GATE_OPEN and not _is_plausible_sourcing(body):
         print(f'[sourcing] cold inbound rejected (implausible body): {body!r}', flush=True)
         return False
 
