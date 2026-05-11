@@ -1680,11 +1680,13 @@ def dashboard():
         sourcing_active = []
         sourcing_unseen_count = 0
 
-    # 2026-05-11: partner offer counts per bid for the yellow-star indicator
-    # in the bid list. One UNION query — cheap.
+    # 2026-05-11: partner offer counts per bid for the yellow-star indicator.
+    # Fresh connection — the main `db` is already closed by the time we get
+    # here (same pattern as bid_detail partner_offers fix).
     partner_offer_counts = {}
     try:
-        _poc_cur = db.cursor()
+        _poc_db = get_db()
+        _poc_cur = _poc_db.cursor()
         _poc_cur.execute("""
             SELECT bid_id, COUNT(*) AS n,
                    COUNT(*) FILTER (WHERE ew_seen_at IS NULL) AS unseen
@@ -1696,6 +1698,7 @@ def dashboard():
                 'n': int(r['n']),
                 'unseen': int(r['unseen']),
             }
+        _poc_db.close()
     except Exception as _poc_err:
         print(f'[index] partner_offer_counts err: {_poc_err}', flush=True)
 
