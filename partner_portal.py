@@ -1365,17 +1365,17 @@ def inbound_bid_view(slug, bid_id):
         """, (bid_id, dealer['id']))
         prior_offers = cur.fetchall()
         # Vehicle history reports — bid_photos with is_car=FALSE are the
-        # Carfax / AutoCheck screenshots that came in via SMS (operator
-        # uploads, _process_carfax_async detection). We only need the count
-        # for v1 — no image rendering per the "no images" rule.
-        carfax_count = 0
+        # Carfax / AutoCheck screenshots. URLs render through /thumb proxy
+        # which handles both local /static/uploads/ and api.twilio.com
+        # Basic auth transparently — same path EW operator side uses.
+        carfax_urls = []
         try:
             cur.execute("""
-                SELECT COUNT(*) AS n FROM bid_photos
+                SELECT url FROM bid_photos
                  WHERE bid_id = %s AND is_car = FALSE
+                 ORDER BY id
             """, (bid_id,))
-            row = cur.fetchone()
-            carfax_count = (row.get('n') if hasattr(row, 'get') else row[0]) or 0
+            carfax_urls = [r['url'] for r in cur.fetchall()]
         except Exception:
             conn.rollback()
     return render_template('partner_inbound.html',
@@ -1385,7 +1385,7 @@ def inbound_bid_view(slug, bid_id):
                            accutrade=dict(accutrade) if accutrade else None,
                            ipacket=dict(ipacket) if ipacket else None,
                            market_intel=mi,
-                           carfax_count=carfax_count,
+                           carfax_urls=carfax_urls,
                            prior_offers=[dict(o) for o in prior_offers],
                            slug=slug,
                            user=user)

@@ -162,23 +162,33 @@
     {% if ipacket.not_available and not ipacket.total_msrp and not ipacket.base_price %}
     <div class="empty">iPacket sticker not available for this VIN{% if ipacket.unavailable_reason %} · {{ ipacket.unavailable_reason }}{% endif %}</div>
     {% endif %}
+    {% if ipacket.screenshot %}
+    <img src="{{ ipacket.screenshot|thumb_url('full') }}"
+         style="width:100%;border-radius:6px;margin-top:12px;cursor:zoom-in;display:block"
+         loading="lazy"
+         onclick="lbOpen(this.src)"
+         onerror="this.style.display='none'">
+    {% endif %}
   </div>
 </details>
 {% endif %}
 
-{# ─────────────────── Vehicle History Reports (count only — images hidden for v1) ─────────────────── #}
-{% if carfax_count %}
-<details class="card history">
+{# ─────────────────── Vehicle History Reports (Carfax / AutoCheck screenshots) ─────────────────── #}
+{% if carfax_urls %}
+<details class="card history" open>
   <summary>
     <span class="title">Vehicle History Reports</span>
-    <span class="summary-text">{{ carfax_count }} report{% if carfax_count != 1 %}s{% endif %} on file</span>
+    <span class="summary-text">{{ carfax_urls|length }} report{% if carfax_urls|length != 1 %}s{% endif %}</span>
   </summary>
   <div class="body">
-    <div style="font-size:13px;color:#cbd5e1;line-height:1.55">
-      {{ carfax_count }} Carfax / AutoCheck screenshot{% if carfax_count != 1 %}s{% endif %}
-      capture{% if carfax_count == 1 %}d{% else %}d{% endif %} for this VIN. Image rendering disabled in this view —
-      contact your salesperson{% if dealer.salesperson %} ({{ dealer.salesperson }}){% endif %}
-      for the full report.
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
+      {% for u in carfax_urls %}
+      <img src="{{ u|thumb_url('mobile') }}"
+           style="width:100%;border-radius:6px;cursor:zoom-in;background:#0a1018"
+           loading="lazy"
+           onclick="lbOpen('{{ u|thumb_url('full') }}')"
+           onerror="this.style.display='none'">
+      {% endfor %}
     </div>
   </div>
 </details>
@@ -300,6 +310,12 @@
   {% endfor %}
   {% endif %}
 </div>
+
+<div class="lb" id="lb" onclick="this.classList.remove('open')" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:1000;align-items:center;justify-content:center;padding:20px;cursor:zoom-out"><img id="lbImg" style="max-width:100%;max-height:100%"></div>
+<style>.lb.open{display:flex !important}</style>
+<script>
+function lbOpen(src){var lb=document.getElementById('lb');document.getElementById('lbImg').src=src;lb.classList.add('open');}
+</script>
 
 </body>
 </html>
