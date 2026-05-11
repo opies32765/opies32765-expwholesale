@@ -312,6 +312,10 @@
 
   {# ── Inbound Market Bids · cars EW collected that you can offer on ── #}
   {% if inbound_pushes %}
+  <div id="inboundBanner" data-unread="{{ inbound_unread }}" style="display:none;position:sticky;top:0;z-index:200;background:linear-gradient(90deg,#f59e0b,#f97316);color:#0a0f1a;font-weight:700;font-size:15px;padding:13px 18px;border-radius:10px;margin:0 0 12px;cursor:pointer;box-shadow:0 4px 18px rgba(245,158,11,.45);animation:bannerPulse 1.5s ease-in-out 3" onclick="this.style.display='none';document.getElementById('inboundCard').scrollIntoView({behavior:'smooth',block:'start'});document.getElementById('inboundCard').open=true">
+    🔔 <span id="inboundBannerCount">new</span> inbound bid<span id="inboundBannerS"></span> — click to view
+  </div>
+  <style>@keyframes bannerPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.02)}}</style>
   <details id="inboundCard" {% if inbound_unread %}open{% endif %} style="background:#1a2330;border:2px solid #f59e0b;border-radius:12px;margin:0 0 18px;overflow:hidden;box-shadow:0 4px 14px rgba(245,158,11,.15)">
     <summary style="cursor:pointer;padding:20px 24px;font-weight:700;font-size:18px;color:#fef3c7;background:linear-gradient(90deg,rgba(245,158,11,.18),rgba(245,158,11,.04));list-style:none;display:flex;align-items:center;gap:12px;user-select:none;letter-spacing:.2px">
       <span style="font-size:24px">📨</span>
@@ -326,10 +330,7 @@
       </div>
       <div style="display:flex;flex-direction:column;gap:8px">
         {% for p in inbound_pushes %}
-        <a href="/partner/{{ slug }}/inbound/{{ p.bid_id }}" style="display:flex;align-items:stretch;gap:12px;padding:10px 12px;background:#0f172a;border:1px solid {% if p.viewed_at is none %}rgba(245,158,11,.5){% else %}#1e293b{% endif %};border-radius:8px;text-decoration:none;transition:border-color .15s">
-          <div style="width:90px;flex-shrink:0;background:#0a1018;border-radius:6px;overflow:hidden;display:flex;align-items:center;justify-content:center">
-            {% if p.thumb_url %}<img src="{{ p.thumb_url }}" style="width:100%;height:64px;object-fit:cover">{% else %}<span style="color:#475569;font-size:11px">no photo</span>{% endif %}
-          </div>
+        <a href="/partner/{{ slug }}/inbound/{{ p.bid_id }}" style="display:flex;align-items:stretch;gap:12px;padding:12px 14px;background:#0f172a;border:1px solid {% if p.viewed_at is none %}rgba(245,158,11,.5){% else %}#1e293b{% endif %};border-radius:8px;text-decoration:none;transition:border-color .15s">
           <div style="flex:1;min-width:0">
             <div style="font-size:14px;font-weight:700;color:#e8ebf0;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
               {{ p.year or '' }} {{ (p.make or '')|upper }} {{ (p.model or '')|upper }}{% if p.trim %} <span style="color:#94a3b8;font-weight:500">{{ p.trim }}</span>{% endif %}
@@ -349,6 +350,41 @@
       </div>
     </div>
   </details>
+  <script>
+    /* 2026-05-11: inbound-bid chime + banner. Compares current unread count
+       against sessionStorage; if higher, plays a short beep via Web Audio
+       API + reveals the sticky banner up top. Idempotent — won't re-fire
+       on simple page reloads if the unread count hasn't grown. */
+    (function() {
+      var banner = document.getElementById('inboundBanner');
+      if (!banner) return;
+      var unread = parseInt(banner.dataset.unread || '0', 10);
+      var key = 'nuccio_inbound_last_seen_unread';
+      var prev = parseInt(sessionStorage.getItem(key) || '0', 10);
+      if (unread > prev && unread > 0) {
+        var delta = unread - prev;
+        document.getElementById('inboundBannerCount').textContent = delta;
+        document.getElementById('inboundBannerS').textContent = (delta === 1 ? '' : 's');
+        banner.style.display = 'block';
+        try {
+          var ctx = new (window.AudioContext || window.webkitAudioContext)();
+          [880, 1320].forEach(function(freq, i) {
+            var osc = ctx.createOscillator();
+            var gain = ctx.createGain();
+            osc.frequency.value = freq;
+            osc.type = 'sine';
+            gain.gain.setValueAtTime(0.0001, ctx.currentTime + i * 0.18);
+            gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + i * 0.18 + 0.02);
+            gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + i * 0.18 + 0.32);
+            osc.connect(gain).connect(ctx.destination);
+            osc.start(ctx.currentTime + i * 0.18);
+            osc.stop(ctx.currentTime + i * 0.18 + 0.35);
+          });
+        } catch (e) { /* autoplay blocked — banner still shows */ }
+      }
+      sessionStorage.setItem(key, String(unread));
+    })();
+  </script>
   {% endif %}
 
   {# ── 3-way flow chart · how to get a bid from EW ── #}

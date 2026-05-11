@@ -135,17 +135,7 @@
 
 {# ─────────────────── Hero — vehicle facts + first photo ─────────────────── #}
 <div class="hero">
-  <div class="gallery">
-    {% if photos %}
-      <div class="photos">
-        {% for u in photos[:1] %}<img src="{{ u }}" class="hero-img" onclick="lbOpen(this.src)">{% endfor %}
-        {% for u in photos[1:9] %}<img src="{{ u }}" onclick="lbOpen(this.src)">{% endfor %}
-      </div>
-    {% else %}
-      <div class="empty">No photos available</div>
-    {% endif %}
-  </div>
-  <div class="info">
+  <div class="info" style="width:100%">
     <div class="ymm">{{ bid.year or '' }} {{ (bid.make or '')|upper }} {{ (bid.model or '')|upper }}{% if bid.trim %} {{ bid.trim|upper }}{% endif %}</div>
     <div class="miles">{{ '{:,}'.format(bid.mileage|int) if bid.mileage else '—' }} mi</div>
     <div class="vin">VIN: {{ bid.vin or '—' }}</div>
@@ -157,8 +147,8 @@
   </div>
 </div>
 
-{# ─────────────────── iPacket OEM Window Sticker ─────────────────── #}
-{% if ipacket and ipacket.screenshot %}
+{# ─────────────────── iPacket OEM Window Sticker (numbers only — images hidden for v1) ─────────────────── #}
+{% if ipacket and (ipacket.total_msrp or ipacket.base_price) %}
 <details class="card sticker" open>
   <summary>
     <span class="title">OEM Window Sticker</span>
@@ -167,22 +157,8 @@
   <div class="body">
     {% if ipacket.total_msrp %}<div class="row"><span class="lbl">Total MSRP</span><span class="val">${{ '{:,}'.format(ipacket.total_msrp|int) }}</span></div>{% endif %}
     {% if ipacket.base_price %}<div class="row"><span class="lbl">Base Price</span><span class="val">${{ '{:,}'.format(ipacket.base_price|int) }}</span></div>{% endif %}
-    <img src="{{ ipacket.screenshot }}" style="width:100%;border-radius:6px;margin-top:12px;cursor:zoom-in" onclick="lbOpen(this.src)">
-  </div>
-</details>
-{% endif %}
-
-{# ─────────────────── Carfax / AutoCheck ─────────────────── #}
-{% if carfax_urls %}
-<details class="card history">
-  <summary>
-    <span class="title">Vehicle History Reports</span>
-    <span class="summary-text">{{ carfax_urls|length }} report{% if carfax_urls|length != 1 %}s{% endif %}</span>
-  </summary>
-  <div class="body">
-    <div class="photos">
-      {% for u in carfax_urls %}<img src="{{ u }}" onclick="lbOpen(this.src)">{% endfor %}
-    </div>
+    {% if ipacket.exterior_color %}<div class="row"><span class="lbl">Exterior</span><span class="val">{{ ipacket.exterior_color }}</span></div>{% endif %}
+    {% if ipacket.interior_color %}<div class="row"><span class="lbl">Interior</span><span class="val">{{ ipacket.interior_color }}</span></div>{% endif %}
   </div>
 </details>
 {% endif %}
@@ -303,15 +279,6 @@
   {% endfor %}
   {% endif %}
 </div>
-
-<div class="lb" id="lb" onclick="this.classList.remove('open')"><img id="lbImg"></div>
-
-<script>
-function lbOpen(src) {
-  document.getElementById('lbImg').src = src;
-  document.getElementById('lb').classList.add('open');
-}
-</script>
 
 </body>
 </html>

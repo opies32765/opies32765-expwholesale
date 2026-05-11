@@ -1166,10 +1166,15 @@ def _push_bid_to_subscribed_partners(bid_id: int) -> None:
 
 
 def notify_partner_of_inbound_bid(bid_id: int, dealer: dict) -> None:
-    """SMS + email all partner_users with the relevant opt-ins. Multi-recipient
-    by design — Nuccio has Mark Palangio + Bill Nuccio; each gets notified
-    based on their own opt-ins. Uses the dealer's portal slug + dashboard
-    token so the SMS link works without login."""
+    """Notify partner users when a new inbound bid is pushed to them.
+    Multi-recipient by design — iterates partner_users per dealer.
+
+    2026-05-11: SMS + email are GATED behind INBOUND_PUSH_SEND_SMS_EMAIL
+    env (default off). v1 strategy is to rely on the dashboard card +
+    in-browser chime/banner; we'll flip the env to "true" once the
+    dashboard UX is validated with Nuccio. Telegram-alert-to-Oscar fires
+    regardless so the operator always knows a bid pushed."""
+    send_channels = os.environ.get('INBOUND_PUSH_SEND_SMS_EMAIL', '').lower() in ('1', 'true', 'yes', 'on')
     try:
         with _db() as conn, conn.cursor() as cur:
             cur.execute("""
@@ -1200,6 +1205,11 @@ def notify_partner_of_inbound_bid(bid_id: int, dealer: dict) -> None:
             """, (dealer['id'],))
             recipients = cur.fetchall()
             for u in recipients:
+                if not send_channels:
+                    print(f'[inbound-notify] skip bid={bid_id} '
+                          f'user={u["id"]} (channels off — dashboard only)',
+                          flush=True)
+                    continue
                 if u.get('sms_opt_in') and u.get('phone'):
                     sent = _send_sms(u['phone'], sms_body)
                     print(f'[inbound-notify] sms bid={bid_id} '
