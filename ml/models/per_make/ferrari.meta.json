@@ -1,6 +1,6 @@
 {
   "make_name": "FERRARI",
-  "trained_at": "2026-05-09T08:30:56.384446Z",
+  "trained_at": "2026-05-10T08:31:20.211993Z",
   "n_total": 294,
   "n_train": 264,
   "n_test": 30,
@@ -217,9 +217,9 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 17073.0,
-    "mape_pct": 7.03,
-    "r2": 0.953,
+    "mae_dollars": 17025.0,
+    "mape_pct": 7.02,
+    "r2": 0.9531,
     "within_5pct": 43.3,
     "within_10pct": 80.0
   },

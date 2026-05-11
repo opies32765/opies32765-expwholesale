@@ -277,6 +277,171 @@ def find_make_for_model(model):
     return rows
 
 
+# ── Wishlist <-> bid cross-reference ──────────────────────────────────────
+# When a bid (sell-side) lands for a vehicle that matches an active
+# sourcing_request (buy-side wishlist), we want EW staff alerted: yellow
+# banner on every dashboard page, click-through to the sourcing thread.
+# The matching is permissive on optional fields and strict on make+model.
+
+def _bid_matches_request(bid, req):
+    """Pure function. Given a bid dict and a sourcing_request dict, return
+    (matches: bool, strength: 'exact'|'partial', reasons: list[str]).
+
+    Match rules (2026-05-10):
+      - REQUIRED: lowercased make AND model match
+      - year:  bid.year in [req.year_min, req.year_max] OR year null/relaxed
+      - color: if req.ext_color set + not relaxed -> bid color must intersect
+      - miles: if req.miles_max set + not relaxed -> bid.mileage <= cap
+      - trim/transmission: informational only, add to reasons if they line up
+
+    'exact' = every set filter matches. 'partial' = only make+model match
+    (some filter missing from the bid or unenforced)."""
+    if not bid or not req:
+        return False, None, []
+    b_make = (bid.get('canon_make') or bid.get('make') or '').strip().lower()
+    b_model = (bid.get('canon_model') or bid.get('model') or '').strip().lower()
+    r_make = (req.get('make') or '').strip().lower()
+    r_model = (req.get('model') or '').strip().lower()
+    if not (b_make and b_model and r_make and r_model):
+        return False, None, []
+    if b_make != r_make or b_model != r_model:
+        return False, None, []
+
+    reasons = [f'make={r_make}', f'model={r_model}']
+    relaxed = set(req.get('relaxations') or [])
+    strength = 'exact'
+
+    # Year gate
+    b_year = bid.get('year')
+    y_min, y_max = req.get('year_min'), req.get('year_max')
+    if (y_min or y_max) and 'year' not in relaxed:
+        if b_year is None:
+            strength = 'partial'
+            reasons.append('year=unknown')
+        else:
+            if y_min and b_year < int(y_min):
+                return False, None, []
+            if y_max and b_year > int(y_max):
+                return False, None, []
+            reasons.append(f'year={b_year}')
+    elif b_year:
+        reasons.append(f'year={b_year}(any)')
+
+    # Color gate
+    r_ec = [str(c).strip().lower() for c in (req.get('ext_color') or [])]
+    if r_ec and 'ext_color' not in relaxed:
+        b_color = (bid.get('color') or '').strip().lower()
+        if not b_color:
+            strength = 'partial'
+            reasons.append('color=unknown')
+        elif not any(c in b_color or b_color in c for c in r_ec):
+            return False, None, []
+        else:
+            reasons.append(f'color={b_color}')
+
+    # Mileage gate
+    if req.get('miles_max') and 'miles_max' not in relaxed:
+        cap = int(req['miles_max'])
+        b_miles = bid.get('mileage')
+        if b_miles is None:
+            strength = 'partial'
+            reasons.append('miles=unknown')
+        else:
+            if int(b_miles) > cap:
+                return False, None, []
+            reasons.append(f'miles={b_miles}<=cap{cap}')
+
+    # Trim gate — when wholesaler specified a trim ("turbo") AND we haven't
+    # relaxed it, the bid's trim must contain the requested trim as a
+    # substring (case-insensitive). "Turbo" matches "Turbo S", "Turbo
+    # Cabriolet", "Turbo Coupe" but NOT plain "Cabriolet" or "Carrera S".
+    # If bid trim is unknown, accept with partial strength so we don't miss
+    # under-decoded bids — staff can adjudicate.
+    r_trim = (req.get('trim') or '').strip().lower()
+    b_trim = (bid.get('canon_trim') or bid.get('trim') or '').strip().lower()
+    if r_trim and 'trim' not in relaxed:
+        if not b_trim:
+            strength = 'partial'
+            reasons.append('trim=unknown')
+        elif r_trim in b_trim or b_trim in r_trim:
+            reasons.append(f'trim={r_trim}')
+        else:
+            return False, None, []
+    elif r_trim and b_trim and (r_trim in b_trim or b_trim in r_trim):
+        reasons.append(f'trim={r_trim}')
+
+    return True, strength, reasons
+
+
+def find_wishlist_matches_for_bid(bid):
+    """For a single bid row, return list of (sourcing_request_id, strength,
+    reasons) for every active wishlist that matches. Used at bid-detail
+    render time to show the yellow banner with prior wholesaler interest."""
+    from app import get_db
+    if not bid or not bid.get('id'):
+        return []
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            SELECT * FROM sourcing_requests
+             WHERE status NOT IN ('archived')
+               AND make IS NOT NULL AND model IS NOT NULL
+        """)
+        reqs = cur.fetchall()
+    except Exception as e:
+        print(f'[wishlist-match] err: {e}', flush=True)
+        reqs = []
+    db.close()
+    out = []
+    for r in reqs:
+        matches, strength, reasons = _bid_matches_request(bid, dict(r))
+        if matches:
+            out.append({
+                'sourcing_request_id': r['id'],
+                'customer_name': r.get('customer_name'),
+                'phone': r.get('phone'),
+                'narrative_brief': r.get('narrative_brief'),
+                'strength': strength,
+                'reasons': reasons,
+            })
+    return out
+
+
+def find_bid_matches_for_request(req):
+    """Inverse: for one sourcing_request, return matching bids from the
+    last 30 days. Used by the cron scan to populate sourcing_bid_matches."""
+    from app import get_db
+    if not req:
+        return []
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            SELECT id, vin, year, make, model, trim, color, mileage,
+                   canon_make, canon_model, canon_trim, status, created_at
+              FROM bids
+             WHERE created_at > NOW() - INTERVAL '30 days'
+               AND COALESCE(canon_make, make) IS NOT NULL
+               AND COALESCE(canon_model, model) IS NOT NULL
+        """)
+        bids_rows = cur.fetchall()
+    except Exception as e:
+        print(f'[bid-match] err: {e}', flush=True)
+        bids_rows = []
+    db.close()
+    out = []
+    for b in bids_rows:
+        matches, strength, reasons = _bid_matches_request(dict(b), req)
+        if matches:
+            out.append({
+                'bid_id': b['id'],
+                'strength': strength,
+                'reasons': reasons,
+            })
+    return out
+
+
 def suggest_models(make, model_hint=None, limit=20):
     """Legacy helper: distinct models that exist for that make in
     dealer_inventory directly (not via the materialized view). Kept for

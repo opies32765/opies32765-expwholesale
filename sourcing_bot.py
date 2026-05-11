@@ -26,7 +26,14 @@ from datetime import datetime, timezone
 _GATE = os.getenv('SOURCING_PHONE_GATE', '+14074309675')
 _GATED_PHONES = {p.strip() for p in _GATE.split(',') if p.strip()}
 _GATE_OPEN = '*' in _GATED_PHONES
-_ACTIVE_DAYS = 7
+# Threads are now effectively indefinite — wholesalers should be able to
+# come back weeks/months later and pick up where they left off, like a real
+# broker would remember a regular client. The re_engagement branch primes
+# returning users with their last narrative_brief; vehicle pivots snapshot
+# prior interests into vehicle_interests JSONB. Nothing auto-archives on
+# time silence. Manual archive still works via drop_it / stop intents and
+# via the dashboard close button.
+_ACTIVE_DAYS = 36500
 
 
 # ── Heuristic intent detection (still used to decide when to OPEN a new
@@ -274,6 +281,33 @@ _AMBIGUOUS_TRIMS = {
     'gts', 'turbo', 'turbo s', 's', 'gt', 'gt s', 'touring',
     'sport', 'sport+',
 }
+
+# Phrases that mean "tell me the price". Detected in user_text so when
+# intent='interested' AND the user asked for price in the same breath
+# ("yes how much" / "interested, what's the cost"), the handoff reply
+# explicitly addresses pricing instead of silently dropping it.
+_PRICE_QUESTION_PATTERNS = (
+    r'how much', r"how much'?s", r'what.{0,10}cost', r"what'?s\s+the\s+cost",
+    r'what.{0,10}price', r"what'?s\s+the\s+price", r'asking price',
+    r'price tag', r'sticker price', r'\bmsrp\b',
+    r"what'?s\s+it\s+go(?:ing)?\s+for", r"what.{0,15}they\s+go(?:ing)?\s+for",
+)
+
+
+def _mentions_price_question(text):
+    """Cheap regex check for 'how much'/'what's the cost'/etc. in user text.
+    Used to fold a pricing note into handoff replies when the user asked
+    about price in the same message that signaled interest."""
+    if not text:
+        return False
+    import re as _re
+    s = (text or '').strip().lower()
+    for pat in _PRICE_QUESTION_PATTERNS:
+        if _re.search(pat, s):
+            return True
+    return False
+
+
 _MAKE_SPECIFIC_TRIMS = {
     'carrera', 'gt3', 'gt4', 'targa', 'panamera', 'macan', 'cayenne',
     'amg', 'g63', 'g550', 'g-class', 'g class',
@@ -284,10 +318,23 @@ _MAKE_SPECIFIC_TRIMS = {
 
 def _is_ambiguous_trim_pivot(row, parsed, user_text):
     """True if user's message is a bare trim name without a fresh make AND
-    the trim spans multiple makes. Probe before searching."""
+    the trim spans multiple makes — bot should probe 'still {make}?' before
+    pivoting.
+
+    Tightened 2026-05-10: probe was firing too eagerly when the user was
+    REFINING the existing search (e.g. 'any yellow turbos' or '911 turbo
+    in yellow' after we already had make=porsche). Now we skip the probe
+    when the user this turn also gave a model, color, or year — those are
+    refinement signals on the existing make, not bare-trim pivots."""
     su = (parsed or {}).get('spec_update') or {}
     new_make = (su.get('make') or '').strip().lower()
     if new_make:
+        return False  # user named the make this turn — no ambiguity
+    # Refinement signals: user is adding detail to the existing search, not
+    # pivoting to a different vehicle. Skip the probe.
+    if su.get('model') or su.get('ext_color') or su.get('int_color'):
+        return False
+    if su.get('year_min') or su.get('year_max'):
         return False
     new_trim = (su.get('trim') or '').strip().lower()
     body_lc = (user_text or '').strip().lower()
@@ -312,14 +359,20 @@ _REWRITE_BRANCHES = {
     'gathering_make_model',
     'gathering_model_for_make',
     'gathering_year',
+    'gathering_extras',
     'no_match_offer',
     'ambiguous_trim_probe',
     'interested_no_name',
+    'interested_no_name_price',
     'more_details_offer',
     'callback_name_ask',
     'extend_wishlist_no_name',
     'more_details_declined',
+    're_engagement',
 }
+# Branches whose wording is intentionally exact (recap text, time-aware
+# acks, match presentations, stop/drop) bypass _REWRITE_BRANCHES — see
+# _run_turn for the gate.
 
 
 def _last_bot_branch(conversation):
@@ -333,13 +386,13 @@ def _last_bot_branch(conversation):
 
 def _no_match_offer_relax_aware(row, sibling_models=None):
     """No-match offer that:
-      - skips narrowing buckets the user has already opted out of
+      - lists narrowing buckets the user can drop (skips any already relaxed)
       - if we have OTHER models in stock for the same make, lists them
-      - offers a pivot to a different model or make as a generic fallback
+      - offers a generic pivot ('a different make') as final fallback
       - offers to flag for the wishlist
-    sibling_models: list of model name strings (other models we DO carry
-    for the user's chosen make, excluding the model they asked for).
-    Pass top 3-4 from inventory_taxonomy.models_for_make()."""
+    Both the narrow_opts AND the sibling clause are preserved — earlier
+    versions dropped narrow_opts when siblings were populated, which is
+    why the 'yellow 911 turbo' search lost its 'other colors' option."""
     relaxed = set(row.get('relaxations') or [])
     narrow_opts = []
     if row.get('ext_color') and 'ext_color' not in relaxed:
@@ -351,24 +404,17 @@ def _no_match_offer_relax_aware(row, sibling_models=None):
     if row.get('miles_max') and 'miles_max' not in relaxed:
         narrow_opts.append("a higher mileage cap")
 
-    # If we have other models in stock for this make, surface them. Concrete
-    # alternatives ("we've got 296, sf90, roma") read better than the
-    # abstract "a different model".
-    sibling_clause = None
-    make = row.get('make')
-    if sibling_models and make:
-        names = ', '.join(sibling_models[:4])
-        sibling_clause = f"we've got these {make}s in stock: {names}"
-
-    parts = []
+    options = []
     if narrow_opts:
-        parts.append(', '.join(narrow_opts))
-    parts.append("a different model or make")
-    parts.append("flag it for when one shows up")
-    body = f"no exact match right now. want me to try {', '.join(parts[:-1])}, or {parts[-1]}?"
-    if sibling_clause:
-        body = f"no exact match right now. {sibling_clause}. want one of those, {parts[-2]}, or {parts[-1]}?"
-    return body
+        options.append(', '.join(narrow_opts))
+    if sibling_models and row.get('make'):
+        names = ', '.join(sibling_models[:3])
+        options.append(f"another {row['make']} ({names})")
+    options.append("a different make")
+    options.append("flag it for when one shows up")
+
+    return (f"no exact match right now. want me to try "
+            f"{', '.join(options[:-1])}, or {options[-1]}?")
 
 
 def _decide(row, parsed, search_results, user_text):
@@ -377,7 +423,7 @@ def _decide(row, parsed, search_results, user_text):
 
     branch is a short label used by _run_turn to decide whether to apply
     the tone-rewrite layer and for log filtering."""
-    from sourcing_gemini import handoff_line, callback_ack
+    from sourcing_gemini import handoff_line, callback_ack, build_recap
 
     intent = (parsed or {}).get('intent') or 'unclear'
     relaxed = set(row.get('relaxations') or [])
@@ -395,6 +441,32 @@ def _decide(row, parsed, search_results, user_text):
         return ("ok, stopped. text us anytime.", 'archived', False, 'stop')
     if intent == 'drop_it':
         return ("ok, dropped. text us anytime.", 'archived', False, 'drop')
+
+    # Re-engagement: known matched/wishlist customer comes back with a
+    # greeting or unclear short message ("hi", "hello", "any updates",
+    # "anything new"). Cold fallback would read robotic for a returning
+    # customer. If they haven't texted in >24h AND we have a narrative_brief
+    # on the row, prime the convo with the last vehicle context so they
+    # don't have to re-explain themselves.
+    if (intent == 'unclear' and has_name
+        and status in ('matched', 'wishlist')
+        and len((user_text or '').strip()) <= 60):
+        hours_since = None
+        last_msg = row.get('last_msg_at')
+        if last_msg:
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+                lm = last_msg if not isinstance(last_msg, str) else _dt.fromisoformat(last_msg)
+                if lm.tzinfo is None:
+                    lm = lm.replace(tzinfo=_tz.utc)
+                hours_since = (_dt.now(_tz.utc) - lm).total_seconds() / 3600
+            except Exception:
+                hours_since = None
+        if hours_since and hours_since > 24 and row.get('narrative_brief'):
+            return (f"hey {name_first} — last we talked you were on {row['narrative_brief']}. anything new on that or different today?",
+                    status, False, 're_engagement')
+        return (f"hey {name_first} — anything else you want to look at?",
+                status, False, 're_engagement')
 
     # ── Callback flow (3-step) ────────────────────────────────────────────
     # Step 3: User just gave name after we asked for it in callback flow.
@@ -414,7 +486,13 @@ def _decide(row, parsed, search_results, user_text):
                 'presented', False, 'more_details_declined')
 
     # Step 1: User asked WHERE / MSRP / options / details of a match.
+    # If we already have their name (matched/wishlist customer asking about
+    # a NEW vehicle), skip the "want me to reach out?" offer entirely and
+    # send the time-aware ack directly. They've already opted in once;
+    # making them re-confirm for every car is friction.
     if intent == 'more_details':
+        if has_name:
+            return (callback_ack(row['customer_name']), 'matched', False, 'callback_ack')
         return ("honestly not sure on that one — want me to have someone reach out with the details?",
                 'presented', False, 'more_details_offer')
 
@@ -434,13 +512,28 @@ def _decide(row, parsed, search_results, user_text):
     # User signaled interest in a specific match.
     if intent == 'interested':
         if has_name:
+            # If the same message asked about price ("yes how much"),
+            # acknowledge it explicitly in the handoff so the user doesn't
+            # feel ignored on that beat. Per the never-quote-prices rule we
+            # don't share a number — staff covers pricing on callback.
+            if _mentions_price_question(user_text):
+                base = handoff_line(row['customer_name'])
+                return (f"{base} pricing's not something we quote here — staff will cover it when they reach out.",
+                        'matched', False, 'interested_with_name_price')
             return (handoff_line(row['customer_name']), 'matched', False, 'interested_with_name')
+        if _mentions_price_question(user_text):
+            return ("on pricing — that's not something we share here, but if you want it we'll have staff reach out with the full picture. what's your name so we know who to text?",
+                    'presented', False, 'interested_no_name_price')
         return ("if you want it we'll get back to you with all the details. what's your name so we know who to text?",
                 'presented', False, 'interested_no_name')
 
-    # Ambiguous bare-trim pivot — ask before searching.
+    # Ambiguous bare-trim pivot — ask before searching. Wording chosen so
+    # a bare "yes" reads as "still {make}" (the safe default), not as
+    # "open to other makes" (which would clear the make and force the user
+    # to re-specify everything). Earlier wording "still {make}, or open to
+    # other makes?" tripped the extractor into clearing make on "yes".
     if _is_ambiguous_trim_pivot(row, parsed, user_text):
-        return (f"still {row['make']}, or open to other makes?",
+        return (f"still {row['make']}? if not, what make?",
                 status, False, 'ambiguous_trim_probe')
 
     # Spec-gathering ladder. No "got it" prefix — the rewrite layer can vary
@@ -468,6 +561,46 @@ def _decide(row, parsed, search_results, user_text):
     if not has_year:
         return ("what year range?",
                 'gathering', False, 'gathering_year')
+
+    # ── Recap flow ────────────────────────────────────────────────────────
+    # After the spec-gathering ladder is satisfied (make+model+year all set
+    # or relaxed), the bot probes for granular detail (trim, color,
+    # transmission, miles, budget) and REPLAYS the spec back for confirm.
+    # Only after explicit "yes" do we run search.
+    #
+    # CRITICAL: this whole block is gated on `search_results is None` —
+    # i.e. only fires on the FIRST _decide pass (before search has run).
+    # On the second pass (caller fed us match results), we skip this and
+    # fall through to the present_matches / no_match_offer branches below.
+    # Without this gate, intent='confirm_recap' would loop back to the
+    # "locked in..." interim message even with results in hand, and the
+    # user would never see the matches (the bug observed on bid 27 / SF90).
+    recap_done = bool(row.get('recap_confirmed_at'))
+
+    if not recap_done and search_results is None:
+        # Step 1: ask the omnibus extras question (one chance, marked by
+        # last_branch == 'gathering_extras' so we don't re-ask).
+        if last_branch not in ('gathering_extras', 'recap_pending'):
+            return ("any preference on trim, color, transmission, max miles, "
+                    "or budget? or just want to see what we have?",
+                    'gathering', False, 'gathering_extras')
+
+        # Step 2: user explicitly bypassed the recap.
+        if intent == 'skip_recap':
+            return (f"got it — {build_recap(row)}. searching now.",
+                    'searching', False, 'recap_skipped')
+
+        # Step 3: user confirmed the recap. Return the interim "locked in"
+        # message; _run_turn then runs search and re-enters _decide with
+        # results, which falls through to present_matches below.
+        if intent == 'confirm_recap' and last_branch == 'recap_pending':
+            return (f"locked in — {build_recap(row)}. one sec.",
+                    'searching', False, 'recap_confirmed')
+
+        # Step 4: user just answered the extras question OR is correcting a
+        # prior recap → build/rebuild the recap and ask to confirm.
+        return (f"ok to recap — {build_recap(row)}. sound right?",
+                'gathering', False, 'recap_pending')
 
     # Sort request — return the existing search results re-sorted.
     if intent == 'sort_request' and search_results:
@@ -509,8 +642,11 @@ def _decide(row, parsed, search_results, user_text):
         return (_no_match_offer_relax_aware(row, siblings),
                 'presented', True, 'no_match_offer')
 
-    # Should not happen — caller runs search when minimums met.
-    return ("got it.", status, False, 'fallback')
+    # Catch-all: extractor didn't surface a clear intent and we couldn't
+    # search either. Don't go silent — acknowledge + open-ended question
+    # so the user knows they were heard. Was 'got it.' which read robotic.
+    return ("not sure i caught that — what are you looking for?",
+            status, False, 'fallback')
 
 
 # ── Main turn handler — reusable for both new + continuing requests ───────
@@ -560,20 +696,35 @@ def _run_turn(db, cur, request_id, row, user_text, num_media=0,
     # enough spec to search or need to ask another question.
     reply, next_state, did_search, branch = _decide(row, parsed, None, user_text)
 
-    # Decide if we should run inventory search this turn:
+    # Decide if we should run inventory search this turn. Search is gated
+    # on:
     # - make + model present
     # - year either set OR explicitly relaxed (relaxations contains 'year')
-    # - status hasn't moved off of search-eligible (gathering/searching/presented)
-    # - intent is one that benefits from search results (sourcing/more_results/sort_request/unclear)
+    # - status hasn't moved off of search-eligible
+    # - user intent benefits from search results
+    # - AND recap has been confirmed OR user explicitly skipped recap OR
+    #   we're already past recap (status='searching'/'presented'). The recap
+    #   gate is what makes the bot ask "ok to recap...?" before just dumping
+    #   matches.
     relaxed = set(row.get('relaxations') or [])
     year_ok = bool(row.get('year_min') or row.get('year_max') or 'year' in relaxed)
+    recap_authorized = bool(
+        row.get('recap_confirmed_at')
+        or branch in ('recap_confirmed', 'recap_skipped')
+        or row.get('status') in ('searching', 'presented', 'matched', 'wishlist')
+    )
+    # Search-eligible statuses include 'matched' and 'wishlist' — once a
+    # user is at handoff or on the wishlist, they should still be able to
+    # refine ("any black sf90 instead?") and get fresh results, not get
+    # frozen at fallback. Status moves back to 'presented' downstream when
+    # the new result set is delivered. Without 'matched'/'wishlist' here,
+    # any post-handoff refinement falls to "not sure i caught that".
     matches = []
-    if (row.get('make') and row.get('model') and year_ok
-        and row.get('status') in ('gathering', 'searching', 'presented')
-        and parsed.get('intent') in ('sourcing', 'more_results', 'sort_request', 'unclear', None)):
-        # Sort preference: explicit from extractor, or the row's price_hint
-        # implicit (handled inside inv_search). more_results lifts the limit
-        # so we can list everything in one shot.
+    if (row.get('make') and row.get('model') and year_ok and recap_authorized
+        and row.get('status') in ('gathering', 'searching', 'presented',
+                                   'matched', 'wishlist')
+        and parsed.get('intent') in ('sourcing', 'more_results', 'sort_request',
+                                      'confirm_recap', 'skip_recap', 'unclear', None)):
         sort_pref = parsed.get('sort_pref')
         limit = 50 if parsed.get('intent') == 'more_results' else 20
         try:
@@ -612,6 +763,16 @@ def _run_turn(db, cur, request_id, row, user_text, num_media=0,
         set_clauses.append("last_scan_at = NOW()")
     if next_state == 'wishlist':
         set_clauses.append("wishlist_until = COALESCE(wishlist_until, NOW() + INTERVAL '30 days')")
+    # When user confirms or skips the recap, lock in the narrative_brief so
+    # staff (and the search) have the canonical statement of intent. Once
+    # set, the recap gate stays open for this vehicle until a pivot resets
+    # both narrative_brief and recap_confirmed_at via merge_spec.
+    if branch in ('recap_confirmed', 'recap_skipped'):
+        from sourcing_gemini import build_recap as _bld
+        narrative = _bld(row)
+        set_clauses.append("narrative_brief = %s")
+        params.append(narrative)
+        set_clauses.append("recap_confirmed_at = NOW()")
     sql = f"UPDATE sourcing_requests SET {', '.join(set_clauses)} WHERE id = %s"
     params.append(request_id)
     cur.execute(sql, params)

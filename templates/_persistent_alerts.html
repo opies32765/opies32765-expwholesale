@@ -1,0 +1,57 @@
+{# ═══════════════════════════════════════════════════════════════════
+   Persistent EW dashboard alerts — included on every staff page.
+
+   Renders ONE surface from the context processor:
+
+     1. Buyer Match banner (yellow strip, top of viewport)
+        - Shows when sourcing_bid_matches has unacknowledged 'exact' rows
+        - Opening the linked sourcing thread acknowledges automatically
+          (see /sourcing/<id> route — bulk-ACKs all matches for that
+          request on render).
+
+   The Buyer Inbox alert is rendered as a NAV TAB inside index.html
+   (.nav-tab-buyer-inbox class) — not as a floating pill — so it lives
+   alongside the other tabs (Dealer DB, Reports, etc.) and reads as part
+   of the site chrome instead of a floating overlay.
+   ═══════════════════════════════════════════════════════════════════ #}
+{% if ew_alert_match_count and ew_alert_match_count > 0 %}
+<style>
+@keyframes ew-match-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,.65) }
+  50%      { box-shadow: 0 0 0 8px rgba(251,191,36,0)   }
+}
+.ew-buyer-match-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 1100;
+  background: #fbbf24; color: #0b1220;
+  padding: 10px 20px;
+  font-size: 13px; font-weight: 700;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  border-bottom: 2px solid #b45309;
+  animation: ew-match-pulse 1.8s ease-in-out infinite;
+}
+.ew-buyer-match-banner .ew-bm-label {
+  background: #0b1220; color: #fbbf24;
+  padding: 3px 10px; border-radius: 12px;
+  font-size: 11px; letter-spacing: .5px; text-transform: uppercase;
+}
+.ew-buyer-match-banner a {
+  color: #0b1220; text-decoration: underline; font-weight: 700;
+}
+.ew-buyer-match-banner a:hover { color: #1e293b }
+
+/* Push host page content down so it doesn't hide under the banner. */
+body { padding-top: 44px !important; }
+</style>
+
+<div class="ew-buyer-match-banner">
+  <span class="ew-bm-label">Buyer Match · {{ ew_alert_match_count }}</span>
+  {% for m in ew_alert_matches[:3] %}
+    <a href="/sourcing/{{ m.sourcing_request_id }}" title="Opens the buyer's thread and acknowledges this match.">
+      {{ m.customer_name or m.phone }} wants {{ m.year_label }} {{ m.make }} {{ m.model }}{% if m.trim %} {{ m.trim }}{% endif %} → bid #{{ m.bid_id }}
+    </a>{% if not loop.last %}<span style="opacity:.6">·</span>{% endif %}
+  {% endfor %}
+  {% if ew_alert_match_count > 3 %}
+    <span style="opacity:.75">+{{ ew_alert_match_count - 3 }} more</span>
+  {% endif %}
+</div>
+{% endif %}

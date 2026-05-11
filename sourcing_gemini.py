@@ -50,7 +50,7 @@ def _fmt_miles(m):
         return f'{n} mi'
     return f'{round(n/1000)}k mi'
 
-_MODEL = 'gpt-oss-120b'
+_MODEL = 'qwen-3-235b-a22b-instruct-2507'
 _CEREBRAS_URL = 'https://api.cerebras.ai/v1/chat/completions'
 _CEREBRAS_TIMEOUT_SEC = 8
 
@@ -60,13 +60,14 @@ EXTRACT_PROMPT = """You are a structured-data extractor for an SMS auto-sourcing
 Output a single JSON object, no markdown, no prose:
 
 {
-  "intent": "sourcing|interested|not_interested|more_results|drop_it|stop|extend_wishlist|name_provided|more_details|callback_yes|sort_request|unclear",
+  "intent": "sourcing|interested|not_interested|more_results|drop_it|stop|extend_wishlist|name_provided|more_details|callback_yes|sort_request|confirm_recap|skip_recap|unclear",
   "sort_pref": "miles_asc|miles_desc|price_asc|price_desc|null",
   "spec_update": {
     "year_min": int|null, "year_max": int|null,
     "make": str|null, "model": str|null, "trim": str|null,
     "ext_color": [str]|null, "int_color": [str]|null,
     "miles_max": int|null,
+    "transmission": str|null,
     "options": [str]|null,
     "must_clean_title": bool|null,
     "price_hint": int|null,
@@ -87,7 +88,11 @@ INTENT GUIDE
 - "more_details": user asks for MSRP / original sticker / options / photos / VIN / location / "where is it" / "what state" / "is it still available" / pricing or any info we can NOT answer about a specific match. Examples: "where is it?", "what state?", "what was msrp?", "original sticker?", "do you have photos?", "is it still available?", "where's it located?"
 - "callback_yes": user said yes to a "want me to have someone reach out / contact you?" offer (only valid when BOT_LAST_TURN was that offer). Affirmatives: "yes", "sure", "please", "ok do that", "go ahead", "yeah"
 - "sort_request": user wants the same matches re-sorted ("show ascending miles", "lowest miles first", "highest miles", "cheapest first", "most expensive", "lowest price", "highest price")
+- "confirm_recap": user confirmed the bot's recap of their request ("yes", "correct", "looks good", "yep that's it", "perfect", "right") — only valid when BOT_LAST_TURN starts with "ok to recap" or "got it — to recap"
+- "skip_recap": user explicitly wants to bypass the recap and search now ("just search", "show me what you have", "skip the recap", "search now", "go ahead and search")
 - "unclear": cannot tell — be honest, do not guess
+
+(Transmission extraction rules folded into SPEC EXTRACTION below.)
 
 SORT_PREF EXTRACTION
 Set sort_pref ONLY when intent="sort_request". Map the user's phrasing:
@@ -104,18 +109,33 @@ Prior conversation matters. Use BOT_LAST_TURN to disambiguate yes/no/any replies
 - bot asked "what's your name?" + user "Mike" -> "name_provided"
 - bot offered "want me to have someone reach out?" + user "yes"/"please"/"sure"/"do that" -> "callback_yes"
 - bot asked "want to see the rest?" + user "yes"/"show all" -> "more_results"
-- bot asked "what year range?" + user "any" -> intent="sourcing", spec_clear: ["year_min","year_max"]
-- bot asked about color + user "any color"/"any" -> intent="sourcing", spec_clear: ["ext_color"]
-- bot asked "still {make}, or open to other makes?" + user "open"/"other makes" -> intent="sourcing", spec_clear: ["make"]
+- bot asked "what year range?" + user "any"/"any year" (standalone) -> intent="sourcing", spec_clear: ["year_min","year_max"]
+- bot asked about color + user "any color"/"any" (standalone) -> intent="sourcing", spec_clear: ["ext_color"]
+- IMPORTANT: "any X" is NOT a relax signal — it's a refinement. "Any yellow turbos" / "any 458" / "got any porsches" / "any AMG?" all mean USER WANTS X, not "drop a filter". Only a bare standalone "any" (or "any year" / "any color") matching the exact field the bot just asked about clears anything. "Any yellow turbos" -> intent="sourcing", spec_update.ext_color=["yellow"], spec_update.trim="turbo", NO spec_clear on make/model/anything. The make/model from the existing context stays.
+- bot asked "still {make}? if not, what make?" + user "yes"/"yeah"/"still {make}" -> intent="sourcing", DO NOT change make (keep current make, no spec_clear on make, proceed to search)
+- bot asked "still {make}? if not, what make?" + user names a DIFFERENT make ("ferrari", "bmw", "mercedes") -> intent="sourcing", spec_update.make=that make, spec_clear: ["model","trim","ext_color","int_color","year_min","year_max","miles_max"]
+- bot asked "still {make}? if not, what make?" + user "no"/"open to others"/"any make" -> intent="sourcing", spec_clear: ["make"]
+- bot asked extras question ("any preference on trim, color, transmission, max miles, or budget?") + user "no"/"none"/"just search"/"show me" -> intent="skip_recap" (bypass recap, search now)
+- bot asked extras question + user gives multiple specs ("manual, 28k miles, 130k") -> intent="sourcing", spec_update with each field parsed
+- bot did recap ("ok to recap...") + user "yes"/"correct"/"looks good"/"yep"/"perfect" -> intent="confirm_recap"
+- bot did recap + user adds correction ("actually any year", "no make it red and white") -> intent="sourcing" with corrections in spec_update / spec_clear; bot will re-recap
 
 SPEC EXTRACTION
 - "model" = model name only (e.g. "911", "Carrera", "MC20", "296", "Bentayga"), NOT including the trim
 - "trim" = everything after the model (e.g. "Carrera GTS", "Turbo S", "GT3 Touring", "Speed")
 - Lowercase makes ("porsche" not "Porsche")
 - Year range: "21-23 fine" -> year_min=2021, year_max=2023; "2025" -> both 2025; "any year" -> spec_clear: ["year_min","year_max"]
-- Colors: list, lowercase ("red" -> ext_color: ["red"])
+- Colors: list, lowercase ("red" -> ext_color: ["red"]; "yellow or red" -> ext_color: ["yellow","red"])
 - "MC" alone is incomplete -> leave model=null
-- If user says a budget/price ("under 200k", "around 250"), set price_hint and intent="sourcing"; never filter by it server-side
+- Budget/price: "under 200k" / "around 250" / "150-180k" / "max 130k" -> price_hint=midpoint or stated cap; never filter by it
+- Mileage cap: "under 28k mi" / "max 50k miles" / "less than 30000" -> miles_max=that number
+- TRANSMISSION (extract aggressively when mentioned, even buried in a comma-list of multiple specs):
+  * "manual" / "stick" / "3-pedal" / "row your own" / "manual transmission" / "manual trans" -> transmission="manual"
+  * "automatic" / "auto" / "tiptronic" / "slushbox" / "auto trans" -> transmission="automatic"
+  * "PDK" / "DCT" / "dual clutch" -> transmission="pdk" (Porsche) or "dct" (other makes)
+  * "either" / "any transmission" / "doesn't matter" -> spec_clear: ["transmission"]
+  Example: user "yellow or red, manual, under 28k mi, under 130k" MUST extract:
+    ext_color=["yellow","red"], transmission="manual", miles_max=28000, price_hint=130000
 
 COMMON MODEL -> MAKE HINTS
 Bare model numbers/names usually map to one make. When user gives just a model with no make, set the make based on these:
@@ -274,6 +294,7 @@ def _empty_spec_update():
         'miles_max': None, 'options': None,
         'must_clean_title': None, 'price_hint': None,
         'customer_name': None,
+        'transmission': None,
     }
 
 
@@ -303,12 +324,16 @@ def _cerebras_call(system_prompt, user_prompt, max_tokens=2500,
         'model': _MODEL,
         'max_tokens': max_tokens,
         'temperature': temperature,
-        'reasoning_effort': 'low',
         'messages': [
             {'role': 'system', 'content': system_prompt},
             {'role': 'user',   'content': user_prompt},
         ],
     }
+    # reasoning_effort is gpt-oss-specific (suppresses chain-of-thought
+    # tokens). Other Cerebras models (qwen-3-*, llama-*, glm-*) reject the
+    # param with HTTP 400 'wrong_api_format'. Only set when targeting gpt-oss.
+    if _MODEL.startswith('gpt-oss'):
+        payload['reasoning_effort'] = 'low'
     if json_mode:
         payload['response_format'] = {'type': 'json_object'}
     _t0 = _time.monotonic()
@@ -341,6 +366,30 @@ def _cerebras_call(system_prompt, user_prompt, max_tokens=2500,
     return content.strip() if content else None
 
 
+_TRANS_PATTERNS = (
+    (r'\b(manual|stick|3.?pedal|row your own|manual trans(?:mission)?)\b', 'manual'),
+    (r'\bp\s*d\s*k\b', 'pdk'),
+    (r'\bd\s*c\s*t\b', 'dct'),
+    (r'\b(dual.?clutch)\b', 'dct'),
+    (r'\b(automatic|tiptronic|slushbox|auto\s+trans|auto-?box)\b', 'automatic'),
+)
+
+
+def _heuristic_transmission(text):
+    """Server-side fallback: detect transmission keywords in raw user text
+    when the extractor missed it. gpt-oss-120b occasionally drops fields
+    when the user types a dense comma-list of specs ('yellow, manual, 28k,
+    130k'); this regex catches the common ones so the recap doesn't drop
+    'manual' from the readback."""
+    if not text:
+        return None
+    s = text.lower()
+    for pat, value in _TRANS_PATTERNS:
+        if re.search(pat, s):
+            return value
+    return None
+
+
 def extract(row, new_user_msg):
     """JSON-only extraction pass. Returns dict
     {intent, sort_pref, spec_update, spec_clear} or None on failure. No reply
@@ -356,6 +405,13 @@ def extract(row, new_user_msg):
     for k in norm_su:
         if k in su:
             norm_su[k] = su[k]
+    # Heuristic backstop on transmission — extractor sometimes misses it
+    # in dense comma-lists. Only fill if extractor returned None.
+    if not norm_su.get('transmission'):
+        tx = _heuristic_transmission(new_user_msg)
+        if tx:
+            norm_su['transmission'] = tx
+            print(f'[sourcing-llm:extract] transmission backstop -> {tx!r}', flush=True)
     parsed['spec_update'] = norm_su
     parsed.setdefault('intent', 'unclear')
     parsed.setdefault('spec_clear', [])
@@ -461,7 +517,7 @@ def turn(row, new_user_msg, search_results=None, fallback_level=None):
 # ── Spec merge helper ─────────────────────────────────────────────────────
 _SCALAR_FIELDS = ('year_min', 'year_max', 'make', 'model', 'trim',
                   'miles_max', 'must_clean_title', 'price_hint',
-                  'customer_name')
+                  'customer_name', 'transmission')
 _LIST_FIELDS = ('ext_color', 'int_color', 'options')
 
 # When spec_clear includes any of these field names, we persist the
@@ -475,7 +531,87 @@ _SPEC_CLEAR_TO_RELAXATION = {
     'int_color': 'int_color',
     'trim': 'trim',
     'miles_max': 'miles_max',
+    'transmission': 'transmission',
 }
+
+
+def _snapshot_vehicle_interest(row):
+    """Build a snapshot dict of the row's current vehicle interest, used to
+    push onto vehicle_interests JSONB before a pivot wipes the spec.
+    Returns None if the prior interest wasn't substantive (no make/model)."""
+    if not row.get('make') or not row.get('model'):
+        return None
+    return {
+        'make': row.get('make'),
+        'model': row.get('model'),
+        'trim': row.get('trim'),
+        'year_min': row.get('year_min'),
+        'year_max': row.get('year_max'),
+        'ext_color': list(row.get('ext_color') or []),
+        'int_color': list(row.get('int_color') or []),
+        'miles_max': row.get('miles_max'),
+        'transmission': row.get('transmission'),
+        'price_hint': row.get('price_hint'),
+        'narrative_brief': row.get('narrative_brief'),
+        'status_at_pivot': row.get('status'),
+        'recap_confirmed_at': (row.get('recap_confirmed_at').isoformat()
+                               if row.get('recap_confirmed_at') else None),
+        'captured_at': datetime.now(_TZ).isoformat(),
+    }
+
+
+def build_recap(row):
+    """Produce the natural-language recap string the bot replays back to the
+    user before searching. Maps row fields to the broker peer-register voice
+    used in the rest of the system.
+
+    Example output:
+      'yellow or red 1997-1999 porsche 911 turbo manual, max 28k mi, around 130k'
+    """
+    parts = []
+    # Color(s) lead — "yellow or red" / "red"
+    ec = row.get('ext_color') or []
+    if ec:
+        if len(ec) == 1:
+            parts.append(ec[0])
+        elif len(ec) == 2:
+            parts.append(f"{ec[0]} or {ec[1]}")
+        else:
+            parts.append(f"{', '.join(ec[:-1])} or {ec[-1]}")
+    # Year range
+    ym, yx = row.get('year_min'), row.get('year_max')
+    if ym and yx:
+        parts.append(f"{ym}-{yx}" if ym != yx else str(ym))
+    elif ym:
+        parts.append(f"{ym}+")
+    elif yx:
+        parts.append(f"up to {yx}")
+    # Make / model / trim
+    if row.get('make'):
+        parts.append(row['make'])
+    if row.get('model'):
+        parts.append(row['model'])
+    if row.get('trim'):
+        parts.append(row['trim'])
+    # Transmission
+    if row.get('transmission'):
+        parts.append(row['transmission'])
+    head = ' '.join(parts) if parts else 'a vehicle'
+
+    extras = []
+    if row.get('miles_max'):
+        m = int(row['miles_max'])
+        extras.append(f"max {m//1000}k mi" if m >= 1000 else f"max {m} mi")
+    if row.get('price_hint'):
+        p = int(row['price_hint'])
+        extras.append(f"around {p//1000}k" if p >= 1000 else f"around {p}")
+    ic = row.get('int_color') or []
+    if ic:
+        extras.append(f"{ic[0]} interior" if len(ic) == 1
+                      else f"{' or '.join(ic)} interior")
+    if extras:
+        return f"{head}, {', '.join(extras)}"
+    return head
 
 
 def merge_spec(row, spec_update, spec_clear=None):
@@ -497,16 +633,38 @@ def merge_spec(row, spec_update, spec_clear=None):
     pivoted = bool(new_make and cur_make and new_make != cur_make)
 
     if pivoted:
-        # On pivot: reset prior relaxations (they were about the OLD vehicle)
-        # AND if the user didn't specify a year for the new vehicle this turn,
-        # treat year as "open" so the bot pivots straight into a search instead
-        # of asking "what year?" again. User can narrow by year afterward.
+        # On pivot: snapshot the prior vehicle interest into vehicle_interests
+        # (so we don't lose Oscar's Porsche 911 Turbo interest when he moves
+        # on to a Ferrari 296). Then reset relaxations (they were about the
+        # OLD vehicle) AND if the user didn't specify a year for the new
+        # vehicle this turn, treat year as "open" so the bot pivots straight
+        # into a search instead of asking "what year?" again.
+        snapshot = _snapshot_vehicle_interest(row)
+        if snapshot:
+            current_interests = list(row.get('vehicle_interests') or [])
+            current_interests.append(snapshot)
+            row['vehicle_interests'] = current_interests
+            changes['vehicle_interests'] = json.dumps(current_interests)
         new_relax = []
         spec_set_year = bool(spec_update.get('year_min') or spec_update.get('year_max'))
         if not spec_set_year:
             new_relax.append('year')
         row['relaxations'] = new_relax
         changes['relaxations'] = new_relax
+        # On pivot, the recap from the old vehicle no longer applies. Clear
+        # narrative_brief and recap_confirmed_at so the gathering ladder
+        # re-asks extras / re-recaps for the new vehicle.
+        row['narrative_brief'] = None
+        changes['narrative_brief'] = None
+        row['recap_confirmed_at'] = None
+        changes['recap_confirmed_at'] = None
+        # If we were in a terminal state (matched / wishlist) and user is
+        # now asking about a different vehicle, reset to 'gathering' so the
+        # search-trigger gate in _run_turn passes. _decide will move it to
+        # 'presented' (or 'matched' again) downstream after search.
+        if row.get('status') in ('matched', 'wishlist'):
+            row['status'] = 'gathering'
+            changes['status'] = 'gathering'
 
     # spec_update wins when both spec_clear and spec_update touch the same
     # field (clear-old-then-set-new pattern, e.g. pivot from Ferrari->Porsche

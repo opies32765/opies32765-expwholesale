@@ -241,7 +241,24 @@ def lookup(page, ctx, vin, t):
                         "raw": {"options": v9_parsed.get("options", []), "v9_path": True, "text_chars": len(v9_text)},
                     }
                 else:
-                    print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 captured but no pricing markers -- falling through to Submit flow")
+                    # 2026-05-10 fix: rasterized PDF stickers (Bentley, Rolls Royce, etc.)
+                    # render fine visually but have no selectable text -> no markers found.
+                    # If V9 captured a substantial screenshot (>=100KB), trust it as a real
+                    # render. Mini-page Layer 3 fallback already handles missing parsed fields.
+                    # Falling through here used to trigger the repeat-VIN rate-limit on Submit
+                    # and produce a 51KB blank capture. Verified on bid 1127 (Bentayga).
+                    if v9_size >= 100_000:
+                        print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 SUCCESS (no text markers but screenshot={v9_size:,}b — rasterized PDF, accepting visual)")
+                        return {
+                            "screenshot": str(v9_screenshot) if v9_screenshot.exists() else None,
+                            "sticker_url": v9_url,
+                            "total_msrp": None,
+                            "base_price": None,
+                            "exterior_color": None,
+                            "interior_color": None,
+                            "raw": {"options": [], "v9_path": True, "text_chars": len(v9_text), "rasterized_pdf": True},
+                        }
+                    print(f"[+{time.time()-t:5.1f}s] [ipacket] V9 captured but no pricing markers and screenshot={v9_size:,}b too small -- falling through to Submit flow")
                     # Restore page state best we can: navigate back to dashboard for Submit flow to work
                     try:
                         page.goto("https://dpapp.autoipacket.com/stickerpull", wait_until="domcontentloaded", timeout=15000)
@@ -567,23 +584,31 @@ def lookup(page, ctx, vin, t):
         print(f"[+{time.time()-t:5.1f}s] [ipacket] regex MSRP=${_m:,} base=${_b:,} ext={_ec} text={len(sticker_text)} chars")
 
     # 2026-05-09: Permanent fix for blank-screenshot / iPacket repeat-VIN rate-limit.
-    # When markers missing AND parser yielded nothing useful AND text is small,
+    # When markers missing AND parser yielded nothing useful AND screenshot is small,
     # return not_available=True so the server doesn't store an empty success row
-    # (which renders as a blank screenshot in the mini-page mini-page).
+    # (which renders as a blank screenshot in the mini-page).
+    # 2026-05-10: Made size-aware. Rasterized PDF stickers (Bentley, exotics) have
+    # no selectable text but render fine visually >=100KB. Don't false-positive them.
     _txt_u = (sticker_text or "").upper()
     _has_markers = any(m in _txt_u for m in ("MSRP","TOTAL PRICE","SUGGESTED","AS DELIVERED PRICE","TOTAL VEHICLE PRICE","VEHICLE PRICE"))
     _has_data = bool(parsed.get("total_msrp") or parsed.get("base_price") or parsed.get("exterior_color") or parsed.get("interior_color"))
-    if not _has_markers and not _has_data:
+    try:
+        _ss_bytes = screenshot.stat().st_size if (screenshot and screenshot.exists()) else 0
+    except Exception:
+        _ss_bytes = 0
+    if not _has_markers and not _has_data and _ss_bytes < 100_000:
         if sticker_page is not page:
             try: sticker_page.close()
             except Exception: pass
-        print(f"[+{time.time()-t:5.1f}s] [ipacket] BLANK-CAPTURE → not_available (text={len(sticker_text or '')} chars, no markers, no parsed data) — likely iPacket repeat-VIN rate-limit")
+        print(f"[+{time.time()-t:5.1f}s] [ipacket] BLANK-CAPTURE -> not_available (text={len(sticker_text or '')} chars, no markers, screenshot={_ss_bytes:,}b<100KB) -- likely iPacket repeat-VIN rate-limit")
         return {
             "screenshot": str(screenshot) if screenshot else None,
             "sticker_url": sticker_url,
             "not_available": True,
             "reason": "iPacket sticker did not render (blank capture). Likely repeat-VIN rate-limit; another bid for same VIN may have full data.",
         }
+    if not _has_markers and not _has_data and _ss_bytes >= 100_000:
+        print(f"[+{time.time()-t:5.1f}s] [ipacket] no text markers but screenshot={_ss_bytes:,}b -- accepting as rasterized-PDF visual sticker")
 
     if sticker_page is not page:
         try: sticker_page.close()

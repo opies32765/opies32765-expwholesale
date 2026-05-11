@@ -1459,11 +1459,12 @@ def dashboard():
     # priority order (matched first → wishlist last). Pre-computes last
     # user/bot messages so the template stays simple.
     sourcing_active = []
+    sourcing_unseen_count = 0
     try:
         cur.execute('''
             SELECT id, phone, status, year_min, year_max, make, model, trim,
                    ext_color, miles_max, customer_name, conversation,
-                   last_msg_at, last_inbound_at, created_at
+                   last_msg_at, last_inbound_at, created_at, seen_at
               FROM sourcing_requests
              WHERE status <> 'archived'
              ORDER BY
@@ -1485,12 +1486,21 @@ def dashboard():
             last_bot  = next((t for t in reversed(conv) if t.get('role') == 'bot'),  None)
             r['last_user_text'] = (last_user or {}).get('text', '')
             r['last_bot_text']  = (last_bot  or {}).get('text', '')
+            # Unseen = staff hasn't opened the thread, OR new activity
+            # has happened since the last time staff opened it. Drives the
+            # pulsing yellow Sourcing Alerts banner.
+            seen = r.get('seen_at')
+            last = r.get('last_msg_at')
+            r['unseen'] = bool(seen is None or (last and last > seen))
+            if r['unseen']:
+                sourcing_unseen_count += 1
             sourcing_active.append(r)
     except Exception as _se:
         print(f'[dashboard] sourcing query error: {_se}', flush=True)
         try: db.rollback()
         except Exception: pass
         sourcing_active = []
+        sourcing_unseen_count = 0
 
     return render_template('index.html', bids=bids, stats=stats,
                            status_filter=status_filter, rep_filter=rep_filter,
@@ -1499,6 +1509,7 @@ def dashboard():
                            vauto_done=vauto_done,
                            active_workers=active_workers,
                            sourcing_active=sourcing_active,
+                           sourcing_unseen_count=sourcing_unseen_count,
                            time_ago=time_ago)
 
 
@@ -11935,14 +11946,146 @@ def api_sourcing_close(req_id):
 
 @app.route('/sourcing/<int:req_id>')
 def sourcing_thread(req_id):
-    """Dashboard thread-detail view: full conversation + spec + actions."""
+    """Dashboard thread-detail view: full conversation + spec + actions.
+    Side effects: marks the request 'seen' (sets seen_at=NOW()) so the
+    Sourcing Alerts banner stops pulsing for this row. Also acknowledges
+    any pending wishlist<->bid match alerts for this request — by opening
+    the thread, staff has 'seen' the matches too."""
     db = get_db()
     cur = db.cursor()
     cur.execute("SELECT * FROM sourcing_requests WHERE id=%s", (req_id,))
     req = cur.fetchone()
     if not req:
         return ('not found', 404)
-    return render_template('sourcing_thread.html', req=req)
+    try:
+        cur.execute("UPDATE sourcing_requests SET seen_at=NOW() WHERE id=%s", (req_id,))
+        cur.execute("""UPDATE sourcing_bid_matches
+                          SET acknowledged_at = NOW()
+                        WHERE sourcing_request_id = %s
+                          AND acknowledged_at IS NULL""", (req_id,))
+        # Also fetch matching bids for sidebar context on the thread page.
+        cur.execute("""SELECT b.id, b.vin, b.year, b.make, b.model, b.trim,
+                              b.color, b.mileage, b.status,
+                              m.match_strength, m.match_reasons, m.detected_at
+                         FROM sourcing_bid_matches m
+                         JOIN bids b ON b.id = m.bid_id
+                        WHERE m.sourcing_request_id = %s
+                        ORDER BY m.detected_at DESC LIMIT 10""", (req_id,))
+        matched_bids = [dict(r) for r in cur.fetchall()]
+        db.commit()
+    except Exception as _e:
+        print(f'[sourcing] seen mark err id={req_id}: {_e}', flush=True)
+        try: db.rollback()
+        except Exception: pass
+        matched_bids = []
+    return render_template('sourcing_thread.html', req=req, matched_bids=matched_bids)
+
+
+@app.route('/api/sourcing/<int:req_id>/seen', methods=['POST'])
+def api_sourcing_seen(req_id):
+    """Mark a sourcing request as seen by staff (clears the alerts pulse).
+    Used for dismiss-without-opening; /sourcing/<id> render also marks seen."""
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("UPDATE sourcing_requests SET seen_at=NOW() WHERE id=%s", (req_id,))
+        db.commit()
+        db.close()
+        return jsonify({'ok': True, 'id': req_id})
+    except Exception as e:
+        try: db.rollback()
+        except Exception: pass
+        db.close()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/buyer-match/<int:match_id>/ack', methods=['POST'])
+def api_buyer_match_ack(match_id):
+    """Manually acknowledge a single wishlist<->bid match without opening
+    the thread. Opening the thread (/sourcing/<id>) bulk-acks all matches
+    for that request already; this endpoint is for dismiss-without-opening
+    patterns (e.g. a future 'mark all seen' button on the dashboard)."""
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("""UPDATE sourcing_bid_matches
+                          SET acknowledged_at = NOW()
+                        WHERE id = %s AND acknowledged_at IS NULL""", (match_id,))
+        db.commit()
+        db.close()
+        return jsonify({'ok': True, 'id': match_id})
+    except Exception as e:
+        try: db.rollback()
+        except Exception: pass
+        db.close()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+# ─── Persistent EW alerts: context processor ─────────────────────────────
+# Injects two counts and one list into every template render so the
+# _persistent_alerts.html partial can render the pulsing Buyer Inbox tab
+# and the Buyer Match yellow banner regardless of which page is being
+# served. The query is intentionally cheap — a single COUNT + a small
+# JOIN limited to 5 rows.
+
+@app.context_processor
+def inject_ew_alerts():
+    """Counts and rows for the persistent EW alert surfaces. Designed for
+    SIGNAL not noise — only 'exact' wishlist<->bid matches count toward
+    the Buyer Match banner. Partial matches still get inserted into
+    sourcing_bid_matches (visible on the thread page for staff review),
+    but they don't pulse on every page until adjudicated."""
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            SELECT COUNT(*)::int AS n
+              FROM sourcing_requests
+             WHERE status <> 'archived'
+               AND (seen_at IS NULL OR last_msg_at > seen_at)
+        """)
+        unseen = (cur.fetchone() or {}).get('n', 0) or 0
+        cur.execute("""
+            SELECT COUNT(*)::int AS n
+              FROM sourcing_bid_matches
+             WHERE acknowledged_at IS NULL
+               AND match_strength = 'exact'
+        """)
+        match_count = (cur.fetchone() or {}).get('n', 0) or 0
+        matches = []
+        if match_count:
+            cur.execute("""
+                SELECT m.id AS match_id, m.sourcing_request_id, m.bid_id,
+                       m.match_strength, m.detected_at,
+                       sr.customer_name, sr.phone, sr.narrative_brief,
+                       b.year, b.make, b.model, b.trim
+                  FROM sourcing_bid_matches m
+                  JOIN sourcing_requests sr ON sr.id = m.sourcing_request_id
+                  JOIN bids b ON b.id = m.bid_id
+                 WHERE m.acknowledged_at IS NULL
+                   AND m.match_strength = 'exact'
+                 ORDER BY m.detected_at DESC
+                 LIMIT 5
+            """)
+            for r in cur.fetchall():
+                r = dict(r)
+                r['year_label'] = str(r['year']) if r.get('year') else ''
+                matches.append(r)
+        db.close()
+        return dict(
+            ew_alert_unseen_count=unseen,
+            ew_alert_match_count=match_count,
+            ew_alert_matches=matches,
+        )
+    except Exception as _e:
+        print(f'[ew-alerts ctx err] {_e}', flush=True)
+        try: db.close()
+        except Exception: pass
+        return dict(
+            ew_alert_unseen_count=0,
+            ew_alert_match_count=0,
+            ew_alert_matches=[],
+        )
 
 
 if __name__ == '__main__':

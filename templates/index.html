@@ -12,6 +12,24 @@
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:100vh}
 
+/* Buyer Inbox pulsing nav tab — only renders with the active class when
+   ew_alert_unseen_count > 0. Same shape/padding as the other nav tabs
+   (Dealer DB, Reports, etc.) so it fits cleanly in the row, but yellow
+   palette + pulse so it draws the eye. */
+@keyframes nav-buyer-pulse {
+  0%,100% { box-shadow:0 0 0 0 rgba(251,191,36,.55) }
+  50%     { box-shadow:0 0 0 5px rgba(251,191,36,0)  }
+}
+.nav-tab-buyer-inbox {
+  font-size:13px; font-weight:700; letter-spacing:.2px;
+  color:#0b1220; background:#fbbf24;
+  text-decoration:none;
+  padding:5px 12px; border:1px solid #b45309; border-radius:6px;
+  animation:nav-buyer-pulse 1.6s ease-in-out infinite;
+  transition:filter .15s;
+}
+.nav-tab-buyer-inbox:hover { filter:brightness(1.05) }
+
 /* Header */
 .header{background:#243447;border-bottom:1px solid #344f68;padding:0 32px;height:66px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
 .logo{display:flex;align-items:center;gap:12px}
@@ -147,6 +165,8 @@ tr:last-child td{border-bottom:none}
 </head>
 <body>
 
+{% include '_persistent_alerts.html' %}
+
 <div class="header">
   <div class="logo">
     <div class="logo-mark">EW</div>
@@ -160,12 +180,16 @@ tr:last-child td{border-bottom:none}
       <span style="width:8px;height:8px;background:#22c55e;border-radius:50%;display:inline-block;animation:pulse 2s infinite;flex-shrink:0"></span>
       <span id="online-reps-text"></span>
     </div>
+    {% if ew_alert_unseen_count and ew_alert_unseen_count > 0 %}
+    <a href="/#sourcing-banner" class="nav-tab-buyer-inbox" title="{{ ew_alert_unseen_count }} unseen sourcing request{{ '' if ew_alert_unseen_count==1 else 's' }}. Click a Thread link to mark seen.">Buyer Inbox · {{ ew_alert_unseen_count }}</a>
+    {% else %}
+    <a href="/#sourcing-banner" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Buyer Inbox — sourcing requests live here. Pulses yellow when one needs attention.">Buyer Inbox</a>
+    {% endif %}
     <a href="/dealers" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Dealer DB</a>
     <a href="/contacts" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Contacts</a>
     <a href="/tesla-vin" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Tesla VIN</a>
     <a href="/drop" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s;background:rgba(59,130,246,.08)" onmouseover="this.style.color='#60a5fa';this.style.borderColor='#3b82f6'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Quick Drop</a>
     <a href="/reports" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Reports</a>
-    <a href="/sms-intake" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Inbound SMS log — every text we received and what we did with it">SMS Log</a>
     <a href="/intel/" target="_blank" style="font-size:13px;color:#c084fc;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(168,85,247,.35);border-radius:6px;transition:all .15s;background:rgba(168,85,247,.1)" onmouseover="this.style.background='rgba(168,85,247,.2)';this.style.color='#d8b4fe'" onmouseout="this.style.background='rgba(168,85,247,.1)';this.style.color='#c084fc'" title="Dealer Intelligence — separate login (admin / Sedecrem34)">Dealer Intel ↗</a>
     <a href="/admin/workers" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · Worker monitor (live phase progress, stuck-bid watchdog)">Workers</a>
     <a href="/admin/ai-accuracy" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · AI accuracy vs LSL purchase reality">AI Accuracy</a>
@@ -175,12 +199,45 @@ tr:last-child td{border-bottom:none}
 </div>
 
 {# ─── Sourcing-bot active requests (sticky top banner) ───
-   One row per request. Stays visible until staff clicks Close. #}
+   One row per request. Stays visible until staff clicks Close.
+   Pulsing yellow "Sourcing Alerts" tab appears when any rows are unseen
+   (seen_at IS NULL or last_msg_at > seen_at). Clicking a row's Thread
+   link opens /sourcing/<id>, which marks seen server-side. #}
 {% if sourcing_active %}
+<style>
+@keyframes sourcing-alert-pulse {
+  0%, 100% { background:#fbbf24; box-shadow:0 0 0 0 rgba(251,191,36,.55) }
+  50%      { background:#fde047; box-shadow:0 0 0 6px rgba(251,191,36,0)   }
+}
+.sourcing-alerts-tab {
+  display:inline-flex;align-items:center;gap:7px;
+  padding:5px 12px;border-radius:14px;
+  background:#fbbf24;color:#0b1220;
+  font-size:11px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;
+  cursor:pointer;text-decoration:none;
+  animation:sourcing-alert-pulse 1.6s ease-in-out infinite;
+}
+.sourcing-alerts-tab:hover { filter:brightness(1.05) }
+.sourcing-row-unseen {
+  box-shadow:inset 4px 0 0 #fbbf24, 0 0 0 1px rgba(251,191,36,.18);
+}
+.unseen-dot {
+  display:inline-block;width:7px;height:7px;border-radius:50%;
+  background:#fbbf24;margin-right:5px;vertical-align:middle;
+  animation:sourcing-alert-pulse 1.6s ease-in-out infinite;
+}
+</style>
 <div id="sourcing-banner" style="position:sticky;top:0;z-index:50;background:#0b1220;border-bottom:2px solid #1e293b;padding:8px 20px 10px">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-    <span style="font-size:11px;font-weight:700;color:#67e8f9;letter-spacing:1px;text-transform:uppercase">★ Active Sourcing — {{ sourcing_active|length }} open</span>
-    <span style="font-size:10px;color:#64748b">click ✕ to close</span>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;gap:10px;flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:11px;font-weight:700;color:#67e8f9;letter-spacing:1px;text-transform:uppercase">★ Active Sourcing — {{ sourcing_active|length }} open</span>
+      {% if sourcing_unseen_count and sourcing_unseen_count > 0 %}
+      <a href="#sourcing-banner" onclick="document.querySelector('.sourcing-row-unseen')?.scrollIntoView({block:'center', behavior:'smooth'}); return false;" class="sourcing-alerts-tab" title="Pulses while there are unviewed requests. Click any Thread link to mark seen.">
+        Sourcing Alerts · {{ sourcing_unseen_count }}
+      </a>
+      {% endif %}
+    </div>
+    <span style="font-size:10px;color:#64748b">click ✕ to close · click Thread to mark seen</span>
   </div>
   <div style="max-height:38vh;overflow-y:auto;display:flex;flex-direction:column;gap:4px;border:1px solid #1e293b;border-radius:6px;padding:4px;background:#0a0f1c">
     {% for r in sourcing_active %}
@@ -191,13 +248,13 @@ tr:last-child td{border-bottom:none}
        'gathering':'#fbbf24',
        'wishlist':'#22d3ee'
     }.get(r.status, '#94a3b8') %}
-    <div id="sr-{{ r.id }}" style="display:grid;grid-template-columns:90px 200px 1fr 90px 120px;gap:10px;align-items:center;background:#0f172a;border-left:3px solid {{ status_color }};border-radius:4px;padding:6px 10px;font-size:12px">
+    <div id="sr-{{ r.id }}" class="{% if r.unseen %}sourcing-row-unseen{% endif %}" style="display:grid;grid-template-columns:90px 200px 1fr 90px 120px;gap:10px;align-items:center;background:#0f172a;border-left:3px solid {{ status_color }};border-radius:4px;padding:6px 10px;font-size:12px">
       <div>
         <span style="background:{{ status_color }};color:#0b1220;padding:2px 7px;border-radius:9px;font-weight:700;font-size:9px;text-transform:uppercase">{{ r.status }}</span>
       </div>
       <div style="overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
         <div style="color:#e2e8f0;font-weight:600">
-          {% if r.customer_name %}{{ r.customer_name }}{% else %}<span style="color:#64748b;font-style:italic">no name yet</span>{% endif %}
+          {% if r.unseen %}<span class="unseen-dot" title="unseen"></span>{% endif %}{% if r.customer_name %}{{ r.customer_name }}{% else %}<span style="color:#64748b;font-style:italic">no name yet</span>{% endif %}
         </div>
         <div style="color:#64748b;font-size:10px">{{ r.phone }}</div>
       </div>

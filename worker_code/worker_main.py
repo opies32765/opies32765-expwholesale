@@ -310,10 +310,18 @@ def _cookie_export_loop():
         scoped = {}
         try:
             with sync_playwright() as p:
-                ctx = p.chromium.launch_persistent_context(
+                ctx = p.chromium.launch_persistent_context(  # STEALTH-2026-05-10
                     user_data_dir=str(PROFILE_DIR),
                     headless=True,
                     viewport={"width": 1200, "height": 800},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    locale="en-US",
+                    timezone_id="America/New_York",
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                    ],
                 )
                 try:
                     raw = ctx.cookies()
@@ -501,7 +509,7 @@ def process_one_bid(item):
         # 2026-05-10: ALWAYS submit something so the assess-gate has
         # visibility. Previously this branch printed 'skipped' and let
         # phase=done land on bid_phase_progress without a corresponding
-        # ipacket_lookups row → assess-gate hung forever waiting on
+        # ipacket_lookups row -- assess-gate hung forever waiting on
         # ipkt=True. Now we submit not_available=True with the error so
         # the bid progresses instead of stalling.
         _err = ipkt.get('error') if ipkt else 'no result'
@@ -512,12 +520,12 @@ def process_one_bid(item):
                 "not_available": True,
                 "unavailable_reason": f"worker error: {_err}",
             })
-            print(f"  iPacket {'OK' if ok else 'FAIL'}: skipped→NA")
+            print(f"  iPacket {'OK' if ok else 'FAIL'}: skipped->NA")
         except Exception as _se:
             print(f"  iPacket NA-submit failed: {_se}")
     _post_phase(bid_id, "ipacket", "done")
 
-    # Successful bid pipeline → 5 min of synthetic_ok credit for auto-promote
+    # Successful bid pipeline -- 5 min of synthetic_ok credit for auto-promote
     if vauto_ok:
         _consecutive_failures = 0
         _lookups_done += 1

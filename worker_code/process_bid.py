@@ -39,10 +39,40 @@ def _run_lookup_in_own_browser(profile_dir, runner):
     """Spin up an isolated Playwright/Chromium just for this one lookup,
     invoke runner(page, ctx) and return its result. Always closes."""
     with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
+        ctx = p.chromium.launch_persistent_context(  # STEALTH-2026-05-10
             user_data_dir=str(profile_dir), headless=False,
             viewport={"width": 1500, "height": 1000},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            locale="en-US",
+            timezone_id="America/New_York",
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
         )
+        try: ctx.add_init_script("""() => {
+  // Hide automation
+  Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+  // Languages
+  Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+  // Plugins (length > 0 — many bot detectors test this)
+  Object.defineProperty(navigator, 'plugins', {
+    get: () => [1, 2, 3, 4, 5].map(() => ({}))
+  });
+  // Chrome runtime
+  window.chrome = window.chrome || { runtime: {} };
+  // Permissions API quirk
+  const _q = (window.navigator.permissions && window.navigator.permissions.query) || null;
+  if (_q) {
+    window.navigator.permissions.query = (parameters) => (
+      parameters && parameters.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : _q(parameters)
+    );
+  }
+}""")
+        except Exception: pass
         try:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             return runner(page, ctx)

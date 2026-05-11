@@ -196,7 +196,13 @@ def dispatch_pending(db, cur, send_sms):
 
 
 def reping_30day(db, cur, send_sms):
-    """Step 3: ping wishlists past their 30-day window asking to extend."""
+    """Friendly check-in for wishlists past their initial 30-day window.
+
+    Reworded 2026-05-10: threads are now indefinite — wholesalers come and
+    go like clients of a real broker. The re-ping is just a 'we're still
+    watching, here's where you are' nudge, NOT an ultimatum. No expiry
+    threat. If they don't reply, the thread stays open; we re-ping again
+    next time wishlist_until falls behind."""
     if not _is_business_hours():
         return
     cur.execute("""
@@ -204,13 +210,14 @@ def reping_30day(db, cur, send_sms):
          WHERE status = 'wishlist'
            AND wishlist_until IS NOT NULL
            AND wishlist_until < NOW()
-           AND reping_sent_at IS NULL
+           AND (reping_sent_at IS NULL OR reping_sent_at < NOW() - INTERVAL '30 days')
     """)
     rows = cur.fetchall()
     for r in rows:
         desc = _format_request_desc(r)
-        msg = (f"still want us to keep searching for {desc}? "
-               f"reply yes to keep going another 30 days, or 'drop it' to stop.")
+        # Soft check-in. Bot stays on the thread regardless of reply.
+        msg = (f"still keeping an eye out for {desc} — anything change on "
+               f"your end, or want me to keep watching?")
         if not send_sms(r['phone'], msg):
             continue
         ts_iso = datetime.now(timezone.utc).isoformat()
@@ -221,7 +228,8 @@ def reping_30day(db, cur, send_sms):
         cur.execute("""UPDATE sourcing_requests
                           SET conversation = %s::jsonb,
                               reping_sent_at = NOW(),
-                              last_msg_at = NOW()
+                              last_msg_at = NOW(),
+                              wishlist_until = NOW() + INTERVAL '30 days'
                         WHERE id = %s""",
                     (json.dumps(new_conv), r['id']))
         db.commit()
@@ -229,22 +237,10 @@ def reping_30day(db, cur, send_sms):
 
 
 def expire_archive(db, cur):
-    """Step 4: archive wishlists where re-ping went unanswered for 7 days."""
-    cur.execute("""
-        UPDATE sourcing_requests
-           SET status = 'archived',
-               archived_at = NOW(),
-               archive_reason = 'expired_no_extend'
-         WHERE status = 'wishlist'
-           AND reping_sent_at IS NOT NULL
-           AND reping_sent_at < NOW() - INTERVAL '7 days'
-           AND last_inbound_at < reping_sent_at
-        RETURNING id
-    """)
-    rows = cur.fetchall()
-    db.commit()
-    if rows:
-        print(f'[{_ts()}] [expire] archived {len(rows)} stale wishlists', flush=True)
+    """No-op. Auto-archive on silence was removed 2026-05-10 — threads are
+    now indefinite. Function kept as a stub so main() doesn't need
+    restructuring; can be deleted in a future cleanup pass."""
+    return
 
 
 def refresh_taxonomy(db, cur):
@@ -265,6 +261,67 @@ def refresh_taxonomy(db, cur):
         except Exception: pass
 
 
+def scan_bids_for_wishlist_matches(db, cur):
+    """Find new (sourcing_request, bid) pairs where the bid matches the
+    request's spec. Insert into sourcing_bid_matches with detected_at=NOW().
+    Existing rows (UNIQUE constraint) are skipped via ON CONFLICT.
+
+    Populates the persistent yellow banner across all dashboard pages when
+    an incoming bid happens to match a wholesaler's active wishlist — so EW
+    staff knows there's a buyer-side party interested before they finalize
+    the acquisition."""
+    from sourcing_search import _bid_matches_request
+    try:
+        cur.execute("""
+            SELECT * FROM sourcing_requests
+             WHERE status NOT IN ('archived')
+               AND make IS NOT NULL AND model IS NOT NULL
+        """)
+        reqs = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f'[{_ts()}] [bid-match-scan] req fetch err: {e}', flush=True)
+        return
+    if not reqs:
+        return
+    try:
+        cur.execute("""
+            SELECT id, vin, year, make, model, trim, color, mileage,
+                   canon_make, canon_model, canon_trim, status, created_at
+              FROM bids
+             WHERE created_at > NOW() - INTERVAL '30 days'
+               AND COALESCE(canon_make, make) IS NOT NULL
+               AND COALESCE(canon_model, model) IS NOT NULL
+        """)
+        bids_rows = [dict(b) for b in cur.fetchall()]
+    except Exception as e:
+        print(f'[{_ts()}] [bid-match-scan] bid fetch err: {e}', flush=True)
+        return
+    if not bids_rows:
+        return
+    inserted = 0
+    for r in reqs:
+        for b in bids_rows:
+            matches, strength, reasons = _bid_matches_request(b, r)
+            if not matches:
+                continue
+            try:
+                cur.execute("""
+                    INSERT INTO sourcing_bid_matches
+                        (sourcing_request_id, bid_id, match_strength, match_reasons)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (sourcing_request_id, bid_id) DO NOTHING
+                """, (r['id'], b['id'], strength, reasons))
+                if cur.rowcount:
+                    inserted += 1
+            except Exception as e:
+                print(f'[{_ts()}] [bid-match-scan] insert err req={r["id"]} bid={b["id"]}: {e}', flush=True)
+                try: db.rollback()
+                except Exception: pass
+    if inserted:
+        db.commit()
+        print(f'[{_ts()}] [bid-match-scan] {inserted} new wishlist<->bid match(es)', flush=True)
+
+
 def main():
     # Late imports so module loads cleanly even if app.py has issues.
     from app import get_db, send_sms
@@ -274,6 +331,7 @@ def main():
     try:
         refresh_taxonomy(db, cur)
         scan_wishlists(db, cur)
+        scan_bids_for_wishlist_matches(db, cur)
         dispatch_pending(db, cur, send_sms)
         reping_30day(db, cur, send_sms)
         expire_archive(db, cur)
