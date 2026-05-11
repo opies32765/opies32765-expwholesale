@@ -100,10 +100,57 @@ def _parse_sticker_text(text):
     return out
 
 
-def is_logged_in(url):
+def is_logged_in(page_or_url):
+    """Detect login state. Accepts either a Playwright Page (preferred —
+    inspects DOM) or a URL string (legacy / cross-tab iteration).
+
+    2026-05-11: rewritten after iPacket moved to PKCE auth. The new flow
+    redirects to auth.autoipacket.com/?redirect=...&pkce=...&client_id=...
+    (no /login in path, double-slash + query string defeats endswith), and
+    after a stale session lands on dpapp.autoipacket.com/stickerpull, the
+    SPA renders the login form INLINE at that URL — so URL-only matching
+    can't tell logged-in from logged-out. We now also DOM-check for the
+    presence of an email+password input pair, which is the unmistakable
+    fingerprint of the login form regardless of what URL is in the bar.
+    """
+    # String path — legacy callsites + cross-tab iteration in auto_login()
+    if isinstance(page_or_url, str):
+        url = page_or_url
+        if "autoipacket.com" not in url: return False
+        if any(m in url for m in LOGIN_MARKERS): return False
+        if "auth.autoipacket.com" in url: return False
+        return True
+    # Page path — preferred
+    page = page_or_url
+    try:
+        url = page.url
+    except Exception:
+        return False
     if "autoipacket.com" not in url: return False
     if any(m in url for m in LOGIN_MARKERS): return False
-    return not url.endswith("auth.autoipacket.com/")
+    if "auth.autoipacket.com" in url: return False
+    # DOM check: an inline-rendered login form has visible email AND password
+    # inputs. Both required so a stray hidden password reset field doesn't
+    # false-positive a real dashboard page.
+    try:
+        has_login_form = page.evaluate(r"""() => {
+            const inputs = document.querySelectorAll('input');
+            let hasEmail = false, hasPwd = false;
+            for (const i of inputs) {
+                if (i.offsetWidth === 0 || i.offsetHeight === 0) continue;
+                const type = (i.type || '').toLowerCase();
+                const name = (i.name || '').toLowerCase();
+                const ph = (i.placeholder || '').toLowerCase();
+                if (type === 'password' || name === 'password') hasPwd = true;
+                if (type === 'email' || name === 'email' || ph === 'email' || name === 'username') hasEmail = true;
+            }
+            return hasEmail && hasPwd;
+        }""")
+        if has_login_form:
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def auto_login(page, ctx, max_seconds=60):
@@ -111,7 +158,7 @@ def auto_login(page, ctx, max_seconds=60):
     while time.time() - t0 < max_seconds:
         for pg in ctx.pages:
             try:
-                if is_logged_in(pg.url): return True
+                if is_logged_in(pg): return True
             except Exception: pass
         try:
             uf = page.query_selector('input[type="email"], input[name="email"], input[name="username"]')
@@ -137,14 +184,23 @@ def lookup(page, ctx, vin, t):
     print(f"[+{time.time()-t:5.1f}s] [ipacket] start")
     _attach_jwt_capture(page)  # 2026-05-08: keep server JWT fresh on every call
     page.goto(IPACKET_DPAPP, wait_until="domcontentloaded", timeout=30000); time.sleep(3)
-    if not is_logged_in(page.url):
+    if not is_logged_in(page):
         if not auto_login(page, ctx):
             return {"error": "auto_login_failed"}
-    page = next((pg for pg in ctx.pages if is_logged_in(pg.url)), page)
+    page = next((pg for pg in ctx.pages if is_logged_in(pg)), page)
 
     # Make sure we're on the sticker pull page
     page.goto("https://dpapp.autoipacket.com/stickerpull", wait_until="domcontentloaded", timeout=20000)
     time.sleep(3)
+    # 2026-05-11: after /stickerpull goto, re-verify the page didn't render
+    # the login form inline. iPacket's PKCE-era behavior is that a stale
+    # session lands you on /stickerpull-the-URL with /login-the-content.
+    if not is_logged_in(page):
+        print(f"[+{time.time()-t:5.1f}s] [ipacket] /stickerpull rendered login form inline -- re-auth")
+        if not auto_login(page, ctx):
+            return {"error": "auto_login_failed"}
+        page.goto("https://dpapp.autoipacket.com/stickerpull", wait_until="domcontentloaded", timeout=20000)
+        time.sleep(3)
 
     # ===== V9 fast-path (additive, repeat-VIN only) =====
     # If this VIN is already in iPacket's Recent Sticker Pulls table, the
@@ -293,7 +349,19 @@ def lookup(page, ctx, vin, t):
         }
         return 'not_found';
     }""", vin)
-    if f != "filled": return {"error": "vin_input_not_found"}
+    if f != "filled":
+        # 2026-05-11: capture page state for diagnostics. iPacket changes their
+        # auth/UI without notice (see is_logged_in DOM rewrite). Saving a
+        # screenshot + URL on every vin-input-not-found means the next break
+        # is debuggable in one screenshot instead of a multi-day investigation.
+        try:
+            ts = int(time.time())
+            dbg = REPORTS_DIR / f"vin_not_found_{vin}_{ts}.png"
+            page.screenshot(path=str(dbg), full_page=True)
+            print(f"[+{time.time()-t:5.1f}s] [ipacket] vin_input_not_found url={page.url!r} debug={dbg.name}")
+        except Exception as _dbg:
+            print(f"[+{time.time()-t:5.1f}s] [ipacket] vin_input_not_found url={page.url!r} (debug save failed: {_dbg})")
+        return {"error": "vin_input_not_found"}
 
     time.sleep(0.5)
     # Clear stale canvas signature + record pre-submit canvas size, so detector
