@@ -79,6 +79,12 @@ _DAYS_ON_LOT_EXPR = (
     f"GREATEST(0, ((NOW() AT TIME ZONE 'America/New_York')::date "
     f"- ({_AGE_EXPR} AT TIME ZONE 'America/New_York')::date)::int)")
 
+_PRICE_DROP_DAYS_AGO_EXPR = (
+    "CASE WHEN di.price_drop_at IS NOT NULL THEN "
+    "GREATEST(0, ((NOW() AT TIME ZONE 'America/New_York')::date "
+    "- (di.price_drop_at AT TIME ZONE 'America/New_York')::date)::int) "
+    "END")
+
 
 def _select_active(extra_where: str, params: list, max_active: int) -> tuple:
     sql = f"""
@@ -88,6 +94,7 @@ def _select_active(extra_where: str, params: list, max_active: int) -> tuple:
                di.first_seen_at, di.last_seen_at,
                di.source_added_at, di.verified_at, di.verified_days_on_lot,
                di.price_drop_amount, di.price_drop_at,
+               {_PRICE_DROP_DAYS_AGO_EXPR} AS price_drop_days_ago,
                {_DAYS_ON_LOT_EXPR} AS days_on_lot
         FROM dealer_inventory di
         JOIN dealers d ON di.dealer_id = d.id
@@ -190,8 +197,8 @@ def find_dealer_matches(db_conn, year, make, model,
        'tier_used': 'tier1_canon' | 'tier2_canon_ymm' | 'tier3_freetext' | 'none',
        'tier_confidence': 'high' | 'medium' | 'low' | 'none'}
     """
-    empty = {'active': [], 'recent_sales': [], 'top_pitch': [],
-             'config_used': {}, 'tier_used': 'none',
+    empty = {'active': [], 'recent_sales': [], 'patterns': [],
+             'top_pitch': [], 'config_used': {}, 'tier_used': 'none',
              'tier_confidence': 'none'}
     if not (year and make and model):
         return empty
@@ -287,9 +294,17 @@ def find_dealer_matches(db_conn, year, make, model,
     if where_rs is not None:
         try:
             with db_conn.cursor() as _c:
+                # Dedupe at SQL level: DISTINCT ON (inventory_id) keeps the
+                # earliest detection per car. dealer_sold_signals re-fires
+                # daily for cars still missing from the active feed, so a
+                # single sale can have 5-10 rows. Earliest detected_at gives
+                # the truest days_to_sell.
                 _c.execute(f"""
-                    SELECT dss.dealer_id, d.name AS dealer_name, di.year, di.make,
-                           di.model, di.trim, di.price, di.mileage, di.url,
+                    SELECT DISTINCT ON (di.id)
+                           di.id AS inventory_id,
+                           dss.dealer_id, d.name AS dealer_name,
+                           di.year, di.make, di.model, di.trim,
+                           di.price, di.mileage, di.url,
                            dss.detected_at, dss.confidence,
                            GREATEST(0,
                              EXTRACT(EPOCH FROM (dss.detected_at - di.first_seen_at))::int
@@ -302,7 +317,7 @@ def find_dealer_matches(db_conn, year, make, model,
                       AND dss.detected_at > NOW() - (%s || ' days')::interval
                       AND d.active = TRUE
                       AND dss.confidence >= %s
-                    ORDER BY dss.detected_at DESC
+                    ORDER BY di.id, dss.detected_at ASC
                     LIMIT %s
                 """, tuple(params_rs + [int(cfg['recent_days']),
                                          float(cfg['min_sold_confidence']),
@@ -311,15 +326,56 @@ def find_dealer_matches(db_conn, year, make, model,
                 cols = [d[0] for d in _c.description]
                 sales_rows = [r if isinstance(r, dict) else dict(zip(cols, r))
                               for r in raw_rs]
+                # Re-sort to "most recent first" for display now that SQL
+                # ORDER BY had to be (inventory_id, detected_at ASC) for the
+                # DISTINCT ON dedupe.
+                sales_rows.sort(key=lambda r: r.get('detected_at') or '',
+                                reverse=True)
         except Exception as e:
             print(f'[dealer_match v2] sales tier {chosen_tier} err: {e}',
                   flush=True)
             try: db_conn.rollback()
             except Exception: pass
 
+    # ── Aggregate per-dealer sold patterns (restored from pre-strict v1) ──
+    # Group deduped sales_rows by dealer_id → sold_count + avg_days_to_sell.
+    # Drives the "Sold at partner dealers · last Nd" section on bid.html
+    # and m_full.html.
+    patterns = []
+    if sales_rows:
+        by_dealer = {}
+        for s in sales_rows:
+            did = s.get('dealer_id')
+            if did is None:
+                continue
+            slot = by_dealer.setdefault(did, {
+                'dealer_id':   did,
+                'dealer_name': s.get('dealer_name'),
+                'sold_count':  0,
+                '_dts_sum':    0,
+                '_dts_n':      0,
+            })
+            slot['sold_count'] += 1
+            dts = s.get('days_to_sell')
+            if dts is not None:
+                slot['_dts_sum'] += int(dts)
+                slot['_dts_n']   += 1
+        for slot in by_dealer.values():
+            avg = (slot['_dts_sum'] // slot['_dts_n']) if slot['_dts_n'] else None
+            patterns.append({
+                'dealer_id':        slot['dealer_id'],
+                'dealer_name':      slot['dealer_name'],
+                'sold_count':       slot['sold_count'],
+                'avg_days_to_sell': avg,
+            })
+        # Hot dealers first: most sales, then fastest turnover.
+        patterns.sort(key=lambda p: (-p['sold_count'],
+                                     p['avg_days_to_sell'] if p['avg_days_to_sell'] is not None else 9999))
+
     return {
         'active': active_rows,
         'recent_sales': sales_rows,
+        'patterns': patterns,
         'top_pitch': [],  # TODO: rank dealers by sold count + turnover
         'config_used': dict(cfg),
         'tier_used': chosen_tier,

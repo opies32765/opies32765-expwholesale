@@ -256,30 +256,79 @@
 </details>
 {% endif %}
 
-{# Dealer Network #}
-{% if dealer and (dealer.active or dealer.recent_sales or dealer.top_pitch) %}
+{# Dealer Network Intel — mirrors desktop bid.html three-section layout #}
+{% if dealer and (dealer.active or dealer.recent_sales or dealer.top_pitch or dealer.patterns) %}
 <details class="card dealer">
   <summary>
-    <span class="title">Dealer Network</span>
-    <span class="summary-text">{{ (dealer.active|default([])|length) + (dealer.recent_sales|default([])|length) }} match{% if (dealer.active|default([])|length) + (dealer.recent_sales|default([])|length) != 1 %}es{% endif %}</span>
+    <span class="title">Dealer Network Intel</span>
+    <span class="summary-text">{{ dealer.active|default([])|length }} active · {{ dealer.recent_sales|default([])|length }} sales{% if dealer.top_pitch %} · {{ dealer.top_pitch|length }} pitch{% endif %}</span>
   </summary>
   <div class="body">
-    <div class="row"><span class="lbl">Active inventory</span><span class="val">{{ dealer.active|default([])|length }}</span></div>
-    <div class="row"><span class="lbl">Recent sales (90d)</span><span class="val">{{ dealer.recent_sales|default([])|length }}</span></div>
-    <div class="row"><span class="lbl">Pitch candidates</span><span class="val">{{ dealer.top_pitch|default([])|length }}</span></div>
-    {% if dealer.tier_used %}<div class="row"><span class="lbl">Match tier</span><span class="val">{{ dealer.tier_used }}{% if dealer.tier_confidence %} ({{ dealer.tier_confidence }}){% endif %}</span></div>{% endif %}
-    {% if dealer.top_pitch %}
-    <div style="margin-top:10px;font-size:11px;color:#fbbf24;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Top pitch dealers</div>
-    {% for p in dealer.top_pitch[:5] %}
+
+    {# ── Currently at partner dealers ── #}
+    {% if dealer.active %}
+    <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin:4px 0 8px">Currently at partner dealers</div>
+    {% for a in dealer.active %}
     <div class="comp">
       <div class="top-line">
-        <span class="miles-l" style="font-size:13px">{{ p.dealer_name or p.name or '?' }}</span>
-        {% if p.score is not none %}<span class="price-l" style="color:#fbbf24">{{ p.score|int }}</span>{% endif %}
+        <span class="miles-l">{{ a.dealer_name or '?' }}</span>
+        {% if a.price %}<span class="price-l" style="color:#fbbf24">${{ '{:,}'.format(a.price|int) }}</span>{% endif %}
       </div>
-      {% if p.city or p.state %}<div class="meta-line">{{ p.city or '' }}{% if p.state %}, {{ p.state }}{% endif %}</div>{% endif %}
+      <div class="meta-line">
+        {{ a.year or '' }} {{ a.make or '' }} {{ a.model or '' }}{% if a.trim %} · {{ a.trim }}{% endif %}{% if a.mileage %} · {{ '{:,}'.format(a.mileage|int) }} mi{% endif %}
+      </div>
+      <div class="meta-line">
+        {% if a.city or a.state %}{{ a.city or '' }}{% if a.city and a.state %}, {% endif %}{{ a.state or '' }} · {% endif %}
+        <span style="color:{% if a.days_on_lot and a.days_on_lot > 60 %}#ef4444{% elif a.days_on_lot and a.days_on_lot > 30 %}#fbbf24{% else %}#86efac{% endif %};font-weight:600">{{ a.days_on_lot if a.days_on_lot is not none else '?' }}d on lot</span>
+      </div>
+      {% if a.msrp_lookup and a.msrp_lookup.msrp %}
+      <div class="meta-line" style="font-family:ui-monospace,Consolas,monospace;color:#cbd5e1">
+        <span style="color:#64748b">Original MSRP:</span> ${{ '{:,}'.format(a.msrp_lookup.msrp|int) }}{% if a.msrp_lookup.base_price %} · base ${{ '{:,}'.format(a.msrp_lookup.base_price|int) }}{% endif %}
+      </div>
+      {% elif a.msrp_lookup and a.msrp_lookup.status in ('pending','in_progress') %}
+      <div class="meta-line" style="font-style:italic;color:#64748b">MSRP loading…</div>
+      {% endif %}
+      {% if a.price_drop_amount and a.price_drop_days_ago %}
+      <div class="meta-line" style="color:#fbbf24;font-style:italic">⚠ Price dropped ${{ '{:,}'.format(a.price_drop_amount|int) }} · {{ a.price_drop_days_ago }}d ago</div>
+      {% elif a.price_drop_amount %}
+      <div class="meta-line" style="color:#fbbf24;font-style:italic">⚠ Price dropped ${{ '{:,}'.format(a.price_drop_amount|int) }}</div>
+      {% endif %}
+      {% if a.url %}<a href="{{ a.url }}" target="_blank" rel="noopener" style="display:inline-block;margin-top:5px;font-size:11px">Open listing →</a>{% endif %}
     </div>
     {% endfor %}
     {% endif %}
+
+    {# ── Sold at partner dealers ── #}
+    {% set sold_patterns = dealer.patterns | selectattr('sold_count', 'gt', 0) | list if dealer.patterns else [] %}
+    {% if sold_patterns %}
+    <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px">
+      Sold at partner dealers · last {{ dealer.config_used.recent_days if dealer.config_used else 90 }}d
+    </div>
+    {% for p in sold_patterns %}
+    <div class="row">
+      <span class="lbl" style="color:#e8ebf0;font-weight:600">{{ p.dealer_name }}</span>
+      <span class="val" style="font-family:ui-monospace,Consolas,monospace;color:#9aa3b2;font-weight:500">
+        {{ p.sold_count }} sold · avg {{ p.avg_days_to_sell }}d{% if p.avg_days_to_sell and p.avg_days_to_sell < 10 %} 🔥{% endif %}
+      </span>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {# ── Top pitch candidates ── #}
+    {% if dealer.top_pitch %}
+    <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px">Top pitch candidates</div>
+    {% for tp in dealer.top_pitch %}
+    <div style="padding:8px 10px;background:linear-gradient(90deg,rgba(217,119,6,.12),rgba(217,119,6,.02));border-left:3px solid #d97706;border-radius:4px;margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">
+        <span style="font-size:13px;font-weight:700;color:#fbbf24">🎯 {{ tp.dealer_name or tp.name or '?' }}</span>
+        {% set _ps = tp.pitch_score if tp.pitch_score is defined else tp.score %}
+        {% if _ps is not none %}<span style="font-size:10px;color:#94a3b8;font-family:ui-monospace,Consolas,monospace">score {{ _ps|int }}</span>{% endif %}
+      </div>
+      {% if tp.reason %}<div style="margin-top:2px;font-size:11px;color:#94a3b8">{{ tp.reason }}</div>{% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+
   </div>
 </details>
 {% endif %}
