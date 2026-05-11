@@ -312,10 +312,10 @@
 
   {# ── Inbound Market Bids · cars EW collected that you can offer on ── #}
   {% if inbound_pushes %}
-  <div id="inboundBanner" data-unread="{{ inbound_unread }}" style="display:none;position:sticky;top:0;z-index:200;background:linear-gradient(90deg,#f59e0b,#f97316);color:#0a0f1a;font-weight:700;font-size:15px;padding:13px 18px;border-radius:10px;margin:0 0 12px;cursor:pointer;box-shadow:0 4px 18px rgba(245,158,11,.45);animation:bannerPulse 1.5s ease-in-out 3" onclick="this.style.display='none';document.getElementById('inboundCard').scrollIntoView({behavior:'smooth',block:'start'});document.getElementById('inboundCard').open=true">
-    🔔 <span id="inboundBannerCount">new</span> inbound bid<span id="inboundBannerS"></span> — click to view
+  <div id="inboundBanner" data-unread="{{ inbound_unread }}" style="display:none;position:sticky;top:0;z-index:200;background:linear-gradient(90deg,#f59e0b,#f97316);color:#0a0f1a;font-weight:700;font-size:15px;padding:13px 18px;border-radius:10px;margin:0 0 12px;cursor:pointer;box-shadow:0 4px 18px rgba(245,158,11,.45)" onclick="document.getElementById('inboundCard').scrollIntoView({behavior:'smooth',block:'start'});document.getElementById('inboundCard').open=true">
+    🔔 <span id="inboundBannerCount">{{ inbound_unread }}</span> new inbound bid<span id="inboundBannerS">{% if inbound_unread != 1 %}s{% endif %}</span> waiting — click to view
   </div>
-  <style>@keyframes bannerPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.02)}}</style>
+  <style>@keyframes bannerPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.02)}} #inboundBanner.pulse{animation:bannerPulse 1.5s ease-in-out 3}</style>
   <details id="inboundCard" style="background:#1a2330;border:2px solid #f59e0b;border-radius:12px;margin:0 0 18px;overflow:hidden;box-shadow:0 4px 14px rgba(245,158,11,.15)">
     <summary style="cursor:pointer;padding:20px 24px;font-weight:700;font-size:18px;color:#fef3c7;background:linear-gradient(90deg,rgba(245,158,11,.18),rgba(245,158,11,.04));list-style:none;display:flex;align-items:center;gap:12px;user-select:none;letter-spacing:.2px">
       <span style="font-size:24px">📨</span>
@@ -356,38 +356,50 @@
        API + reveals the sticky banner up top. Idempotent — won't re-fire
        on simple page reloads if the unread count hasn't grown. */
     (function() {
-      // 2026-05-11: persist the Inbound Market Bids card open/closed state
-      // across the dashboard's 30s auto-reload. Without this, if Mark
-      // expands the card to read the list and then the page reloads, the
-      // card snaps shut again and he loses his place.
-      try {
-        var card = document.getElementById('inboundCard');
-        var stateKey = 'nuccio_inbound_card_open';
-        if (card) {
-          if (sessionStorage.getItem(stateKey) === '1') card.open = true;
-          card.addEventListener('toggle', function() {
-            sessionStorage.setItem(stateKey, card.open ? '1' : '0');
-          });
-        }
-      } catch (e) { /* sessionStorage may be blocked in some contexts */ }
+      // 2026-05-11: persistent yellow banner for unacknowledged inbound bids.
+      // Banner stays visible across 30s auto-reloads as long as the server
+      // says there are unread bids AND Mark hasn't acknowledged this round.
+      // "Acknowledging" = opening the Inbound Market Bids card (any open
+      // event hides the banner + records the current unread count). When
+      // NEW unread bids land beyond the acknowledged count, banner returns
+      // + pulse animation + (audio-unlocked) chime.
 
       var banner = document.getElementById('inboundBanner');
-      if (!banner) return;
-      var unread = parseInt(banner.dataset.unread || '0', 10);
-      var key = 'nuccio_inbound_last_seen_unread';
-      var prev = parseInt(sessionStorage.getItem(key) || '0', 10);
-      if (unread > prev && unread > 0) {
-        var delta = unread - prev;
-        document.getElementById('inboundBannerCount').textContent = delta;
-        document.getElementById('inboundBannerS').textContent = (delta === 1 ? '' : 's');
-        banner.style.display = 'block';
+      var card = document.getElementById('inboundCard');
+      if (!banner && !card) return;
+
+      var unread = banner ? parseInt(banner.dataset.unread || '0', 10) : 0;
+      var ackKey = 'nuccio_inbound_acknowledged_unread';
+      var chimeKey = 'nuccio_inbound_last_chimed_unread';
+      var cardKey = 'nuccio_inbound_card_open';
+      var ack = parseInt(sessionStorage.getItem(ackKey) || '0', 10);
+      var lastChimed = parseInt(sessionStorage.getItem(chimeKey) || '0', 10);
+
+      // Restore card open/closed state across auto-reloads. Opening it
+      // is itself the acknowledgement gesture (see toggle handler below).
+      try {
+        if (card && sessionStorage.getItem(cardKey) === '1') card.open = true;
+      } catch (e) {}
+
+      // Show banner iff there are unacknowledged unread bids AND the card
+      // is currently closed (no point banner-ing while they ARE looking).
+      function refreshBanner() {
+        if (!banner) return;
+        var visible = (unread > ack) && !(card && card.open);
+        banner.style.display = visible ? 'block' : 'none';
+      }
+      refreshBanner();
+
+      // Pulse + chime only when unread is HIGHER than what we last chimed
+      // for. Avoids re-chiming on every 30s reload that has the same count.
+      if (unread > lastChimed && unread > 0) {
+        if (banner) banner.classList.add('pulse');
         try {
           var ctx = new (window.AudioContext || window.webkitAudioContext)();
           [880, 1320].forEach(function(freq, i) {
             var osc = ctx.createOscillator();
             var gain = ctx.createGain();
-            osc.frequency.value = freq;
-            osc.type = 'sine';
+            osc.frequency.value = freq; osc.type = 'sine';
             gain.gain.setValueAtTime(0.0001, ctx.currentTime + i * 0.18);
             gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + i * 0.18 + 0.02);
             gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + i * 0.18 + 0.32);
@@ -395,9 +407,23 @@
             osc.start(ctx.currentTime + i * 0.18);
             osc.stop(ctx.currentTime + i * 0.18 + 0.35);
           });
-        } catch (e) { /* autoplay blocked — banner still shows */ }
+        } catch (e) { /* autoplay blocked until first user gesture */ }
+        sessionStorage.setItem(chimeKey, String(unread));
       }
-      sessionStorage.setItem(key, String(unread));
+
+      // Opening the card = acknowledgement. Persist ack + hide banner.
+      if (card) {
+        card.addEventListener('toggle', function() {
+          try {
+            sessionStorage.setItem(cardKey, card.open ? '1' : '0');
+            if (card.open) {
+              sessionStorage.setItem(ackKey, String(unread));
+              ack = unread;
+              refreshBanner();
+            }
+          } catch (e) {}
+        });
+      }
     })();
   </script>
   {% endif %}
