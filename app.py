@@ -4761,6 +4761,17 @@ def _run_assessment(bid_id):
         finally:
             db.close()
 
+        # 2026-05-11: push inbound bid to subscribed partner dealers. Fires
+        # from _run_assessment directly so it catches BOTH _auto_assess
+        # (SMS intake path) AND /api/bid/<id>/assess (manual re-assess path).
+        # Bid 1183 missed the original hook because /api/bid/<id>/assess
+        # calls _run_assessment without the _auto_assess wrapper.
+        try:
+            from partner_portal import _push_bid_to_subscribed_partners
+            _push_bid_to_subscribed_partners(bid_id)
+        except Exception as _pbpe:
+            print(f'[bid-push] outer error bid={bid_id}: {_pbpe}', flush=True)
+
         return {'success': True, 'assessment': assessment, 'buy_price': buy_price}
     except Exception as e:
         print(f'Assessment error for bid {bid_id}: {e}')
@@ -4783,15 +4794,8 @@ def _auto_assess(bid_id):
                     _notify_driver_phase2(bid_id)
                 except Exception as _p2e:
                     print(f'[phase2-notify] outer error bid={bid_id}: {_p2e}', flush=True)
-                # 2026-05-11: push inbound bid to subscribed partner dealers
-                # (dealers.receive_inbound_pushes=TRUE). Filter rules and
-                # the actual SMS/email/Telegram fan-out live in
-                # partner_portal._push_bid_to_subscribed_partners.
-                try:
-                    from partner_portal import _push_bid_to_subscribed_partners
-                    _push_bid_to_subscribed_partners(bid_id)
-                except Exception as _pbpe:
-                    print(f'[bid-push] outer error bid={bid_id}: {_pbpe}', flush=True)
+                # Partner push hook moved INTO _run_assessment so both
+                # SMS-intake and manual re-assess paths fire it. See there.
             else:
                 print(f'Auto-assess failed for bid {bid_id}: {result.get("error")}')
                 _release_assessment_claim(bid_id)
@@ -5171,11 +5175,31 @@ def api_bids():
             'completed': r.get('completed_at') is not None,
         })
 
+    # 2026-05-11: partner offer counts per bid — same shape as the SSR
+    # dashboard so the JS auto-poll row-rebuild keeps the Partner Bid
+    # column populated. Without this, rebuilt rows drop the column.
+    partner_offer_counts = {}
+    try:
+        cur.execute("""
+            SELECT bid_id, COUNT(*) AS n,
+                   COUNT(*) FILTER (WHERE ew_seen_at IS NULL) AS unseen
+              FROM bid_partner_offers
+             GROUP BY bid_id
+        """)
+        for r in cur.fetchall():
+            partner_offer_counts[r['bid_id']] = {
+                'n': int(r['n']),
+                'unseen': int(r['unseen']),
+            }
+    except Exception as _poc_err:
+        print(f'[api/bids] partner_offer_counts err: {_poc_err}', flush=True)
+
     db.close()
     return jsonify({'bids': bids, 'stats': stats, 'photo_counts': photo_counts,
                     'first_photos': first_photos,
                     'vauto_done': list(vauto_done),
-                    'active_workers': active_workers})
+                    'active_workers': active_workers,
+                    'partner_offer_counts': partner_offer_counts})
 
 
 @app.route('/sms-intake')

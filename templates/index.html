@@ -623,11 +623,20 @@ function filterVisibleRows() {
 }
 
 let _vautoDone = new Set();
+window._partnerOfferCounts = {{ partner_offer_counts|tojson if partner_offer_counts is defined else '{}' }};
 // Badge turns green when iPacket finishes — last in the scan pipeline.
 // Server's `vauto_done` (kept the field name for backward compat) tracks
 // presence of an ipacket_lookups row, which the worker always writes
 // (success OR not_available=true). No client-side age buffer needed.
+// 2026-05-11: window._partnerOfferCounts is set by the /api/bids poll
+// in pollAndRender below. Used here to render the Partner Bid cell so
+// the column persists across auto-poll re-renders.
 function renderRow(b, pc, fp, activeWorker) {
+  const _poc = (window._partnerOfferCounts || {})[b.id] || null;
+  const _poStar = _poc ? '<span title="Partner offer received" style="color:#fbbf24;font-weight:700;margin-right:3px">&#9733;</span>' : '';
+  const _poCell = _poc
+    ? `<a href="/bid/${b.id}#partner-offers-card" style="display:inline-flex;align-items:center;gap:6px;padding:5px 9px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.4);border-radius:6px;text-decoration:none;font-size:13px;font-weight:700;color:#fbbf24;font-family:ui-monospace,Consolas,monospace" title="Click to view partner offers">&#9733; ${_poc.n} offer${_poc.n !== 1 ? 's' : ''}${_poc.unseen ? ` <span style="font-size:9px;background:#fbbf24;color:#0f172a;padding:1px 5px;border-radius:3px;letter-spacing:.3px">${_poc.unseen} NEW</span>` : ''}</a>`
+    : '—';
   const vehicleDesc = (b.year||b.make||b.mileage) ? `<div class="vehicle-desc">${b.year||''} ${b.make||''} ${b.model||''}${b.mileage ? (b.year||b.make?' · ':'')+b.mileage.toLocaleString()+' mi':''}</div>` : '';
   const vaScanDone = _vautoDone.has(b.id);
   const vaBadge = b.vin ? (vaScanDone
@@ -662,7 +671,7 @@ function renderRow(b, pc, fp, activeWorker) {
   const askPrice = b.asking_price ? `<div style="font-size:15px;font-weight:700;color:#94a3b8">$${Math.round(b.asking_price).toLocaleString()}</div>` : '—';
   const aiPrice  = b.ai_price    ? `<div style="font-size:15px;font-weight:700;color:#a78bfa">$${Math.round(b.ai_price).toLocaleString()}</div>` : '—';
   const bidSent  = b.bid_amount  ? `<div style="font-size:15px;font-weight:700;color:#34d399">$${Math.round(b.bid_amount).toLocaleString()}</div>` : '—';
-  const star = b.has_unread ? '<span class="unread-star" title="Unread message">&#9733;</span>' : '';
+  const star = (b.has_unread ? '<span class="unread-star" title="Unread message">&#9733;</span>' : '') + _poStar;
   // Live worker chip — first/most-recent active job for this bid (60s window)
   let workerChip = '';
   if (activeWorker && activeWorker.length) {
@@ -688,6 +697,7 @@ function renderRow(b, pc, fp, activeWorker) {
     <td>${askPrice}</td>
     <td>${aiPrice}</td>
     <td>${bidSent}</td>
+    <td>${_poCell}</td>
     <td>${photos}</td>
     <td>${statusBadge(b.status)}</td>
     <td><a href="/bid/${b.id}" class="btn-view">View →</a></td>
@@ -754,6 +764,10 @@ async function poll() {
 
     // Update vAuto status set
     if (d.vauto_done) _vautoDone = new Set(d.vauto_done);
+    // 2026-05-11: stash partner offer counts on window so renderRow can
+    // re-emit the Partner Bid cell on every auto-poll re-render. Without
+    // this the column flickers off-and-on across reload cycles.
+    window._partnerOfferCounts = d.partner_offer_counts || {};
 
     // Re-render table
     if (d.bids.length > 0) {

@@ -356,6 +356,21 @@
        API + reveals the sticky banner up top. Idempotent — won't re-fire
        on simple page reloads if the unread count hasn't grown. */
     (function() {
+      // 2026-05-11: persist the Inbound Market Bids card open/closed state
+      // across the dashboard's 30s auto-reload. Without this, if Mark
+      // expands the card to read the list and then the page reloads, the
+      // card snaps shut again and he loses his place.
+      try {
+        var card = document.getElementById('inboundCard');
+        var stateKey = 'nuccio_inbound_card_open';
+        if (card) {
+          if (sessionStorage.getItem(stateKey) === '1') card.open = true;
+          card.addEventListener('toggle', function() {
+            sessionStorage.setItem(stateKey, card.open ? '1' : '0');
+          });
+        }
+      } catch (e) { /* sessionStorage may be blocked in some contexts */ }
+
       var banner = document.getElementById('inboundBanner');
       if (!banner) return;
       var unread = parseInt(banner.dataset.unread || '0', 10);
