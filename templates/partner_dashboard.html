@@ -310,6 +310,47 @@
     {% for cat, m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}
   {% endwith %}
 
+  {# ── Inbound Market Bids · cars EW collected that you can offer on ── #}
+  {% if inbound_pushes %}
+  <details id="inboundCard" {% if inbound_unread %}open{% endif %} style="background:#1a2330;border:2px solid #f59e0b;border-radius:12px;margin:0 0 18px;overflow:hidden;box-shadow:0 4px 14px rgba(245,158,11,.15)">
+    <summary style="cursor:pointer;padding:20px 24px;font-weight:700;font-size:18px;color:#fef3c7;background:linear-gradient(90deg,rgba(245,158,11,.18),rgba(245,158,11,.04));list-style:none;display:flex;align-items:center;gap:12px;user-select:none;letter-spacing:.2px">
+      <span style="font-size:24px">📨</span>
+      <span>Inbound Market Bids</span>
+      <span style="font-size:13px;font-weight:600;color:#fbbf24;background:rgba(251,191,36,.15);border:1px solid rgba(251,191,36,.35);padding:3px 10px;border-radius:999px;margin-left:6px">
+        {{ inbound_pushes|length }} listed{% if inbound_unread %} · <span style="color:#f87171">{{ inbound_unread }} unread</span>{% endif %}
+      </span>
+    </summary>
+    <div style="padding:16px 22px 22px">
+      <div style="font-size:13px;color:#94a3b8;margin-bottom:12px;line-height:1.5">
+        Vehicles that hit Experience Wholesale and are open for your offer. Click any row to view photos, sticker, market comps, and submit your offer.
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        {% for p in inbound_pushes %}
+        <a href="/partner/{{ slug }}/inbound/{{ p.bid_id }}" style="display:flex;align-items:stretch;gap:12px;padding:10px 12px;background:#0f172a;border:1px solid {% if p.viewed_at is none %}rgba(245,158,11,.5){% else %}#1e293b{% endif %};border-radius:8px;text-decoration:none;transition:border-color .15s">
+          <div style="width:90px;flex-shrink:0;background:#0a1018;border-radius:6px;overflow:hidden;display:flex;align-items:center;justify-content:center">
+            {% if p.thumb_url %}<img src="{{ p.thumb_url }}" style="width:100%;height:64px;object-fit:cover">{% else %}<span style="color:#475569;font-size:11px">no photo</span>{% endif %}
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:14px;font-weight:700;color:#e8ebf0;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              {{ p.year or '' }} {{ (p.make or '')|upper }} {{ (p.model or '')|upper }}{% if p.trim %} <span style="color:#94a3b8;font-weight:500">{{ p.trim }}</span>{% endif %}
+              {% if p.viewed_at is none %}<span style="font-size:9px;font-weight:700;color:#f59e0b;background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.4);padding:1px 7px;border-radius:4px;text-transform:uppercase;letter-spacing:.5px">NEW</span>{% endif %}
+              {% if p.our_offer_count %}<span style="font-size:9px;font-weight:700;color:#5fd393;background:rgba(95,211,147,.15);border:1px solid rgba(95,211,147,.4);padding:1px 7px;border-radius:4px;text-transform:uppercase;letter-spacing:.5px">Offer sent</span>{% endif %}
+            </div>
+            <div style="font-size:12px;color:#94a3b8;margin-top:3px">
+              Bid #{{ p.bid_id }} · {{ '{:,}'.format(p.mileage|int) if p.mileage else '?' }} mi{% if p.color %} · {{ p.color }}{% endif %}{% if p.vin %} · VIN ...{{ p.vin[-6:] }}{% endif %}
+            </div>
+            <div style="font-size:11px;color:#64748b;margin-top:3px">
+              {{ p.pushed_at.strftime('%b %d · %I:%M %p') if p.pushed_at else '' }}
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;color:#7dd3fc;font-size:18px;padding-right:6px">›</div>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+  </details>
+  {% endif %}
+
   {# ── 3-way flow chart · how to get a bid from EW ── #}
   {% set _flowAccent = (dealer.brand and dealer.brand.primary_color) or '#2563eb' %}
   <div class="flowchart" style="background:linear-gradient(180deg,rgba(37,99,235,.06) 0%,rgba(37,99,235,0) 100%);border:1px solid var(--line,#334155);border-radius:14px;padding:22px 24px;margin:0 0 22px">

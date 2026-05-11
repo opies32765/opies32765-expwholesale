@@ -548,6 +548,46 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
       </div>
 
+      {# ─────────────────── Partner Offers Received ─────────────────── #}
+      {# 2026-05-11: Offers submitted by subscribed partner dealers via
+         their /partner/<slug>/inbound/<bid_id> view. NOT the same as
+         partner_bid_requests (which is the OTHER direction — partner asks
+         EW to bid on their car). #}
+      {% if partner_offers %}
+      <div class="card" style="border-color:#f59e0b;flex-shrink:0" id="partner-offers-card">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          Partner Offers Received
+          <span style="font-size:10px;font-weight:700;color:#fbbf24;background:rgba(245,158,11,.15);border:1px solid rgba(245,158,11,.35);border-radius:4px;padding:2px 8px;letter-spacing:.4px">
+            {{ partner_offers|length }} offer{% if partner_offers|length != 1 %}s{% endif %}
+          </span>
+        </div>
+        <div style="font-size:13px;color:#94a3b8;margin-top:6px;line-height:1.5">
+          Subscribed partner dealers who have offered on this bid via their inbound portal.
+        </div>
+        {% for o in partner_offers %}
+        <div style="background:#0f172a;border:1px solid {% if o.ew_seen_at is none %}rgba(245,158,11,.5){% else %}#1e293b{% endif %};border-radius:8px;padding:12px 14px;margin-top:10px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap">
+            <div>
+              <div style="font-size:15px;font-weight:700;color:#e8ebf0">🎯 {{ o.dealer_name }}</div>
+              {% if o.user_name %}<div style="font-size:12px;color:#94a3b8;margin-top:2px">{{ o.user_name }}{% if o.user_email %} · <span style="color:#64748b">{{ o.user_email }}</span>{% endif %}</div>{% endif %}
+            </div>
+            <div style="font-size:22px;font-weight:800;color:#fbbf24;font-family:ui-monospace,Consolas,monospace">
+              {% if o.offer_amount %}${{ '{:,}'.format(o.offer_amount|int) }}{% else %}—{% endif %}
+            </div>
+          </div>
+          <div style="font-size:11px;color:#64748b;margin-top:4px">
+            {{ o.submitted_at.strftime('%b %d, %Y · %I:%M %p') if o.submitted_at else '' }}
+            {% if o.ew_seen_at is none %}<span style="color:#f59e0b;font-weight:700;margin-left:8px">NEW</span>{% endif %}
+            {% if o.ew_action %}<span style="background:#2b313c;color:#cbd5e1;padding:2px 8px;border-radius:999px;font-size:10px;text-transform:uppercase;letter-spacing:.5px;margin-left:8px">{{ o.ew_action }}</span>{% endif %}
+          </div>
+          {% if o.message %}
+          <div style="margin-top:8px;padding:8px 10px;background:#0a1018;border-left:3px solid #475569;border-radius:4px;font-size:13px;color:#cbd5e1;font-style:italic">{{ o.message }}</div>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
       {# ─────────────────── Dealer Network Intel ─────────────────── #}
       {# Lives directly below AI Assessment so all AI / decisioning signal is in one column. #}
       {% set di = (ai_log.dealer_intel if ai_log else None) or None %}
@@ -1331,10 +1371,23 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
       <div class="card">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none" onclick="toggleContact()">
-          <span>Contact <span style="color:#64748b;font-weight:500;font-size:12px;margin-left:6px">{{ bid.contact_name or bid.phone or '' }}</span></span>
+          <span>Contact <span style="color:#64748b;font-weight:500;font-size:12px;margin-left:6px">
+            {%- if bid.awaiting_name -%}
+              <span style="color:#fbbf24">Awaiting name…</span>
+            {%- elif bid.bidder_name -%}
+              {{ bid.bidder_name }}{% if bid.partner_dealer_name %} · <span style="color:#a78bfa">{{ bid.partner_dealer_name }}</span>{% endif %}
+            {%- else -%}
+              {{ bid.contact_name or bid.phone or '' }}
+            {%- endif -%}
+          </span></span>
           <span id="contact-chevron" style="font-size:11px;color:#475569;transition:transform .2s;display:inline-block;transform:rotate(0deg)">&#9660;</span>
         </div>
         <div id="contact-body" style="display:none">
+          {% if bid.bidder_name %}
+            <div style="font-size:15px;font-weight:600;color:#f1f5f9;margin-bottom:4px">{{ bid.bidder_name }}{% if bid.partner_dealer_name %} <span style="color:#a78bfa;font-weight:500;font-size:12px">({{ bid.partner_dealer_name }})</span>{% endif %}</div>
+          {% elif bid.awaiting_name %}
+            <div style="font-size:13px;color:#fbbf24;margin-bottom:4px">Awaiting name reply…</div>
+          {% endif %}
           <div class="contact-phone-big">{{ bid.phone }}</div>
           <div class="contact-fields">
             <div class="field"><label>Name</label><input id="c-name" value="{{ bid.contact_name or '' }}" placeholder="Full name"></div>

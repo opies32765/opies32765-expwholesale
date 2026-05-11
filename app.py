@@ -1315,6 +1315,184 @@ def send_sms(to, body):
         return False
 
 
+# ── Bidder-identity helpers (Phase 1/2/3 gating + name capture) ─────────────
+# Phase 1 (mini-page) and Phase 2 (full report with AI price) are restricted
+# to a 4-number whitelist of full-broker clients. Phase 3 (single ack only,
+# no AI links) is the default for everyone else. The same whitelist gates
+# both Phase 1 and Phase 2 via PHASE2_PHONE_GATE (kept as one env to
+# avoid drift between the two).
+
+def _phone_digits(p):
+    """Last-10-digit normalization. '+14074309675' / '4074309675' / '14074309675'
+    all collapse to '4074309675'. Empty/None returns ''."""
+    d = ''.join(c for c in (p or '') if c.isdigit())
+    if len(d) == 11 and d[0] == '1':
+        d = d[1:]
+    return d
+
+
+def _bid_full_gate_digits():
+    """Digit-set of phones that get Phase 1 + Phase 2 (mini-page + full
+    report). Reads PHASE2_PHONE_GATE fresh on every call so env-only
+    changes take effect on systemctl restart without a code redeploy.
+    Empty env = no gating (everyone gets Phase 1+2 — back-compat for prod
+    before this feature shipped)."""
+    gate = (os.environ.get('PHASE2_PHONE_GATE') or '').strip()
+    if not gate:
+        return None  # sentinel for "no gating"
+    return {_phone_digits(tok) for tok in gate.replace(',', ' ').split()
+            if len(_phone_digits(tok)) == 10}
+
+
+def _is_full_broker_phone(phone):
+    """True if this phone is in the 4-number Phase 1/2 whitelist."""
+    allowed = _bid_full_gate_digits()
+    if allowed is None:
+        return True  # no gating configured → everyone is full-broker
+    return _phone_digits(phone) in allowed
+
+
+def _lookup_bidder(cur, phone):
+    """Resolve who a sender is. Returns dict:
+        {'kind': 'partner'|'returning'|'unknown',
+         'name': str|None,
+         'partner_dealer_id': int|None,
+         'dealer_name': str|None}
+
+    Lookup precedence (first hit wins):
+      1. partner_users  — known dealer partner (auto-link partner_dealer_id)
+      2. bidder_contacts — phone→name memory from a prior held-bid release
+      3. ANY prior row in bids — they've submitted before (pre-Phase-3 era).
+         Classified as 'returning' with name=None so they get the generic
+         Phase 3 ack ("Bid #N received — we'll contact you back shortly.")
+         and skip the held-bid name-ask flow. This prevents long-standing
+         customers (e.g. +19546092424 with 9 prior bids) from being treated
+         as first-timers just because we never captured their name.
+      4. Else 'unknown' — true first-time sender, held in awaiting_name.
+    """
+    if not phone:
+        return {'kind': 'unknown', 'name': None,
+                'partner_dealer_id': None, 'dealer_name': None}
+    cur.execute("""SELECT pu.full_name, pu.dealer_id, d.name AS dealer_name
+                     FROM partner_users pu
+                     JOIN dealers d ON d.id = pu.dealer_id
+                    WHERE pu.phone = %s
+                    LIMIT 1""", (phone,))
+    pu = cur.fetchone()
+    if pu:
+        return {'kind': 'partner',
+                'name': pu.get('full_name'),
+                'partner_dealer_id': pu.get('dealer_id'),
+                'dealer_name': pu.get('dealer_name')}
+    cur.execute("SELECT name FROM bidder_contacts WHERE phone = %s LIMIT 1",
+                (phone,))
+    bc = cur.fetchone()
+    if bc:
+        return {'kind': 'returning',
+                'name': bc.get('name'),
+                'partner_dealer_id': None,
+                'dealer_name': None}
+    # Final check: prior bid in the bids table? They've submitted before
+    # (even if pre-dating the bidder_contacts feature), so treat as a
+    # known returning sender. No name yet, but we won't hold them.
+    cur.execute("SELECT 1 FROM bids WHERE phone = %s LIMIT 1", (phone,))
+    if cur.fetchone():
+        return {'kind': 'returning', 'name': None,
+                'partner_dealer_id': None, 'dealer_name': None}
+    return {'kind': 'unknown', 'name': None,
+            'partner_dealer_id': None, 'dealer_name': None}
+
+
+_NAME_STRIP_RE = re.compile(
+    r"^\s*(?:i'?m|im|its|it's|this is|my name is|name is|name:|im called|"
+    r"call me|name's|name s)\s+",
+    re.IGNORECASE,
+)
+_NAME_TRAILING_RE = re.compile(
+    r"\s+(?:here|speaking|btw|by the way)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_name_reply(body):
+    """Extract a plausible bidder name from a free-form SMS reply.
+    Returns the cleaned name string, or None if the body doesn't look like
+    a name (no alpha tokens, or pure ack/digit/punctuation noise).
+
+    Conservative on purpose — better to re-ask than to save 'ok' as someone's
+    name. Caller is expected to re-prompt the user when this returns None.
+    """
+    if not body:
+        return None
+    s = body.strip()
+    # Strip common lead-ins.
+    s = _NAME_STRIP_RE.sub('', s)
+    s = _NAME_TRAILING_RE.sub('', s)
+    s = s.strip(' .,!?:-')
+    if not s:
+        return None
+    # Reject single-char, pure-digit, or known noise replies.
+    if len(s) < 2:
+        return None
+    alpha = re.sub(r'[^A-Za-z]', '', s)
+    if len(alpha) < 2:
+        return None
+    _NOISE = {'ok', 'okay', 'k', 'kk', 'yes', 'yeah', 'yep', 'yup',
+              'no', 'nope', 'nah', 'sure', 'fine', 'thanks', 'thx',
+              'thank you', 'hi', 'hey', 'hello', 'sup'}
+    if s.lower() in _NOISE:
+        return None
+    return s[:64]
+
+
+_PHASE3_DEFAULT_TEXT = "thanks {name}, bid #{bid_id} received — we'll contact you back shortly."
+_PHASE3_NO_NAME_TEXT = "bid #{bid_id} received — we'll contact you back shortly."
+
+
+def _send_phase3_ack(cur, bid_id, phone, name=None):
+    """Send the Phase 3 ack SMS. Idempotent via bids.phase3_notified_at.
+    Returns True if SMS sent (or already sent earlier), False on failure.
+    Caller commits the transaction."""
+    if not phone or phone.startswith('field:'):
+        return False
+    cur.execute("SELECT phase3_notified_at FROM bids WHERE id = %s", (bid_id,))
+    row = cur.fetchone()
+    if not row:
+        return False
+    if row.get('phase3_notified_at'):
+        return True  # already sent
+    if name:
+        body = _PHASE3_DEFAULT_TEXT.format(name=name, bid_id=bid_id)
+    else:
+        body = _PHASE3_NO_NAME_TEXT.format(bid_id=bid_id)
+    sent = send_sms(phone, body)
+    if sent:
+        cur.execute(
+            "UPDATE bids SET phase3_notified_at = NOW() WHERE id = %s",
+            (bid_id,),
+        )
+        print(f'[phase3-ack] bid={bid_id} → {phone} name={name!r}', flush=True)
+    else:
+        print(f'[phase3-ack] SMS failed bid={bid_id} → {phone}', flush=True)
+    return sent
+
+
+def _upsert_bidder_contact(cur, phone, name):
+    """Record (or refresh) a phone→name memory. Increments bid_count + bumps
+    last_bid_at on every call. Caller commits."""
+    if not phone or not name:
+        return
+    cur.execute("""
+        INSERT INTO bidder_contacts (phone, name, first_bid_at, last_bid_at,
+                                     bid_count)
+        VALUES (%s, %s, NOW(), NOW(), 1)
+        ON CONFLICT (phone) DO UPDATE
+           SET name = EXCLUDED.name,
+               last_bid_at = NOW(),
+               bid_count = bidder_contacts.bid_count + 1
+    """, (phone, name))
+
+
 def time_ago(dt):
     if not dt:
         return ''
@@ -1519,8 +1697,11 @@ def bid_detail(bid_id):
     cur = db.cursor()
 
     cur.execute("""
-        SELECT b.*, c.name as contact_name, c.company as contact_company
-        FROM bids b LEFT JOIN contacts c ON b.contact_id = c.id
+        SELECT b.*, c.name as contact_name, c.company as contact_company,
+               d.name as partner_dealer_name
+        FROM bids b
+        LEFT JOIN contacts c ON b.contact_id = c.id
+        LEFT JOIN dealers d ON b.partner_dealer_id = d.id
         WHERE b.id = %s
     """, (bid_id,))
     bid = cur.fetchone()
@@ -1881,6 +2062,25 @@ def bid_detail(bid_id):
     except Exception as _ml_err:
         print(f'[bid_detail] ml_predict err: {_ml_err}', flush=True)
 
+    # 2026-05-11: offers from subscribed partner dealers on this bid
+    partner_offers = []
+    try:
+        _po_cur = db.cursor()
+        _po_cur.execute("""
+            SELECT o.id, o.offer_amount, o.message, o.submitted_at,
+                   o.ew_seen_at, o.ew_action,
+                   d.name AS dealer_name,
+                   pu.full_name AS user_name, pu.email AS user_email
+              FROM bid_partner_offers o
+              JOIN dealers d ON o.dealer_id = d.id
+         LEFT JOIN partner_users pu ON o.partner_user_id = pu.id
+             WHERE o.bid_id = %s
+             ORDER BY o.submitted_at DESC
+        """, (bid_id,))
+        partner_offers = _po_cur.fetchall()
+    except Exception as _po_err:
+        print(f'[bid_detail] partner_offers err: {_po_err}', flush=True)
+
     return render_template('bid.html', bid=bid, photos=photos,
                            messages=messages, valuations=valuations,
                            vauto_data=vauto_data,
@@ -1893,6 +2093,7 @@ def bid_detail(bid_id):
                            vin_candidate=vin_candidate,
                            market_intel=market_intel,
                            ml_prediction=ml_prediction,
+                           partner_offers=partner_offers,
                            time_ago=time_ago)
 
 
@@ -2141,6 +2342,100 @@ def twilio_webhook():
             db.rollback()
         except Exception:
             pass
+
+    # ── Name-reply routing (Phase 3 onboarding) ──
+    # If this phone has one or more held bids (status='awaiting_name'),
+    # AND the inbound has no VIN and no media (a plausible name-only reply),
+    # attempt to parse the body as a name. On success: release ALL held
+    # bids for this phone (they may have sent multiple before answering),
+    # save the phone→name memory in bidder_contacts, fire the deferred
+    # workers + owner push, and send a single combined Phase 3 ack.
+    # On unparseable noise: re-ask once.
+    #
+    # MUST run before the partner-dealer reply path, the share-reply check,
+    # and the stitch / new-bid flow — otherwise the name reply would be
+    # mis-routed into one of those (creating a duplicate bid or silently
+    # stitching the name as a thread message into the held bid forever).
+    if from_phone and not num_media and not _early_vin:
+        cur.execute("""SELECT id FROM bids
+                        WHERE phone = %s
+                          AND awaiting_name = TRUE
+                          AND created_at > NOW() - INTERVAL '24 hours'
+                        ORDER BY id ASC""", (from_phone,))
+        _held_rows = cur.fetchall() or []
+        if _held_rows:
+            _held_ids = [r['id'] for r in _held_rows]
+            _name = _parse_name_reply(body)
+            if not _name:
+                # Inbound was noise ("ok", "?", digits-only). Re-ask once.
+                # Don't burn name_nudged_at — that's reserved for the cron
+                # nudge (Stage 2f) after long silence.
+                try:
+                    send_sms(from_phone,
+                             "sorry — just need a name we can call you by.")
+                except Exception as _ne:
+                    print(f'[name-reask] SMS error phone={from_phone!r}: {_ne}', flush=True)
+                _finalize_sms_intake(
+                    cur, intake_log_id, 'awaiting_name_reask',
+                    bid_id=_held_ids[0],
+                    reason=(f"Inbound from phone with held bid(s) {_held_ids} "
+                            f"did not parse as a name; re-asked"),
+                    parsed_vin=None, parsed_miles=None)
+                db.commit()
+                db.close()
+                return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                        200, {'Content-Type': 'text/xml'})
+
+            # Parseable name — release all held bids for this phone.
+            _upsert_bidder_contact(cur, from_phone, _name)
+            cur.execute("""UPDATE bids
+                              SET bidder_name = %s,
+                                  awaiting_name = FALSE,
+                                  status = 'new',
+                                  updated_at = NOW()
+                            WHERE id = ANY(%s)""",
+                        (_name, _held_ids))
+
+            # Combined Phase 3 ack covering every released bid.
+            if len(_held_ids) == 1:
+                _ack_body = (f"thanks {_name}, bid #{_held_ids[0]} received — "
+                             f"we'll contact you back shortly.")
+            else:
+                _bid_list = ', '.join('#' + str(i) for i in _held_ids)
+                _ack_body = (f"thanks {_name}, bids {_bid_list} received — "
+                             f"we'll contact you back shortly.")
+            _sent = send_sms(from_phone, _ack_body)
+            if _sent:
+                cur.execute("""UPDATE bids
+                                  SET phase3_notified_at = NOW()
+                                WHERE id = ANY(%s)
+                                  AND phase3_notified_at IS NULL""",
+                            (_held_ids,))
+            print(f'[name-captured] phone={from_phone!r} name={_name!r} '
+                  f'bids={_held_ids} ack_sent={_sent}', flush=True)
+            _finalize_sms_intake(
+                cur, intake_log_id, 'name_captured',
+                bid_id=_held_ids[0],
+                reason=(f"Released held bid(s) {_held_ids} with name={_name!r}; "
+                        f"phase 3 ack {'sent' if _sent else 'FAILED'}"),
+                parsed_vin=None, parsed_miles=None)
+            db.commit()
+            db.close()
+
+            # NOW fire the workers + owner push that were deferred when
+            # the bids were held. Done AFTER commit + close so DB locks
+            # aren't held across slow worker dispatches.
+            for _hid in _held_ids:
+                try:
+                    _fire_owner_new_bid(_hid)
+                except Exception as _oe:
+                    print(f'[name-released] owner push error bid={_hid}: {_oe}', flush=True)
+                try:
+                    _replay_held_bid_workers(_hid)
+                except Exception as _we:
+                    print(f'[name-released] worker fire error bid={_hid}: {_we}', flush=True)
+            return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                    200, {'Content-Type': 'text/xml'})
 
     # ── Stitch precedence over share-reply ──
     # If this phone has a bid created via SMS in the last 60 seconds, that's
@@ -2466,17 +2761,47 @@ def twilio_webhook():
         return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 200, {'Content-Type': 'text/xml'})
 
+    # Resolve sender identity BEFORE the INSERT so we can tag the bid with
+    # bidder_name / partner_dealer_id and decide whether to hold it for a
+    # name. Three outcomes:
+    #   * partner   — phone matches partner_users (e.g. Greg/Marino).
+    #                 Auto-link partner_dealer_id and use partner full_name.
+    #   * returning — phone is in bidder_contacts (seen on a prior bid).
+    #                 Use the stored name.
+    #   * unknown   — first-time sender. Bid is held in 'awaiting_name'
+    #                 status until they reply with a name. Workers, owner-
+    #                 push, and Phase 1/2/3 SMS are all DEFERRED to that
+    #                 follow-up turn (Stage 2c name-reply handler).
+    bidder = _lookup_bidder(cur, from_phone)
+    # Hold only TRUE unknowns. The 4-number full-broker whitelist is
+    # trusted by definition — if one of them texts in without a
+    # partner_users / bidder_contacts row, process the bid normally
+    # (un-named) rather than asking them for a name. Same behavior as
+    # the pre-Phase-3 system.
+    is_unknown = (bidder['kind'] == 'unknown'
+                  and not _is_full_broker_phone(from_phone))
+
     # Mini-page token: short, URL-safe, unguessable. Used for /m/<token>
     # auto-reply flow so the sender can review + counter from his phone.
     import secrets as _secrets
     driver_token = _secrets.token_urlsafe(8)[:12]
 
-    # Create bid record
+    # Create bid record. Unknown senders land in 'awaiting_name' so the
+    # dashboard's main lane (filters on status='new'/'pending'/etc.) hides
+    # them until the name lands. Known senders go straight to 'new'.
+    initial_status = 'awaiting_name' if is_unknown else 'new'
     cur.execute("""
         INSERT INTO bids (contact_id, phone, vin, mileage, raw_message, status,
-                          driver_token, driver_phone)
-        VALUES (%s, %s, %s, %s, %s, 'new', %s, %s) RETURNING id
-    """, (contact_id, from_phone, vin, miles, body, driver_token, from_phone))
+                          driver_token, driver_phone,
+                          bidder_name, partner_dealer_id,
+                          awaiting_name, name_asked_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s,
+                CASE WHEN %s THEN NOW() ELSE NULL END) RETURNING id
+    """, (contact_id, from_phone, vin, miles, body, initial_status,
+          driver_token, from_phone,
+          bidder['name'], bidder['partner_dealer_id'],
+          is_unknown, is_unknown))
     bid_id = cur.fetchone()['id']
 
     # Direct API kick removed 2026-05-08: was firing here with stale
@@ -2545,25 +2870,63 @@ def twilio_webhook():
         cur.execute("UPDATE bids SET vauto_priority=TRUE WHERE id=%s", (bid_id,))
 
     _finalize_sms_intake(
-        cur, intake_log_id, 'new_bid', bid_id=bid_id,
-        reason=(f"Created bid #{bid_id} from SMS. "
+        cur, intake_log_id,
+        'awaiting_name' if is_unknown else 'new_bid', bid_id=bid_id,
+        reason=(f"Created bid #{bid_id} from SMS "
+                f"(kind={bidder['kind']}). "
                 f"vin={'yes' if vin else 'no'} "
                 f"miles={'yes' if miles else 'no'} "
                 f"photos={len(photo_files)}"),
         parsed_vin=vin, parsed_miles=miles)
     db.commit()
-    db.close()
 
-    # Immediate creation ack so the sender knows we got it. The full bid
-    # card SMS lands later via _notify_driver_if_pending once the
-    # assessment completes.
-    print(f'[bid-ack] entering for bid={bid_id} phone={from_phone!r}', flush=True)
+    # ── Held-bid path: first-time unknown sender ─────────────────────────
+    # No worker triggers, no owner push, no Phase 1/2/3 SMS. Just ask for a
+    # name and stop. Photos are already persisted to disk via the
+    # _ingest_sms_photo calls above, so nothing is lost — the name-reply
+    # handler (Stage 2c) will flip status='new', fire workers, and send
+    # the Phase 3 ack with the captured name.
+    if is_unknown:
+        db.close()
+        print(f'[awaiting-name] held bid={bid_id} phone={from_phone!r}', flush=True)
+        if from_phone and not from_phone.startswith('field:'):
+            try:
+                send_sms(
+                    from_phone,
+                    "got it — looks like this is your first bid with us. "
+                    "what's a name we can use for reference?")
+            except Exception as _ne:
+                print(f'[awaiting-name] SMS error bid={bid_id}: {_ne}', flush=True)
+        return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                200, {'Content-Type': 'text/xml'})
+
+    # ── Known-sender path: partner or returning bidder ───────────────────
+    # Send a personalized ack. Wording diverges based on whether this phone
+    # is in the Phase 1/2 whitelist:
+    #   * full-broker → "give us a minute" (more SMS coming via Phase 1/2)
+    #   * Phase 3     → "we'll contact you back shortly" (final SMS) AND
+    #                   stamp phase3_notified_at so the cron sweep doesn't
+    #                   re-send.
+    _full_broker = _is_full_broker_phone(from_phone)
+    _name = bidder['name']
+    print(f'[bid-ack] entering for bid={bid_id} phone={from_phone!r} '
+          f'kind={bidder["kind"]} full_broker={_full_broker}', flush=True)
     if from_phone and not from_phone.startswith('field:'):
         try:
-            _ack_result = send_sms(from_phone, f"Bid #{bid_id} received — give us a minute.")
-            print(f'[bid-ack] sent bid={bid_id} result={_ack_result}', flush=True)
+            if _full_broker:
+                _ack_body = (f"thanks {_name}, bid #{bid_id} received — "
+                             f"give us a minute." if _name
+                             else f"Bid #{bid_id} received — give us a minute.")
+                _ack_result = send_sms(from_phone, _ack_body)
+                print(f'[bid-ack] full-broker sent bid={bid_id} result={_ack_result}', flush=True)
+            else:
+                # Phase 3 path — _send_phase3_ack handles wording + idempotency.
+                _send_phase3_ack(cur, bid_id, from_phone, _name)
+                db.commit()
         except Exception as _ack_e:
             print(f'[bid-ack] error bid={bid_id}: {_ack_e}', flush=True)
+
+    db.close()
 
     # Owner-portal push fan-out (best-effort, never blocks)
     _fire_owner_new_bid(bid_id)
@@ -2744,6 +3107,77 @@ def _process_carfax_async(bid_id, photo_files):
             db.close()
         except Exception:
             pass
+
+
+def _replay_held_bid_workers(bid_id):
+    """Fire the workers that were deferred when this bid was held in
+    'awaiting_name' status. Reads VIN + photo paths from DB, reloads photo
+    bytes from disk, and dispatches the same async paths the original
+    SMS-intake webhook would have hit if the sender had been known.
+
+    Mirrors the photo / VIN branching at the end of twilio_webhook:
+      * photos present → _process_carfax_async (which folds in VIN + miles +
+        YMM and then triggers market check)
+      * no photos but VIN known → trigger_market_check directly
+      * neither → nothing fires; bid sits as 'new' for manual handling
+    """
+    db = get_db()
+    cur = db.cursor()
+    vin = None
+    photo_rows = []
+    try:
+        cur.execute("SELECT vin FROM bids WHERE id = %s", (bid_id,))
+        row = cur.fetchone()
+        if not row:
+            return
+        vin = (row.get('vin') or '').strip() or None
+        cur.execute("""SELECT local_path FROM bid_photos
+                        WHERE bid_id = %s AND local_path IS NOT NULL
+                        ORDER BY id ASC""", (bid_id,))
+        photo_rows = cur.fetchall() or []
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+    photo_files = []
+    for p in photo_rows:
+        rel = p.get('local_path') if isinstance(p, dict) else None
+        if not rel:
+            continue
+        full = rel if os.path.isabs(rel) else os.path.join('/opt/expwholesale', rel)
+        if not os.path.exists(full):
+            print(f'[replay] missing photo file bid={bid_id} path={full}', flush=True)
+            continue
+        try:
+            with open(full, 'rb') as f:
+                data = f.read()
+        except Exception as _re:
+            print(f'[replay] photo read error bid={bid_id} {full}: {_re}', flush=True)
+            continue
+        ext = os.path.splitext(full)[1].lower()
+        if ext == '.png':
+            mime = 'image/png'
+        elif ext in ('.heic', '.heif'):
+            mime = 'image/heic'
+        else:
+            mime = 'image/jpeg'
+        photo_files.append((data, mime))
+
+    if photo_files:
+        threading.Thread(
+            target=_process_carfax_async,
+            args=(bid_id, photo_files),
+            daemon=True,
+        ).start()
+    elif vin:
+        try:
+            trigger_market_check(bid_id, vin)
+        except Exception as _me:
+            print(f'[replay] market check error bid={bid_id}: {_me}', flush=True)
+    print(f'[replay] fired workers bid={bid_id} photos={len(photo_files)} '
+          f'vin={"yes" if vin else "no"}', flush=True)
 
 
 @app.route('/api/bid/<int:bid_id>/reply', methods=['POST'])
@@ -4322,6 +4756,15 @@ def _auto_assess(bid_id):
                     _notify_driver_phase2(bid_id)
                 except Exception as _p2e:
                     print(f'[phase2-notify] outer error bid={bid_id}: {_p2e}', flush=True)
+                # 2026-05-11: push inbound bid to subscribed partner dealers
+                # (dealers.receive_inbound_pushes=TRUE). Filter rules and
+                # the actual SMS/email/Telegram fan-out live in
+                # partner_portal._push_bid_to_subscribed_partners.
+                try:
+                    from partner_portal import _push_bid_to_subscribed_partners
+                    _push_bid_to_subscribed_partners(bid_id)
+                except Exception as _pbpe:
+                    print(f'[bid-push] outer error bid={bid_id}: {_pbpe}', flush=True)
             else:
                 print(f'Auto-assess failed for bid {bid_id}: {result.get("error")}')
                 _release_assessment_claim(bid_id)
@@ -4333,7 +4776,14 @@ def _auto_assess(bid_id):
 def _notify_driver_if_pending(bid_id):
     """If this bid came in via SMS (has driver_phone) and we haven't already
     auto-replied, text the sender the mini-page link. Idempotent — sets
-    driver_notified_at so a re-run of assessment won't double-text."""
+    driver_notified_at so a re-run of assessment won't double-text.
+
+    Phase 1 (this) is restricted to the 4-number full-broker whitelist via
+    PHASE2_PHONE_GATE (shared with Phase 2). Phones outside that whitelist
+    fall into Phase 3 — they received their final ack at bid intake
+    (_send_phase3_ack), no mini-page link, no AI links. This function
+    no-ops for them so we don't double-message.
+    """
     try:
         db = get_db()
         cur = db.cursor()
@@ -4347,6 +4797,14 @@ def _notify_driver_if_pending(bid_id):
             db.close()
             return
         if bid['driver_notified_at'] is not None:
+            db.close()
+            return
+        # Phase 1 gate — only the 4-number full-broker whitelist gets the
+        # mini-page link SMS. Others already got the Phase 3 ack at intake.
+        if not _is_full_broker_phone(bid['driver_phone']):
+            print(f'[driver-notify] gated — bid={bid_id} '
+                  f'driver={bid["driver_phone"]} not in Phase 1/2 whitelist '
+                  f'(handled by Phase 3 at intake)', flush=True)
             db.close()
             return
 
@@ -4608,6 +5066,7 @@ def api_bids():
         SELECT b.id, b.phone, b.vin, b.year, b.make, b.model, b.mileage,
                b.raw_message, b.status, b.created_at, b.bid_amount, b.ai_price, b.asking_price,
                b.has_unread, b.partner_dealer_id, b.partner_request_id, b.salesperson,
+               b.bidder_name, b.awaiting_name,
                c.name as contact_name, c.company as contact_company, c.role as contact_role,
                d.name as partner_dealer_name
         FROM bids b
@@ -4643,6 +5102,8 @@ def api_bids():
             'partner_dealer_name': r.get('partner_dealer_name'),
             'partner_request_id': r.get('partner_request_id'),
             'salesperson': r.get('salesperson'),
+            'bidder_name': r.get('bidder_name'),
+            'awaiting_name': bool(r.get('awaiting_name')),
             'is_new': r['id'] > since_id,
             'has_unread': bool(r.get('has_unread'))
         })

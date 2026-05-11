@@ -476,6 +476,24 @@ def dashboard(slug):
         """, (dealer['id'],))
         unread_responses = cur.fetchall()
 
+        # 2026-05-11: Inbound bids pushed TO this dealer (bid_pushes).
+        # Join the freshest photo per bid for the thumbnail in the card.
+        cur.execute("""
+            SELECT bp.id AS push_id, bp.bid_id, bp.pushed_at, bp.viewed_at,
+                   b.year, b.make, b.model, b.trim, b.mileage, b.vin, b.color,
+                   (SELECT url FROM bid_photos WHERE bid_id = bp.bid_id
+                     ORDER BY id LIMIT 1) AS thumb_url,
+                   (SELECT COUNT(*) FROM bid_partner_offers
+                     WHERE bid_id = bp.bid_id AND dealer_id = bp.dealer_id) AS our_offer_count
+              FROM bid_pushes bp
+              JOIN bids b ON b.id = bp.bid_id
+             WHERE bp.dealer_id = %s
+             ORDER BY bp.pushed_at DESC
+             LIMIT 25
+        """, (dealer['id'],))
+        inbound_pushes = cur.fetchall()
+        inbound_unread = sum(1 for p in inbound_pushes if p['viewed_at'] is None)
+
     return render_template('partner_dashboard.html',
                            user=user, dealer=dealer, slug=slug,
                            rows=rows, enabled_buckets=enabled_buckets,
@@ -484,6 +502,8 @@ def dashboard(slug):
                            quick_drop_rows=quick_drop_rows,
                            inventory_bid_rows=inventory_bid_rows,
                            unread_responses=unread_responses,
+                           inbound_pushes=inbound_pushes,
+                           inbound_unread=inbound_unread,
                            wholesaler_mode=wholesaler_mode,
                            viewing_as_admin=session.get('partner_viewing_as_admin', False),
                            BUCKETS=BUCKETS)
@@ -1074,6 +1094,332 @@ def notify_partner_of_ew_response(bid_id: int, send_email: bool = False, send_te
                             print(f'[partner sms_sent log] skipped: {_e}')
     except Exception as e:
         print(f'[partner notify] failed for bid {bid_id}: {e}')
+
+
+# ── Inbound bid push to subscribed partners + partner offer capture ──────
+# 2026-05-11 — new flow distinct from partner_bid_requests. EW collects
+# inbound bids from sellers (SMS to 754 number, dashboard manual entry).
+# Subscribed partner dealers (dealers.receive_inbound_pushes=TRUE) get
+# those bids pushed to their portal with a strip-down view. They submit
+# offers via /partner/<slug>/inbound/<bid_id>/offer. Offers attach to the
+# original bid_id via bid_partner_offers — no new partner_bid_requests row.
+# EW operator sees all offers side-by-side on the bid detail page.
+
+def _bid_qualifies_for_push(bid: dict) -> tuple[bool, str]:
+    """Filter rules — return (allowed, reason). Skip operator test bids and
+    explicitly-killed bids. Keep both rules in one place so future filters
+    (IP whitelist, source whitelist, etc.) are easy to extend."""
+    # Operator test phone — normalize to 10 digits
+    raw_phone = bid.get('phone') or ''
+    digits = ''.join(c for c in raw_phone if c.isdigit())
+    if len(digits) == 11 and digits[0] == '1':
+        digits = digits[1:]
+    if digits == '4074309675':
+        return (False, 'operator_test_phone')
+    status = (bid.get('status') or '').lower()
+    if status in ('dropped', 'rejected', 'spam'):
+        return (False, f'status={status}')
+    return (True, '')
+
+
+def _push_bid_to_subscribed_partners(bid_id: int) -> None:
+    """Called from end of _run_assessment. Inserts bid_pushes rows for every
+    subscribed dealer and notifies their partner_users. Idempotent via
+    UNIQUE (bid_id, dealer_id) — re-running on the same bid is a no-op."""
+    try:
+        with _db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, phone, status, year, make, model, trim, mileage, vin
+                  FROM bids WHERE id = %s
+            """, (bid_id,))
+            bid = cur.fetchone()
+            if not bid:
+                return
+            allowed, reason = _bid_qualifies_for_push(bid)
+            if not allowed:
+                print(f'[bid-push] bid={bid_id} skipped reason={reason}',
+                      flush=True)
+                return
+            cur.execute("""
+                SELECT id, name, portal_slug, dashboard_token, salesperson, salesperson_phone
+                  FROM dealers
+                 WHERE receive_inbound_pushes = TRUE AND active = TRUE
+            """)
+            subscribers = cur.fetchall()
+            if not subscribers:
+                return
+            for d in subscribers:
+                cur.execute("""
+                    INSERT INTO bid_pushes (bid_id, dealer_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (bid_id, dealer_id) DO NOTHING
+                    RETURNING id
+                """, (bid_id, d['id']))
+                inserted = cur.fetchone()
+                conn.commit()
+                if inserted:
+                    print(f'[bid-push] bid={bid_id} -> {d["name"]} '
+                          f'(dealer_id={d["id"]})', flush=True)
+                    notify_partner_of_inbound_bid(bid_id, d)
+    except Exception as e:
+        print(f'[bid-push] error bid={bid_id}: {e}', flush=True)
+
+
+def notify_partner_of_inbound_bid(bid_id: int, dealer: dict) -> None:
+    """SMS + email all partner_users with the relevant opt-ins. Multi-recipient
+    by design — Nuccio has Mark Palangio + Bill Nuccio; each gets notified
+    based on their own opt-ins. Uses the dealer's portal slug + dashboard
+    token so the SMS link works without login."""
+    try:
+        with _db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT year, make, model, trim, mileage, vin
+                  FROM bids WHERE id = %s
+            """, (bid_id,))
+            b = cur.fetchone()
+            if not b:
+                return
+            car = f"{b['year'] or ''} {(b['make'] or '').upper()} " \
+                  f"{(b['model'] or '').upper()}".strip()
+            if b['trim']:
+                car += f" {b['trim']}"
+            vin_last6 = (b['vin'] or '')[-6:] if b['vin'] else ''
+            miles_str = f"{b['mileage']:,} mi" if b['mileage'] else ''
+            slug = dealer.get('portal_slug') or ''
+            dtok = dealer.get('dashboard_token') or ''
+            inbound_url = (f"{PORTAL_BASE}/partner/{slug}/d/{dtok}"
+                           if dtok else f"{PORTAL_BASE}/partner/{slug}")
+            sms_body = (f'EW: New inbound bid — {car} · {miles_str}'
+                        f'{f" · VIN ...{vin_last6}" if vin_last6 else ""}\n'
+                        f'View + offer: {inbound_url}\n'
+                        f'Reply STOP to unsubscribe.')
+            cur.execute("""
+                SELECT id, email, full_name, phone, sms_opt_in, email_bid_alerts
+                  FROM partner_users
+                 WHERE dealer_id = %s
+            """, (dealer['id'],))
+            recipients = cur.fetchall()
+            for u in recipients:
+                if u.get('sms_opt_in') and u.get('phone'):
+                    sent = _send_sms(u['phone'], sms_body)
+                    print(f'[inbound-notify] sms bid={bid_id} '
+                          f'dealer={dealer["id"]} user={u["id"]} '
+                          f'-> {u["phone"]} sent={sent}', flush=True)
+                if u.get('email_bid_alerts') and u.get('email') \
+                   and '@' in (u['email'] or '') \
+                   and not u['email'].endswith('.invite'):
+                    name_greet = (" " + u["full_name"]) if u.get("full_name") else ""
+                    vin_line = f"<br>VIN: {b['vin']}" if b.get('vin') else ""
+                    html = (
+                        f'<p>Hi{name_greet},</p>'
+                        f'<p>A new inbound vehicle bid just arrived at '
+                        f'Experience Wholesale that you have rights to see:</p>'
+                        f'<p style="background:#f1f5f9;padding:12px 14px;'
+                        f'border-radius:6px;margin:12px 0;font-size:15px">'
+                        f'<strong>{car}</strong><br>{miles_str}{vin_line}'
+                        f'</p>'
+                        f'<p><a href="{inbound_url}" '
+                        f'style="display:inline-block;padding:11px 22px;'
+                        f'background:#2563eb;color:#fff;text-decoration:none;'
+                        f'border-radius:6px;font-weight:600">View + Submit Offer</a></p>'
+                        f'<p style="font-size:12px;color:#64748b">'
+                        f'You can change these alerts from your portal settings.</p>'
+                    )
+                    sent = _send_email(u['email'],
+                                       f'New inbound bid: {car}', html)
+                    print(f'[inbound-notify] email bid={bid_id} '
+                          f'dealer={dealer["id"]} user={u["id"]} '
+                          f'-> {u["email"]} sent={sent}', flush=True)
+            _tg_alert(f'📨 <b>Inbound bid pushed to {dealer["name"]}</b>\n'
+                      f'Bid #{bid_id} — {car}\n'
+                      f'Recipients: {len(recipients)} user(s)\n'
+                      f'View: {inbound_url}')
+    except Exception as e:
+        print(f'[inbound-notify] err bid={bid_id} dealer={dealer.get("id")}: {e}',
+              flush=True)
+
+
+def notify_salesperson_of_partner_offer(offer_id: int) -> None:
+    """When a partner submits an offer on an inbound bid, text the assigned
+    EW salesperson on that dealer (dealers.salesperson_phone). Also Telegram."""
+    try:
+        with _db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                SELECT o.id, o.bid_id, o.dealer_id, o.offer_amount, o.message,
+                       o.submitted_at,
+                       d.name AS dealer_name, d.salesperson, d.salesperson_phone,
+                       pu.full_name AS user_name,
+                       b.year, b.make, b.model, b.trim, b.vin
+                  FROM bid_partner_offers o
+                  JOIN dealers d ON o.dealer_id = d.id
+                  JOIN bids b ON o.bid_id = b.id
+             LEFT JOIN partner_users pu ON o.partner_user_id = pu.id
+                 WHERE o.id = %s
+            """, (offer_id,))
+            row = cur.fetchone()
+            if not row:
+                return
+            car = f"{row['year'] or ''} {(row['make'] or '').upper()} " \
+                  f"{(row['model'] or '').upper()}".strip()
+            vin_last6 = (row['vin'] or '')[-6:] if row['vin'] else ''
+            amt = f"${int(float(row['offer_amount'])):,}" \
+                  if row.get('offer_amount') else '(no amount)'
+            who = row.get('user_name') or 'A partner user'
+            bid_url = f"{PORTAL_BASE}/bid/{row['bid_id']}"
+            sms = (f'{row["dealer_name"]} offer: {amt} on Bid #{row["bid_id"]} '
+                   f'({car} ...{vin_last6}). View: {bid_url}')
+            if row.get('salesperson_phone'):
+                _send_sms(row['salesperson_phone'], sms)
+                print(f'[partner-offer] sms -> salesperson '
+                      f'{row["salesperson_phone"]}: bid={row["bid_id"]} '
+                      f'offer_id={offer_id}', flush=True)
+            note_line = f"Note: {row['message']}\n" if row.get("message") else ""
+            _tg_alert(
+                f'💰 <b>Partner offer received</b>\n'
+                f'Dealer: {row["dealer_name"]}\n'
+                f'User: {who}\n'
+                f'Bid: #{row["bid_id"]} — {car}\n'
+                f'Offer: {amt}\n'
+                f'{note_line}'
+                f'View: {bid_url}')
+    except Exception as e:
+        print(f'[partner-offer] notify err offer_id={offer_id}: {e}', flush=True)
+
+
+@bp.route('/partner/<slug>/inbound/<int:bid_id>', methods=['GET'])
+def inbound_bid_view(slug, bid_id):
+    """Partner-side view of an inbound EW bid pushed to this dealer.
+    Strict scope: only bid_pushes rows that match this dealer.
+    Renders a stripped-down version of the bid card — no LSL, no dealer
+    network, no AI assessment. See partner_inbound.html for the field
+    whitelist."""
+    user = _current_partner_user()
+    if not user:
+        return redirect(url_for('partner.login', slug=slug))
+    with _db() as conn, conn.cursor() as cur:
+        dealer = _dealer_by_slug(cur, slug)
+        if not dealer or dealer['id'] != user['dealer_id']:
+            return redirect(url_for('partner.login', slug=slug))
+        cur.execute("""
+            SELECT id, pushed_at, viewed_at FROM bid_pushes
+             WHERE bid_id = %s AND dealer_id = %s
+        """, (bid_id, dealer['id']))
+        push = cur.fetchone()
+        if not push:
+            return 'This bid is not available for your dealer.', 404
+        if push['viewed_at'] is None:
+            cur.execute("UPDATE bid_pushes SET viewed_at = NOW() WHERE id = %s",
+                        (push['id'],))
+            conn.commit()
+        cur.execute("""
+            SELECT id, year, make, model, trim, mileage, vin,
+                   color, int_color, asking_price, created_at, ai_assessed_at,
+                   status
+              FROM bids WHERE id = %s
+        """, (bid_id,))
+        bid = cur.fetchone()
+        if not bid:
+            return 'Bid not found.', 404
+        cur.execute("SELECT url FROM bid_photos WHERE bid_id = %s ORDER BY id",
+                    (bid_id,))
+        photos = cur.fetchall()
+        cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid_id,))
+        vauto = cur.fetchone()
+        cur.execute("SELECT * FROM accutrade_lookups WHERE bid_id = %s",
+                    (bid_id,))
+        accutrade = cur.fetchone()
+        cur.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s",
+                    (bid_id,))
+        ipacket = cur.fetchone()
+        # Partner-safe slice of ai_assessment_log: ONLY market_intel (rBook
+        # closest_3 + Manheim transactions). Explicitly NOT dealer_intel,
+        # buyer_intel, ai reasoning, target_buy, confidence, flags.
+        import json as _json
+        cur.execute("""
+            SELECT market_intel
+              FROM ai_assessment_log
+             WHERE bid_id = %s
+             ORDER BY created_at DESC LIMIT 1
+        """, (bid_id,))
+        ass = cur.fetchone() or {}
+        mi = ass.get('market_intel') if ass else None
+        if isinstance(mi, str):
+            try: mi = _json.loads(mi)
+            except Exception: mi = None
+        # Prior offers from THIS dealer on THIS bid (so they don't re-offer)
+        cur.execute("""
+            SELECT id, offer_amount, message, submitted_at, ew_action
+              FROM bid_partner_offers
+             WHERE bid_id = %s AND dealer_id = %s
+             ORDER BY submitted_at DESC
+        """, (bid_id, dealer['id']))
+        prior_offers = cur.fetchall()
+        # Look for any Carfax / AutoCheck report screenshots on this bid
+        cur.execute("""
+            SELECT url FROM bid_reports WHERE bid_id = %s ORDER BY id
+        """, (bid_id,)) if False else None
+        # bid_reports table may not exist on every install — pull via fallback
+        carfax_urls = []
+        try:
+            cur.execute("""
+                SELECT url FROM bid_reports WHERE bid_id = %s ORDER BY id
+            """, (bid_id,))
+            carfax_urls = [r['url'] for r in cur.fetchall()]
+        except Exception:
+            conn.rollback()
+    return render_template('partner_inbound.html',
+                           dealer=dealer, bid=dict(bid),
+                           photos=[p['url'] for p in photos],
+                           vauto=dict(vauto) if vauto else None,
+                           accutrade=dict(accutrade) if accutrade else None,
+                           ipacket=dict(ipacket) if ipacket else None,
+                           market_intel=mi,
+                           carfax_urls=carfax_urls,
+                           prior_offers=[dict(o) for o in prior_offers],
+                           slug=slug,
+                           user=user)
+
+
+@bp.route('/partner/<slug>/inbound/<int:bid_id>/offer', methods=['POST'])
+def inbound_bid_offer(slug, bid_id):
+    """Partner submits an offer on an inbound bid. Inserts bid_partner_offers
+    (does NOT create a partner_bid_requests row). Salesperson on the dealer
+    gets SMS + Telegram alert."""
+    user = _current_partner_user()
+    if not user:
+        return redirect(url_for('partner.login', slug=slug))
+    raw_amt = (request.form.get('offer_amount') or '').strip().replace(',', '').replace('$', '')
+    message = (request.form.get('message') or '').strip()[:1000]
+    try:
+        amt = float(raw_amt) if raw_amt else None
+    except ValueError:
+        amt = None
+    if amt is None or amt <= 0:
+        flash('Please enter a valid offer amount.', 'error')
+        return redirect(url_for('partner.inbound_bid_view',
+                                slug=slug, bid_id=bid_id))
+    with _db() as conn, conn.cursor() as cur:
+        dealer = _dealer_by_slug(cur, slug)
+        if not dealer or dealer['id'] != user['dealer_id']:
+            return redirect(url_for('partner.login', slug=slug))
+        cur.execute("""
+            SELECT id FROM bid_pushes
+             WHERE bid_id = %s AND dealer_id = %s
+        """, (bid_id, dealer['id']))
+        if not cur.fetchone():
+            return 'This bid is not available for your dealer.', 404
+        cur.execute("""
+            INSERT INTO bid_partner_offers
+                (bid_id, dealer_id, partner_user_id, offer_amount, message)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """, (bid_id, dealer['id'], user['id'], amt, message or None))
+        offer_id = cur.fetchone()['id']
+        conn.commit()
+    notify_salesperson_of_partner_offer(offer_id)
+    flash(f'Offer of ${int(amt):,} sent. We will contact you shortly.', 'info')
+    return redirect(url_for('partner.inbound_bid_view',
+                            slug=slug, bid_id=bid_id))
 
 
 # ── Submit bid requests (partner side) ────────────────────────────────────

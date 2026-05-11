@@ -1,0 +1,317 @@
+{# Partner-side view of an inbound EW bid pushed to this dealer.
+   STRICTLY WHITELISTED — no LSL, no Dealer Network, no AI assessment.
+   Whitelist: vehicle facts, photos, Carfax/AutoCheck, iPacket sticker,
+   rBook closest_3 comps, Manheim transactions, AccuTrade book values. #}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Bid #{{ bid.id }} — {{ bid.year }} {{ bid.make }} {{ bid.model }}</title>
+<style>
+  *,*::before,*::after { box-sizing:border-box; }
+  html,body { margin:0; padding:0; background:#0f1115; color:#e8ebf0;
+              font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+              -webkit-font-smoothing:antialiased; }
+  body { padding:16px 16px 40px; max-width:980px; margin:0 auto; }
+  a { color:#7dd3fc; }
+  .topbar { display:flex; justify-content:space-between; align-items:center;
+            border-bottom:1px solid #1f2937; padding-bottom:14px; margin-bottom:18px; }
+  .crumb { font-size:12px; color:#94a3b8; }
+  .crumb a { color:#7dd3fc; text-decoration:none; }
+  .dealer { font-size:13px; color:#fbbf24; font-weight:600; }
+
+  .hero { display:flex; gap:18px; flex-wrap:wrap; margin-bottom:18px;
+          background:#161a22; border:1px solid #1f2937; border-radius:10px; padding:16px; }
+  .hero .gallery { flex:1 1 320px; min-width:280px; }
+  .hero .info    { flex:1 1 320px; min-width:280px; }
+  .ymm  { font-size:24px; font-weight:800; color:#fff; letter-spacing:-0.3px; }
+  .miles{ font-size:18px; font-weight:700; color:#e8ebf0; margin-top:4px; }
+  .vin  { font-family:ui-monospace,Consolas,monospace; font-size:12px;
+          color:#9aa3b2; margin-top:6px; word-break:break-all; }
+  .meta { display:flex; gap:14px; flex-wrap:wrap; font-size:13px;
+          color:#9aa3b2; margin-top:10px; }
+  .meta b { color:#e8ebf0; font-weight:600; }
+  .ts   { font-size:11px; color:#64748b; margin-top:8px; }
+
+  .photos { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr));
+            gap:6px; }
+  .photos img { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:6px;
+                background:#0f141d; cursor:pointer; }
+  .photos img.hero-img { grid-column:1/-1; aspect-ratio:16/9; }
+
+  details.card { margin-bottom:10px; background:#161a22; border:1px solid #1f2937;
+                 border-left:3px solid var(--accent,#475569); border-radius:8px;
+                 overflow:hidden; }
+  details.card[open] { background:#1a1f29; }
+  details.card summary { list-style:none; cursor:pointer; padding:13px 16px;
+                         display:flex; align-items:center; justify-content:space-between; }
+  details.card summary::-webkit-details-marker { display:none; }
+  details.card summary::after { content:'▾'; font-size:11px; color:#6b7280;
+                                 transition:transform .2s; }
+  details.card[open] summary::after { transform:rotate(180deg); }
+  details.card .title { font-size:13px; font-weight:700; color:var(--accent,#cbd5e1);
+                        text-transform:uppercase; letter-spacing:.5px; }
+  details.card .summary-text { font-size:12px; color:#9aa3b2; flex:1;
+                                text-align:right; margin-right:10px; }
+  details.card .body { padding:0 16px 16px; }
+  details.card.manheim { --accent:#c4b5fd; }
+  details.card.rbook   { --accent:#67e8f9; }
+  details.card.books   { --accent:#94a3b8; }
+  details.card.history { --accent:#86efac; }
+  details.card.sticker { --accent:#fde68a; }
+
+  .row { display:flex; justify-content:space-between; gap:10px; padding:8px 0;
+         border-bottom:1px solid #1f2937; font-size:13px; }
+  .row:last-child { border-bottom:0; }
+  .row .lbl { color:#9aa3b2; }
+  .row .val { font-weight:700; color:#e8ebf0; font-family:ui-monospace,Consolas,monospace; }
+
+  .comp { background:#0f141d; border:1px solid #1f2937; border-radius:6px;
+          padding:10px; margin-bottom:8px; font-size:12px; }
+  .comp .top-line { display:flex; justify-content:space-between; align-items:baseline; gap:8px; }
+  .comp .miles-l { font-size:14px; font-weight:700; color:#e8ebf0; }
+  .comp .price-l { font-size:15px; font-weight:700; color:#86efac; white-space:nowrap; }
+  .comp .meta-line { font-size:11px; color:#9aa3b2; margin-top:5px; }
+  .comp a { color:#7dd3fc; text-decoration:none; border-bottom:1px dashed rgba(125,211,252,.4); }
+
+  .flag { display:inline-block; font-size:11px; font-weight:700; padding:3px 9px;
+          border-radius:4px; background:rgba(134,239,172,.12); color:#86efac;
+          margin:3px 5px 0 0; border:1px solid rgba(134,239,172,.25); }
+
+  .offer { background:linear-gradient(135deg,#1a3d2a,#0f2a1d); border:1.5px solid #2d6b48;
+           border-radius:12px; padding:18px; margin-top:20px; }
+  .offer h2 { margin:0 0 12px; font-size:16px; font-weight:700; color:#5fd393;
+              letter-spacing:.3px; }
+  .offer label { display:block; font-size:11px; color:#7fc99c; text-transform:uppercase;
+                 letter-spacing:.8px; font-weight:700; margin:10px 0 4px; }
+  .offer input[type=text], .offer textarea {
+       width:100%; padding:12px 14px; font-size:16px; background:#0a1410;
+       border:1px solid #2d6b48; color:#e8ebf0; border-radius:8px;
+       font-family:inherit; }
+  .offer textarea { min-height:60px; resize:vertical; }
+  .offer button { background:#5fd393; color:#0a1410; font-weight:800; font-size:16px;
+                  padding:13px 22px; border:none; border-radius:8px; cursor:pointer;
+                  margin-top:14px; letter-spacing:.4px; }
+  .offer button:hover { background:#7fdcaa; }
+  .offer .prior { background:rgba(15,42,29,.6); border:1px solid rgba(45,107,72,.4);
+                  border-radius:6px; padding:10px 12px; margin-top:10px; font-size:13px; }
+
+  .empty { color:#64748b; font-style:italic; font-size:12px; padding:10px 0; }
+
+  .flash { background:rgba(95,211,147,.12); border:1px solid rgba(95,211,147,.4);
+           color:#5fd393; padding:10px 14px; border-radius:8px; margin-bottom:14px;
+           font-size:13px; }
+  .flash.error { background:rgba(239,68,68,.12); border-color:rgba(239,68,68,.4);
+                 color:#ef4444; }
+
+  .pill { display:inline-block; font-size:10px; font-weight:700; padding:2px 8px;
+          border-radius:999px; background:#2b313c; color:#9aa3b2;
+          text-transform:uppercase; letter-spacing:.5px; margin-left:6px; }
+
+  /* Lightbox */
+  .lb { display:none; position:fixed; inset:0; background:rgba(0,0,0,.92);
+        z-index:1000; align-items:center; justify-content:center; padding:20px;
+        cursor:zoom-out; }
+  .lb.open { display:flex; }
+  .lb img { max-width:100%; max-height:100%; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="crumb">
+    <a href="/partner/{{ slug }}">← {{ dealer.name }} dashboard</a>
+  </div>
+  <div class="dealer">{{ dealer.name }}</div>
+</div>
+
+{% with msgs = get_flashed_messages(with_categories=true) %}
+  {% for cat, m in msgs %}
+    <div class="flash {{ cat }}">{{ m }}</div>
+  {% endfor %}
+{% endwith %}
+
+{# ─────────────────── Hero — vehicle facts + first photo ─────────────────── #}
+<div class="hero">
+  <div class="gallery">
+    {% if photos %}
+      <div class="photos">
+        {% for u in photos[:1] %}<img src="{{ u }}" class="hero-img" onclick="lbOpen(this.src)">{% endfor %}
+        {% for u in photos[1:9] %}<img src="{{ u }}" onclick="lbOpen(this.src)">{% endfor %}
+      </div>
+    {% else %}
+      <div class="empty">No photos available</div>
+    {% endif %}
+  </div>
+  <div class="info">
+    <div class="ymm">{{ bid.year or '' }} {{ (bid.make or '')|upper }} {{ (bid.model or '')|upper }}{% if bid.trim %} {{ bid.trim|upper }}{% endif %}</div>
+    <div class="miles">{{ '{:,}'.format(bid.mileage|int) if bid.mileage else '—' }} mi</div>
+    <div class="vin">VIN: {{ bid.vin or '—' }}</div>
+    <div class="meta">
+      {% if bid.color %}<span><b>EXT</b> {{ bid.color }}</span>{% endif %}
+      {% if bid.int_color %}<span><b>INT</b> {{ bid.int_color }}</span>{% endif %}
+    </div>
+    <div class="ts">Listed {{ bid.created_at.strftime('%b %d, %Y · %I:%M %p') if bid.created_at else '—' }}</div>
+  </div>
+</div>
+
+{# ─────────────────── iPacket OEM Window Sticker ─────────────────── #}
+{% if ipacket and ipacket.screenshot %}
+<details class="card sticker" open>
+  <summary>
+    <span class="title">OEM Window Sticker</span>
+    <span class="summary-text">iPacket{% if ipacket.total_msrp %} · MSRP ${{ '{:,}'.format(ipacket.total_msrp|int) }}{% endif %}</span>
+  </summary>
+  <div class="body">
+    {% if ipacket.total_msrp %}<div class="row"><span class="lbl">Total MSRP</span><span class="val">${{ '{:,}'.format(ipacket.total_msrp|int) }}</span></div>{% endif %}
+    {% if ipacket.base_price %}<div class="row"><span class="lbl">Base Price</span><span class="val">${{ '{:,}'.format(ipacket.base_price|int) }}</span></div>{% endif %}
+    <img src="{{ ipacket.screenshot }}" style="width:100%;border-radius:6px;margin-top:12px;cursor:zoom-in" onclick="lbOpen(this.src)">
+  </div>
+</details>
+{% endif %}
+
+{# ─────────────────── Carfax / AutoCheck ─────────────────── #}
+{% if carfax_urls %}
+<details class="card history">
+  <summary>
+    <span class="title">Vehicle History Reports</span>
+    <span class="summary-text">{{ carfax_urls|length }} report{% if carfax_urls|length != 1 %}s{% endif %}</span>
+  </summary>
+  <div class="body">
+    <div class="photos">
+      {% for u in carfax_urls %}<img src="{{ u }}" onclick="lbOpen(this.src)">{% endfor %}
+    </div>
+  </div>
+</details>
+{% endif %}
+
+{# ─────────────────── Manheim auction transactions ─────────────────── #}
+{% set manheim_tx = None %}
+{% if vauto and vauto.manheim_transactions %}
+  {% set manheim_raw = vauto.manheim_transactions %}
+  {% if manheim_raw is mapping %}
+    {% set manheim_tx = manheim_raw.transactions %}
+  {% endif %}
+{% endif %}
+{% if manheim_tx %}
+<details class="card manheim">
+  <summary>
+    <span class="title">Manheim Auction (Wholesale)</span>
+    <span class="summary-text">{{ manheim_tx|length }} recent sale{% if manheim_tx|length != 1 %}s{% endif %}</span>
+  </summary>
+  <div class="body">
+    {% set prices = manheim_tx|selectattr('sale_price')|map(attribute='sale_price')|list %}
+    {% if prices %}
+      {% set med = prices|sort %}
+      <div class="row"><span class="lbl">Sales count</span><span class="val">{{ prices|length }}</span></div>
+      <div class="row"><span class="lbl">Median</span><span class="val">${{ '{:,}'.format(med[med|length//2]|int) }}</span></div>
+      <div class="row"><span class="lbl">Range</span><span class="val">${{ '{:,}'.format(med[0]|int) }} – ${{ '{:,}'.format(med[-1]|int) }}</span></div>
+    {% endif %}
+    <div style="margin-top:12px;font-size:11px;font-weight:700;color:#c4b5fd;text-transform:uppercase;letter-spacing:.5px">Recent sales</div>
+    {% for t in manheim_tx[:8] %}
+    <div class="comp">
+      <div class="top-line">
+        <span class="miles-l">{{ '{:,}'.format(t.odometer|int) if t.odometer else '?' }} mi</span>
+        {% if t.sale_price %}<span class="price-l">${{ '{:,}'.format(t.sale_price|int) }}</span>{% endif %}
+      </div>
+      <div class="meta-line">
+        {% if t.sale_date %}{{ t.sale_date }}{% endif %}{% if t.auction_location %} · {{ t.auction_location }}{% endif %}{% if t.condition_grade %} · grade {{ t.condition_grade }}{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
+
+{# ─────────────────── rBook closest-3 comps (top 3 retail market) ─────────────────── #}
+{% set rbook = market_intel.rbook if market_intel else None %}
+{% set closest = rbook.closest_3 if rbook else None %}
+{% if closest %}
+<details class="card rbook">
+  <summary>
+    <span class="title">rBook Market Comps</span>
+    <span class="summary-text">Top {{ closest|length }} closest retail listings</span>
+  </summary>
+  <div class="body">
+    {% if rbook.median %}<div class="row"><span class="lbl">rBook median (full set)</span><span class="val">${{ '{:,}'.format(rbook.median|int) }}</span></div>{% endif %}
+    {% if rbook.avg_price %}<div class="row"><span class="lbl">rBook average</span><span class="val">${{ '{:,}'.format(rbook.avg_price|int) }}</span></div>{% endif %}
+    <div style="margin-top:12px;font-size:11px;font-weight:700;color:#67e8f9;text-transform:uppercase;letter-spacing:.5px">Closest 3 by miles</div>
+    {% for c in closest %}
+    <div class="comp">
+      <div class="top-line">
+        <span class="miles-l">{{ '{:,}'.format(c.mileage|int) if c.mileage else '?' }} mi</span>
+        {% if c.price %}<span class="price-l">${{ '{:,}'.format(c.price|int) }}</span>{% endif %}
+      </div>
+      <div class="meta-line">
+        {{ c.year or '' }} {{ c.make or '' }} {{ c.model or '' }}{% if c.trim %} · {{ c.trim }}{% endif %}{% if c.days_on_lot %} · {{ c.days_on_lot }}d on lot{% endif %}
+      </div>
+      {% if c.url %}<div class="meta-line"><a href="{{ c.url }}" target="_blank" rel="noopener">View listing →</a></div>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
+
+{# ─────────────────── AccuTrade & vAuto book values ─────────────────── #}
+{% if accutrade or vauto %}
+<details class="card books">
+  <summary>
+    <span class="title">Book Values</span>
+    <span class="summary-text">vAuto · AccuTrade</span>
+  </summary>
+  <div class="body">
+    {% if vauto %}
+      {% if vauto.rbook %}<div class="row"><span class="lbl">vAuto rBook</span><span class="val">${{ '{:,}'.format(vauto.rbook|int) }}</span></div>{% endif %}
+      {% if vauto.mmr %}<div class="row"><span class="lbl">Manheim MMR</span><span class="val">${{ '{:,}'.format(vauto.mmr|int) }}</span></div>{% endif %}
+      {% if vauto.blackbook %}<div class="row"><span class="lbl">Black Book</span><span class="val">${{ '{:,}'.format(vauto.blackbook|int) }}</span></div>{% endif %}
+      {% if vauto.kbb %}<div class="row"><span class="lbl">KBB</span><span class="val">${{ '{:,}'.format(vauto.kbb|int) }}</span></div>{% endif %}
+      {% if vauto.j2j %}<div class="row"><span class="lbl">J2J</span><span class="val">${{ '{:,}'.format(vauto.j2j|int) }}</span></div>{% endif %}
+    {% endif %}
+    {% if accutrade %}
+      {% if accutrade.guaranteed_offer %}<div class="row"><span class="lbl">AccuTrade Guaranteed Offer</span><span class="val">${{ '{:,}'.format(accutrade.guaranteed_offer|int) }}</span></div>{% endif %}
+      {% if accutrade.trade_in %}<div class="row"><span class="lbl">AccuTrade Trade-in</span><span class="val">${{ '{:,}'.format(accutrade.trade_in|int) }}</span></div>{% endif %}
+      {% if accutrade.market_avg %}<div class="row"><span class="lbl">AccuTrade Market Avg</span><span class="val">${{ '{:,}'.format(accutrade.market_avg|int) }}</span></div>{% endif %}
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+{# ─────────────────── Offer form ─────────────────── #}
+<div class="offer">
+  <h2>💰 Submit your offer</h2>
+  <form method="POST" action="/partner/{{ slug }}/inbound/{{ bid.id }}/offer">
+    <label for="offer_amount">Your offer ($)</label>
+    <input type="text" name="offer_amount" id="offer_amount" inputmode="decimal"
+           placeholder="e.g. 48000" required autocomplete="off">
+    <label for="message">Optional note (delivery, recon plans, etc.)</label>
+    <textarea name="message" id="message" maxlength="1000"
+              placeholder="Anything else our salesperson should know?"></textarea>
+    <button type="submit">Send Offer to {{ dealer.salesperson or 'Experience Wholesale' }}</button>
+  </form>
+
+  {% if prior_offers %}
+  <div style="margin-top:18px;font-size:11px;color:#7fc99c;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Your prior offers on this bid</div>
+  {% for o in prior_offers %}
+  <div class="prior">
+    <strong>${{ '{:,}'.format(o.offer_amount|int) if o.offer_amount else '—' }}</strong>
+    <span style="color:#9aa3b2;font-size:12px"> · {{ o.submitted_at.strftime('%b %d, %I:%M %p') if o.submitted_at else '' }}</span>
+    {% if o.ew_action %}<span class="pill">{{ o.ew_action }}</span>{% endif %}
+    {% if o.message %}<div style="margin-top:6px;font-size:12px;color:#cbd5e1">{{ o.message }}</div>{% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+</div>
+
+<div class="lb" id="lb" onclick="this.classList.remove('open')"><img id="lbImg"></div>
+
+<script>
+function lbOpen(src) {
+  document.getElementById('lbImg').src = src;
+  document.getElementById('lb').classList.add('open');
+}
+</script>
+
+</body>
+</html>
