@@ -117,15 +117,12 @@ def _default_criteria_options(vehicle: dict) -> list[dict]:
         out.append({'fieldId': 'ModelYear',
                     'optionId': str(year),
                     'isSelected': True})
-    # 2026-05-11: when caller injects a canonical trim (from the AccuTrade
-    # overseer's confident pick), emit it as a Trim criteriaOption so
-    # vAuto's comp engine narrows server-side. Closes the loose-comp leak
-    # for makes that VIN-encode trim (Porsche 911, Ford F-series, BMW M).
-    canon_trim = vehicle.get('canon_trim') or vehicle.get('trim')
-    if canon_trim not in (None, ''):
-        out.append({'fieldId': 'Trim',
-                    'optionId': str(canon_trim),
-                    'isSelected': True})
+    # 2026-05-11: REVERTED — `Trim` criteriaOption causes vAuto BFF to
+    # return HTTP 500 (Cox doesn't accept 'Trim' as a valid fieldId, or
+    # rejects multi-value trim strings like "GT3 / GT3 Touring"). The
+    # downstream VIN-prefix-5 post-filter in market_intel.py + app.py
+    # remains the working strict-peer mechanism. Keep the canon_trim
+    # signal flowing for display + dealer match purposes only.
     return out
 
 

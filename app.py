@@ -616,6 +616,23 @@ def normalize_trim_text(s):
     return _MAT_ICON_RE.sub('', (s or '').strip()).strip()
 
 
+def _ensure_trim_select_cache_clean_trim_column():
+    """Idempotent — ensure clean_trim column exists on accutrade_trim_select_cache.
+    Older deployments created the table without it; the /api/accutrade/submit
+    canon_trim writeback SELECTs the column directly and 500s without it.
+    Runs once at module load."""
+    try:
+        _db = psycopg2.connect(DB_URL)
+        _cur = _db.cursor()
+        _cur.execute(
+            "ALTER TABLE accutrade_trim_select_cache "
+            "ADD COLUMN IF NOT EXISTS clean_trim TEXT")
+        _db.commit()
+        _db.close()
+    except Exception as _ee:
+        print(f'[boot] clean_trim column ensure failed: {_ee}', flush=True)
+
+
 def filter_rbook_to_strict_peers(subject_vin, rows, min_kept=5):
     """Drop comp rows whose first 5 VIN chars don't match the subject.
 
@@ -6352,6 +6369,7 @@ def _ensure_accutrade_table():
 
 
 _ensure_accutrade_table()
+_ensure_trim_select_cache_clean_trim_column()
 
 
 def _ensure_ipacket_table():
