@@ -260,7 +260,13 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
             {% endif %}
           </div>
           {% if bid.dc_all_in %}
-          <div><span style="color:#94a3b8">All-in (+${{ bid.dc_buy_fee_used }} fee, +${{ bid.dc_transport_used }} transport):</span> <strong style="color:#e2e8f0">${{ '{:,}'.format(bid.dc_all_in) }}</strong></div>
+          <div>
+            <span style="color:#94a3b8">All-in
+              (+${{ bid.dc_buy_fee_used }} fee,
+              +${{ '{:,}'.format(bid.dc_transport_used|int) }} transport{% if bid.dc_transport_mileage %} · {{ '{:,}'.format(bid.dc_transport_mileage) }} mi{% endif %}{% if bid.dc_transport_eta_min and bid.dc_transport_eta_max %} · {{ bid.dc_transport_eta_min }}–{{ bid.dc_transport_eta_max }} days{% endif %}{% if bid.dc_transport_enclosed %} · enclosed{% endif %}):
+            </span>
+            <strong style="color:#e2e8f0">${{ '{:,}'.format(bid.dc_all_in) }}</strong>
+          </div>
           {% endif %}
           <div><span style="color:#94a3b8">Bids:</span> <strong style="color:#e2e8f0">{{ bid.dc_bid_count or 0 }}</strong></div>
           <div><span style="color:#94a3b8">Reserve:</span>

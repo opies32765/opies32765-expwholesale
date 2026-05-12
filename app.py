@@ -1869,6 +1869,10 @@ def bid_detail(bid_id):
                dl.detail_url            AS dc_detail_url,
                dl.estimated_buy_fee     AS dc_buy_fee,
                dl.estimated_transport   AS dc_transport,
+               dl.transport_mileage     AS dc_transport_mileage,
+               dl.transport_eta_min     AS dc_transport_eta_min,
+               dl.transport_eta_max     AS dc_transport_eta_max,
+               dl.transport_enclosed    AS dc_transport_enclosed,
                dl.closed_at             AS dc_closed_at
         FROM bids b
         LEFT JOIN contacts c ON b.contact_id = c.id
@@ -7802,6 +7806,13 @@ def api_dealerclub_lot():
     featured_image_url = (data.get('featured_image_url') or '').strip() or None
     drivetrain = (data.get('drivetrain') or '').strip() or None
 
+    # Transport-quote fields from the scraper (DealerClub /transportation/quote/)
+    transport_price    = data.get('transport_price')
+    transport_mileage  = data.get('transport_mileage')
+    transport_eta_min  = data.get('transport_eta_min')
+    transport_eta_max  = data.get('transport_eta_max')
+    transport_enclosed = data.get('transport_enclosed')
+
     db = get_db()
     cur = db.cursor()
     try:
@@ -7814,6 +7825,8 @@ def api_dealerclub_lot():
                  reserve_met, is_no_reserve, reserve_price,
                  reserve_progress_color, status, featured_image_url,
                  detail_url, raw_payload,
+                 estimated_transport, transport_mileage,
+                 transport_eta_min, transport_eta_max, transport_enclosed,
                  first_seen_at, last_seen_at, last_polled_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s,
@@ -7821,6 +7834,7 @@ def api_dealerclub_lot():
                     %s, %s, %s,
                     %s, %s, %s,
                     %s, %s::jsonb,
+                    %s, %s, %s, %s, %s,
                     NOW(), NOW(), NOW())
             ON CONFLICT (external_id) DO UPDATE SET
                 current_price          = EXCLUDED.current_price,
@@ -7846,7 +7860,22 @@ def api_dealerclub_lot():
                         dealerclub_lots.close_reason
                     WHEN EXCLUDED.status IS NOT NULL
                          AND EXCLUDED.status != 'active' THEN EXCLUDED.status
-                    ELSE NULL END
+                    ELSE NULL END,
+                estimated_transport = COALESCE(
+                    EXCLUDED.estimated_transport,
+                    dealerclub_lots.estimated_transport),
+                transport_mileage = COALESCE(
+                    EXCLUDED.transport_mileage,
+                    dealerclub_lots.transport_mileage),
+                transport_eta_min = COALESCE(
+                    EXCLUDED.transport_eta_min,
+                    dealerclub_lots.transport_eta_min),
+                transport_eta_max = COALESCE(
+                    EXCLUDED.transport_eta_max,
+                    dealerclub_lots.transport_eta_max),
+                transport_enclosed = COALESCE(
+                    EXCLUDED.transport_enclosed,
+                    dealerclub_lots.transport_enclosed)
             RETURNING id, bid_id, (xmax = 0) AS is_insert
         """, (
             external_id, vin, year, make, model, trim, odometer,
@@ -7855,6 +7884,8 @@ def api_dealerclub_lot():
             reserve_met, is_no_reserve, reserve_price,
             reserve_color, status, featured_image_url,
             detail_url, json.dumps(data),
+            transport_price, transport_mileage,
+            transport_eta_min, transport_eta_max, transport_enclosed,
         ))
         row = cur.fetchone()
         lot_id = row['id']
