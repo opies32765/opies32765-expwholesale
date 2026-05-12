@@ -33,3 +33,13 @@ accutrade_reports/
 vauto_reports/
 ipacket_reports/
 private_reports/
+
+# ML model weights + metadata — regenerated nightly by train_per_make.py
+# at 04:30 ET from the lsl_training Postgres table (which is backed up via
+# the nightly pg_dump). Snapshotting daily retrain output in git creates
+# constant noise with no recovery benefit; re-running the trainer reproduces
+# them from the source-of-truth training data.
+ml/models/per_make/*.json
+ml/models_v2/per_make/*.json
+ml/models_hybrid/per_make/*.json
+ml/models_hybrid_v2/per_make/*.json
