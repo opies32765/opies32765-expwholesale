@@ -265,8 +265,17 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           <div><span style="color:#94a3b8">Bids:</span> <strong style="color:#e2e8f0">{{ bid.dc_bid_count or 0 }}</strong></div>
           <div><span style="color:#94a3b8">Reserve:</span>
             {% if bid.dc_no_reserve %}<strong style="color:#fde047">NO RESERVE</strong>
-            {% elif bid.dc_reserve_met %}<strong style="color:#86efac">met</strong>
-            {% else %}<strong style="color:#fca5a5">not met</strong>{% endif %}
+            {% elif bid.dc_reserve_met %}<strong style="color:#86efac">met ✓</strong>
+            {% else %}
+              <strong style="color:#fca5a5">not met ✗</strong>
+              {% if bid.dc_reserve_color == 'green' %}
+                <span style="color:#86efac;font-weight:700;margin-left:6px" title="Within ~90% of reserve — close to clearing">● near</span>
+              {% elif bid.dc_reserve_color == 'yellow' %}
+                <span style="color:#fde047;font-weight:700;margin-left:6px" title="60–90% of reserve — approaching">● close</span>
+              {% elif bid.dc_reserve_color == 'red' %}
+                <span style="color:#fca5a5;font-weight:700;margin-left:6px" title="Under 60% of reserve — long way to go">● far</span>
+              {% endif %}
+            {% endif %}
           </div>
         </div>
         {% if bid.dc_opp_tier %}
