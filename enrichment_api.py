@@ -122,12 +122,37 @@ def claim_job():
             # claim the same row. Excludes rows where someone holds an
             # active (< LEASE_SECONDS) claim on this same job type.
             bid_clause = ' AND bid_id = %s' if only_bid else ''
+            # rbook is now demoted to true-fallback only:
+            # - direct vAuto BFF gets first crack (kicked from
+            #   /api/vauto/submit + /api/vauto/url_capture_result, which
+            #   stamp enrichment_state.rbook.direct_started_at synchronously
+            #   BEFORE spawning the daemon thread).
+            # - legacy oscar-worker may claim only when direct has had a
+            #   chance: either direct_started_at is set AND >= 60s old, OR
+            #   no direct attempt happened at all AND the bid is old enough
+            #   (5 min from looked_up_at) that we assume direct won't fire.
+            # manheim is unchanged — direct API doesn't return the
+            # transaction-level Manheim rows that the scraper produces, so
+            # legacy MUST run for manheim.
+            if jtype == 'rbook':
+                direct_defer_clause = """
+                  AND (
+                       (enrichment_state->'rbook'->>'direct_started_at' IS NOT NULL
+                        AND (enrichment_state->'rbook'->>'direct_started_at')::timestamptz
+                            < NOW() - INTERVAL '60 seconds')
+                    OR (enrichment_state->'rbook'->>'direct_started_at' IS NULL
+                        AND looked_up_at < NOW() - INTERVAL '5 minutes')
+                  )
+                """
+            else:
+                direct_defer_clause = ''
             sql = f"""
                 SELECT id, bid_id, vin, appraisal_url, enrichment_state
                 FROM vauto_lookups
                 WHERE appraisal_url LIKE %s
                   AND {completed_col} IS NULL
                   {bid_clause}
+                  {direct_defer_clause}
                   AND (
                        enrichment_state IS NULL
                     OR enrichment_state->>%s IS NULL

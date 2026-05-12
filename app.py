@@ -8048,6 +8048,45 @@ def _ensure_watchdog():
 # Maps EW worker_id -> Proxmox vmid. Hardcoded for now; future: small DB table.
 # vm-worker-1 currently runs in vmid 9000 (the original template VM).
 # Clones for workers 2-5 will be at vmids 100-103.
+def _stamp_rbook_direct_started(bid_id):
+    """Record the moment we kick off a direct vAuto BFF rbook fetch.
+
+    The legacy enrichment claim path (enrichment_api.claim_job, jtype=rbook)
+    reads enrichment_state.rbook.direct_started_at and defers for 60s after
+    that stamp, so the legacy oscar-worker on pve-pc1 only races in when
+    direct has had its shot AND hasn't completed. This stops the race-loss
+    visible bug observed on bid 1192 (2026-05-12) where the slow 7-min
+    legacy scrape beat the 5-min assessment fallback timer because direct
+    had a transient 401 (now also retried — see commit f605009).
+
+    Called synchronously from /api/vauto/submit and
+    /api/vauto/url_capture_result BEFORE spawning the direct daemon
+    thread. Idempotent — overwrites prior stamp on retry.
+    """
+    import time as _time
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            UPDATE vauto_lookups
+               SET enrichment_state =
+                   COALESCE(enrichment_state, '{}'::jsonb)
+                   || jsonb_build_object(
+                          'rbook',
+                          COALESCE(enrichment_state->'rbook', '{}'::jsonb)
+                          || jsonb_build_object(
+                                 'direct_started_at', %s::text,
+                                 'status', 'direct_in_flight'))
+             WHERE bid_id = %s
+               AND rbook_completed_at IS NULL
+        """, (_time.strftime('%Y-%m-%dT%H:%M:%S+00:00', _time.gmtime()),
+              bid_id))
+        db.commit()
+        db.close()
+    except Exception as e:
+        print(f'[direct-stamp] bid={bid_id} stamp failed: {e}', flush=True)
+
+
 def _kick_direct_for_intake(bid_id):
     """Kick direct vAuto BFF API enrichment for a freshly-created bid.
 
@@ -9245,8 +9284,10 @@ def api_vauto_url_capture_result():
     # Direct vAuto BFF enrichment — replaces VM 120's 99s rbook scrape with
     # a ~2s API call. Fires only when a real URL is captured. Best-effort:
     # any failure (auth, timeout, missing session) falls through and legacy
-    # EWEnrichRbook on VM 120 picks up the bid via /api/enrichment/claim.
+    # EWEnrichRbook on VM 120 picks up the bid via /api/enrichment/claim
+    # (which now defers for 60s after _stamp_rbook_direct_started).
     if url:
+        _stamp_rbook_direct_started(bid_id)
         try:
             import threading
             from vauto_enrichment import kick_direct_enrichment
@@ -9513,9 +9554,11 @@ def api_vauto_submit():
     # Direct vAuto BFF enrichment — replaces VM 120's slow rbook scrape.
     # Wave-1 worker writes appraisal_url here on the saved vAuto submit;
     # we fire direct API in a daemon thread. Idempotent on rbook_completed_at
-    # IS NULL (legacy claim path will pick up bids we don't reach in time).
+    # IS NULL (legacy claim path defers for 60s after _stamp_rbook_direct_started
+    # so it only fires if direct API failed).
     _ap_url = (data.get('appraisal_url') or '').strip()
     if _ap_url.startswith('https://provision.vauto.app.coxautoinc.com/Va/Appraisal/Default.aspx'):
+        _stamp_rbook_direct_started(bid_id)
         try:
             import threading
             from vauto_enrichment import kick_direct_enrichment
