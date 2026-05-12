@@ -7115,6 +7115,53 @@ def _thalist_resolve_make(make_id):
     return _THALIST_MAKE_ID_TO_NAME.get(int(make_id))
 
 
+def _thalist_download_photo(remote_url: str) -> str | None:
+    """Pull a thalist blob photo to local /static/uploads/ and return its
+    local URL.
+
+    thalist serves blob.core.windows.net images with Content-Type:
+    application/octet-stream, which Gemini's vision API refuses with
+    "Provided image is not valid." Saving the bytes locally and serving
+    them under our own /static/uploads/ (where nginx sets a real
+    image/jpeg content type) makes the whole rest of the EW pipeline —
+    Gemini, the dashboard thumbnails, the bid view — work normally.
+
+    Returns the local /static/uploads/<uuid>.<ext> URL, or None on
+    failure.
+    """
+    import uuid as _uuid
+    try:
+        r = requests.get(remote_url, timeout=20, stream=False)
+        if r.status_code != 200 or not r.content:
+            return None
+        data = r.content
+        # Sniff extension from magic bytes — Azure blob doesn't tell us.
+        if data[:3] == b'\xff\xd8\xff':
+            ext = '.jpg'
+        elif data[:8] == b'\x89PNG\r\n\x1a\n':
+            ext = '.png'
+        elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            ext = '.webp'
+        elif data[:6] in (b'GIF87a', b'GIF89a'):
+            ext = '.gif'
+        elif data[:4] == b'%PDF':
+            return None  # skip PDFs etc. — only photos belong on bids
+        else:
+            # Unknown signature — assume jpeg, EW dashboard will render it
+            # if it's actually a real image of any common format.
+            ext = '.jpg'
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        fname = f'thalist_{_uuid.uuid4().hex}{ext}'
+        fpath = os.path.join(UPLOAD_DIR, fname)
+        with open(fpath, 'wb') as fp:
+            fp.write(data)
+        return f'/static/uploads/{fname}'
+    except Exception as e:
+        print(f'[thalist] photo download failed {remote_url}: {e}',
+              flush=True)
+        return None
+
+
 @app.route('/api/thalist/post', methods=['POST'])
 def api_thalist_post():
     """Receive one scraped thalist.com Wholesale Inventory post.
@@ -7311,18 +7358,23 @@ def api_thalist_post():
         ))
         new_bid_id = cur.fetchone()['id']
 
-        # Save photos on the bid — strictly thalist's blob CDN (the page
-        # source carries site-chrome logos under www.thalist.com which would
-        # render as broken vehicle photos if we let them through).
+        # Save photos on the bid. thalist's blob CDN serves images with
+        # Content-Type: application/octet-stream, which Gemini's vision
+        # endpoint rejects with "Provided image is not valid." We pull
+        # each photo down, save it under /static/uploads/ (where nginx
+        # serves a real image/jpeg content type), and store the local URL.
         for purl in (photos or [])[:20]:
             if not purl or not isinstance(purl, str):
                 continue
             if 'blob.core.windows.net/images/' not in purl:
                 continue
+            local_url = _thalist_download_photo(purl)
+            if not local_url:
+                continue
             try:
                 cur.execute(
                     "INSERT INTO bid_photos (bid_id, url) VALUES (%s, %s)",
-                    (new_bid_id, purl))
+                    (new_bid_id, local_url))
             except Exception:
                 pass
 
