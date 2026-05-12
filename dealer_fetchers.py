@@ -16,6 +16,7 @@ status_code = 599 is our synthetic "redirected to an internal address" code.
 FlareSolverr must be running at FLARESOLVERR_URL (default http://127.0.0.1:8191).
 DataImpulse creds default to the same values used by CarHub's 3proxy on C1.
 """
+import concurrent.futures
 import json
 import os
 import time
@@ -50,6 +51,34 @@ def fetch_direct(url, sess, method='GET'):
 
 
 # ── Tier 2: FlareSolverr ────────────────────────────────────────────────
+# Wall-clock deadline budget per FS call (seconds). requests' `timeout` is
+# per-read, not total — if FlareSolverr keeps the HTTP socket alive while
+# Chromium is wedged on a selector heuristic (e.g. Manheim's .lds-ring
+# loading spinner 2026-05-12), per-read never fires and a single dealer can
+# hang the entire scan for hours. ThreadPool + future.result(timeout=N)
+# guarantees we move on. The orphaned worker thread leaks a single short
+# connection that FS eventually 504s — acceptable cost for forward progress.
+FLARESOLVERR_DEADLINE_SEC = int(os.environ.get('FLARESOLVERR_DEADLINE_SEC', '120'))
+FLARESOLVERR_PROXY_DEADLINE_SEC = int(os.environ.get('FLARESOLVERR_PROXY_DEADLINE_SEC', '180'))
+
+
+def _flaresolverr_post(payload, wall_clock_sec):
+    """POST to FlareSolverr with a HARD wall-clock deadline. Returns the
+    `requests.Response`, or None if the deadline expired."""
+    def _do():
+        return requests.post(FLARESOLVERR_URL, json=payload, timeout=wall_clock_sec)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(_do)
+    try:
+        return future.result(timeout=wall_clock_sec)
+    except concurrent.futures.TimeoutError:
+        return None
+    finally:
+        # shutdown(wait=False) lets the orphaned thread finish in the
+        # background; we don't block scan progress on its cleanup.
+        pool.shutdown(wait=False)
+
+
 def fetch_flaresolverr(url, sess=None, method='GET'):
     """Route through a local FlareSolverr container. Handles Cloudflare/Akamai
     by executing the JS challenge in a real headless Chromium."""
@@ -59,7 +88,9 @@ def fetch_flaresolverr(url, sess=None, method='GET'):
         'maxTimeout': FLARESOLVERR_TIMEOUT_MS,
     }
     try:
-        resp = requests.post(FLARESOLVERR_URL, json=payload, timeout=90)
+        resp = _flaresolverr_post(payload, wall_clock_sec=FLARESOLVERR_DEADLINE_SEC)
+        if resp is None:
+            return None, None, f'flaresolverr_deadline_exceeded:{FLARESOLVERR_DEADLINE_SEC}s'
         data = resp.json()
     except Exception as e:
         return None, None, f'flaresolverr_error:{type(e).__name__}:{e}'
@@ -94,7 +125,9 @@ def fetch_flaresolverr_proxy(url, sess=None, method='GET'):
         },
     }
     try:
-        resp = requests.post(FLARESOLVERR_URL, json=payload, timeout=120)
+        resp = _flaresolverr_post(payload, wall_clock_sec=FLARESOLVERR_PROXY_DEADLINE_SEC)
+        if resp is None:
+            return None, None, f'flaresolverr_proxy_deadline_exceeded:{FLARESOLVERR_PROXY_DEADLINE_SEC}s'
         data = resp.json()
     except Exception as e:
         return None, None, f'flaresolverr_proxy_error:{type(e).__name__}'

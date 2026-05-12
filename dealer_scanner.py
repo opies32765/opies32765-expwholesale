@@ -2293,20 +2293,43 @@ class DealerScanner:
                  'platform_detected': None, 'status': 'running', 'error': None,
                  'tier': 'direct'}
         try:
-            # 1. Platform fingerprint (homepage always fetched on 'direct' first)
-            _CURRENT_TIER['tier'] = 'direct'
-            code, _f, body = fetch(self.base_url, self.sess)
-            if code in (403, 503, 401) and dealer_fetchers.flaresolverr_healthy():
-                # Homepage is blocked — jump straight to FlareSolverr for the whole scan
-                _CURRENT_TIER['tier'] = 'flaresolverr'
+            # 1. Platform fingerprint.
+            # If the dealer has a known stored platform from onboarding, skip
+            # the homepage probe entirely. The probe was the wedge point on
+            # 2026-05-12 when FlareSolverr got stuck on Manheim Imports'
+            # .lds-ring loading spinner (a permanent UI element FS misread
+            # as a Cloudflare challenge). One wedged probe blocked the whole
+            # scan for 4+ hours. All platform fast-paths below either gate
+            # on `self.dealer.get('platform')` (dealerinspire/ect/greenlight)
+            # or accept a pre-set `platform` local (aan/ridemotive/etc), so
+            # re-fingerprinting via homepage HTML is dead weight here.
+            stored_platform = (self.dealer.get('platform') or '').strip().lower()
+            _STORED_KNOWN = {
+                'aan', 'wordpress', 'shopify', 'autorevo', 'autodealercms',
+                'frazer', 'dealercenter', 'dealer.com', 'dealerinspire',
+                'greenlight', 'ridemotive', 'dealer-eprocess', 'vinsolutions',
+                'cdk', 'homenet', 'ect', 'dealeron', 'autotrader-embed',
+                'ai-generated',
+            }
+            if stored_platform in _STORED_KNOWN:
+                platform = stored_platform
+                method = ''
+                _CURRENT_TIER['tier'] = 'direct'
+                body = ''
+            else:
+                _CURRENT_TIER['tier'] = 'direct'
                 code, _f, body = fetch(self.base_url, self.sess)
-            if code in (403, 503, 401) or not body:
-                stats['status'] = 'blocked'
-                stats['error'] = f'HTTP {code} on homepage even via {_CURRENT_TIER["tier"]}'
-                self._update_dealer(None, None, scan_id, stats['error'][:200])
-                self._finalize(scan_id, stats, started)
-                return stats
-            platform, method = detect_platform(body or '')
+                if code in (403, 503, 401) and dealer_fetchers.flaresolverr_healthy():
+                    # Homepage is blocked — jump straight to FlareSolverr for the whole scan
+                    _CURRENT_TIER['tier'] = 'flaresolverr'
+                    code, _f, body = fetch(self.base_url, self.sess)
+                if code in (403, 503, 401) or not body:
+                    stats['status'] = 'blocked'
+                    stats['error'] = f'HTTP {code} on homepage even via {_CURRENT_TIER["tier"]}'
+                    self._update_dealer(None, None, scan_id, stats['error'][:200])
+                    self._finalize(scan_id, stats, started)
+                    return stats
+                platform, method = detect_platform(body or '')
 
             # DealerInspire Algolia fast-path — runs before any other
             # branching. Gated on the dealer's STORED platform column
