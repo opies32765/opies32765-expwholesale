@@ -165,6 +165,29 @@ tr:last-child td{border-bottom:none}
 </head>
 <body>
 
+{# ─── 2026-05-12 Network claim banners (yellow, stacked, persistent) ─── #}
+{% if network_claims %}
+<div id="network-claims-banner" style="position:sticky;top:0;z-index:60;background:#1e1b0f;border-bottom:2px solid #b45309;padding:10px 20px">
+  {% for c in network_claims %}
+  <a href="/bid/{{ c.bid_id }}" style="display:flex;align-items:center;gap:14px;padding:10px 14px;margin-bottom:6px;background:#3b2c0a;border:1px solid #fbbf24;border-radius:8px;text-decoration:none;color:#fef3c7;animation:nc-pulse 2s ease-in-out infinite">
+    <span style="font-size:18px">🔔</span>
+    <span style="flex:1;font-size:14px">
+      <b style="color:#fde68a">{{ c.dealer_name }}{% if c.dealer_salesperson %} ({{ c.dealer_salesperson }}){% endif %}</b>
+      claimed <b style="color:white">bid #{{ c.bid_id }}</b> —
+      <b style="color:white">{{ c.year }} {{ c.make }} {{ c.model }}</b>
+      at <b style="color:#fde68a">${{ '{:,}'.format(c.ask or 0) }}</b>
+      <span style="opacity:.7;font-size:12px;margin-left:8px">{{ c.claimed_at.strftime('%H:%M') if c.claimed_at else '' }}</span>
+    </span>
+    <span style="font-size:12px;color:#fbbf24;text-transform:uppercase;letter-spacing:.5px;font-weight:600">view & confirm →</span>
+  </a>
+  {% endfor %}
+</div>
+<style>
+  @keyframes nc-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,.55) } 50% { box-shadow: 0 0 0 6px rgba(251,191,36,0) } }
+</style>
+{% endif %}
+
+
 {% include '_persistent_alerts.html' %}
 
 <div class="header">
@@ -424,6 +447,10 @@ setInterval(() => {
           {% if bid.phone.startswith('field:') %}
             <div class="contact-name">{{ bid.contact_name or 'Field Rep' }}</div>
             <div><span class="badge-field">{{ bid.contact_role or 'Field Rep' }}</span></div>
+          {% elif bid.phone.startswith('thalist:') %}
+            <div class="contact-name" style="color:#34d399">{{ bid.contact_name or 'Thalist Post' }}</div>
+            {% if bid.contact_company %}<div class="contact-company" style="color:#94a3b8;font-size:11px">{{ bid.contact_company }}</div>{% endif %}
+            <div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.3);border-radius:3px;font-size:9px;font-weight:700;color:#34d399;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from thalist.com Wholesale Inventory">Thalist</span></div>
           {% elif bid.phone == 'sys:db_push' %}
             <div class="contact-name" style="color:#a78bfa">EW Search</div>
             {% if bid.partner_dealer_name %}<div class="contact-company" style="color:#94a3b8;font-size:11px">{{ bid.partner_dealer_name }}</div>{% endif %}

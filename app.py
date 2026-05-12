@@ -83,6 +83,7 @@ _PUBLIC_PREFIXES = (
     '/api/vauto/', '/api/accutrade/', '/accutrade_reports/',
     '/api/ipacket/', '/ipacket_reports/',
     '/api/enrichment/',  # rbook/manheim enrichment workers (oscar VMs)
+    '/api/thalist/',     # thalist.com scraper -> EW (shared-secret auth)
     '/api/comp_msrp/',   # VM 121 comp_msrp worker (claim, submit, jwt, status)
     '/api/worker/',  # progress, session_lost — worker-facing, no login
     '/api/dealer/vauto_verify', '/api/dealer/vauto_verify_queue',
@@ -1594,6 +1595,22 @@ def dashboard():
     db = get_db()
     cur = db.cursor()
 
+    # ── 2026-05-12 Network claims: bids dealers said YES to, not yet confirmed sold ──
+    cur.execute("""
+        SELECT bp.bid_id, bp.dealer_id, bp.claimed_at, bp.score,
+               d.name AS dealer_name, d.salesperson AS dealer_salesperson,
+               b.year, b.make, b.model, b.network_ask::int AS ask
+          FROM bid_pushes bp
+          JOIN dealers d ON d.id = bp.dealer_id
+          JOIN bids    b ON b.id = bp.bid_id
+         WHERE bp.claimed_at IS NOT NULL
+           AND bp.claim_late IS NOT TRUE
+           AND bp.sold_confirmed_at IS NULL
+         ORDER BY bp.claimed_at DESC
+    """)
+    network_claims = [dict(r) for r in cur.fetchall()]
+    network_claims_by_bid = {c['bid_id']: c for c in network_claims}
+
     cur.execute("SELECT status, COUNT(*) as cnt FROM bids GROUP BY status")
     stats = {'new': 0, 'reviewing': 0, 'bid_sent': 0, 'passed': 0, 'bought': 0, 'total': 0}
     for r in cur.fetchall():
@@ -1788,7 +1805,9 @@ def dashboard():
                            sourcing_active=sourcing_active,
                            sourcing_unseen_count=sourcing_unseen_count,
                            partner_offer_counts=partner_offer_counts,
-                           time_ago=time_ago)
+                           time_ago=time_ago,
+                           network_claims=network_claims,
+                           network_claims_by_bid=network_claims_by_bid)
 
 
 @app.route('/bid/<int:bid_id>')
@@ -1814,6 +1833,41 @@ def bid_detail(bid_id):
 
     cur.execute("SELECT * FROM bid_messages WHERE bid_id = %s ORDER BY created_at", (bid_id,))
     messages = cur.fetchall()
+
+    cur.execute("""
+        SELECT bp.bid_id, bp.dealer_id, bp.claimed_at, bp.score, bp.claim_from_phone,
+               d.name AS dealer_name, d.salesperson AS dealer_salesperson,
+               b.network_ask::int AS ask
+          FROM bid_pushes bp
+          JOIN dealers d ON d.id = bp.dealer_id
+          JOIN bids b    ON b.id = bp.bid_id
+         WHERE bp.bid_id = %s AND bp.claimed_at IS NOT NULL
+           AND bp.claim_late IS NOT TRUE AND bp.sold_confirmed_at IS NULL
+         LIMIT 1
+    """, (bid_id,))
+    _bnc = cur.fetchone()
+    bid_network_claim = dict(_bnc) if _bnc else None
+
+    # The same query but for already-confirmed sales (sold_confirmed_at NOT NULL).
+    # Drives the SOLD panel on the Push to Network card.
+    cur.execute("""
+        SELECT bp.bid_id, bp.dealer_id, bp.claimed_at, bp.sold_confirmed_at,
+               bp.sold_confirmed_by, bp.score,
+               d.name AS dealer_name, d.salesperson AS dealer_salesperson,
+               b.network_ask::int AS ask,
+               (SELECT COUNT(*) FROM bid_pushes bp2
+                 WHERE bp2.bid_id = bp.bid_id AND bp2.sold_confirmed_at IS NOT NULL
+                   AND bp2.dealer_id != bp.dealer_id) AS losers_notified
+          FROM bid_pushes bp
+          JOIN dealers d ON d.id = bp.dealer_id
+          JOIN bids b    ON b.id = bp.bid_id
+         WHERE bp.bid_id = %s AND bp.sold_confirmed_at IS NOT NULL
+           AND bp.claim_late IS NOT TRUE
+           AND bp.claimed_at IS NOT NULL
+         LIMIT 1
+    """, (bid_id,))
+    _bns = cur.fetchone()
+    bid_network_sold = dict(_bns) if _bns else None
 
     cur.execute("SELECT * FROM valuations WHERE bid_id = %s ORDER BY fetched_at DESC", (bid_id,))
     valuations = cur.fetchall()
@@ -2198,7 +2252,7 @@ def bid_detail(bid_id):
                            market_intel=market_intel,
                            ml_prediction=ml_prediction,
                            partner_offers=partner_offers,
-                           time_ago=time_ago)
+                           bid_network_claim=bid_network_claim, bid_network_sold=bid_network_sold, time_ago=time_ago)
 
 
 # ── SMS intake observability helpers ─────────────────────────────────────────
@@ -2425,6 +2479,19 @@ def twilio_webhook():
             db.rollback()
         except Exception:
             pass
+
+    # ── 2026-05-12 Network claim reply (YES) — intercept first ──
+    try:
+        from partner_portal import try_handle_network_claim
+        _h, _r = try_handle_network_claim(from_phone, body)
+        if _h:
+            from html import escape as _esc
+            xml = ("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                   "<Response>" + (f"<Message>{_esc(_r)}</Message>" if _r else "") +
+                   "</Response>")
+            return (xml, 200, {"Content-Type": "application/xml"})
+    except Exception as _e:
+        print(f"[network-claim] handler error: {_e}", flush=True)
 
     # ── Sourcing bot router ──
     # Intercepts inbound from gated phones (default: dev phone only) that
@@ -7041,6 +7108,296 @@ def api_admin_bulk_upload_commit():
     })
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# thalist.com scraper -> EW bid intake
+# Built 2026-05-12. Scraper runs on a Windows VM, fires this 4x/day with
+# one JSON payload per Wholesale Inventory post. We dedupe by VIN against
+# open bids — new posts spawn a bid (creation_source='thalist'), repeats
+# just refresh the ledger row's last_seen_at.
+# ─────────────────────────────────────────────────────────────────────────
+
+THALIST_SECRET = os.environ.get(
+    'EW_THALIST_SECRET',
+    'f1pxdtE9UkMMXslbCI3raenTIOEZ3rIJ4-FaSGt1Iqw')  # default for first deploy
+THALIST_ALERT_PHONE = '+14074309675'  # operator's phone for new-post SMS
+
+_THALIST_MAKE_ID_TO_NAME = {
+    # Backfilled lazily as the scraper sends us posts whose Make is unknown.
+    # The list dropdown carries the mapping; we'll harvest it from the
+    # scraper's first call (sends a 'makes' bootstrap payload) — for now we
+    # know a few from the sample scrape.
+    18: 'Lexus',
+}
+
+
+def _thalist_resolve_make(make_id):
+    if not make_id:
+        return None
+    return _THALIST_MAKE_ID_TO_NAME.get(int(make_id))
+
+
+@app.route('/api/thalist/post', methods=['POST'])
+def api_thalist_post():
+    """Receive one scraped thalist.com Wholesale Inventory post.
+
+    Auth: header X-Auth must match env EW_THALIST_SECRET.
+    Body (JSON, all optional except detail_url + post_id):
+        {
+          post_id:           -304074,
+          detail_url:        "https://www.thalist.com/auth/posts/carpost-details/-304074",
+          vin:               "JTJTBCDX8T5081902",
+          title:             "2026 Lexus GX550 Premium Plus",
+          year:              2026, make_id: 18,
+          model:             "GX550 Premium Plus",
+          asking_price:      86500,
+          mileage:            2997,
+          location_zip:      "55364",
+          description:       "RARE ATOMIC SILVER ...",
+          teaser:            "PRICE RECUCED $1000 FOR IMMEDIATE SALE!",
+          title_holder:      "LEXUS FS",
+          poster_name:       "Billy Ward",
+          poster_company:    "Luxury & Exotic Inc.",
+          poster_company_id: 1180,
+          photos:            ["https://...", "..."]
+        }
+
+    Behavior:
+      - Upsert thalist_posts row (unique on post_id). On INSERT, run the
+        dedupe + bid-create flow. On UPDATE, just bump last_seen_at and
+        return 'already_seen'.
+      - Dedupe: skip bid creation if an open bid with same VIN exists.
+        Record the matching bid in dedupe_target_bid_id and return.
+      - On bid creation: fire Telegram + SMS alert, kick canonicalization
+        + market check just like a quick_drop.
+
+    Response: {ok, status: 'new'|'dupe'|'already_seen', bid_id, ...}
+    """
+    auth = (request.headers.get('X-Auth') or '').strip()
+    if not THALIST_SECRET or auth != THALIST_SECRET:
+        return jsonify({'error': 'bad auth'}), 401
+
+    data = request.get_json(silent=True) or {}
+    post_id = data.get('post_id')
+    detail_url = (data.get('detail_url') or '').strip()
+    if not post_id or not detail_url:
+        return jsonify({'error': 'post_id + detail_url required'}), 400
+    try:
+        post_id = int(post_id)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'post_id must be int'}), 400
+
+    vin = (data.get('vin') or '').strip().upper() or None
+    if vin and len(vin) != 17:
+        vin = None  # malformed
+
+    # Decompose for bid-creation path
+    year         = data.get('year')
+    make_id      = data.get('make_id')
+    make_name    = _thalist_resolve_make(make_id) or 'Unknown'
+    model        = (data.get('model') or '').strip() or None
+    asking_price = data.get('asking_price')
+    mileage      = data.get('mileage')
+    title        = (data.get('title') or '').strip() or None
+    description  = (data.get('description') or '').strip() or None
+    teaser       = (data.get('teaser') or '').strip() or None
+    poster_name  = (data.get('poster_name') or '').strip() or None
+    poster_company = (data.get('poster_company') or '').strip() or None
+    poster_company_id = data.get('poster_company_id')
+    location_zip = (data.get('location_zip') or '').strip() or None
+    photos       = data.get('photos') or []
+
+    db = get_db()
+    cur = db.cursor()
+    try:
+        # UPSERT ledger row first
+        cur.execute("""
+            INSERT INTO thalist_posts
+                (post_id, vin, title, year, make_id, model, asking_price,
+                 mileage, location_zip, description, teaser, title_holder,
+                 poster_name, poster_company, poster_company_id, photos,
+                 detail_url, raw_payload, first_seen_at, last_seen_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s::jsonb,
+                    %s, %s::jsonb, NOW(), NOW())
+            ON CONFLICT (post_id) DO UPDATE
+              SET last_seen_at = NOW(),
+                  asking_price = COALESCE(EXCLUDED.asking_price,
+                                          thalist_posts.asking_price),
+                  raw_payload = EXCLUDED.raw_payload
+            RETURNING id, bid_id, dedupe_target_bid_id,
+                      (xmax = 0) AS is_insert
+        """, (
+            post_id, vin, title, year, make_id, model, asking_price,
+            mileage, location_zip, description, teaser,
+            (data.get('title_holder') or '').strip() or None,
+            poster_name, poster_company, poster_company_id,
+            json.dumps(photos) if photos else None,
+            detail_url, json.dumps(data),
+        ))
+        row = cur.fetchone()
+        ledger_id = row['id']
+        existing_bid = row['bid_id']
+        existing_dupe = row['dedupe_target_bid_id']
+        is_insert = bool(row['is_insert'])
+
+        # Repeat scrape — nothing to do
+        if not is_insert:
+            db.commit()
+            return jsonify({
+                'ok': True, 'status': 'already_seen',
+                'ledger_id': ledger_id,
+                'bid_id': existing_bid,
+                'dedupe_target_bid_id': existing_dupe,
+            })
+
+        # First-time post. If VIN matches an open bid, record as dupe — no
+        # new bid + no alert.
+        if vin:
+            cur.execute("""
+                SELECT id FROM bids
+                WHERE vin = %s
+                  AND COALESCE(status,'') NOT IN ('cancelled', 'rejected')
+                ORDER BY id DESC LIMIT 1
+            """, (vin,))
+            dupe = cur.fetchone()
+            if dupe:
+                cur.execute("""
+                    UPDATE thalist_posts SET dedupe_target_bid_id = %s
+                    WHERE id = %s
+                """, (dupe['id'], ledger_id))
+                db.commit()
+                print(f'[thalist] post {post_id} VIN {vin} dedupe -> '
+                      f'bid #{dupe["id"]}', flush=True)
+                return jsonify({
+                    'ok': True, 'status': 'dupe',
+                    'ledger_id': ledger_id,
+                    'dedupe_target_bid_id': dupe['id'],
+                })
+
+        # Create contact for the poster (keyed by their company on thalist
+        # so repeat posts from the same dealer roll up into one contact).
+        contact_phone = f'thalist:{poster_company_id or "0"}'
+        contact_name = poster_name or poster_company or 'Thalist Post'
+        cur.execute("""
+            INSERT INTO contacts (phone, name, company)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (phone) DO UPDATE SET
+                name    = COALESCE(EXCLUDED.name, contacts.name),
+                company = COALESCE(EXCLUDED.company, contacts.company)
+            RETURNING id
+        """, (contact_phone, contact_name, poster_company))
+        contact_id = cur.fetchone()['id']
+
+        # Build the bid's notes + raw_message in EW's house style
+        note_parts = [f'[Thalist: {poster_name or poster_company or "?"}]']
+        if poster_company and poster_company != poster_name:
+            note_parts.append(poster_company)
+        if location_zip:
+            note_parts.append(f'ZIP {location_zip}')
+        if teaser:
+            note_parts.append(f'Teaser: {teaser}')
+        if description:
+            note_parts.append(description)
+        note_parts.append(f'thalist post: {detail_url}')
+        full_notes = ' — '.join(note_parts)
+
+        rm_parts = ['[THALIST]']
+        if vin: rm_parts.append(f'VIN: {vin}')
+        if title: rm_parts.append(title)
+        elif year and make_name and model:
+            rm_parts.append(f'{year} {make_name} {model}')
+        if mileage: rm_parts.append(f'{int(mileage):,} mi')
+        if asking_price: rm_parts.append(f'${int(asking_price):,}')
+        raw_message = ' | '.join(rm_parts)
+
+        cur.execute("""
+            INSERT INTO bids
+                (contact_id, phone, vin, year, make, model,
+                 mileage, raw_message, asking_price, notes,
+                 status, creation_source, vauto_priority)
+            VALUES (%s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    'new', 'thalist', TRUE)
+            RETURNING id
+        """, (
+            contact_id, contact_phone, vin,
+            year if year else None,
+            make_name if make_name and make_name != 'Unknown' else None,
+            model,
+            int(mileage) if mileage else None,
+            raw_message,
+            int(asking_price) if asking_price else None,
+            full_notes,
+        ))
+        new_bid_id = cur.fetchone()['id']
+
+        # Save photos on the bid
+        for purl in photos[:10]:
+            if purl and 'thalist' in purl.lower() or 'cloudfront' in (purl or '').lower() \
+                    or 'amazonaws' in (purl or '').lower() \
+                    or 'blob.core.windows' in (purl or '').lower():
+                try:
+                    cur.execute(
+                        "INSERT INTO bid_photos (bid_id, url) VALUES (%s, %s)",
+                        (new_bid_id, purl))
+                except Exception:
+                    pass
+
+        # Link ledger row to the new bid
+        cur.execute("""
+            UPDATE thalist_posts SET bid_id = %s WHERE id = %s
+        """, (new_bid_id, ledger_id))
+
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        db.close()
+        return jsonify({'error': f'{type(e).__name__}: {e}'}), 500
+    finally:
+        try: db.close()
+        except Exception: pass
+
+    # Fire alerts + downstream enrichment
+    try:
+        title_str = title or f'{year or ""} {make_name or ""} {model or ""}'.strip()
+        price_str = f'${int(asking_price):,}' if asking_price else 'no price'
+        miles_str = f'{int(mileage):,} mi' if mileage else '? mi'
+        msg_text = (
+            f'🚗 New Thalist post → bid #{new_bid_id}\n'
+            f'{title_str}\n'
+            f'VIN: {vin or "(none)"}\n'
+            f'{price_str} · {miles_str}\n'
+            f'by {poster_name or "?"} ({poster_company or "?"})\n'
+            f'{detail_url}'
+        )
+        msg_html = (
+            f'<b>🚗 New Thalist post</b> → bid #<b>{new_bid_id}</b>\n'
+            f'{title_str}\n'
+            f'VIN: <code>{vin or "(none)"}</code>\n'
+            f'{price_str} · {miles_str}\n'
+            f'by {poster_name or "?"} ({poster_company or "?"})\n'
+            f'<a href="{detail_url}">view on thalist</a>'
+        )
+        _tg_worker_alert(msg_html)
+        send_sms(THALIST_ALERT_PHONE, msg_text[:1200])
+    except Exception as e:
+        print(f'[thalist] alert error: {e}', flush=True)
+
+    try:
+        if vin:
+            trigger_market_check(new_bid_id, vin)
+    except Exception as e:
+        print(f'[thalist] market_check kick failed: {e}', flush=True)
+
+    return jsonify({
+        'ok': True, 'status': 'new',
+        'ledger_id': ledger_id,
+        'bid_id': new_bid_id,
+        'vin': vin,
+    })
+
+
 @app.route('/admin/ai-levers')
 def admin_ai_levers():
     """Render the AI Levers admin page."""
@@ -7339,17 +7696,27 @@ def api_vauto_pending():
     # are clearly broken (vAuto session issue, popup hangs, VIN data issue,
     # etc.). Mark them as __not_found__ so they stop cycling through workers
     # infinitely. Lightweight, idempotent, self-healing — runs each poll.
+    # UPSERT so bids that never produced a vauto_lookups row (e.g. every
+    # worker error'd before reaching the submit step) still get marked
+    # __not_found__ and stop cycling through the fleet. The pre-2026-05-12
+    # UPDATE-only version silently no-op'd on those bids (bid 1193: 43
+    # consecutive failed claims tripping the 3-failure Telegram alert
+    # on every worker that touched it).
     cur.execute("""
-        UPDATE vauto_lookups
-           SET appraisal_url = '__not_found__'
-         WHERE appraisal_url IS NULL
-           AND bid_id IN (
-               SELECT bid_id FROM worker_jobs
+        INSERT INTO vauto_lookups (bid_id, vin, appraisal_url, looked_up_at)
+        SELECT b.id, b.vin, '__not_found__', NOW()
+          FROM bids b
+          JOIN (
+              SELECT bid_id FROM worker_jobs
                WHERE job_type='vauto'
                GROUP BY bid_id
                HAVING COUNT(*) >= 5
                   AND COUNT(*) FILTER (WHERE status='ok') = 0
-           )
+          ) wj ON wj.bid_id = b.id
+         WHERE b.vin IS NOT NULL
+        ON CONFLICT (bid_id) DO UPDATE
+           SET appraisal_url = '__not_found__'
+         WHERE vauto_lookups.appraisal_url IS NULL
     """)
     cur.execute("""
         WITH eligible AS (
@@ -13318,6 +13685,361 @@ def inject_ew_alerts():
             ew_alert_match_count=0,
             ew_alert_matches=[],
         )
+
+
+
+# ── Network push (2026-05-12) — bidder-triggered scored broadcast ─────
+@app.route('/api/bid/<int:bid_id>/network-push', methods=['POST'])
+def api_bid_network_push(bid_id):
+    """Bidder hits 'Push & Text' on bid.html. Stamps target ask, scores
+    every subscribed dealer with VIN-on-lot exclusion, texts surviving
+    salespeople. Returns sent/skipped/errors JSON for the result UI."""
+    try:
+        ask = float(request.form.get('network_ask') or 0)
+    except (TypeError, ValueError):
+        return {'error': 'invalid network_ask'}, 400
+    if ask <= 0:
+        return {'error': 'network_ask must be > 0'}, 400
+    note = (request.form.get('note') or '').strip() or None
+    pushed_by = session.get('username') or 'bidder'
+
+    # Per-dealer selection (CSV of dealer IDs from the checkbox UI). When
+    # absent, push to ALL scored matches (legacy behavior).
+    raw_ids = (request.form.get('dealer_ids') or '').strip()
+    only_ids = None
+    if raw_ids:
+        try:
+            only_ids = [int(x) for x in raw_ids.split(',') if x.strip().isdigit()]
+        except Exception:
+            only_ids = None
+    from partner_portal import push_bid_with_network_ask
+    result = push_bid_with_network_ask(bid_id, ask, note, pushed_by=pushed_by,
+                                       only_dealer_ids=only_ids)
+    return result
+
+
+@app.route('/api/bid/<int:bid_id>/network-push/preview', methods=['GET'])
+def api_bid_network_push_preview(bid_id):
+    """Dry-run: returns who WOULD be texted without sending. No DB writes."""
+    try:
+        ask = float(request.args.get('ask') or 0)
+    except (TypeError, ValueError):
+        ask = 0
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT id, year, make, model, mileage, vin,
+               COALESCE(asking_price, ai_price, bid_amount) AS asking_price
+          FROM bids WHERE id = %s
+    """, (bid_id,))
+    bid = cur.fetchone()
+    if not bid:
+        db.close()
+        return {'error': 'bid not found'}, 404
+    cur.execute("""
+        SELECT id, name, salesperson, salesperson_phone, buy_profile
+          FROM dealers
+         WHERE receive_inbound_pushes = TRUE AND active = TRUE
+    """)
+    subscribers = cur.fetchall()
+    db.close()
+    from partner_portal import _score_bid_for_dealer, INBOUND_PUSH_MIN_SCORE
+    sent, skipped = [], []
+    for d in subscribers:
+        score, reason = _score_bid_for_dealer(dict(bid), d.get('buy_profile'),
+                                              dealer_id=d['id'])
+        target = {
+            'dealer_id': d['id'], 'name': d['name'],
+            'score': score, 'reason': reason,
+            'sms_to': d.get('salesperson_phone'),
+            'salesperson': d.get('salesperson'),
+        }
+        if score is not None and score >= INBOUND_PUSH_MIN_SCORE:
+            sent.append(target)
+        else:
+            skipped.append(target)
+    return {'preview': True, 'ask': ask, 'sent': sent, 'skipped': skipped, 'errors': []}
+
+
+# ============================================================
+# 2026-05-12 Buy Profile admin routes
+# Buy Profile admin routes — added 2026-05-12
+# ============================================================
+
+import math as _bp_math
+
+def _bp_score(bid, dealer_id, profile):
+    """Score one bid against one dealer's buy_profile JSONB."""
+    if not profile or not profile.get('makes'):
+        return None, "no profile"
+    make = (bid.get('make') or '').upper().strip()
+    if not make:
+        return None, "bid missing make"
+    makes = profile.get('makes') or {}
+    if make not in makes:
+        return None, f"never stocks {make.title()}"
+
+    m = makes[make]
+    bands = profile.get('bands') or {}
+    overrides = profile.get('overrides') or {}
+
+    # Hard NEVER overrides
+    for rule in overrides.get('never', []) or []:
+        if 'price_lt' in rule and bid.get('price') and bid['price'] < rule['price_lt']:
+            return None, f"override never (price<{rule['price_lt']})"
+        if 'miles_gt' in rule and bid.get('miles') and bid['miles'] > rule['miles_gt']:
+            return None, f"override never (miles>{rule['miles_gt']})"
+
+    # Hard ALWAYS overrides — boost to 100
+    for rule in overrides.get('always', []) or []:
+        if rule.get('make') == make:
+            return 100, "override always"
+
+    score = 50
+    share = m.get('share') or 0
+    if share >= 20:   score += 15
+    elif share >= 10: score += 10
+    elif share >= 5:  score += 5
+
+    avg_y = m.get('avg_year')
+    if avg_y and bid.get('year'):
+        yd = abs(bid['year'] - avg_y)
+        if yd <= 2:    score += 20
+        elif yd <= 5:  score += 10
+        elif yd <= 10: score += 0
+        else:          score -= 20
+
+    ymin = bands.get('year_min'); ymax = bands.get('year_max')
+    if ymin and ymax and bid.get('year'):
+        if bid['year'] < ymin - 2 or bid['year'] > ymax + 2:
+            score -= 25
+
+    sold_n = m.get('sold_n') or 0
+    days = m.get('avg_days_on_lot') or 0
+    if sold_n >= 3 and 0 < days < 15:
+        score += 15
+    elif sold_n >= 1 and 0 < days < 30:
+        score += 5
+
+    p10 = bands.get('price_p10'); p90 = bands.get('price_p90')
+    if bid.get('price') and p10 and p90:
+        if p10 <= bid['price'] <= p90:
+            score += 10
+        elif bid['price'] < p10 * 0.6 or bid['price'] > p90 * 1.5:
+            score -= 15
+
+    mp90 = bands.get('miles_p90')
+    if bid.get('miles') is not None and mp90:
+        if bid['miles'] <= mp90:
+            score += 5
+        elif bid['miles'] > mp90 * 1.5:
+            score -= 5
+
+    return score, "ok"
+
+
+def _bp_tier(score):
+    if score is None: return "skip"
+    if score >= 80:   return "T1"
+    if score >= 60:   return "T2"
+    return "skip"
+
+
+@app.route('/admin/buy-profiles')
+def admin_buy_profiles():
+    """Index — all 14 partner buy profiles side-by-side."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT id, name, portal_slug, buy_profile, buy_profile_built_at,
+               receive_inbound_pushes
+          FROM dealers
+         WHERE portal_slug IS NOT NULL
+         ORDER BY id
+    """)
+    dealers = []
+    for r in cur.fetchall():
+        r = dict(r)
+        p = r.get('buy_profile') or {}
+        sample = p.get('sample') or {}
+        bands = p.get('bands') or {}
+        makes = p.get('makes') or {}
+        top_makes = sorted(
+            [(k, v.get('share') or 0) for k, v in makes.items()],
+            key=lambda x: -x[1]
+        )[:5]
+        r['_summary'] = {
+            'active': sample.get('active_n'),
+            'sold_180d': sample.get('sold_n_180d'),
+            'days_scanned': sample.get('days_scanned'),
+            'year_min': bands.get('year_min'),
+            'year_max': bands.get('year_max'),
+            'price_p10': bands.get('price_p10'),
+            'price_p90': bands.get('price_p90'),
+            'top_makes': top_makes,
+            'makes_count': len(makes),
+        }
+        dealers.append(r)
+    db.close()
+    return render_template('admin_buy_profiles.html', dealers=dealers)
+
+
+@app.route('/admin/dealer/<int:dealer_id>/buy-profile')
+def admin_dealer_buy_profile(dealer_id):
+    """Detail — single dealer profile with full makes table + overrides."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT id, name, portal_slug, buy_profile, buy_profile_built_at,
+               receive_inbound_pushes, salesperson
+          FROM dealers WHERE id = %s
+    """, (dealer_id,))
+    row = cur.fetchone()
+    db.close()
+    if not row:
+        return "Not found", 404
+    d = dict(row)
+    p = d.get('buy_profile') or {}
+    makes = p.get('makes') or {}
+    makes_sorted = sorted(
+        [(k, v) for k, v in makes.items()],
+        key=lambda x: -(x[1].get('share') or 0)
+    )
+    return render_template(
+        'admin_dealer_buy_profile.html',
+        d=d, profile=p, makes=makes_sorted,
+        sample=p.get('sample') or {}, bands=p.get('bands') or {},
+        behavioral=p.get('behavioral') or {}, overrides=p.get('overrides') or {}
+    )
+
+
+@app.route('/admin/buy-profiles/preview', methods=['GET', 'POST'])
+def admin_buy_profile_preview():
+    """Match-routing preview — enter a hypothetical bid, see which dealers fire."""
+    bid = {'year': None, 'make': '', 'model': '', 'miles': None, 'price': None}
+    routing = None
+    if request.method == 'POST':
+        try:
+            bid['year'] = int(request.form.get('year') or 0) or None
+            bid['make'] = (request.form.get('make') or '').strip()
+            bid['model'] = (request.form.get('model') or '').strip()
+            bid['miles'] = int(request.form.get('miles') or 0) or None
+            bid['price'] = int(request.form.get('price') or 0) or None
+        except (TypeError, ValueError):
+            pass
+        if bid['make']:
+            db = get_db()
+            cur = db.cursor()
+            cur.execute("""
+                SELECT id, name, buy_profile
+                  FROM dealers
+                 WHERE portal_slug IS NOT NULL AND buy_profile IS NOT NULL
+                 ORDER BY id
+            """)
+            routing = []
+            for r in cur.fetchall():
+                r = dict(r)
+                s, why = _bp_score(bid, r['id'], r['buy_profile'] or {})
+                routing.append({
+                    'id': r['id'], 'name': r['name'],
+                    'score': s, 'tier': _bp_tier(s), 'why': why,
+                })
+            db.close()
+            routing.sort(key=lambda x: (x['score'] if x['score'] is not None else -9999), reverse=True)
+    return render_template('admin_buy_profile_preview.html', bid=bid, routing=routing)
+
+
+@app.route('/api/admin/buy-profile/rebuild', methods=['POST'])
+def api_admin_buy_profile_rebuild():
+    """Manual rebuild trigger — handy during the meeting."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT rebuild_all_buy_profiles()")
+    n = list(cur.fetchone().values())[0]
+    db.commit()
+    db.close()
+    return {'rebuilt': n}
+
+
+
+@app.route('/api/bid/<int:bid_id>/confirm-sold', methods=['POST'])
+def api_bid_confirm_sold(bid_id):
+    """Marks winning bid_pushes row sold + flips bid.status='bought' +
+    broadcasts a polite 'just sold' SMS to every OTHER dealer who received
+    the original network push. Winner is excluded from the broadcast (they
+    already got 'It's yours' on their YES reply)."""
+    db = get_db()
+    cur = db.cursor()
+
+    # 1. Mark winner sold
+    cur.execute("""
+        UPDATE bid_pushes
+           SET sold_confirmed_at = NOW(),
+               sold_confirmed_by = %s
+         WHERE bid_id = %s
+           AND claimed_at IS NOT NULL
+           AND claim_late IS NOT TRUE
+         RETURNING dealer_id
+    """, (session.get('username') or 'admin', bid_id))
+    w = cur.fetchone()
+    if not w:
+        db.close()
+        return {'ok': False, 'error': 'no active claim to confirm'}
+    winner_id = w['dealer_id']
+
+    # 2. Flip bid to bought
+    cur.execute("UPDATE bids SET status='bought', updated_at=NOW() WHERE id=%s",
+                (bid_id,))
+
+    # 3. Pull bid context for the broadcast message
+    cur.execute("SELECT year, make, model FROM bids WHERE id=%s", (bid_id,))
+    b = cur.fetchone()
+    ymm = (b and f"{b['year'] or ''} {b['make'] or ''} {b['model'] or ''}".strip()) or 'that vehicle'
+
+    # 4. Find losers — everyone else who got the SMS for this bid
+    cur.execute("""
+        SELECT bp.id AS push_id, bp.dealer_id, bp.sms_to,
+               d.name AS dealer_name, d.salesperson_phone
+          FROM bid_pushes bp
+          JOIN dealers d ON d.id = bp.dealer_id
+         WHERE bp.bid_id = %s
+           AND bp.sms_sent_at IS NOT NULL
+           AND bp.dealer_id != %s
+    """, (bid_id, winner_id))
+    losers = cur.fetchall()
+
+    # 5. Broadcast polite 'just sold' SMS to each loser
+    from partner_portal import _send_network_sms
+    broadcast_sent = 0
+    broadcast_failed = 0
+    sold_body = (f"Update: the {ymm} you saw earlier just sold to another buyer. "
+                 f"Thanks for taking a look — we'll text you when the next one hits.")
+    for L in losers:
+        target = L.get('sms_to') or L.get('salesperson_phone')
+        if not target:
+            broadcast_failed += 1
+            continue
+        if _send_network_sms(target, sold_body):
+            broadcast_sent += 1
+            cur.execute("""
+                UPDATE bid_pushes SET sold_confirmed_at = NOW()
+                 WHERE id = %s
+            """, (L['push_id'],))
+        else:
+            broadcast_failed += 1
+
+    db.commit()
+    db.close()
+
+    print(f'[confirm-sold] bid={bid_id} winner={winner_id} '
+          f'broadcast_sent={broadcast_sent} failed={broadcast_failed}', flush=True)
+
+    return {
+        'ok': True,
+        'dealer_id': winner_id,
+        'broadcast_sent': broadcast_sent,
+        'broadcast_failed': broadcast_failed,
+    }
 
 
 if __name__ == '__main__':
