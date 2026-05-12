@@ -72,8 +72,8 @@
   <div class="card" id="card-upload">
     <div class="row">
       <div>
-        <label>Source name (dealer or contact)</label>
-        <input type="text" id="source_name" placeholder='e.g. "Bob @ ABC Motors"' />
+        <label>Source name (dealer or contact) <span style="color:#dc2626;">*</span></label>
+        <input type="text" id="source_name" placeholder='e.g. "Bob @ ABC Motors"' required />
       </div>
       <div>
         <label>Delay between bids (seconds)</label>
@@ -126,33 +126,69 @@
 <script>
 let parsed = [];
 
+async function safeJsonFetch(url, options) {
+  // Wraps fetch() to surface auth/redirect/non-JSON failures as real errors
+  // instead of leaving the UI stuck on a spinner. Returns {ok, status, data}.
+  const resp = await fetch(url, options);
+  if (resp.status === 401) {
+    let j = {};
+    try { j = await resp.json(); } catch (_) {}
+    const err = new Error('Session expired — open /login in another tab, sign back in, then retry.');
+    err.code = 'auth';
+    err.redirect = j.redirect || '/login';
+    throw err;
+  }
+  const ct = (resp.headers.get('content-type') || '').toLowerCase();
+  if (!ct.includes('application/json')) {
+    const err = new Error(`Server returned ${resp.status} ${resp.statusText} — non-JSON response (likely auth redirect or 5xx).`);
+    err.code = 'non_json';
+    throw err;
+  }
+  const data = await resp.json();
+  return { ok: resp.ok, status: resp.status, data };
+}
+
 document.getElementById('btn-parse').onclick = async () => {
   const f = document.getElementById('file').files[0];
+  const sourceEl = document.getElementById('source_name');
   const statusEl = document.getElementById('parse-status');
+  const btn = document.getElementById('btn-parse');
+  if (!sourceEl.value.trim()) {
+    statusEl.textContent = 'Source name is required — type the dealer or contact who sent this list.';
+    statusEl.className = 'status-line err';
+    sourceEl.focus();
+    return;
+  }
   if (!f) { statusEl.textContent = 'Pick a file first.'; statusEl.className = 'status-line err'; return; }
+  // Reset prior preview state so a second click doesn't show stale rows
+  parsed = [];
+  document.querySelector('#preview-table tbody').innerHTML = '';
+  document.getElementById('card-preview').style.display = 'none';
+  document.getElementById('commit-status').textContent = '';
   statusEl.textContent = 'Parsing…';
   statusEl.className = 'status-line';
+  btn.disabled = true;
   const fd = new FormData();
   fd.append('file', f);
   fd.append('source_name', document.getElementById('source_name').value);
-  let resp;
   try {
-    resp = await fetch('/api/admin/bulk_upload/parse', { method: 'POST', body: fd });
+    const { ok, data } = await safeJsonFetch('/api/admin/bulk_upload/parse',
+      { method: 'POST', body: fd, credentials: 'same-origin' });
+    if (!ok || data.error) {
+      statusEl.textContent = 'Parse failed: ' + (data.error || 'unknown');
+      statusEl.className = 'status-line err';
+      return;
+    }
+    parsed = data.rows || [];
+    statusEl.textContent = `Parsed ${parsed.length} rows from ${data.filename}.`;
+    statusEl.className = 'status-line ok';
+    renderPreview();
   } catch (e) {
-    statusEl.textContent = 'Network error: ' + e;
+    statusEl.textContent = e.message || String(e);
     statusEl.className = 'status-line err';
-    return;
+  } finally {
+    btn.disabled = false;
   }
-  const j = await resp.json();
-  if (!resp.ok || j.error) {
-    statusEl.textContent = 'Parse failed: ' + (j.error || resp.statusText);
-    statusEl.className = 'status-line err';
-    return;
-  }
-  parsed = j.rows || [];
-  statusEl.textContent = `Parsed ${parsed.length} rows from ${j.filename}.`;
-  statusEl.className = 'status-line ok';
-  renderPreview();
 };
 
 function renderPreview() {
@@ -213,32 +249,30 @@ document.getElementById('btn-commit').onclick = async () => {
   statusEl.textContent = `Creating ${keep.length} bids (${delay}s stagger)…`;
   statusEl.className = 'status-line';
   document.getElementById('btn-commit').disabled = true;
-  let resp;
   try {
-    resp = await fetch('/api/admin/bulk_upload/commit', {
+    const { ok, data: j } = await safeJsonFetch('/api/admin/bulk_upload/commit', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
+      credentials: 'same-origin',
       body: JSON.stringify({ rows: keep, delay_seconds: delay, source_name: source }),
     });
+    if (!ok || j.error) {
+      statusEl.textContent = 'Commit failed: ' + (j.error || 'unknown');
+      statusEl.className = 'status-line err';
+      return;
+    }
+    const lines = (j.created || []).map(c => `  → bid #${c.bid_id} — ${c.vin}`).join('\n');
+    statusEl.innerHTML = `<strong style="color:#166534;">Created ${j.created.length} bids</strong> ` +
+      `(skipped ${j.skipped}). Enrichment kicks staggered every ${delay}s.<br>` +
+      (j.bulk_upload_id ? `Batch ID: <a href="/admin/bulk_upload/${j.bulk_upload_id}">${j.bulk_upload_id}</a><br>` : '') +
+      `<pre style="font-size:12px; background:#f9fafb; padding:8px; margin-top:8px;">` + escapeHtml(lines) + `</pre>`;
+    statusEl.className = 'status-line ok';
   } catch (e) {
-    statusEl.textContent = 'Network error: ' + e;
+    statusEl.textContent = e.message || String(e);
     statusEl.className = 'status-line err';
+  } finally {
     document.getElementById('btn-commit').disabled = false;
-    return;
   }
-  const j = await resp.json();
-  if (!resp.ok || j.error) {
-    statusEl.textContent = 'Commit failed: ' + (j.error || resp.statusText);
-    statusEl.className = 'status-line err';
-    document.getElementById('btn-commit').disabled = false;
-    return;
-  }
-  const lines = (j.created || []).map(c => `  → bid #${c.bid_id} — ${c.vin}`).join('\n');
-  statusEl.innerHTML = `<strong style="color:#166534;">Created ${j.created.length} bids</strong> ` +
-    `(skipped ${j.skipped}). Enrichment kicks staggered every ${delay}s.<br>` +
-    (j.bulk_upload_id ? `Batch ID: <a href="/admin/bulk_upload/${j.bulk_upload_id}">${j.bulk_upload_id}</a><br>` : '') +
-    `<pre style="font-size:12px; background:#f9fafb; padding:8px; margin-top:8px;">` + escapeHtml(lines) + `</pre>`;
-  statusEl.className = 'status-line ok';
 };
 </script>
 </body>

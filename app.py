@@ -142,6 +142,13 @@ def require_login():
         return
     if any(path.endswith(s) for s in _PUBLIC_SUFFIXES):
         return
+    # AJAX-style API endpoints: return JSON 401 instead of an HTML 302 so
+    # the calling JS can see "session expired" rather than getting silently
+    # redirected and trying to parse the login page as JSON (which throws
+    # and leaves the UI stuck on a spinner).
+    if path.startswith('/api/'):
+        return jsonify({'error': 'login_required',
+                        'redirect': '/login'}), 401
     return redirect('/login')
 
 
@@ -6889,6 +6896,8 @@ def api_admin_bulk_upload_commit():
     delay_seconds = max(0, min(60, delay_seconds))
     source_name = (data.get('source_name') or '').strip()[:200]
 
+    if not source_name:
+        return jsonify({'error': 'source_name required (type the dealer or contact who sent the list)'}), 400
     if not isinstance(rows, list) or not rows:
         return jsonify({'error': 'rows array required'}), 400
 
