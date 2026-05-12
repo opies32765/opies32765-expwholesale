@@ -84,6 +84,7 @@ _PUBLIC_PREFIXES = (
     '/api/ipacket/', '/ipacket_reports/',
     '/api/enrichment/',  # rbook/manheim enrichment workers (oscar VMs)
     '/api/thalist/',     # thalist.com scraper -> EW (shared-secret auth)
+    '/api/dealerclub/',  # dealerclub live-auction scraper -> EW (shared-secret auth)
     '/api/comp_msrp/',   # VM 121 comp_msrp worker (claim, submit, jwt, status)
     '/api/worker/',  # progress, session_lost — worker-facing, no login
     '/api/dealer/vauto_verify', '/api/dealer/vauto_verify_queue',
@@ -7580,6 +7581,396 @@ def api_thalist_post():
     })
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# DealerClub live-auction integration
+# Built 2026-05-12. The scraper (Contabo 1 daemon) polls
+# POST api.dealerclub.com/auctions/marketplace/active/ every 30s when
+# anything is live, every 5min when idle. For each row it POSTs here.
+# We upsert the dealerclub_lots ledger (UNIQUE external_id). First-seen
+# creates an EW bid; subsequent polls just refresh current_price /
+# end_time / bid_count / status for the live dashboard tiles.
+# ─────────────────────────────────────────────────────────────────────────
+
+DEALERCLUB_SECRET = os.environ.get(
+    'EW_DEALERCLUB_SECRET',
+    'Uu11t87Ki1nrvMEddMX2kHOrfkd_bI4o-iGa5Jsu6yg')  # default for first deploy
+DEALERCLUB_ALERT_PHONE = '+14074309675'
+
+# DealerClub serves vehicle photos via imagekit.io / s3-accelerate hosts.
+# Both accept anonymous GET (no signed URL needed for thumbnail_url), so
+# we can download them locally for Gemini just like the thalist path.
+def _dealerclub_download_photo(remote_url: str) -> str | None:
+    import uuid as _uuid
+    try:
+        r = requests.get(remote_url, timeout=20)
+        if r.status_code != 200 or not r.content:
+            return None
+        data = r.content
+        if data[:3] == b'\xff\xd8\xff':
+            ext = '.jpg'
+        elif data[:8] == b'\x89PNG\r\n\x1a\n':
+            ext = '.png'
+        elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            ext = '.webp'
+        elif data[:6] in (b'GIF87a', b'GIF89a'):
+            ext = '.gif'
+        else:
+            ext = '.jpg'
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        fname = f'dealerclub_{_uuid.uuid4().hex}{ext}'
+        fpath = os.path.join(UPLOAD_DIR, fname)
+        with open(fpath, 'wb') as fp:
+            fp.write(data)
+        return f'/static/uploads/{fname}'
+    except Exception as e:
+        print(f'[dealerclub] photo download failed {remote_url}: {e}',
+              flush=True)
+        return None
+
+
+@app.route('/api/dealerclub/lot', methods=['POST'])
+def api_dealerclub_lot():
+    """Receive one DealerClub active-auction row.
+
+    Auth: X-Auth header must match EW_DEALERCLUB_SECRET.
+
+    Body (JSON): normalized lot dict from dealerclub_scraper.normalize_lot.
+    Always required: external_id + detail_url. VIN may be missing for
+    salvage / dealer-block lots and that's fine — bid still gets created.
+
+    Behavior:
+      - UPSERT dealerclub_lots on external_id. is_insert distinguishes
+        first-seen (create bid) from refresh (just update price/timer).
+      - First-seen: dedupe by VIN against open bids; if dupe, skip bid
+        creation and just record the dupe target. Otherwise create a bid
+        with creation_source='dealerclub', kick canon + market check.
+      - On refresh: bump current_price / end_time / bid_count /
+        reserve_met / status. If status flipped from active → ended,
+        stamp closed_at + close_reason for downstream cleanup.
+
+    Response: {ok, status: 'new'|'updated'|'dupe', lot_id, bid_id?, ...}
+    """
+    auth = (request.headers.get('X-Auth') or '').strip()
+    if not DEALERCLUB_SECRET or auth != DEALERCLUB_SECRET:
+        return jsonify({'error': 'bad auth'}), 401
+
+    data = request.get_json(silent=True) or {}
+    external_id = (data.get('external_id') or '').strip()
+    detail_url = (data.get('detail_url') or '').strip()
+    if not external_id or not detail_url:
+        return jsonify({'error': 'external_id + detail_url required'}), 400
+
+    vin = (data.get('vin') or '').strip().upper() or None
+    if vin and len(vin) != 17:
+        vin = None
+
+    year = data.get('year')
+    make = (data.get('make') or '').strip() or None
+    model = (data.get('model') or '').strip() or None
+    trim = (data.get('trim') or '').strip() or None
+    odometer = data.get('odometer')
+    current_price = data.get('current_price')
+    high_bid = data.get('high_bid')
+    bid_count = data.get('bid_count') or 0
+    unique_bidder_count = data.get('unique_bidder_count') or 0
+    end_time = data.get('end_time')
+    duration = data.get('duration_in_minutes')
+    reserve_met = bool(data.get('reserve_met'))
+    is_no_reserve = bool(data.get('is_no_reserve'))
+    reserve_price = data.get('reserve_price')
+    reserve_color = (data.get('reserve_progress_color') or '').strip() or None
+    status = (data.get('status') or '').strip() or None
+    featured_image_url = (data.get('featured_image_url') or '').strip() or None
+    drivetrain = (data.get('drivetrain') or '').strip() or None
+
+    db = get_db()
+    cur = db.cursor()
+    try:
+        # UPSERT the ledger row
+        cur.execute("""
+            INSERT INTO dealerclub_lots
+                (external_id, vin, year, make, model, trim, odometer,
+                 drivetrain, current_price, high_bid, bid_count,
+                 unique_bidder_count, end_time, duration_in_minutes,
+                 reserve_met, is_no_reserve, reserve_price,
+                 reserve_progress_color, status, featured_image_url,
+                 detail_url, raw_payload,
+                 first_seen_at, last_seen_at, last_polled_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s::jsonb,
+                    NOW(), NOW(), NOW())
+            ON CONFLICT (external_id) DO UPDATE SET
+                current_price          = EXCLUDED.current_price,
+                high_bid               = EXCLUDED.high_bid,
+                bid_count              = EXCLUDED.bid_count,
+                unique_bidder_count    = EXCLUDED.unique_bidder_count,
+                end_time               = EXCLUDED.end_time,
+                reserve_met            = EXCLUDED.reserve_met,
+                reserve_progress_color = EXCLUDED.reserve_progress_color,
+                reserve_price          = EXCLUDED.reserve_price,
+                status                 = EXCLUDED.status,
+                last_seen_at           = NOW(),
+                last_polled_at         = NOW(),
+                raw_payload            = EXCLUDED.raw_payload,
+                closed_at = CASE
+                    WHEN dealerclub_lots.closed_at IS NOT NULL THEN
+                        dealerclub_lots.closed_at
+                    WHEN EXCLUDED.status IS NOT NULL
+                         AND EXCLUDED.status != 'active' THEN NOW()
+                    ELSE NULL END,
+                close_reason = CASE
+                    WHEN dealerclub_lots.close_reason IS NOT NULL THEN
+                        dealerclub_lots.close_reason
+                    WHEN EXCLUDED.status IS NOT NULL
+                         AND EXCLUDED.status != 'active' THEN EXCLUDED.status
+                    ELSE NULL END
+            RETURNING id, bid_id, (xmax = 0) AS is_insert
+        """, (
+            external_id, vin, year, make, model, trim, odometer,
+            drivetrain, current_price, high_bid, bid_count,
+            unique_bidder_count, end_time, duration,
+            reserve_met, is_no_reserve, reserve_price,
+            reserve_color, status, featured_image_url,
+            detail_url, json.dumps(data),
+        ))
+        row = cur.fetchone()
+        lot_id = row['id']
+        existing_bid_id = row['bid_id']
+        is_insert = bool(row['is_insert'])
+
+        if not is_insert:
+            db.commit()
+            return jsonify({
+                'ok': True, 'status': 'updated',
+                'lot_id': lot_id,
+                'bid_id': existing_bid_id,
+                'current_price': current_price,
+            })
+
+        # First-seen — dedupe by VIN against open bids
+        dupe_target = None
+        if vin:
+            cur.execute("""
+                SELECT id FROM bids
+                WHERE vin = %s
+                  AND COALESCE(status,'') NOT IN ('cancelled', 'rejected')
+                ORDER BY id DESC LIMIT 1
+            """, (vin,))
+            d = cur.fetchone()
+            if d:
+                dupe_target = d['id']
+                cur.execute("""
+                    UPDATE dealerclub_lots SET bid_id = NULL
+                    WHERE id = %s
+                """, (lot_id,))
+                db.commit()
+                print(f'[dealerclub] lot {external_id} VIN {vin} dupe of '
+                      f'bid #{dupe_target}', flush=True)
+                return jsonify({
+                    'ok': True, 'status': 'dupe',
+                    'lot_id': lot_id,
+                    'dedupe_target_bid_id': dupe_target,
+                })
+
+        # Build the bid's notes + raw_message
+        end_str = (end_time or '')[:19].replace('T', ' ') + ' UTC'
+        rsv_str = ('no reserve' if is_no_reserve
+                   else f'reserve {"met" if reserve_met else "not met"}')
+        note_parts = [f'[DealerClub {external_id}]',
+                      f'Auction ends {end_str}',
+                      rsv_str,
+                      f'Current bid ${(current_price or 0):,}',
+                      f'{bid_count} bids']
+        if odometer:
+            note_parts.append(f'{int(odometer):,} mi')
+        note_parts.append(f'View: {detail_url}')
+        full_notes = ' — '.join(note_parts)
+
+        rm_parts = ['[DEALERCLUB]', f'Lot: {external_id}']
+        if vin: rm_parts.append(f'VIN: {vin}')
+        if year and make and model:
+            ymm = f'{year} {make} {model}'
+            if trim:
+                ymm += f' {trim}'
+            rm_parts.append(ymm)
+        if odometer: rm_parts.append(f'{int(odometer):,} mi')
+        rm_parts.append(f'Current bid ${(current_price or 0):,}')
+        raw_message = ' | '.join(rm_parts)
+
+        # Create / upsert a contact for the DealerClub source
+        contact_phone = 'dealerclub:auction'
+        contact_name = 'DealerClub Auction'
+        cur.execute("""
+            INSERT INTO contacts (phone, name)
+            VALUES (%s, %s)
+            ON CONFLICT (phone) DO UPDATE SET name = EXCLUDED.name
+            RETURNING id
+        """, (contact_phone, contact_name))
+        contact_id = cur.fetchone()['id']
+
+        cur.execute("""
+            INSERT INTO bids
+                (contact_id, phone, vin, year, make, model, trim,
+                 mileage, raw_message, asking_price, notes,
+                 status, creation_source, vauto_priority)
+            VALUES (%s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    'new', 'dealerclub', TRUE)
+            RETURNING id
+        """, (
+            contact_id, contact_phone, vin,
+            year if year else None,
+            make, model, trim,
+            int(odometer) if odometer else None,
+            raw_message,
+            int(current_price) if current_price else None,
+            full_notes,
+        ))
+        new_bid_id = cur.fetchone()['id']
+
+        # Featured photo → local upload (Gemini-friendly content-type)
+        if featured_image_url:
+            local_url = _dealerclub_download_photo(featured_image_url)
+            if local_url:
+                try:
+                    cur.execute(
+                        "INSERT INTO bid_photos (bid_id, url) "
+                        "VALUES (%s, %s)",
+                        (new_bid_id, local_url))
+                except Exception:
+                    pass
+
+        # Link ledger row to the new bid
+        cur.execute("""
+            UPDATE dealerclub_lots SET bid_id = %s WHERE id = %s
+        """, (new_bid_id, lot_id))
+
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        db.close()
+        return jsonify({'error': f'{type(e).__name__}: {e}'}), 500
+    finally:
+        try: db.close()
+        except Exception: pass
+
+    # Kick downstream enrichment (canon + vAuto + market check). Gemini
+    # assessment will set ai_price; the live dashboard tile compares it
+    # against current_price to compute the opportunity score.
+    try:
+        if vin:
+            trigger_market_check(new_bid_id, vin)
+    except Exception as e:
+        print(f'[dealerclub] market_check kick failed: {e}', flush=True)
+
+    return jsonify({
+        'ok': True, 'status': 'new',
+        'lot_id': lot_id,
+        'bid_id': new_bid_id,
+        'vin': vin,
+        'current_price': current_price,
+    })
+
+
+# Buy fee + transport assumptions for opportunity scoring. Operator has
+# max_buy_fee_override=300 on DealerClub, and transport averages ~$700 for
+# domestic moves to FL. Real transport quotes come from DealerClub's
+# /transportation/quote/ endpoint later — these are sane defaults.
+DEALERCLUB_BUY_FEE_FLAT = 300
+DEALERCLUB_TRANSPORT_EST = 700
+
+
+def _compute_opportunity(current_price, ai_price,
+                         buy_fee=None, transport=None):
+    """Return (all_in_cost, gap_dollars, gap_pct) for a given lot.
+
+    gap_pct = (ai_price - all_in_cost) / ai_price * 100
+    Positive = opportunity. None = not enough data (AI still analyzing).
+    """
+    if current_price is None or ai_price is None or ai_price <= 0:
+        return None, None, None
+    bf = buy_fee if buy_fee is not None else DEALERCLUB_BUY_FEE_FLAT
+    tr = transport if transport is not None else DEALERCLUB_TRANSPORT_EST
+    all_in = float(current_price) + bf + tr
+    gap = float(ai_price) - all_in
+    pct = gap / float(ai_price) * 100.0
+    return round(all_in), round(gap), round(pct, 2)
+
+
+@app.route('/admin/live_auctions')
+def admin_live_auctions_page():
+    """Live tile grid of every active DealerClub auction."""
+    return render_template('live_auctions.html')
+
+
+@app.route('/api/admin/dealerclub/state')
+def api_admin_dealerclub_state():
+    """JSON state for the live auction dashboard. Polled by JS every 15s.
+
+    Returns one row per ACTIVE DealerClub lot, joined with the EW bid's
+    ai_price so the client can compute opportunity color + gap.
+    """
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT dl.id              AS lot_id,
+               dl.external_id,
+               dl.vin,
+               dl.year, dl.make, dl.model, dl.trim,
+               dl.odometer,
+               dl.current_price,
+               dl.high_bid,
+               dl.bid_count,
+               dl.unique_bidder_count,
+               dl.end_time,
+               dl.duration_in_minutes,
+               dl.reserve_met,
+               dl.is_no_reserve,
+               dl.reserve_price,
+               dl.reserve_progress_color,
+               dl.status,
+               dl.featured_image_url,
+               dl.detail_url,
+               dl.estimated_buy_fee,
+               dl.estimated_transport,
+               dl.bid_id,
+               dl.last_polled_at,
+               b.ai_price        AS ai_price
+        FROM dealerclub_lots dl
+        LEFT JOIN bids b ON b.id = dl.bid_id
+        WHERE dl.closed_at IS NULL
+          AND (dl.end_time IS NULL OR dl.end_time > NOW())
+        ORDER BY dl.end_time ASC
+    """)
+    rows = list(cur.fetchall())
+    db.close()
+    lots = []
+    for r in rows:
+        d = dict(r)
+        ai = d.get('ai_price')
+        ai_int = int(float(ai)) if ai is not None else None
+        all_in, gap, pct = _compute_opportunity(
+            d.get('current_price'),
+            ai_int,
+            d.get('estimated_buy_fee'),
+            d.get('estimated_transport'),
+        )
+        d['ai_price'] = ai_int
+        d['all_in_cost'] = all_in
+        d['opportunity_gap'] = gap
+        d['opportunity_pct'] = pct
+        # Convert timestamps to ISO so the JS countdown can parse them
+        for k in ('end_time', 'last_polled_at'):
+            if d.get(k) and hasattr(d[k], 'isoformat'):
+                d[k] = d[k].isoformat()
+        lots.append(d)
+    return jsonify({'lots': lots, 'as_of': time.strftime('%Y-%m-%dT%H:%M:%S')})
+
+
 @app.route('/admin/ai-levers')
 def admin_ai_levers():
     """Render the AI Levers admin page."""
@@ -14222,6 +14613,304 @@ def api_bid_confirm_sold(bid_id):
         'broadcast_sent': broadcast_sent,
         'broadcast_failed': broadcast_failed,
     }
+
+
+
+# ── /opportunities — daily AI scout dashboard ─────────────────────────────
+@app.route('/opportunities')
+def opportunities_page():
+    """Salesperson-facing buy-opportunity dashboard. Auth via global require_login."""
+    return render_template('opportunities.html')
+
+
+@app.route('/api/opportunities/snapshot')
+def api_opportunities_snapshot():
+    """Today's scored opportunities + summary + last-run audit.
+
+    Anyone who can see the main dashboard can hit this — relies on the
+    global require_login gate.
+    """
+    db = get_db()
+    cur = db.cursor()
+
+    # Most-recent run for this calendar day
+    cur.execute("""
+        SELECT id, started_at, finished_at, mmr_attempted, mmr_ok,
+               mmr_no_data, mmr_errors, candidates_5pct,
+               rbook_attempted, rbook_ok, rbook_errors,
+               opportunities_written, auth_failed
+          FROM opportunity_runs
+         WHERE started_at::date = CURRENT_DATE
+         ORDER BY started_at DESC
+         LIMIT 1
+    """)
+    run = cur.fetchone()
+    run_dict = dict(run) if run else {}
+    if run_dict.get('started_at'):
+        run_dict['started_at_iso'] = run_dict['started_at'].strftime('%Y-%m-%d %H:%M:%S')
+
+    # Today's opportunities — most recent snapshot_date that has any rows
+    cur.execute("""
+        SELECT MAX(snapshot_date) AS d FROM dealer_opportunities
+    """)
+    latest_day = (cur.fetchone() or {}).get('d')
+    if not latest_day:
+        return jsonify({'opportunities': [], 'summary': {}, 'run': run_dict, 'dealers': []})
+
+    cur.execute("""
+        SELECT o.id, o.snapshot_date, o.vin, o.dealer_id, o.inventory_id,
+               o.year, o.make, o.model, o.trim, o.mileage, o.ext_color,
+               o.photo_url, o.detail_url,
+               o.asking_price, o.mmr_wholesale_avg, o.mmr_wholesale_above,
+               o.mmr_wholesale_below, o.mmr_grade,
+               o.mmr_retail_avg, o.mmr_retail_above, o.mmr_retail_below,
+               o.dollars_under_mmr, o.pct_under_mmr,
+               o.rbook_comp_count, o.rbook_p25, o.rbook_p50, o.rbook_p75,
+               o.rbook_avg_dol, o.retail_headroom,
+               o.dealer_dol, o.recent_price_drop_amount,
+               o.recent_price_drop_days_ago,
+               o.lsl_deal_count, o.lsl_avg_gross,
+               o.score, o.score_breakdown, o.signals,
+               o.gemini_pitch,
+               o.status, o.assigned_to, o.notes,
+               o.created_at, o.updated_at,
+               d.name AS dealer_name, d.phone AS dealer_phone
+          FROM dealer_opportunities o
+          JOIN dealers d ON d.id = o.dealer_id
+         WHERE o.snapshot_date = %s
+         ORDER BY o.score DESC NULLS LAST, o.pct_under_mmr DESC NULLS LAST
+    """, (latest_day,))
+    rows = [dict(r) for r in cur.fetchall()]
+
+    # Stringify timestamps + ensure clean JSON
+    for r in rows:
+        for k in ('created_at', 'updated_at'):
+            if r.get(k):
+                r[k] = r[k].isoformat()
+        if r.get('snapshot_date'):
+            r['snapshot_date'] = r['snapshot_date'].isoformat()
+        if r.get('rbook_avg_dol') is not None:
+            r['rbook_avg_dol'] = float(r['rbook_avg_dol'])
+        if r.get('pct_under_mmr') is not None:
+            r['pct_under_mmr'] = float(r['pct_under_mmr'])
+        # signals + score_breakdown stored as JSONB — already dicts when
+        # using RealDictCursor; leave alone
+
+    # Summary
+    cur.execute("""
+        SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE status='new')      AS "new",
+            COUNT(*) FILTER (WHERE status='pursuing') AS pursuing,
+            COUNT(*) FILTER (WHERE status='acquired') AS acquired,
+            COUNT(*) FILTER (WHERE status='passed')   AS passed,
+            MAX(score) AS top_score,
+            SUM(dollars_under_mmr) FILTER (WHERE status NOT IN ('passed','acquired')) AS total_under_mmr
+          FROM dealer_opportunities
+         WHERE snapshot_date = %s
+    """, (latest_day,))
+    summary = dict(cur.fetchone() or {})
+
+    # Dealer breakdown chips
+    cur.execute("""
+        SELECT d.id, d.name, COUNT(*) AS n
+          FROM dealer_opportunities o
+          JOIN dealers d ON d.id = o.dealer_id
+         WHERE o.snapshot_date = %s
+         GROUP BY d.id, d.name
+         ORDER BY n DESC, d.name
+    """, (latest_day,))
+    dealers = [dict(r) for r in cur.fetchall()]
+
+    db.close()
+    return jsonify({
+        'opportunities': rows,
+        'summary': summary,
+        'run': run_dict,
+        'dealers': dealers,
+    })
+
+
+@app.route('/api/opportunities/<int:opp_id>/status', methods=['POST'])
+def api_opportunity_status(opp_id):
+    """Update workflow status. Body: {status, notes?, assigned_to?}."""
+    data = request.get_json(silent=True) or {}
+    new_status = (data.get('status') or '').strip()
+    if new_status not in ('new', 'called', 'pursuing', 'passed', 'acquired', 'snoozed'):
+        return jsonify({'ok': False, 'error': 'bad status'}), 400
+
+    actor = (session.get('user_email') if 'session' in globals() else None) or 'unknown'
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE dealer_opportunities
+           SET status = %s,
+               status_updated_at = NOW(),
+               status_updated_by = %s,
+               notes = COALESCE(%s, notes),
+               assigned_to = COALESCE(%s, assigned_to),
+               updated_at = NOW()
+         WHERE id = %s
+        RETURNING id, status
+    """, (new_status, actor, data.get('notes'), data.get('assigned_to'), opp_id))
+    row = cur.fetchone()
+    db.commit()
+    db.close()
+    if not row:
+        return jsonify({'ok': False, 'error': 'not found'}), 404
+    return jsonify({'ok': True, 'id': row['id'], 'status': row['status']})
+
+
+
+# ── /api/opportunities/<id>/pitch — lazy Gemini Pro narrative ─────────────
+OPPORTUNITY_PITCH_PROMPT = """You are advising Experience Wholesale's buying team on whether to chase a single car off a partner dealer's lot for wholesale acquisition.
+
+This isn't a customer bid — EW would BUY this car wholesale from the dealer and resell to another dealer or retail it. Give a sharp, salesperson-actionable read.
+
+═══ VEHICLE ═══
+{ymm}{trim_clause}
+VIN: {vin}
+Mileage: {mileage:,}
+Dealer: {dealer_name}{dealer_phone_clause}
+Asking price: ${asking:,}
+
+═══ SIGNALS ═══
+MMR Wholesale Avg: ${mmr_avg:,}  ({pct_under:.1f}% under MMR, ${dollars_under:,} delta)
+MMR Above (clean): ${mmr_above_s}
+MMR Below (rough): ${mmr_below_s}
+MMR Grade: {grade}
+
+rBook competitive set: {comp_count_s} cars
+  Retail P25: ${rbook_p25_s}
+  Retail P50: ${rbook_p50_s}
+  Retail P75: ${rbook_p75_s}
+  Retail headroom (P50 - asking): ${headroom_s}
+  Avg DOL on comps: {comp_dol_s}
+
+Dealer-side:
+  Days listed on dealer lot: {dealer_dol_s}
+  Recent price drop: {drop_str}
+
+LSL track record (our historical EW deals on this YMM):
+  Deals: {lsl_n}{lsl_gross_clause}
+
+═══ TASK ═══
+Write 3-4 SHORT sentences. Cover:
+  1. Why this is (or isn't) a wholesale buy — point to the strongest signal
+  2. Suggested target buy price + walk-away ceiling
+  3. ONE risk or thing to verify before chasing it
+
+Do NOT restate the data. Make a recommendation. Plain text, no markdown."""
+
+
+@app.route('/api/opportunities/<int:opp_id>/pitch', methods=['POST', 'GET'])
+def api_opportunity_pitch(opp_id):
+    """Lazy-generate or return cached Gemini Pro narrative for one opportunity.
+
+    GET returns cached or 404. POST regenerates (or generates first time).
+    """
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT o.id, o.vin, o.year, o.make, o.model, o.trim, o.mileage,
+               o.asking_price, o.mmr_wholesale_avg, o.mmr_wholesale_above,
+               o.mmr_wholesale_below, o.mmr_grade,
+               o.dollars_under_mmr, o.pct_under_mmr,
+               o.rbook_comp_count, o.rbook_p25, o.rbook_p50, o.rbook_p75,
+               o.rbook_avg_dol, o.retail_headroom,
+               o.dealer_dol, o.recent_price_drop_amount,
+               o.recent_price_drop_days_ago,
+               o.lsl_deal_count, o.lsl_avg_gross,
+               o.gemini_pitch, o.gemini_pitch_at,
+               d.name AS dealer_name, d.phone AS dealer_phone
+          FROM dealer_opportunities o
+          JOIN dealers d ON d.id = o.dealer_id
+         WHERE o.id = %s
+    """, (opp_id,))
+    o = cur.fetchone()
+    if not o:
+        db.close()
+        return jsonify({'ok': False, 'error': 'not found'}), 404
+
+    method = request.method
+    if method == 'GET' and o.get('gemini_pitch'):
+        db.close()
+        return jsonify({
+            'ok': True, 'cached': True,
+            'pitch': o['gemini_pitch'],
+            'generated_at': o['gemini_pitch_at'].isoformat() if o.get('gemini_pitch_at') else None,
+        })
+
+    if method == 'GET' and not o.get('gemini_pitch'):
+        db.close()
+        return jsonify({'ok': False, 'error': 'no pitch — POST to generate'}), 404
+
+    # POST: regenerate
+    def _s(v, default='—'):
+        return f'{v:,}' if isinstance(v, (int, float)) and v else default
+
+    drop_amt = o.get('recent_price_drop_amount') or 0
+    drop_days = o.get('recent_price_drop_days_ago')
+    if drop_amt and drop_days is not None:
+        drop_str = f'${drop_amt:,} cut {drop_days} days ago'
+    else:
+        drop_str = 'none in last 30 days'
+
+    lsl_n = o.get('lsl_deal_count') or 0
+    lsl_g = o.get('lsl_avg_gross') or 0
+    lsl_gross_clause = f', avg gross ${lsl_g:,}' if lsl_n and lsl_g else ''
+
+    trim_clause = f' {o["trim"]}' if o.get('trim') else ''
+    dealer_phone_clause = f' ({o["dealer_phone"]})' if o.get('dealer_phone') else ''
+
+    prompt = OPPORTUNITY_PITCH_PROMPT.format(
+        ymm=f'{o["year"]} {o["make"]} {o["model"]}',
+        trim_clause=trim_clause,
+        vin=o['vin'],
+        mileage=o.get('mileage') or 0,
+        dealer_name=o.get('dealer_name') or 'unknown',
+        dealer_phone_clause=dealer_phone_clause,
+        asking=o['asking_price'] or 0,
+        mmr_avg=o['mmr_wholesale_avg'] or 0,
+        pct_under=float(o['pct_under_mmr'] or 0),
+        dollars_under=o['dollars_under_mmr'] or 0,
+        mmr_above_s=_s(o.get('mmr_wholesale_above')),
+        mmr_below_s=_s(o.get('mmr_wholesale_below')),
+        grade=o.get('mmr_grade') or 'n/a',
+        comp_count_s=_s(o.get('rbook_comp_count')),
+        rbook_p25_s=_s(o.get('rbook_p25')),
+        rbook_p50_s=_s(o.get('rbook_p50')),
+        rbook_p75_s=_s(o.get('rbook_p75')),
+        headroom_s=_s(o.get('retail_headroom')),
+        comp_dol_s=f'{float(o["rbook_avg_dol"]):.1f}d' if o.get('rbook_avg_dol') else '—',
+        dealer_dol_s=f'{o["dealer_dol"]}d' if o.get('dealer_dol') else 'unknown',
+        drop_str=drop_str,
+        lsl_n=lsl_n,
+        lsl_gross_clause=lsl_gross_clause,
+    )
+
+    try:
+        pitch = gemini_call(prompt, model='gemini-2.5-flash',
+                            max_tokens=1500, temperature=0.4)
+    except Exception as e:
+        db.close()
+        return jsonify({'ok': False, 'error': f'gemini_call failed: {e}'}), 500
+
+    if not pitch:
+        db.close()
+        return jsonify({'ok': False, 'error': 'empty gemini response'}), 500
+
+    cur.execute("""
+        UPDATE dealer_opportunities
+           SET gemini_pitch = %s,
+               gemini_pitch_at = NOW(),
+               updated_at = NOW()
+         WHERE id = %s
+    """, (pitch, opp_id))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'cached': False, 'pitch': pitch})
 
 
 if __name__ == '__main__':

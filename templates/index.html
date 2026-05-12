@@ -165,6 +165,7 @@ tr:last-child td{border-bottom:none}
 </head>
 <body>
 
+{% set network_claims = get_network_claims_banner() %}
 {# ─── 2026-05-12 Network claim banners (yellow, stacked, persistent) ─── #}
 {% if network_claims %}
 <div id="network-claims-banner" style="position:sticky;top:0;z-index:60;background:#1e1b0f;border-bottom:2px solid #b45309;padding:10px 20px">
@@ -213,8 +214,10 @@ tr:last-child td{border-bottom:none}
     <a href="/tesla-vin" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Tesla VIN</a>
     <a href="/drop" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s;background:rgba(59,130,246,.08)" onmouseover="this.style.color='#60a5fa';this.style.borderColor='#3b82f6'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Quick Drop</a>
     <a href="/admin/bulk_upload" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s;background:rgba(59,130,246,.08)" onmouseover="this.style.color='#60a5fa';this.style.borderColor='#3b82f6'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Upload a dealer xlsx/csv needs-to-go list — creates one bid per row with staggered enrichment">Bulk Upload</a>
+    <a href="/admin/live_auctions" style="font-size:13px;color:#f59e0b;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(245,158,11,.35);border-radius:6px;transition:all .15s;background:rgba(245,158,11,.1)" onmouseover="this.style.background='rgba(245,158,11,.2)';this.style.color='#fbbf24'" onmouseout="this.style.background='rgba(245,158,11,.1)';this.style.color='#f59e0b'" title="DealerClub live auctions with opportunity scoring">Live Auctions</a>
     <a href="/reports" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Reports</a>
     <a href="/intel/" target="_blank" style="font-size:13px;color:#c084fc;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(168,85,247,.35);border-radius:6px;transition:all .15s;background:rgba(168,85,247,.1)" onmouseover="this.style.background='rgba(168,85,247,.2)';this.style.color='#d8b4fe'" onmouseout="this.style.background='rgba(168,85,247,.1)';this.style.color='#c084fc'" title="Dealer Intelligence — separate login (admin / Sedecrem34)">Dealer Intel ↗</a>
+    <a href="/opportunities" style="font-size:13px;color:#c084fc;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(168,85,247,.35);border-radius:6px;transition:all .15s;background:rgba(168,85,247,.1)" onmouseover="this.style.background='rgba(168,85,247,.2)';this.style.color='#d8b4fe'" onmouseout="this.style.background='rgba(168,85,247,.1)';this.style.color='#c084fc'" title="Daily AI scout — top buy opportunities across the dealer network">Opportunities</a>
     <a href="/admin/workers" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · Worker monitor (live phase progress, stuck-bid watchdog)">Workers</a>
     <a href="/admin/ai-accuracy" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · AI accuracy vs LSL purchase reality">AI Accuracy</a>
     <div class="live-dot"></div>
@@ -451,6 +454,10 @@ setInterval(() => {
             <div class="contact-name" style="color:#34d399">{{ bid.contact_name or 'Thalist Post' }}</div>
             {% if bid.contact_company %}<div class="contact-company" style="color:#94a3b8;font-size:11px">{{ bid.contact_company }}</div>{% endif %}
             <div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.3);border-radius:3px;font-size:9px;font-weight:700;color:#34d399;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from thalist.com Wholesale Inventory">Thalist</span></div>
+          {% elif bid.phone.startswith('dealerclub:') %}
+            <div class="contact-name" style="color:#f59e0b">DealerClub</div>
+            <div class="contact-company" style="color:#94a3b8;font-size:11px">Live auction</div>
+            <div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);border-radius:3px;font-size:9px;font-weight:700;color:#f59e0b;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from app.dealerclub.com live auction">DealerClub</span></div>
           {% elif bid.phone == 'sys:db_push' %}
             <div class="contact-name" style="color:#a78bfa">EW Search</div>
             {% if bid.partner_dealer_name %}<div class="contact-company" style="color:#94a3b8;font-size:11px">{{ bid.partner_dealer_name }}</div>{% endif %}
