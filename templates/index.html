@@ -456,8 +456,23 @@ setInterval(() => {
             <div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.3);border-radius:3px;font-size:9px;font-weight:700;color:#34d399;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from thalist.com Wholesale Inventory">Thalist</span></div>
           {% elif bid.phone.startswith('dealerclub:') %}
             <div class="contact-name" style="color:#f59e0b">DealerClub</div>
-            <div class="contact-company" style="color:#94a3b8;font-size:11px">Live auction</div>
-            <div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);border-radius:3px;font-size:9px;font-weight:700;color:#f59e0b;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from app.dealerclub.com live auction">DealerClub</span></div>
+            <div class="contact-company" style="color:#94a3b8;font-size:11px">
+              {% if bid.dc_current_price %}Bid ${{ '{:,}'.format(bid.dc_current_price) }}{% else %}Live auction{% endif %}
+            </div>
+            <div style="margin-top:3px">
+              <span style="display:inline-block;padding:1px 7px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);border-radius:3px;font-size:9px;font-weight:700;color:#f59e0b;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from app.dealerclub.com live auction">DealerClub</span>
+              {% if bid.dc_opp_tier %}
+                {% if bid.dc_opp_tier == 'green' %}
+                  <span title="Opportunity: AI buy beats current bid + fees + transport by 15%+" style="display:inline-block;padding:1px 7px;margin-left:3px;background:rgba(74,222,128,.18);border:1px solid rgba(74,222,128,.45);border-radius:3px;font-size:9px;font-weight:700;color:#86efac;letter-spacing:.4px;text-transform:uppercase">🟢 +{{ bid.dc_opp_pct }}%</span>
+                {% elif bid.dc_opp_tier == 'yellow' %}
+                  <span title="Marginal: 5-15% gap" style="display:inline-block;padding:1px 7px;margin-left:3px;background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.4);border-radius:3px;font-size:9px;font-weight:700;color:#fde047;letter-spacing:.4px;text-transform:uppercase">🟡 +{{ bid.dc_opp_pct }}%</span>
+                {% elif bid.dc_opp_tier == 'red' %}
+                  <span title="Skip: AI ceiling below all-in cost" style="display:inline-block;padding:1px 7px;margin-left:3px;background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.35);border-radius:3px;font-size:9px;font-weight:700;color:#fca5a5;letter-spacing:.4px;text-transform:uppercase">🔴 {{ bid.dc_opp_pct }}%</span>
+                {% else %}
+                  <span title="Gemini still analyzing" style="display:inline-block;padding:1px 7px;margin-left:3px;background:rgba(148,163,184,.12);border:1px solid rgba(148,163,184,.3);border-radius:3px;font-size:9px;font-weight:700;color:#cbd5e1;letter-spacing:.4px;text-transform:uppercase">⚪ analyzing</span>
+                {% endif %}
+              {% endif %}
+            </div>
           {% elif bid.phone == 'sys:db_push' %}
             <div class="contact-name" style="color:#a78bfa">EW Search</div>
             {% if bid.partner_dealer_name %}<div class="contact-company" style="color:#94a3b8;font-size:11px">{{ bid.partner_dealer_name }}</div>{% endif %}

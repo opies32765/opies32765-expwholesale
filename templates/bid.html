@@ -237,6 +237,101 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
 <div class="page">
 
+  {% if bid.dc_external_id %}
+  <!-- DealerClub live-auction card (only on creation_source='dealerclub' bids) -->
+  <div style="margin:14px 24px 0 24px;padding:14px 18px;border-radius:10px;
+              background:linear-gradient(180deg,rgba(245,158,11,.08),rgba(245,158,11,0));
+              border:1px solid {% if bid.dc_opp_tier=='green' %}rgba(74,222,128,.45)
+                              {% elif bid.dc_opp_tier=='yellow' %}rgba(250,204,21,.45)
+                              {% elif bid.dc_opp_tier=='red' %}rgba(248,113,113,.35)
+                              {% else %}rgba(245,158,11,.35){% endif %};">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:18px;flex-wrap:wrap">
+      <div style="flex:1;min-width:280px">
+        <div style="font-size:11px;color:#f59e0b;letter-spacing:.5px;font-weight:700;text-transform:uppercase;margin-bottom:4px">
+          🏛 DealerClub Live Auction · {{ bid.dc_external_id }}
+        </div>
+        <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:13px;line-height:1.6">
+          <div><span style="color:#94a3b8">Current bid:</span> <strong style="color:#e2e8f0">${{ '{:,}'.format(bid.dc_current_price or 0) }}</strong></div>
+          <div><span style="color:#94a3b8">AI buy ceiling:</span>
+            {% if bid.ai_price %}
+              <strong style="color:#e2e8f0">${{ '{:,}'.format(bid.ai_price|int) }}</strong>
+            {% else %}
+              <em style="color:#64748b">analyzing…</em>
+            {% endif %}
+          </div>
+          {% if bid.dc_all_in %}
+          <div><span style="color:#94a3b8">All-in (+${{ bid.dc_buy_fee_used }} fee, +${{ bid.dc_transport_used }} transport):</span> <strong style="color:#e2e8f0">${{ '{:,}'.format(bid.dc_all_in) }}</strong></div>
+          {% endif %}
+          <div><span style="color:#94a3b8">Bids:</span> <strong style="color:#e2e8f0">{{ bid.dc_bid_count or 0 }}</strong></div>
+          <div><span style="color:#94a3b8">Reserve:</span>
+            {% if bid.dc_no_reserve %}<strong style="color:#fde047">NO RESERVE</strong>
+            {% elif bid.dc_reserve_met %}<strong style="color:#86efac">met</strong>
+            {% else %}<strong style="color:#fca5a5">not met</strong>{% endif %}
+          </div>
+        </div>
+        {% if bid.dc_opp_tier %}
+        <div style="margin-top:10px;padding:10px 14px;border-radius:6px;font-weight:700;font-size:14px;display:inline-flex;gap:10px;align-items:center;
+                    background:{% if bid.dc_opp_tier=='green' %}rgba(74,222,128,.15)
+                              {% elif bid.dc_opp_tier=='yellow' %}rgba(250,204,21,.13)
+                              {% elif bid.dc_opp_tier=='red' %}rgba(248,113,113,.13)
+                              {% else %}rgba(148,163,184,.13){% endif %};
+                    color:{% if bid.dc_opp_tier=='green' %}#86efac
+                          {% elif bid.dc_opp_tier=='yellow' %}#fde047
+                          {% elif bid.dc_opp_tier=='red' %}#fca5a5
+                          {% else %}#cbd5e1{% endif %};">
+          <span>{% if bid.dc_opp_tier=='green' %}🟢
+                {% elif bid.dc_opp_tier=='yellow' %}🟡
+                {% elif bid.dc_opp_tier=='red' %}🔴
+                {% else %}⚪{% endif %} OPPORTUNITY</span>
+          <span>
+            {% if bid.dc_opp_pct is not none %}
+              {{ '%+0.1f' % bid.dc_opp_pct }}%
+              {% if bid.dc_opp_gap %}
+                · {{ '+$' if bid.dc_opp_gap >= 0 else '−$' }}{{ '{:,}'.format(bid.dc_opp_gap|abs) }}
+              {% endif %}
+            {% else %}
+              waiting for AI assessment
+            {% endif %}
+          </span>
+        </div>
+        {% endif %}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-end">
+        <div id="dc-timer" data-end="{{ bid.dc_end_time.isoformat() if bid.dc_end_time else '' }}"
+             style="font-family:'JetBrains Mono',ui-monospace,monospace;font-size:18px;font-weight:700;color:#e2e8f0">
+          --
+        </div>
+        <a href="{{ bid.dc_detail_url }}" target="_blank"
+           style="background:#f59e0b;color:#0f172a;padding:8px 16px;border-radius:6px;
+                  text-decoration:none;font-weight:700;font-size:12px;text-transform:uppercase;
+                  letter-spacing:.4px;display:inline-block">Bid on DealerClub ↗</a>
+      </div>
+    </div>
+    <script>
+      (function() {
+        const el = document.getElementById('dc-timer');
+        if (!el || !el.dataset.end) return;
+        const end = new Date(el.dataset.end);
+        function tick() {
+          const ms = end - Date.now();
+          if (ms <= 0) { el.textContent = 'ENDED'; el.style.color = '#fca5a5'; return; }
+          const s = Math.floor(ms/1000);
+          const d = Math.floor(s/86400);
+          const h = Math.floor((s%86400)/3600);
+          const m = Math.floor((s%3600)/60);
+          const ss = s%60;
+          el.textContent = d > 0 ? `${d}d ${h}h ${m}m`
+                            : h > 0 ? `${h}h ${m}m ${String(ss).padStart(2,'0')}s`
+                            : `${m}m ${String(ss).padStart(2,'0')}s`;
+          el.style.color = ms < 30*60*1000 ? '#fca5a5' : '#e2e8f0';
+        }
+        tick();
+        setInterval(tick, 1000);
+      })();
+    </script>
+  </div>
+  {% endif %}
+
   <!-- ROW 1: Vehicle Banner (always visible) -->
   <div class="vehicle-banner">
     <div class="vb-left">
@@ -268,7 +363,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
         {% endif %}
       </div>
-      <span class="badge badge-{{ bid.status }}">{{ bid.status.replace('_',' ') }}</span>
+      {% if bid.status != 'bought' %}<span class="badge badge-{{ bid.status }}">{{ bid.status.replace('_',' ') }}</span>{% endif %}
     </div>
     <div class="vb-right">
       <div class="quick-status-group">
@@ -556,6 +651,247 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           </div>
         </div>
       </div>
+
+
+      {# ─── 2026-05-12 Network claim received ─── #}
+      {% if bid_network_claim %}
+      <div class="card" id="network-claim-card" style="border-color:#fbbf24;flex-shrink:0;animation:nc-card-glow 2.5s ease-in-out infinite">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;background:#3b2c0a">
+          🟢 Claimed by Network Dealer
+          <span style="font-size:11px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.15);border:1px solid rgba(251,191,36,.4);border-radius:4px;padding:2px 8px;letter-spacing:.4px">
+            CLAIMED {{ bid_network_claim.claimed_at.strftime('%H:%M:%S') if bid_network_claim.claimed_at else '' }}
+          </span>
+        </div>
+        <div style="padding:14px 18px;background:#0b1220">
+          <div style="font-size:18px;font-weight:700;color:#fde68a;margin-bottom:6px">
+            {{ bid_network_claim.dealer_name }}
+            {% if bid_network_claim.dealer_salesperson %}
+              <span style="font-size:13px;color:#94a3b8;font-weight:500"> · {{ bid_network_claim.dealer_salesperson }}</span>
+            {% endif %}
+          </div>
+          <div style="font-size:13px;color:#94a3b8;margin-bottom:14px">
+            Said YES at <b style="color:#e2e8f0">${{ '{:,}'.format(bid_network_claim.ask or 0) }}</b>
+            · score {{ bid_network_claim.score or '—' }}
+            {% if bid_network_claim.claim_from_phone %} · from {{ bid_network_claim.claim_from_phone }}{% endif %}
+          </div>
+          <button onclick="confirmSold({{ bid.id }})"
+                  style="padding:10px 18px;background:#16a34a;border:none;border-radius:6px;color:white;font-size:14px;font-weight:700;cursor:pointer;letter-spacing:.3px">
+            ✓ Confirm Sold to {{ bid_network_claim.dealer_name }}
+          </button>
+          <span style="font-size:11px;color:#64748b;margin-left:10px">
+            (clicking will broadcast "sold" SMS to other dealers — not yet wired)
+          </span>
+        </div>
+      </div>
+      <style>
+        @keyframes nc-card-glow { 0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,.45) } 50% { box-shadow: 0 0 0 8px rgba(251,191,36,0) } }
+      </style>
+      <script>
+        function confirmSold(bidId) {
+          if (!confirm('Confirm sold? This will text all other matched dealers that the car was taken.')) return;
+          fetch(`/np/api/bid/${bidId}/confirm-sold`, { method: 'POST' })
+            .then(r => r.json()).then(j => {
+              if (j.ok) {
+                const bs = j.broadcast_sent || 0;
+                const bf = j.broadcast_failed || 0;
+                let msg = `✓ Confirmed sold. ${bs} other dealer${bs===1?'':'s'} texted "just sold".`;
+                if (bf > 0) msg += ` (${bf} SMS failed)`;
+                alert(msg);
+                location.reload();
+              } else {
+                alert('Error: ' + (j.error || 'unknown'));
+              }
+            });
+        }
+      </script>
+      {% endif %}
+
+      {# ─────────────────── Push to Network (2026-05-12) ─────────────────── #}
+      {# Bidder hit a wall on the car — enter the target buy + push to scored,
+         VIN-filtered partner network. Each matched dealer's salesperson gets
+         a text. Reuses the buy_profile match-routing built earlier today. #}
+      {# 2026-05-12 drift-safe: pull state via blueprint helpers #}
+      {% set bid_network_sold = get_bid_network_sold(bid.id) %}
+      {% set bid_network_claim = get_bid_network_claim(bid.id) %}
+      {# SOLD panel — replaces the form once Confirm Sold has fired #}
+      {% if bid_network_sold %}
+      <div class="card" id="network-push-card" style="border-color:#16a34a;flex-shrink:0;background:linear-gradient(180deg,#052e16 0%,#0b1220 100%)">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;background:#052e16">
+          ✓ SOLD via Network
+          <span style="font-size:10px;font-weight:700;color:#16a34a;background:rgba(22,163,74,.18);border:1px solid #16a34a;border-radius:4px;padding:2px 8px;letter-spacing:.5px">
+            CONFIRMED {{ bid_network_sold.sold_confirmed_at.strftime('%Y-%m-%d %H:%M') if bid_network_sold.sold_confirmed_at else '' }}
+          </span>
+        </div>
+        <div style="padding:18px 22px;background:#0b1220">
+          <div style="font-size:20px;font-weight:700;color:#22c55e;margin-bottom:4px">
+            {{ bid_network_sold.dealer_name }}
+          </div>
+          {% if bid_network_sold.dealer_salesperson %}
+          <div style="font-size:13px;color:#86efac;margin-bottom:14px">
+            via {{ bid_network_sold.dealer_salesperson }}
+          </div>
+          {% endif %}
+          <div style="display:flex;gap:24px;flex-wrap:wrap;font-size:13px;color:#cbd5e1">
+            <div><b style="color:#fde68a;font-size:18px;display:block">${{ '{:,}'.format(bid_network_sold.ask or 0) }}</b><span style="font-size:11px;color:#64748b">sold price</span></div>
+            <div><b style="color:#e2e8f0;display:block">{{ bid_network_sold.claimed_at.strftime('%H:%M') if bid_network_sold.claimed_at else '' }}</b><span style="font-size:11px;color:#64748b">claimed</span></div>
+            <div><b style="color:#e2e8f0;display:block">{{ bid_network_sold.sold_confirmed_at.strftime('%H:%M') if bid_network_sold.sold_confirmed_at else '' }}</b><span style="font-size:11px;color:#64748b">confirmed by {{ bid_network_sold.sold_confirmed_by or '—' }}</span></div>
+            <div><b style="color:#e2e8f0;display:block">{{ bid_network_sold.losers_notified or 0 }}</b><span style="font-size:11px;color:#64748b">other dealers notified</span></div>
+          </div>
+        </div>
+      </div>
+      {% else %}
+      <div class="card" id="network-push-card" style="border-color:#16a34a;flex-shrink:0">
+        <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+          Push to Network
+          {% if bid.network_pushed_at %}
+            <span style="font-size:10px;font-weight:700;color:#16a34a;background:rgba(22,163,74,.15);border:1px solid rgba(22,163,74,.35);border-radius:4px;padding:2px 8px;letter-spacing:.4px">
+              PUSHED {{ bid.network_push_count or 1 }}× — ${{ '{:,.0f}'.format(bid.network_ask or 0) }}
+            </span>
+          {% endif %}
+        </div>
+        <div style="padding:12px 16px 16px;background:#0b1220;border-radius:0 0 12px 12px">
+          <div style="font-size:12px;color:#94a3b8;margin-bottom:10px;line-height:1.4">
+            Need a number to make this work? Enter your target buy.<br>
+            Matched dealers (scored against their daily buy-profile, with VIN-on-lot exclusion) get a text — first responder wins.
+          </div>
+          <form id="network-push-form" onsubmit="return submitNetworkPush(event, {{ bid.id }})">
+            <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+              <div style="flex:1;min-width:130px">
+                <label style="display:block;font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600">Target Buy ($)</label>
+                <input type="text" name="network_ask" required inputmode="numeric"
+                       autocomplete="off"
+                       placeholder="$118,000"
+                       value="{{ '${:,}'.format(bid.network_ask|int) if bid.network_ask else '' }}"
+                       oninput="this.value=this.value.replace(/[^0-9]/g,'').replace(/\B(?=(\d{3})+(?!\d))/g,','); if(this.value)this.value='$'+this.value"
+                       style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:15px;font-weight:600">
+              </div>
+              <div style="flex:2;min-width:200px">
+                <label style="display:block;font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600">Note (optional)</label>
+                <input type="text" name="note" maxlength="240"
+                       placeholder="Quick close, seller waiting"
+                       value="{{ bid.network_ask_note or '' }}"
+                       style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px">
+              </div>
+              <button type="button" onclick="previewNetworkPush({{ bid.id }})"
+                      style="padding:9px 14px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#e2e8f0;font-size:13px;font-weight:600;cursor:pointer">
+                Preview
+              </button>
+              <button type="submit"
+                      style="padding:9px 18px;background:#16a34a;border:none;border-radius:6px;color:white;font-size:13px;font-weight:700;cursor:pointer">
+                Push & Text ›
+              </button>
+            </div>
+          </form>
+          <div id="network-push-result" style="margin-top:12px;font-size:13px"></div>
+        </div>
+      </div>
+      {% endif %}
+
+      <script>
+      async function previewNetworkPush(bidId) {
+        const f = document.getElementById('network-push-form');
+        const ask = (f.network_ask.value || '').replace(/[^0-9]/g, '') || 0;
+        if (!ask) { alert('Enter a target buy first'); return; }
+        const r = await fetch(`/np/api/bid/${bidId}/network-push/preview?ask=${ask}`);
+        const j = await r.json();
+        renderNetworkResult(j, true, bidId);
+      }
+      async function submitNetworkPush(ev, bidId) {
+        ev.preventDefault();
+        const f = document.getElementById('network-push-form');
+        const askRaw = f.network_ask.value.replace(/[^0-9]/g, '');
+        if (!askRaw) { alert('Enter a target buy'); return false; }
+        f.network_ask.value = askRaw;
+        // If preview has been rendered, send only checked dealers.
+        const checked = Array.from(document.querySelectorAll('input.np-dealer-cb:checked'))
+                              .map(x => x.dataset.dealerId);
+        const previewRendered = document.querySelectorAll('input.np-dealer-cb').length > 0;
+        let dealerLabel = 'all matched';
+        if (previewRendered) {
+          if (!checked.length) { alert('No dealers checked.'); return false; }
+          dealerLabel = `${checked.length} selected`;
+        }
+        if (!confirm(`Push to network at $${parseInt(askRaw).toLocaleString()} (${dealerLabel}) and text?`)) return false;
+        const fd = new FormData(f);
+        if (checked.length) fd.set('dealer_ids', checked.join(','));
+        const r = await fetch(`/np/api/bid/${bidId}/network-push`, { method: 'POST', body: fd });
+        const j = await r.json();
+        renderNetworkResult(j, false, bidId);
+        return false;
+      }
+      function renderNetworkResult(j, isPreview, bidId) {
+        const el = document.getElementById('network-push-result');
+        const sent = (j.sent || []);
+        const skipped = (j.skipped || []);
+        const errors = (j.errors || []);
+        let h = '';
+        if (sent.length) {
+          const verb = isPreview ? 'Would text' : 'Texted';
+          h += `<div style="background:#052e16;border:1px solid #16a34a;border-radius:6px;padding:10px 14px;margin-bottom:8px">
+            <div style="color:#22c55e;font-weight:600;margin-bottom:8px">${verb} ${sent.length} dealer${sent.length===1?'':'s'} ${isPreview ? '— uncheck any you want to skip:' : ':'}</div>`;
+          if (isPreview) {
+            h += '<div style="display:flex;flex-direction:column;gap:6px">';
+            sent.forEach(s => {
+              const phone = s.sms_to || '(no phone)';
+              const sp = s.salesperson ? ` · ${s.salesperson}` : '';
+              const isManual = !!s.manual_pick;
+              const rowBg = isManual ? 'rgba(148,163,184,.08)' : 'rgba(34,197,94,.08)';
+              const rowText = isManual ? '#cbd5e1' : '#dcfce7';
+              const cbColor = isManual ? '#64748b' : '#22c55e';
+              const scoreBg = isManual ? '#1e293b' : '#0d2240';
+              const scoreColor = isManual ? '#94a3b8' : '#fde68a';
+              const phoneColor = isManual ? '#94a3b8' : '#86efac';
+              const manualTag = isManual ? '<span style="font-size:10px;background:rgba(148,163,184,.18);color:#cbd5e1;padding:2px 7px;border-radius:8px;letter-spacing:.3px;font-weight:600">MANUAL</span>' : '';
+              const cls = isManual ? 'np-dealer-cb manual-pick-row' : 'np-dealer-cb';
+              const checked = '';  // 2026-05-12: all dealers start unchecked, operator opts in
+              h += `<label style="display:flex;align-items:center;gap:10px;padding:6px 10px;background:${rowBg};border-radius:5px;cursor:pointer;font-size:13px;color:${rowText}">
+                      <input type="checkbox" class="${cls}" data-dealer-id="${s.dealer_id}" ${checked} style="width:17px;height:17px;accent-color:${cbColor};cursor:pointer">
+                      <b style="flex:1">${s.name}</b>
+                      ${manualTag}
+                      <span style="font-size:11px;background:${scoreBg};color:${scoreColor};padding:2px 8px;border-radius:10px;font-weight:600">score ${s.score}</span>
+                      <span style="font-size:11px;color:${phoneColor}">${phone}${sp}</span>
+                    </label>`;
+            });
+            h += '</div>';
+          } else {
+            h += '<ul style="margin:0;padding-left:18px;color:#86efac;font-size:12px">';
+            sent.forEach(s => {
+              const sp = s.salesperson ? ` · ${s.salesperson}` : '';
+              h += `<li><b>${s.name}</b> · score ${s.score} · ${s.sms_to || '(no phone)'}${sp}</li>`;
+            });
+            h += '</ul>';
+          }
+          h += '</div>';
+        }
+        if (skipped.length) {
+          const seller = skipped.filter(s => s.reason && s.reason.indexOf('has this VIN') >= 0);
+          const unchecked = skipped.filter(s => s.reason === 'unchecked by operator');
+          const others = skipped.filter(s => (!s.reason || s.reason.indexOf('has this VIN') < 0) && s.reason !== 'unchecked by operator');
+          if (seller.length) {
+            h += `<div style="background:#1e1b0f;border:1px solid #b45309;border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:#fbbf24">
+              <b>⚠ VIN already on their lot:</b> ${seller.map(s => s.name).join(', ')} (auto-skipped — seller-protection)
+            </div>`;
+          }
+          if (unchecked.length) {
+            h += `<div style="background:#1a1a2e;border:1px solid #475569;border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:#94a3b8">
+              <b>Unchecked:</b> ${unchecked.map(s => s.name).join(', ')}
+            </div>`;
+          }
+          if (others.length) {
+            h += `<details style="background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:#94a3b8">
+              <summary style="cursor:pointer">Score too low: ${others.length} dealer${others.length===1?'':'s'} (click to expand)</summary>
+              <ul style="margin:6px 0 0;padding-left:18px">
+              ${others.map(s => `<li>${s.name} — ${s.reason} ${s.score!==null?`(score ${s.score})`:''}</li>`).join('')}
+              </ul></details>`;
+          }
+        }
+        if (errors.length) {
+          h += `<div style="color:#f87171;font-size:12px;margin-top:6px">errors: ${errors.join('; ')}</div>`;
+        }
+        el.innerHTML = h;
+      }
+      </script>
+
 
       {# ─────────────────── Partner Offers Received ─────────────────── #}
       {# 2026-05-11: Offers submitted by subscribed partner dealers via

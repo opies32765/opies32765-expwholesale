@@ -1676,15 +1676,53 @@ def dashboard():
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     q = """
         SELECT b.*, c.name as contact_name, c.company as contact_company,
-               c.role as contact_role, d.name as partner_dealer_name
+               c.role as contact_role, d.name as partner_dealer_name,
+               dl.current_price       AS dc_current_price,
+               dl.end_time            AS dc_end_time,
+               dl.is_no_reserve       AS dc_no_reserve,
+               dl.reserve_met         AS dc_reserve_met,
+               dl.detail_url          AS dc_detail_url,
+               dl.status              AS dc_status,
+               dl.closed_at           AS dc_closed_at
         FROM bids b
         LEFT JOIN contacts c ON b.contact_id = c.id
         LEFT JOIN dealers d ON b.partner_dealer_id = d.id
+        LEFT JOIN dealerclub_lots dl ON dl.bid_id = b.id
         {where}
         ORDER BY b.created_at DESC LIMIT 200
     """
     cur.execute(q.format(where=where), params)
-    bids = cur.fetchall()
+    bids = list(cur.fetchall())
+
+    # Compute opportunity for each DealerClub-sourced bid so the template
+    # can render the colored badge without per-row math.
+    for bid in bids:
+        if not isinstance(bid, dict):
+            continue
+        if not bid.get('dc_current_price'):
+            continue
+        ai = bid.get('ai_price')
+        if ai is None:
+            bid['dc_opp_tier'] = 'gray'
+            bid['dc_opp_pct'] = None
+            continue
+        all_in = float(bid['dc_current_price']) + DEALERCLUB_BUY_FEE_FLAT \
+                 + DEALERCLUB_TRANSPORT_EST
+        try:
+            ai_f = float(ai)
+            pct = (ai_f - all_in) / ai_f * 100 if ai_f else None
+        except (TypeError, ValueError):
+            pct = None
+        bid['dc_opp_pct'] = round(pct, 1) if pct is not None else None
+        bid['dc_opp_dollars'] = round(float(ai) - all_in) if pct is not None else None
+        if pct is None:
+            bid['dc_opp_tier'] = 'gray'
+        elif pct >= 15:
+            bid['dc_opp_tier'] = 'green'
+        elif pct >= 5:
+            bid['dc_opp_tier'] = 'yellow'
+        else:
+            bid['dc_opp_tier'] = 'red'
 
     cur.execute("SELECT bid_id, COUNT(*) as cnt FROM bid_photos GROUP BY bid_id")
     photo_counts = {r['bid_id']: int(r['cnt']) for r in cur.fetchall()}
@@ -1818,16 +1856,61 @@ def bid_detail(bid_id):
 
     cur.execute("""
         SELECT b.*, c.name as contact_name, c.company as contact_company,
-               d.name as partner_dealer_name
+               d.name as partner_dealer_name,
+               dl.external_id           AS dc_external_id,
+               dl.current_price         AS dc_current_price,
+               dl.high_bid              AS dc_high_bid,
+               dl.bid_count             AS dc_bid_count,
+               dl.end_time              AS dc_end_time,
+               dl.is_no_reserve         AS dc_no_reserve,
+               dl.reserve_met           AS dc_reserve_met,
+               dl.reserve_progress_color AS dc_reserve_color,
+               dl.status                AS dc_status,
+               dl.detail_url            AS dc_detail_url,
+               dl.estimated_buy_fee     AS dc_buy_fee,
+               dl.estimated_transport   AS dc_transport,
+               dl.closed_at             AS dc_closed_at
         FROM bids b
         LEFT JOIN contacts c ON b.contact_id = c.id
         LEFT JOIN dealers d ON b.partner_dealer_id = d.id
+        LEFT JOIN dealerclub_lots dl ON dl.bid_id = b.id
         WHERE b.id = %s
     """, (bid_id,))
     bid = cur.fetchone()
     if not bid:
         db.close()
         return 'Not found', 404
+    # Compute live opportunity for DealerClub bids so the template can
+    # render the prominent green/yellow/red card.
+    if bid.get('dc_current_price'):
+        bid = dict(bid)
+        ai = bid.get('ai_price')
+        bf = bid.get('dc_buy_fee') if bid.get('dc_buy_fee') is not None \
+             else DEALERCLUB_BUY_FEE_FLAT
+        tr = bid.get('dc_transport') if bid.get('dc_transport') is not None \
+             else DEALERCLUB_TRANSPORT_EST
+        if ai is not None:
+            try:
+                ai_f = float(ai)
+                all_in = float(bid['dc_current_price']) + bf + tr
+                pct = (ai_f - all_in) / ai_f * 100 if ai_f else None
+                bid['dc_opp_pct'] = round(pct, 1) if pct is not None else None
+                bid['dc_opp_gap'] = round(ai_f - all_in) if pct is not None else None
+                bid['dc_all_in']  = round(all_in)
+                bid['dc_buy_fee_used'] = bf
+                bid['dc_transport_used'] = tr
+                if pct is None:
+                    bid['dc_opp_tier'] = 'gray'
+                elif pct >= 15:
+                    bid['dc_opp_tier'] = 'green'
+                elif pct >= 5:
+                    bid['dc_opp_tier'] = 'yellow'
+                else:
+                    bid['dc_opp_tier'] = 'red'
+            except (TypeError, ValueError):
+                bid['dc_opp_tier'] = 'gray'
+        else:
+            bid['dc_opp_tier'] = 'gray'
 
     cur.execute("SELECT * FROM bid_photos WHERE bid_id = %s ORDER BY id", (bid_id,))
     photos = cur.fetchall()
@@ -14665,6 +14748,7 @@ def api_opportunities_snapshot():
                o.mmr_wholesale_below, o.mmr_grade,
                o.mmr_retail_avg, o.mmr_retail_above, o.mmr_retail_below,
                o.dollars_under_mmr, o.pct_under_mmr,
+               o.dollars_under_retail, o.pct_under_retail, o.opportunity_type,
                o.rbook_comp_count, o.rbook_p25, o.rbook_p50, o.rbook_p75,
                o.rbook_avg_dol, o.retail_headroom,
                o.dealer_dol, o.recent_price_drop_amount,
