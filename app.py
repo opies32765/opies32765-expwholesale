@@ -7162,6 +7162,89 @@ def _thalist_download_photo(remote_url: str) -> str | None:
         return None
 
 
+def _cleanup_invalid_thalist_bids(min_age_minutes=10) -> dict:
+    """Delete thalist-sourced bids that AccuTrade couldn't price.
+
+    Rule: a thalist seller occasionally types a junk/invalid VIN
+    (check-digit fail, missing chars, transposed digits, etc.).
+    AccuTrade then silently returns no values — guaranteed_offer,
+    trade_in, and market_avg are all NULL. Without a valuable trade
+    quote, the bid has no actionable signal and just clutters the
+    dashboard. We delete it + stamp the thalist_posts ledger row so
+    a later re-scrape of the same post_id doesn't re-create the same
+    junk bid (ON CONFLICT bumps last_seen_at, never re-inserts).
+
+    min_age_minutes: don't touch bids younger than this — AccuTrade
+    typically reports back within 2-5 minutes; give it a margin.
+    """
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            SELECT b.id AS bid_id,
+                   b.vin,
+                   tp.id AS ledger_id,
+                   tp.post_id,
+                   al.not_available,
+                   al.unavailable_reason
+            FROM bids b
+            JOIN thalist_posts tp ON tp.bid_id = b.id
+            JOIN accutrade_lookups al ON al.bid_id = b.id
+            WHERE b.creation_source = 'thalist'
+              AND tp.invalidated_at IS NULL
+              AND al.looked_up_at IS NOT NULL
+              AND al.looked_up_at < NOW() - (%s || ' minutes')::interval
+              AND (
+                    al.not_available IS TRUE
+                 OR (al.guaranteed_offer IS NULL
+                     AND al.trade_in IS NULL
+                     AND al.market_avg IS NULL)
+              )
+        """, (str(min_age_minutes),))
+        victims = list(cur.fetchall())
+
+        for v in victims:
+            reason = (v['unavailable_reason']
+                      or 'AccuTrade returned no values (likely invalid VIN)')
+            cur.execute("""
+                UPDATE thalist_posts
+                   SET invalidated_at = NOW(),
+                       invalidate_reason = %s,
+                       bid_id = NULL
+                 WHERE id = %s
+            """, (reason, v['ledger_id']))
+            # DELETE the bid. CASCADE clears bid_photos, vauto_lookups,
+            # accutrade_lookups, ipacket_lookups, ai_assessment_log, etc.
+            cur.execute("DELETE FROM bids WHERE id = %s", (v['bid_id'],))
+            print(f'[thalist-cleanup] deleted bid #{v["bid_id"]} '
+                  f'vin={v["vin"]} post={v["post_id"]} reason="{reason}"',
+                  flush=True)
+        db.commit()
+        return {'deleted': len(victims),
+                'victims': [{'bid_id': v['bid_id'],
+                             'vin': v['vin'],
+                             'post_id': v['post_id']}
+                            for v in victims]}
+    except Exception as e:
+        db.rollback()
+        print(f'[thalist-cleanup] error: {e}', flush=True)
+        return {'deleted': 0, 'error': f'{type(e).__name__}: {e}'}
+    finally:
+        try: db.close()
+        except Exception: pass
+
+
+@app.route('/api/thalist/cleanup', methods=['POST'])
+def api_thalist_cleanup():
+    """Sweep junk thalist bids. Auth: same X-Auth shared secret as
+    /api/thalist/post. Called by the scraper at the end of each run."""
+    auth = (request.headers.get('X-Auth') or '').strip()
+    if not THALIST_SECRET or auth != THALIST_SECRET:
+        return jsonify({'error': 'bad auth'}), 401
+    result = _cleanup_invalid_thalist_bids()
+    return jsonify({'ok': True, **result})
+
+
 @app.route('/api/thalist/post', methods=['POST'])
 def api_thalist_post():
     """Receive one scraped thalist.com Wholesale Inventory post.
