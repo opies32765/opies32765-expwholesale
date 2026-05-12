@@ -255,7 +255,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           {{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }}
           {%- if bid.canon_trim and bid.canon_source == 'accutrade_overseer' -%}
             {{ ' ' + bid.canon_trim }}
-            <span title="Trim auto-corrected from VIN via AccuTrade ({{ '%.0f' % ((bid.canon_confidence or 0)*100) }}% conf). Seller said: {{ bid.trim or '(blank)' }}"
+            <span title="Trim auto-corrected from VIN via AccuTrade ({{ '%.0f' % ((bid.canon_confidence|float(0))*100) }}% conf). Seller said: {{ bid.trim or '(blank)' }}"
                   style="display:inline-block;margin-left:6px;padding:2px 6px;background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.45);border-radius:8px;font-size:10px;font-weight:700;color:#22c55e;vertical-align:middle">VIN ✓</span>
           {%- else -%}
             {{ ' ' + (bid.trim or '') }}
