@@ -1114,17 +1114,33 @@ def notify_partner_of_ew_response(bid_id: int, send_email: bool = False, send_te
 # original bid_id via bid_partner_offers — no new partner_bid_requests row.
 # EW operator sees all offers side-by-side on the bid detail page.
 
+OPERATOR_HOME_IP = '108.64.163.112'
+OPERATOR_TEST_PHONES = {'4074309675'}
+
+
 def _bid_qualifies_for_push(bid: dict) -> tuple[bool, str]:
     """Filter rules — return (allowed, reason). Skip operator test bids and
-    explicitly-killed bids. Keep both rules in one place so future filters
-    (IP whitelist, source whitelist, etc.) are easy to extend."""
+    explicitly-killed bids. Keep all rules in one place so future filters
+    are easy to extend.
+
+    2026-05-11: per operator request, also exclude bids from the operator's
+    home IP 108.64.163.112 (quick-drop tests) so Nuccio etc. never see them.
+    """
     # Operator test phone — normalize to 10 digits
     raw_phone = bid.get('phone') or ''
     digits = ''.join(c for c in raw_phone if c.isdigit())
     if len(digits) == 11 and digits[0] == '1':
         digits = digits[1:]
-    if digits == '4074309675':
+    if digits in OPERATOR_TEST_PHONES:
         return (False, 'operator_test_phone')
+
+    # Operator home IP — quick-drops from the operator's local computer
+    creation_ip = (bid.get('creation_ip') or '').strip()
+    if creation_ip == OPERATOR_HOME_IP:
+        return (False, 'operator_home_ip')
+    if creation_ip and OPERATOR_HOME_IP in creation_ip:
+        return (False, 'operator_home_ip_in_chain')
+
     status = (bid.get('status') or '').lower()
     if status in ('dropped', 'rejected', 'spam'):
         return (False, f'status={status}')
@@ -1138,7 +1154,8 @@ def _push_bid_to_subscribed_partners(bid_id: int) -> None:
     try:
         with _db() as conn, conn.cursor() as cur:
             cur.execute("""
-                SELECT id, phone, status, year, make, model, trim, mileage, vin
+                SELECT id, phone, status, year, make, model, trim, mileage, vin,
+                       creation_ip, creation_source
                   FROM bids WHERE id = %s
             """, (bid_id,))
             bid = cur.fetchone()

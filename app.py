@@ -601,6 +601,59 @@ def extract_vin_from_text(text):
     return match.group(0) if match else None
 
 
+_MAT_ICON_RE = re.compile(
+    r'\s*(?:keyboard_arrow_right|keyboard_arrow_left|chevron_right|chevron_left|'
+    r'arrow_forward|arrow_back|arrow_drop_down|expand_more|more_vert)\s*$',
+    re.IGNORECASE)
+
+
+def normalize_trim_text(s):
+    """Strip Material-Icons glyph names + collapse whitespace. Used to clean
+    DOM-scraped trim labels from AccuTrade's modal (the Angular widget appends
+    chevron font-ligatures that leak through textContent)."""
+    if not s:
+        return s
+    return _MAT_ICON_RE.sub('', (s or '').strip()).strip()
+
+
+def filter_rbook_to_strict_peers(subject_vin, rows, min_kept=5):
+    """Drop comp rows whose first 5 VIN chars don't match the subject.
+
+    For makes that VIN-encode trim/body (Porsche, Chevy, GMC, Audi, BMW),
+    char-5 differs across trims (WP0AA=Carrera, WP0AH=GTS). Filtering keeps
+    only true peers. For makes that DON'T encode trim in VIN (Ford F-150
+    XL vs King Ranch share the same chars 1-5), the filter would drop
+    nothing — which is correct, since 1-5 == 1-5 means same body+drivetrain.
+
+    Safety net: if the filter drops more than half the rows AND fewer than
+    `min_kept` survive, return the original list. That handles weird vAuto
+    bleeds (e.g. when a model code shifts mid-year and char-5 changes
+    despite same trim). Better to show some loose comps than zero comps.
+
+    Returns (filtered_rows, dropped_count, source_label).
+    """
+    if not rows or not subject_vin or len(subject_vin) < 5:
+        return rows, 0, 'unfiltered_no_subject'
+    subj_pfx = subject_vin[:5].upper()
+    kept = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        cv = (r.get('vin') or '').upper()
+        if not cv or len(cv) < 5:
+            kept.append(r)  # incomplete data — keep, don't penalize
+            continue
+        if cv[:5] == subj_pfx:
+            kept.append(r)
+    dropped = len(rows) - len(kept)
+    if dropped == 0:
+        return rows, 0, 'unfiltered_no_drops'
+    # If we'd drop more than half AND end up below min_kept, bail.
+    if len(kept) < min_kept and dropped > len(rows) / 2:
+        return rows, 0, 'unfiltered_would_nuke'
+    return kept, dropped, 'strict_vin_pfx5'
+
+
 _MILES_RE_LABELED = re.compile(
     r'(\d{1,3}(?:[,. ]\d{3})+|\d{3,6})\s*(?:k\b|mi\b|miles?\b|mileage\b)',
     re.IGNORECASE)
@@ -3436,12 +3489,26 @@ def _run_market_check_playwright(bid_id, vin):
 
 
 def trigger_market_check(bid_id, vin):
-    """Launch background thread to run Playwright market check."""
+    """Launch background thread to run Playwright market check.
+
+    2026-05-11: also kicks off VIN canonicalization (NHTSA decode + VIN-prefix
+    trim lookup → writes canon_year/make/model/trim/source/confidence on the
+    bid). This is the single intake hook that every bid creation path runs
+    through, so wiring canonicalize here covers SMS, quick-drop, API,
+    external, and operator-edit paths in one place.
+    """
     if not vin or len(vin) != 17:
         return
     import threading
     t = threading.Thread(target=_run_market_check_playwright, args=(bid_id, vin), daemon=True)
     t.start()
+    # Phase 3 canonicalizer — runs in its own daemon thread, opens its own
+    # DB conn, never blocks request hot path.
+    try:
+        from canonicalize_bid import canonicalize_bid_vin_async
+        canonicalize_bid_vin_async(bid_id, get_db)
+    except Exception as _ce:
+        print(f'[canonicalize] kick failed bid={bid_id}: {_ce}', flush=True)
 
 
 @app.route('/api/bid/<int:bid_id>/market-check', methods=['POST'])
@@ -4653,6 +4720,35 @@ def _run_assessment(bid_id):
             v2_reason = v2_result.get('reasoning', '')
             v2_flags = v2_result.get('flags', [])
 
+            # Book-value floor sanity check — catches bid 1139-style failures
+            # where Gemini recommends far below AccuTrade's offer numbers.
+            # If buy_price < 50% of max(trade_in, guaranteed_offer), flag it
+            # so a human can review. We don't auto-clamp — just surface.
+            try:
+                _at_ti = (accutrade or {}).get('trade_in') if accutrade else None
+                _at_go = (accutrade or {}).get('guaranteed_offer') if accutrade else None
+                _at_ma = (accutrade or {}).get('market_avg') if accutrade else None
+                _at_na = bool((accutrade or {}).get('not_available')) if accutrade else False
+                _at_top = max([v for v in (_at_ti, _at_go, _at_ma) if v] or [0])
+                if (not _at_na and _at_top > 0 and buy_price
+                        and float(buy_price) < 0.5 * float(_at_top)):
+                    _floor_flag = {
+                        'recommended': float(buy_price),
+                        'accutrade_trade_in': _at_ti,
+                        'accutrade_guaranteed_offer': _at_go,
+                        'accutrade_market_avg': _at_ma,
+                        'ratio': round(float(buy_price) / float(_at_top), 3),
+                    }
+                    v2_flags = list(v2_flags) + ['under_book_floor_check']
+                    print(f'[ASSESS] Bid {bid_id} UNDER_BOOK_FLOOR: '
+                          f'rec=${float(buy_price):,.0f} vs accu top=${_at_top:,.0f} '
+                          f'(ratio={_floor_flag["ratio"]:.2f})', flush=True)
+                else:
+                    _floor_flag = None
+            except Exception as _ff_err:
+                print(f'[ASSESS] floor-check err: {_ff_err}', flush=True)
+                _floor_flag = None
+
             # Build a simple narrative for the bid card legacy field
             narrative = [f"**RECOMMENDED BUY**: ${buy_price:,}"]
             if v2_low and v2_high:
@@ -4688,7 +4784,10 @@ def _run_assessment(bid_id):
                     _json.dumps({
                         'v2': v2_result,
                         '_server_flags': (
-                            {'odometer_discrepancy': _odo_flag} if _odo_flag else None
+                            {
+                                **({'odometer_discrepancy': _odo_flag} if _odo_flag else {}),
+                                **({'under_book_floor_check': _floor_flag} if _floor_flag else {}),
+                            } or None
                         ),
                         '_bias_correction': _bias_result,
                     }),
@@ -4771,6 +4870,32 @@ def _run_assessment(bid_id):
             _push_bid_to_subscribed_partners(bid_id)
         except Exception as _pbpe:
             print(f'[bid-push] outer error bid={bid_id}: {_pbpe}', flush=True)
+
+        # 2026-05-11: refresh ai_accuracy for THIS bid so the training table
+        # reflects the corrected assessment immediately (instead of waiting
+        # for the 6 AM cron). Required when we re-run an assessment with
+        # corrected inputs (e.g. overseer-fixed AccuTrade trim). Spawns a
+        # daemon thread so it doesn't slow down the API response. The bias
+        # correction layer trains on ai_accuracy, so keeping it current
+        # post-reassess is what "clean training data" actually means.
+        def _refresh_ai_accuracy():
+            try:
+                import subprocess as _sp
+                _sp.Popen(
+                    ['/opt/expwholesale/venv/bin/python3',
+                     '/opt/expwholesale/reconcile_ai_accuracy.py',
+                     '--bid', str(bid_id)],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                    close_fds=True,
+                )
+            except Exception as _re:
+                print(f'[reconcile-kick] bid={bid_id}: {_re}', flush=True)
+        try:
+            import threading as _th
+            _th.Thread(target=_refresh_ai_accuracy, daemon=True,
+                       name=f'reconcile-{bid_id}').start()
+        except Exception as _tke:
+            print(f'[reconcile-kick] thread err bid={bid_id}: {_tke}', flush=True)
 
         return {'success': True, 'assessment': assessment, 'buy_price': buy_price}
     except Exception as e:
@@ -6983,7 +7108,9 @@ def api_vauto_pending():
           FROM eligible
          WHERE bids.id = eligible.id
         RETURNING bids.id AS bid_id, bids.vin, bids.mileage, bids.year,
-                  bids.make, bids.model, bids.trim, bids.vauto_priority
+                  bids.make, bids.model,
+                  COALESCE(NULLIF(bids.canon_trim, ''), bids.trim) AS trim,
+                  bids.vauto_priority
     """, (worker_id,))
     rows = cur.fetchall()
 
@@ -9593,6 +9720,215 @@ def _normalize_accutrade_url(url):
         return url
 
 
+@app.route('/api/accutrade/trim_select', methods=['POST'])
+def api_trim_select():
+    """AI overseer: pick the correct trim from AccuTrade's modal choices.
+
+    Worker POSTs {vin, bid_id, choices: [{index, text}]}. We cache the result
+    by VIN forever — same VIN never re-asks the LLM. On any failure, we tell
+    the worker to fall back to its existing fuzzy-match (returns index=null).
+    """
+    data = request.json or {}
+    vin = (data.get('vin') or '').strip().upper()
+    bid_id = data.get('bid_id')
+    choices = data.get('choices') or []
+
+    if not vin or len(vin) != 17 or not choices:
+        return jsonify({'index': None, 'reason': 'bad_request'}), 200
+
+    # Defensive normalize: strip mat-icon glyph names from inbound choice text
+    # (older workers may not have the clean-scrape patch yet).
+    for c in choices:
+        if isinstance(c, dict) and c.get('text'):
+            c['text'] = normalize_trim_text(c['text'])
+
+    db = get_db()
+    cur = db.cursor()
+
+    # Cache hit by VIN
+    cur.execute(
+        "SELECT selected_index, selected_text, confidence, model_used, clean_trim "
+        "FROM accutrade_trim_select_cache WHERE vin=%s", (vin,)
+    )
+    row = cur.fetchone()
+    if row:
+        db.close()
+        return jsonify({
+            'index': int(row['selected_index']),
+            'text': normalize_trim_text(row['selected_text']),
+            'clean_trim': row.get('clean_trim') if isinstance(row, dict) else None,
+            'confidence': float(row['confidence']) if row['confidence'] is not None else None,
+            'source': 'cache',
+            'model': row['model_used'],
+        })
+
+    # Pull bid context + iPacket signal for the prompt
+    bid_trim = None
+    bid_year = bid_make = bid_model = None
+    sticker_msrp = None
+    sticker_base = None
+    sticker_ext = None
+    sticker_int = None
+    try:
+        cur.execute(
+            "SELECT year, make, model, trim, canon_trim, mileage "
+            "FROM bids WHERE id=%s", (bid_id,)
+        )
+        b = cur.fetchone()
+        if b:
+            bid_trim = (b.get('canon_trim') or b.get('trim') or '').strip()
+            bid_year = b.get('year')
+            bid_make = b.get('make')
+            bid_model = b.get('model')
+        cur.execute(
+            "SELECT total_msrp, base_price, exterior_color, interior_color "
+            "FROM ipacket_lookups WHERE vin=%s ORDER BY looked_up_at DESC LIMIT 1",
+            (vin,)
+        )
+        s = cur.fetchone()
+        if s:
+            sticker_msrp = s.get('total_msrp')
+            sticker_base = s.get('base_price')
+            sticker_ext = s.get('exterior_color')
+            sticker_int = s.get('interior_color')
+    except Exception as e:
+        print(f'trim_select: bid/sticker context fetch failed: {e}', flush=True)
+
+    # Build the prompt for the LLM overseer
+    choice_lines = '\n'.join(
+        f"  [{c.get('index', i)}] {c.get('text', '')}"
+        for i, c in enumerate(choices)
+    )
+    ctx_lines = [f"VIN: {vin}"]
+    if bid_year and bid_make and bid_model:
+        ctx_lines.append(f"Vehicle (from seller): {bid_year} {bid_make} {bid_model}")
+    if bid_trim:
+        ctx_lines.append(f"Trim hint from seller/canon: {bid_trim}")
+    if sticker_msrp:
+        ctx_lines.append(f"Window-sticker MSRP: ${sticker_msrp:,}")
+    if sticker_base:
+        ctx_lines.append(f"Window-sticker base price: ${sticker_base:,}")
+    if sticker_ext:
+        ctx_lines.append(f"Exterior color: {sticker_ext}")
+    if sticker_int:
+        ctx_lines.append(f"Interior color: {sticker_int}")
+    context_block = '\n'.join(ctx_lines)
+
+    prompt = (
+        "You are a vehicle-trim disambiguator for an automotive wholesale buyer.\n"
+        "AccuTrade has returned multiple possible trim configurations for the same VIN.\n"
+        "Pick the SINGLE choice that best matches the actual vehicle.\n\n"
+        f"{context_block}\n\n"
+        "AccuTrade choices (you must pick exactly one index):\n"
+        f"{choice_lines}\n\n"
+        "Rules:\n"
+        "1. The seller's trim hint is the strongest signal when present.\n"
+        "2. Window-sticker MSRP narrows by price tier (higher trims cost more).\n"
+        "3. If the seller hint contradicts the sticker MSRP, prefer the hint.\n"
+        "4. When in doubt for VINs that don't encode trim (Ford Super Duty, etc.),\n"
+        "   prefer the LOWER trim — never assume a high-spec trim without evidence.\n"
+        "5. The VIN itself is authoritative when its prefix encodes trim\n"
+        "   (Porsche WP0AA=Carrera, WP0AB=Carrera S, WP0AC=GT3/Touring,\n"
+        "   WP0AH=GTS variants). When seller hint disagrees with VIN-encoded\n"
+        "   trim, TRUST THE VIN.\n"
+        "6. Confidence: 0.9+ if VIN or sticker confirms; 0.6-0.8 if reasoned;\n"
+        "   below 0.5 if guessing.\n"
+        '7. Output a "clean_trim" canonical short label (e.g. "Carrera S",\n'
+        '   "GT3", "F-250 XL Crew Cab", "M240i Coupe") — concise, marketable.\n\n'
+        'Return ONLY this JSON: {"index": N, "confidence": 0.0-1.0,\n'
+        '"clean_trim": "<short label>", "reason": "<one short sentence>"}\n'
+        'No markdown, no commentary.'
+    )
+
+    model = 'gemini-2.5-flash'
+    raw = gemini_call(prompt, model=model, max_tokens=400, temperature=0.1)
+    if not raw:
+        db.close()
+        return jsonify({'index': None, 'reason': 'llm_unavailable'}), 200
+
+    # Parse JSON (tolerate ```json fences and truncated responses).
+    # Pull index/confidence/reason via regex fallback if json.loads fails.
+    txt = raw.strip()
+    if txt.startswith('```'):
+        txt = re.sub(r'^```(?:json)?\s*|\s*```$', '', txt, flags=re.MULTILINE).strip()
+    idx = None
+    conf = 0.5
+    reason = ''
+    clean_trim = None
+    try:
+        parsed = json.loads(txt)
+        idx = int(parsed.get('index'))
+        conf = float(parsed.get('confidence', 0.5))
+        reason = (parsed.get('reason') or '')[:200]
+        clean_trim = (parsed.get('clean_trim') or '')[:80] or None
+    except Exception:
+        m_idx = re.search(r'"index"\s*:\s*(\d+)', txt)
+        m_conf = re.search(r'"confidence"\s*:\s*([0-9.]+)', txt)
+        m_reason = re.search(r'"reason"\s*:\s*"([^"]*)"', txt)
+        m_clean = re.search(r'"clean_trim"\s*:\s*"([^"]*)"', txt)
+        if m_idx:
+            idx = int(m_idx.group(1))
+            if m_conf:
+                try: conf = float(m_conf.group(1))
+                except: pass
+            if m_reason:
+                reason = m_reason.group(1)[:200]
+            if m_clean:
+                clean_trim = m_clean.group(1)[:80] or None
+        else:
+            print(f'trim_select: parse failed | raw={raw[:300]}', flush=True)
+            db.close()
+            return jsonify({'index': None, 'reason': 'parse_failed', 'raw': raw[:200]}), 200
+
+    if idx < 0 or idx >= len(choices):
+        db.close()
+        return jsonify({'index': None, 'reason': 'index_out_of_range'}), 200
+
+    selected_text = normalize_trim_text(choices[idx].get('text', ''))
+
+    # Persist to cache
+    try:
+        cur.execute("ALTER TABLE accutrade_trim_select_cache ADD COLUMN IF NOT EXISTS clean_trim TEXT")
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        cur.execute("""
+            INSERT INTO accutrade_trim_select_cache
+                (vin, choices_json, selected_index, selected_text, confidence,
+                 model_used, bid_id_first_seen, bid_trim_at_select, clean_trim)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (vin) DO UPDATE SET
+                choices_json=EXCLUDED.choices_json,
+                selected_index=EXCLUDED.selected_index,
+                selected_text=EXCLUDED.selected_text,
+                confidence=EXCLUDED.confidence,
+                model_used=EXCLUDED.model_used,
+                clean_trim=COALESCE(EXCLUDED.clean_trim, accutrade_trim_select_cache.clean_trim),
+                updated_at=NOW()
+        """, (
+            vin, json.dumps(choices), idx, selected_text, conf,
+            model, bid_id, bid_trim or None, clean_trim,
+        ))
+        db.commit()
+    except Exception as e:
+        print(f'trim_select: cache write failed: {e}', flush=True)
+    finally:
+        db.close()
+
+    print(f'trim_select VIN={vin} bid={bid_id} chose [{idx}] "{selected_text}" '
+          f'clean="{clean_trim}" conf={conf} reason={reason}', flush=True)
+    return jsonify({
+        'index': idx,
+        'text': selected_text,
+        'clean_trim': clean_trim,
+        'confidence': conf,
+        'reason': reason,
+        'source': 'llm',
+        'model': model,
+    })
+
+
 @app.route('/api/accutrade/submit', methods=['POST'])
 def api_accutrade_submit():
     """Accept AccuTrade lookup results from worker."""
@@ -9608,8 +9944,9 @@ def api_accutrade_submit():
         INSERT INTO accutrade_lookups
             (bid_id, vin, guaranteed_offer, trade_in, trade_market, retail,
              market_avg, local_comps, screenshot, raw_json,
-             not_available, unavailable_reason, appraisal_url, looked_up_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+             not_available, unavailable_reason, appraisal_url,
+             selected_trim_text, trim_select_source, looked_up_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         ON CONFLICT (bid_id) DO UPDATE SET
             vin=EXCLUDED.vin, guaranteed_offer=EXCLUDED.guaranteed_offer,
             trade_in=EXCLUDED.trade_in, trade_market=EXCLUDED.trade_market,
@@ -9619,6 +9956,8 @@ def api_accutrade_submit():
             not_available=EXCLUDED.not_available,
             unavailable_reason=EXCLUDED.unavailable_reason,
             appraisal_url=COALESCE(EXCLUDED.appraisal_url, accutrade_lookups.appraisal_url),
+            selected_trim_text=COALESCE(EXCLUDED.selected_trim_text, accutrade_lookups.selected_trim_text),
+            trim_select_source=COALESCE(EXCLUDED.trim_select_source, accutrade_lookups.trim_select_source),
             looked_up_at=NOW()
     """, (
         bid_id, data.get('vin', ''),
@@ -9631,8 +9970,46 @@ def api_accutrade_submit():
         bool(data.get('not_available', False)),
         data.get('unavailable_reason'),
         _normalize_accutrade_url(data.get('appraisal_url')),
+        normalize_trim_text(data.get('selected_trim_text')),
+        data.get('trim_select_source'),
     ))
     db.commit()
+
+    # 2026-05-11: canon_trim writeback. When the AccuTrade overseer picked
+    # a trim with confidence >= 0.7, propagate it to bids.canon_trim so the
+    # rest of the system (bid display, vAuto BFF Trim filter, dealer-match)
+    # uses the authoritative VIN-derived trim instead of whatever the seller
+    # texted in. Bid 1188 case: seller said "Carrera 4 (Coupe)" but AccuTrade
+    # modal only offered GT3 variants → canon_trim should become "GT3".
+    try:
+        vin = (data.get('vin') or '').upper()
+        if vin and len(vin) == 17:
+            cur.execute(
+                "SELECT clean_trim, selected_text, confidence "
+                "FROM accutrade_trim_select_cache WHERE vin=%s", (vin,))
+            crow = cur.fetchone()
+            if crow:
+                cconf = float(crow['confidence'] or 0)
+                ctrim = (crow.get('clean_trim')
+                         or normalize_trim_text(crow.get('selected_text'))
+                         or '').strip()
+                if ctrim and cconf >= 0.7:
+                    cur.execute("""
+                        UPDATE bids
+                           SET canon_trim = %s,
+                               canon_source = 'accutrade_overseer',
+                               canon_confidence = %s
+                         WHERE id = %s
+                           AND (canon_trim IS NULL OR canon_trim = '')
+                    """, (ctrim[:80], cconf, bid_id))
+                    if cur.rowcount > 0:
+                        print(f'[canon_trim] bid={bid_id} set canon_trim="{ctrim}" '
+                              f'conf={cconf:.2f} from accutrade_overseer', flush=True)
+                    db.commit()
+    except Exception as _canon_err:
+        print(f'[canon_trim] writeback err bid={bid_id}: {_canon_err}', flush=True)
+        db.rollback()
+
     db.close()
     _maybe_fire_assessment(bid_id, require_all=True, source='accutrade')
     return jsonify({'ok': True, 'bid_id': bid_id})
@@ -10165,6 +10542,12 @@ def _ml_purchase_predict(bid: dict, vauto: dict | None,
             except Exception: rb_obj = None
         rb_rows = (rb_obj or {}).get('rows') or []
         if rb_rows:
+            # 2026-05-11: strict VIN-prefix filter — drops Carrera-vs-GTS bleed
+            rb_rows, _drop, _src = filter_rbook_to_strict_peers(
+                bid.get('vin'), rb_rows)
+            if _drop:
+                print(f'[ml] rbook strict-filter bid={bid.get("id")}: '
+                      f'dropped {_drop} rows ({_src})', flush=True)
             asks = sorted(v.get('price') for v in rb_rows
                           if isinstance(v, dict)
                           and isinstance(v.get('price'), (int, float))
@@ -11182,13 +11565,22 @@ def api_bid_quick_drop():
         parts.append(f'{mileage:,} mi')
     raw_message = ' | '.join(parts)
 
+    # 2026-05-11: capture client IP + source for partner-push filtering.
+    # Quick-drop bids from the operator's home IP (108.64.163.112) are test
+    # bids and must NOT be pushed to subscribed partners (Nuccio etc.).
+    _client_ip = (request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
+                  or request.remote_addr or '')
+
     cur.execute("""
         INSERT INTO bids (contact_id, phone, vin, year, make, model, trim, mileage, color,
-                          raw_message, asking_price, notes, status, trim_confidence)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new', %s) RETURNING id
+                          raw_message, asking_price, notes, status, trim_confidence,
+                          creation_ip, creation_source)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'new', %s,
+                %s, 'quick_drop') RETURNING id
     """, (contact_id, rep_phone, vin if vin and len(vin) == 17 else None,
           year, make, model, trim, mileage, color,
-          raw_message, asking_price, full_notes, _trim_confidence))
+          raw_message, asking_price, full_notes, _trim_confidence,
+          _client_ip))
     bid_id = cur.fetchone()['id']
 
     # Direct API kick removed 2026-05-08 (see same removal at intake hooks).
@@ -11903,15 +12295,28 @@ def driver_full_page(token):
     if rb and not rb.get('closest_3') and bid.get('mileage') and vauto and vauto.get('rbook_competitive_set'):
         rcs = _j(vauto['rbook_competitive_set']) or {}
         rows = rcs.get('rows') or []
+        # Strict VIN-prefix filter: keep only true trim peers (drops
+        # Carrera-vs-GTS / Tahoe-vs-Suburban bleed).
+        rows_strict, _drop, _src = filter_rbook_to_strict_peers(bid.get('vin'), rows)
+        if _drop:
+            print(f'[m_full] rbook strict-filter bid={bid["id"]} '
+                  f'closest_3: dropped {_drop} of {len(rows)} ({_src})', flush=True)
+        rows = rows_strict
         if rows:
             bid_miles = int(bid['mileage'])
             by_dist = sorted(rows,
                              key=lambda r: abs(int(r.get('mileage') or 0) - bid_miles))
             rb['closest_3'] = by_dist[:3]
+            rb['_strict_filter'] = {'dropped': _drop, 'kept': len(rows), 'source': _src}
 
     if not rb and vauto and vauto.get('rbook_competitive_set'):
         rcs = _j(vauto['rbook_competitive_set']) or {}
         rows = rcs.get('rows') or []
+        rows_strict, _drop, _src = filter_rbook_to_strict_peers(bid.get('vin'), rows)
+        if _drop:
+            print(f'[m_full] rbook strict-filter bid={bid["id"]} '
+                  f'full: dropped {_drop} of {len(rows)} ({_src})', flush=True)
+        rows = rows_strict
         if rows:
             asks = sorted(int(r.get('price') or 0) for r in rows if r.get('price'))
             rb = {
@@ -11919,6 +12324,7 @@ def driver_full_page(token):
                 'median': asks[len(asks)//2] if asks else None,
                 'p25': asks[len(asks)//4] if len(asks) >= 4 else None,
                 'p75': asks[(3*len(asks))//4] if len(asks) >= 4 else None,
+                '_strict_filter': {'dropped': _drop, 'kept': len(rows), 'source': _src},
             }
             if bid.get('mileage'):
                 bid_miles = int(bid['mileage'])

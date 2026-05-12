@@ -325,8 +325,31 @@ def kick_direct_enrichment(bid_id: int, db_conn_factory) -> None:
             return
         vehicle, option_codes = built
 
+        # 2026-05-11: inject bids.canon_trim into the vehicle dict so
+        # _default_criteria_options() emits a Trim criteriaOption to vAuto.
+        # The AccuTrade overseer writes canon_trim with high confidence,
+        # which closes the Carrera-vs-GTS / F-150-vs-F-250 comp-bleed at
+        # the source (vs the downstream VIN-prefix-5 post-filter).
+        try:
+            with db_conn_factory() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT canon_trim, canon_confidence "
+                                "FROM bids WHERE id=%s", (bid_id,))
+                    crow = cur.fetchone()
+            if crow:
+                ct = (crow[0] if not hasattr(crow, 'keys') else crow['canon_trim'])
+                cc = (crow[1] if not hasattr(crow, 'keys') else crow['canon_confidence'])
+                if ct and cc and float(cc) >= 0.7:
+                    vehicle = dict(vehicle)
+                    vehicle['canon_trim'] = ct
+                    log.info('bid %d injected canon_trim=%r (conf=%.2f) '
+                             'into vAuto comp request', bid_id, ct, float(cc))
+        except Exception as _ct_err:
+            log.warning('bid %d canon_trim inject failed: %s', bid_id, _ct_err)
+
         # Direct API — uses REAL appraisalId + canonical vehicle +
-        # vAuto-default criteriaOptions (Series/BodyType/ModelYear).
+        # vAuto-default criteriaOptions (Series/BodyType/ModelYear + Trim
+        # if canon_trim is set with high confidence).
         result = enrich_bid_direct(bid_id, vehicle, appraisal_id,
                                    option_codes=option_codes)
         log_direct_enrichment_result(bid_id, result)

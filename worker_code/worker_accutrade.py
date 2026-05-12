@@ -2,14 +2,37 @@
 import os, time
 from pathlib import Path
 
+try:
+    import requests as http_requests
+except Exception:
+    http_requests = None
+
 REPORTS_DIR = Path(r"C:\worker\accutrade_reports")
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 EMAIL = os.environ.get("ACCUTRADE_EMAIL", "opies32765@gmail.com")
 PASSWORD = os.environ.get("ACCUTRADE_PASSWORD", "Sedecremlun35$")
+EW_SERVER = os.environ.get("EW_SERVER", "https://experience-wholesale.net")
 ACCUTRADE_URL = "https://appraiser3.accu-trade.com"
 LOGIN_MARKERS = ("auth0.accu-trade.com", "/u/login", "/auth/login")
 SUCCESS_PATHS = ("/dashboard", "/appraisal", "/vehicle", "/home", "/index", "/performance-center")
+
+
+def _ask_overseer(vin, bid_id, choices, timeout=15):
+    """Ask EW's AI overseer which trim choice to click. Returns dict or None."""
+    if not http_requests or not choices:
+        return None
+    try:
+        r = http_requests.post(
+            f"{EW_SERVER}/api/accutrade/trim_select",
+            json={"vin": vin, "bid_id": bid_id, "choices": choices},
+            timeout=timeout,
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        print(f"[accutrade] overseer call failed: {e}")
+    return None
 
 
 def is_logged_in(url):
@@ -45,7 +68,7 @@ def auto_login(page, ctx, max_seconds=60):
     return False
 
 
-def lookup(page, ctx, vin, miles, t, trim=None):
+def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     print(f"[+{time.time()-t:5.1f}s] [accutrade] start")
     page.goto(ACCUTRADE_URL, wait_until="domcontentloaded", timeout=30000)
     if not is_logged_in(page.url):
@@ -127,45 +150,135 @@ def lookup(page, ctx, vin, miles, t, trim=None):
     }""")
     time.sleep(1)  # was 3s
 
-    fast = page.evaluate(r"""() => {
-        const url = window.location.href.toLowerCase();
-        if (url.indexOf('/appraisal/') < 0) return false;
-        if (url.indexOf('/new') >= 0 || url.indexOf('/auth/') >= 0) return false;
-        const text = document.body.innerText || '';
-        return (text.indexOf('Instant Offer') >= 0 || text.indexOf('Target Auction') >= 0)
-               && /\$[\d,]{3,}/.test(text);
-    }""")
-    if not fast:
-        time.sleep(1)  # was 2s
-        page.evaluate(r"""(trimHint) => {
-            function fc(el) { try { el.click(); } catch(e) {}
-                try { el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window})); } catch(e) {} }
-            const footers = document.querySelectorAll('footer');
-            for (const f of footers) {
-                if (!f.offsetParent) continue;
-                const tt = (f.textContent || '');
-                if (tt.indexOf('APPRAISAL') >= 0 && tt.indexOf('Target Trade') >= 0) {
-                    let cur = f;
-                    for (let j = 0; j < 6 && cur; j++) { fc(cur); cur = cur.parentElement; }
-                    return 'clicked_existing';
-                }
-            }
-            let choices = document.querySelectorAll('new-appraisal-trim-choice');
-            if (!choices.length) choices = document.querySelectorAll('.new-appraisal-trim-choice');
-            if (!choices.length) return 'no_modal';
-            let best = choices[0];
-            if (trimHint) {
-                const h = trimHint.toLowerCase();
-                for (const c of choices) {
-                    if (!c.offsetParent) continue;
-                    if ((c.textContent || '').toLowerCase().indexOf(h) >= 0) { best = c; break; }
-                }
-            }
-            fc(best);
-            const inner = best.querySelector('.new-appraisal-trim-choice, .text');
-            if (inner) fc(inner);
-            return 'clicked_trim';
-        }""", trim or "")
+    # 2026-05-11: "fast" + "clicked_existing" paths removed. Both bypassed the
+    # trim modal where the AI overseer runs — meaning AccuTrade silently
+    # served back the WRONG trim from a prior appraisal (King Ranch when the
+    # real truck is XL, Turbo S when it's Carrera S, etc.). We now ALWAYS try
+    # to reach the trim modal so the overseer (or fuzzy hint) picks.
+    selected_trim_text = None
+    trim_select_source = None
+    if True:
+        time.sleep(1.5)
+
+        # Helper that scrapes visible trim choices from the "Start a New
+        # Appraisal" modal. Returns [] when no modal is showing.
+        # 2026-05-11: clone each choice and strip mat-icon / svg / known
+        # Material-Icons glyph names before grabbing textContent — otherwise
+        # "GT3 COUPE 4.0L 6 CYL" came through as
+        # "GT3 COUPE 4.0L 6 CYLkeyboard_arrow_right" (chevron font ligature).
+        _scrape_choices_js = r"""() => {
+            let nodes = document.querySelectorAll('new-appraisal-trim-choice');
+            if (!nodes.length) nodes = document.querySelectorAll('.new-appraisal-trim-choice');
+            const out = [];
+            nodes.forEach((c, i) => {
+                if (!c.offsetParent) return;
+                const clone = c.cloneNode(true);
+                clone.querySelectorAll('mat-icon, .mat-icon, .material-icons, svg, i.material-icons-outlined').forEach(e => e.remove());
+                let txt = (clone.textContent || '').trim().replace(/\s+/g, ' ');
+                // Belt-and-suspenders: strip trailing Material-Icons glyph names that
+                // some Angular builds render as plain text via ::before pseudo-elements.
+                txt = txt.replace(/\s*(?:keyboard_arrow_right|keyboard_arrow_left|chevron_right|chevron_left|arrow_forward|arrow_back|arrow_drop_down|expand_more|more_vert)\s*$/i, '').trim();
+                if (txt) out.push({index: out.length, dom_index: i, text: txt});
+            });
+            return out;
+        }"""
+
+        choices = page.evaluate(_scrape_choices_js) or []
+
+        # If we didn't land on the trim modal (AccuTrade auto-redirected to an
+        # existing appraisal), force back into "Start a New Appraisal" so the
+        # overseer can pick. Click any "Start a New Appraisal" / "Add" / "+"
+        # button, re-enter VIN, search, then re-scrape. This handles the case
+        # of re-pulls for VINs that already have appraisals on AccuTrade.
+        if not choices:
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] no modal — forcing fresh appraisal flow")
+            try:
+                page.evaluate(r"""() => {
+                    const buttons = document.querySelectorAll('button, a, [role="button"]');
+                    for (const b of buttons) {
+                        const txt = (b.textContent || '').trim().toLowerCase();
+                        if (txt === '+' || txt === 'start a new appraisal' ||
+                            txt.indexOf('start a new appraisal') >= 0 ||
+                            txt.indexOf('new appraisal') >= 0) {
+                            b.click(); return 'clicked';
+                        }
+                    }
+                    return 'not_found';
+                }""")
+                time.sleep(1.5)
+                # Re-enter the VIN in the now-open modal
+                page.evaluate(r"""(vin) => {
+                    const inputs = document.querySelectorAll('input');
+                    for (const i of inputs) {
+                        const ph = (i.placeholder || '').toLowerCase();
+                        const al = (i.getAttribute('aria-label') || '').toLowerCase();
+                        if (ph.includes('vin') || al.includes('vin')) {
+                            i.focus();
+                            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                            setter.call(i, vin);
+                            i.dispatchEvent(new Event('input', {bubbles: true}));
+                            i.dispatchEvent(new Event('change', {bubbles: true}));
+                            return 'filled';
+                        }
+                    }
+                    return 'not_found';
+                }""", vin)
+                time.sleep(0.5)
+                page.evaluate(r"""() => {
+                    const all = document.querySelectorAll('*');
+                    for (const el of all) {
+                        let direct = '';
+                        for (const cn of el.childNodes) if (cn.nodeType === 3) direct += cn.textContent.trim();
+                        if (direct.toLowerCase() === 'search') { el.click(); return 'clicked'; }
+                    }
+                }""")
+                time.sleep(1.5)
+                choices = page.evaluate(_scrape_choices_js) or []
+            except Exception as _force_err:
+                print(f"[+{time.time()-t:5.1f}s] [accutrade] force-fresh failed: {_force_err}")
+
+        if not choices:
+            # Genuinely no modal even after forcing — bail to whatever's on page.
+            pass
+        else:
+                chosen_index = None
+                # 1) AI overseer (preferred)
+                overseer = _ask_overseer(vin, bid_id, choices)
+                if overseer and overseer.get('index') is not None:
+                    chosen_index = int(overseer['index'])
+                    selected_trim_text = overseer.get('text') or (choices[chosen_index]['text'] if chosen_index < len(choices) else None)
+                    trim_select_source = overseer.get('source') or 'llm'
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] overseer picked [{chosen_index}] '{selected_trim_text}' src={trim_select_source} conf={overseer.get('confidence')}")
+                # 2) Fallback fuzzy match on seller trim hint
+                if chosen_index is None and trim:
+                    h = trim.lower()
+                    for c in choices:
+                        if h in c['text'].lower():
+                            chosen_index = c['index']
+                            selected_trim_text = c['text']
+                            trim_select_source = 'fuzzy_hint'
+                            break
+                # 3) Last resort — first visible choice (legacy behavior)
+                if chosen_index is None:
+                    chosen_index = 0
+                    selected_trim_text = choices[0]['text']
+                    trim_select_source = 'first_visible'
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] NO overseer/hint — defaulting to [0] '{selected_trim_text}'")
+
+                page.evaluate(r"""(targetDomIndex) => {
+                    function fc(el) { try { el.click(); } catch(e) {}
+                        try { el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window})); } catch(e) {} }
+                    let nodes = document.querySelectorAll('new-appraisal-trim-choice');
+                    if (!nodes.length) nodes = document.querySelectorAll('.new-appraisal-trim-choice');
+                    const visible = [];
+                    nodes.forEach(c => { if (c.offsetParent) visible.push(c); });
+                    const best = visible[targetDomIndex] || visible[0];
+                    if (!best) return 'no_target';
+                    fc(best);
+                    const inner = best.querySelector('.new-appraisal-trim-choice, .text');
+                    if (inner) fc(inner);
+                    return 'clicked_trim';
+                }""", chosen_index)
         time.sleep(1)  # was 3s
         deadline = time.time() + 30
         while time.time() < deadline:
@@ -280,4 +393,6 @@ def lookup(page, ctx, vin, miles, t, trim=None):
         "market_avg": values.get("market_avg"),
         "screenshot": str(screenshot) if screenshot else None,
         "appraisal_url": appraisal_url,
+        "selected_trim_text": selected_trim_text,
+        "trim_select_source": trim_select_source,
     }

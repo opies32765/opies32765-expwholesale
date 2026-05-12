@@ -81,7 +81,7 @@ def _run_lookup_in_own_browser(profile_dir, runner):
             except Exception: pass
 
 
-def process_bid(vin, miles, trim=None, on_phase=None):
+def process_bid(vin, miles, trim=None, on_phase=None, bid_id=None):
     """Run all three lookups in parallel.
 
     on_phase: optional callback (phase: str, state: str) for watchdog markers.
@@ -115,7 +115,7 @@ def process_bid(vin, miles, trim=None, on_phase=None):
         threading.Thread(
             target=_wrap, name="accutrade", daemon=True,
             args=("accutrade", ACCUTRADE_PROFILE_DIR,
-                  lambda page, ctx: worker_accutrade.lookup(page, ctx, vin, miles, t, trim=trim)),
+                  lambda page, ctx: worker_accutrade.lookup(page, ctx, vin, miles, t, trim=trim, bid_id=bid_id)),
         ),
         threading.Thread(
             target=_wrap, name="ipacket", daemon=True,

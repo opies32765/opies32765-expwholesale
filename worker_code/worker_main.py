@@ -379,7 +379,7 @@ def process_one_bid(item):
         _post_phase(bid_id, phase, state)
 
     try:
-        result = process_bid(vin, miles, trim, on_phase=_phase_cb)
+        result = process_bid(vin, miles, trim, on_phase=_phase_cb, bid_id=bid_id)
     except Exception as e:
         traceback.print_exc()
         # If process_bid raised because Cox sent us to signin, surface that.
@@ -467,6 +467,8 @@ def process_one_bid(item):
                 "screenshot": screenshot_path,
                 "raw": accu.get("raw", {}),
                 "appraisal_url": accu.get("appraisal_url"),
+                "selected_trim_text": accu.get("selected_trim_text"),
+                "trim_select_source": accu.get("trim_select_source"),
             }
             ok = ew_submit_accutrade(a_payload)
             g = accu.get("guaranteed_offer") or 0

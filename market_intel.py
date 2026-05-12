@@ -97,8 +97,33 @@ def compute_market_intel(bid: dict,
 
     # ── rBook (retail asking from other dealers) ────────────────────
     retail_median = None
+    _strict_meta = None
     if rbook_data and isinstance(rbook_data, dict):
         rows = rbook_data.get('rows') or []
+        # 2026-05-11: strict VIN-prefix-5 filter. vAuto's loose competitive
+        # set bleeds wrong trims (Carrera vs GTS, F-150 vs F-250). For makes
+        # that VIN-encode trim, chars 1-5 differ across trims — drop those.
+        # Safety: bail if we'd nuke more than half AND end up below 5 rows.
+        subj_vin = (bid.get('vin') or '').upper() if bid else ''
+        if subj_vin and len(subj_vin) >= 5:
+            subj_pfx = subj_vin[:5]
+            _strict = [r for r in rows
+                       if isinstance(r, dict)
+                       and (r.get('vin') or '').upper()[:5] == subj_pfx]
+            _dropped = len(rows) - len(_strict)
+            if _dropped > 0:
+                if len(_strict) < 5 and _dropped > len(rows) / 2:
+                    print(f'[market_intel] strict-filter would_nuke '
+                          f'(kept={len(_strict)}, dropped={_dropped}) — using raw',
+                          flush=True)
+                else:
+                    print(f'[market_intel] strict-filter bid={bid.get("id")} '
+                          f'dropped {_dropped} of {len(rows)} rows', flush=True)
+                    rows = _strict
+                    _strict_meta = {
+                        'dropped': _dropped, 'kept': len(_strict),
+                        'source': 'strict_vin_pfx5',
+                    }
         # SANITY: old-format xlsx parser leaked stock numbers into the price
         # field (caused $804M medians). Cap at $2M, miles at 500k.
         usable_rows = [r for r in rows
@@ -111,6 +136,8 @@ def compute_market_intel(bid: dict,
             'stocking_report': rbook_data.get('stocking_report'),
             'all_rows':        usable_rows,  # full list for AI prompt
         }
+        if _strict_meta:
+            out['rbook']['_strict_filter'] = _strict_meta
         if n_rows > 0:
             retail_median = asks[n_rows // 2]
             out['rbook']['retail_median'] = retail_median

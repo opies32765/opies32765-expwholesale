@@ -117,6 +117,15 @@ def _default_criteria_options(vehicle: dict) -> list[dict]:
         out.append({'fieldId': 'ModelYear',
                     'optionId': str(year),
                     'isSelected': True})
+    # 2026-05-11: when caller injects a canonical trim (from the AccuTrade
+    # overseer's confident pick), emit it as a Trim criteriaOption so
+    # vAuto's comp engine narrows server-side. Closes the loose-comp leak
+    # for makes that VIN-encode trim (Porsche 911, Ford F-series, BMW M).
+    canon_trim = vehicle.get('canon_trim') or vehicle.get('trim')
+    if canon_trim not in (None, ''):
+        out.append({'fieldId': 'Trim',
+                    'optionId': str(canon_trim),
+                    'isSelected': True})
     return out
 
 
@@ -154,6 +163,12 @@ def fetch_competitive_set(vehicle: dict, cookies: dict[str, str],
         'criteriaOptions': criteria_options,
         'listPrice': list_price,
         'shouldShowMarketInfoForMyVehicle': True,
+        # 2026-05-11: tried flipping to True (vAuto's "smart" trim-aware
+        # mode) to fix the Carrera-vs-GTS bleed. vAuto returned HTTP 500
+        # on every call — either requires extra fields our payload lacks,
+        # or it's a paid Cox tier we don't have. Reverted. The actual fix
+        # for loose comps lives in the VIN-prefix-5 post-filter applied
+        # in market_intel.py + app.py rbook closest_3 paths.
         'useSmarterCompetitiveSet': False,
         'optionCodes': option_codes,
     }
