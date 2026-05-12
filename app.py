@@ -1848,27 +1848,6 @@ def bid_detail(bid_id):
     _bnc = cur.fetchone()
     bid_network_claim = dict(_bnc) if _bnc else None
 
-    # The same query but for already-confirmed sales (sold_confirmed_at NOT NULL).
-    # Drives the SOLD panel on the Push to Network card.
-    cur.execute("""
-        SELECT bp.bid_id, bp.dealer_id, bp.claimed_at, bp.sold_confirmed_at,
-               bp.sold_confirmed_by, bp.score,
-               d.name AS dealer_name, d.salesperson AS dealer_salesperson,
-               b.network_ask::int AS ask,
-               (SELECT COUNT(*) FROM bid_pushes bp2
-                 WHERE bp2.bid_id = bp.bid_id AND bp2.sold_confirmed_at IS NOT NULL
-                   AND bp2.dealer_id != bp.dealer_id) AS losers_notified
-          FROM bid_pushes bp
-          JOIN dealers d ON d.id = bp.dealer_id
-          JOIN bids b    ON b.id = bp.bid_id
-         WHERE bp.bid_id = %s AND bp.sold_confirmed_at IS NOT NULL
-           AND bp.claim_late IS NOT TRUE
-           AND bp.claimed_at IS NOT NULL
-         LIMIT 1
-    """, (bid_id,))
-    _bns = cur.fetchone()
-    bid_network_sold = dict(_bns) if _bns else None
-
     cur.execute("SELECT * FROM valuations WHERE bid_id = %s ORDER BY fetched_at DESC", (bid_id,))
     valuations = cur.fetchall()
 
@@ -2252,7 +2231,7 @@ def bid_detail(bid_id):
                            market_intel=market_intel,
                            ml_prediction=ml_prediction,
                            partner_offers=partner_offers,
-                           bid_network_claim=bid_network_claim, bid_network_sold=bid_network_sold, time_ago=time_ago)
+                           bid_network_claim=bid_network_claim, time_ago=time_ago)
 
 
 # ── SMS intake observability helpers ─────────────────────────────────────────
@@ -7332,17 +7311,20 @@ def api_thalist_post():
         ))
         new_bid_id = cur.fetchone()['id']
 
-        # Save photos on the bid
-        for purl in photos[:10]:
-            if purl and 'thalist' in purl.lower() or 'cloudfront' in (purl or '').lower() \
-                    or 'amazonaws' in (purl or '').lower() \
-                    or 'blob.core.windows' in (purl or '').lower():
-                try:
-                    cur.execute(
-                        "INSERT INTO bid_photos (bid_id, url) VALUES (%s, %s)",
-                        (new_bid_id, purl))
-                except Exception:
-                    pass
+        # Save photos on the bid — strictly thalist's blob CDN (the page
+        # source carries site-chrome logos under www.thalist.com which would
+        # render as broken vehicle photos if we let them through).
+        for purl in (photos or [])[:20]:
+            if not purl or not isinstance(purl, str):
+                continue
+            if 'blob.core.windows.net/images/' not in purl:
+                continue
+            try:
+                cur.execute(
+                    "INSERT INTO bid_photos (bid_id, url) VALUES (%s, %s)",
+                    (new_bid_id, purl))
+            except Exception:
+                pass
 
         # Link ledger row to the new bid
         cur.execute("""
