@@ -6793,6 +6793,245 @@ def _validate_ai_config(cfg):
     return True, None
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Bulk upload — dealer "needs to go" xlsx/csv lists → individual bids
+# Built 2026-05-12. See bulk_upload.py for the parser.
+# ─────────────────────────────────────────────────────────────────────────
+
+@app.route('/admin/bulk_upload')
+def admin_bulk_upload_page():
+    """Render the bulk upload preview/commit page."""
+    return render_template('bulk_upload.html')
+
+
+@app.route('/api/admin/bulk_upload/parse', methods=['POST'])
+def api_admin_bulk_upload_parse():
+    """Parse an uploaded xlsx/csv. Returns the list of candidate rows + a
+    duplicate-VIN check against the existing bids table (open bids only).
+    Does NOT insert anything."""
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'file required'}), 400
+    try:
+        from bulk_upload import parse_upload
+        rows = parse_upload(f.filename, f.read())
+    except Exception as e:
+        return jsonify({'error': f'parse failed: {type(e).__name__}: {e}'}), 400
+    if not rows:
+        return jsonify({'error': 'no recognizable rows found in file'}), 400
+
+    # Duplicate check: a row is a dupe if a non-cancelled bid with the same
+    # VIN exists. Returns the most recent matching bid's id.
+    vins = [r['vin'] for r in rows if r.get('vin')]
+    dupe_map = {}
+    if vins:
+        try:
+            db = get_db()
+            cur = db.cursor()
+            cur.execute("""
+                SELECT DISTINCT ON (vin) vin, id
+                FROM bids
+                WHERE vin = ANY(%s)
+                  AND COALESCE(status, '') NOT IN ('cancelled', 'rejected')
+                ORDER BY vin, id DESC
+            """, (vins,))
+            for r in cur.fetchall():
+                dupe_map[r['vin']] = r['id']
+            db.close()
+        except Exception as e:
+            print(f'[bulk_upload] dupe check failed: {e}', flush=True)
+    for r in rows:
+        if r.get('vin') and r['vin'] in dupe_map:
+            r['duplicate_of'] = dupe_map[r['vin']]
+    return jsonify({'filename': f.filename, 'rows': rows})
+
+
+def _stagger_kick_market_check(bid_ids_vins, delay_seconds):
+    """Fire trigger_market_check for each (bid_id, vin) tuple with a stagger.
+    Spawned as a single daemon thread that sleeps between kicks. The first
+    bid fires immediately; each subsequent bid waits `delay_seconds`."""
+    import threading
+    import time as _t
+    def _run():
+        for i, (bid_id, vin) in enumerate(bid_ids_vins):
+            if i > 0:
+                _t.sleep(delay_seconds)
+            try:
+                trigger_market_check(bid_id, vin)
+                print(f'[bulk_upload] staggered kick bid={bid_id} '
+                      f'vin={vin} idx={i}/{len(bid_ids_vins)}', flush=True)
+            except Exception as e:
+                print(f'[bulk_upload] kick failed bid={bid_id}: {e}',
+                      flush=True)
+    threading.Thread(target=_run, daemon=True,
+                     name='bulk-upload-stagger').start()
+
+
+@app.route('/api/admin/bulk_upload/commit', methods=['POST'])
+def api_admin_bulk_upload_commit():
+    """Commit a confirmed set of bid candidates. Body:
+        {rows: [{vin, raw_vehicle, year, make, model, trim, mileage,
+                 asking_price, color, body, notes, stock, ...}, ...],
+         delay_seconds: 5,
+         source_name: "Bob @ ABC Motors"}
+
+    Inserts all bids immediately (single transaction), creates a
+    bulk_uploads row, then spawns one stagger thread that fires
+    trigger_market_check per bid with the requested delay.
+    """
+    data = request.get_json(silent=True) or {}
+    rows = data.get('rows') or []
+    delay_seconds = data.get('delay_seconds')
+    try:
+        delay_seconds = int(delay_seconds) if delay_seconds is not None else 5
+    except (TypeError, ValueError):
+        delay_seconds = 5
+    delay_seconds = max(0, min(60, delay_seconds))
+    source_name = (data.get('source_name') or '').strip()[:200]
+
+    if not isinstance(rows, list) or not rows:
+        return jsonify({'error': 'rows array required'}), 400
+
+    # Filter to rows we'll actually insert (valid 17-char VIN, no skip flag).
+    keep = []
+    for r in rows:
+        vin = (r.get('vin') or '').strip().upper()
+        if len(vin) != 17:
+            continue
+        keep.append({**r, 'vin': vin})
+    if not keep:
+        return jsonify({'error': 'no rows with valid VINs'}), 400
+
+    # Resolve a contact for the batch. We slug the source name into a
+    # phone-key like 'bulk:bob_abc_motors' so we can find the same contact
+    # next time the same dealer sends a list. If no source, use a generic.
+    if source_name:
+        import re as _re
+        slug = _re.sub(r'[^a-z0-9]+', '_',
+                       source_name.lower()).strip('_')[:60] or 'unnamed'
+        contact_phone = f'bulk:{slug}'
+        contact_name = source_name
+    else:
+        contact_phone = 'bulk:unnamed'
+        contact_name = 'Bulk Upload'
+
+    client_ip = (request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
+                 or request.remote_addr or '')
+
+    db = get_db()
+    cur = db.cursor()
+    try:
+        # Upsert the contact
+        cur.execute("""
+            INSERT INTO contacts (phone, name)
+            VALUES (%s, %s)
+            ON CONFLICT (phone) DO UPDATE SET name = EXCLUDED.name
+            RETURNING id
+        """, (contact_phone, contact_name))
+        contact_id = cur.fetchone()['id']
+
+        # Create the bulk_uploads grouping row first so each bid links back.
+        cur.execute("""
+            INSERT INTO bulk_uploads
+                (uploaded_by, contact_id, source_name, row_count, delay_seconds)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """, (session.get('username') or 'admin', contact_id, source_name,
+              len(rows), delay_seconds))
+        bulk_upload_id = cur.fetchone()['id']
+
+        created = []
+        for r in keep:
+            year     = r.get('year')
+            make     = (r.get('make') or '').strip()[:60]
+            model    = (r.get('model') or '').strip()[:80]
+            trim     = (r.get('trim') or '').strip()[:120]
+            color    = (r.get('color') or '').strip()[:80]
+            body     = (r.get('body') or '').strip()[:80]
+            mileage  = r.get('mileage')
+            asking   = r.get('asking_price')
+            stock    = (r.get('stock') or '').strip()[:40]
+            notes_in = (r.get('notes') or '').strip()
+            raw_veh  = (r.get('raw_vehicle') or '').strip()
+
+            # Notes field: combine the dealer's note, any stock #, and a
+            # bulk-upload header so it's obvious in bid view where this
+            # came from.
+            note_parts = [f'[Bulk Upload: {source_name or "unnamed"}]']
+            if stock:
+                note_parts.append(f'Stock #{stock}')
+            if body:
+                note_parts.append(f'Body: {body}')
+            if notes_in:
+                note_parts.append(f'Dealer notes: {notes_in}')
+            full_notes = ' — '.join(note_parts)
+
+            # Raw message — mimic the quick_drop format so AI prompts and
+            # bid_detail render correctly.
+            rm_parts = ['[BULK UPLOAD]']
+            rm_parts.append(f'VIN: {r["vin"]}')
+            if raw_veh:
+                rm_parts.append(raw_veh)
+            elif year and make and model:
+                rm_parts.append(f'{year} {make} {model}')
+                if trim:
+                    rm_parts.append(trim)
+            if mileage:
+                rm_parts.append(f'{int(mileage):,} mi')
+            raw_message = ' | '.join(rm_parts)
+
+            cur.execute("""
+                INSERT INTO bids
+                    (contact_id, phone, vin, year, make, model, trim,
+                     mileage, color, raw_message, asking_price, notes,
+                     status, creation_ip, creation_source, bulk_upload_id,
+                     vauto_priority)
+                VALUES (%s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        'new', %s, 'bulk_upload', %s,
+                        TRUE)
+                RETURNING id
+            """, (
+                contact_id, contact_phone, r['vin'],
+                year if year else None,
+                make or None, model or None, trim or None,
+                int(mileage) if mileage else None,
+                color or None, raw_message,
+                int(asking) if asking else None, full_notes,
+                client_ip, bulk_upload_id,
+            ))
+            new_bid_id = cur.fetchone()['id']
+            created.append((new_bid_id, r['vin']))
+
+        # Update the rollup counts
+        cur.execute("""
+            UPDATE bulk_uploads
+            SET created_count = %s,
+                skipped_count = %s
+            WHERE id = %s
+        """, (len(created), len(rows) - len(created), bulk_upload_id))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        db.close()
+        return jsonify({'error': f'commit failed: {type(e).__name__}: {e}'}), 500
+    finally:
+        try: db.close()
+        except Exception: pass
+
+    # Now stagger the enrichment kicks. Single daemon thread sleeps between
+    # bids — no thread-per-bid storm.
+    _stagger_kick_market_check(created, delay_seconds)
+
+    return jsonify({
+        'ok': True,
+        'bulk_upload_id': bulk_upload_id,
+        'created': [{'bid_id': bid_id, 'vin': vin} for bid_id, vin in created],
+        'skipped': len(rows) - len(created),
+        'delay_seconds': delay_seconds,
+    })
+
+
 @app.route('/admin/ai-levers')
 def admin_ai_levers():
     """Render the AI Levers admin page."""
