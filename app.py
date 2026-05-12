@@ -7163,19 +7163,22 @@ def _thalist_download_photo(remote_url: str) -> str | None:
 
 
 def _cleanup_invalid_thalist_bids(min_age_minutes=10) -> dict:
-    """Delete thalist-sourced bids that AccuTrade couldn't price.
+    """Delete thalist-sourced bids whose VIN is structurally invalid.
 
-    Rule: a thalist seller occasionally types a junk/invalid VIN
-    (check-digit fail, missing chars, transposed digits, etc.).
-    AccuTrade then silently returns no values — guaranteed_offer,
-    trade_in, and market_avg are all NULL. Without a valuable trade
-    quote, the bid has no actionable signal and just clutters the
-    dashboard. We delete it + stamp the thalist_posts ledger row so
-    a later re-scrape of the same post_id doesn't re-create the same
-    junk bid (ON CONFLICT bumps last_seen_at, never re-inserts).
+    Earlier version of this rule was too aggressive: it deleted any
+    bid where AccuTrade returned no values. That killed bid 1219
+    (Ferrari Roma Spider — valid VIN, AccuTrade just doesn't carry
+    pricing for that model). New rule uses VIN check digit as the
+    primary signal — only typos (W1NYC6BJ5NX458393 etc.) fail the
+    digit check, while exotics that AccuTrade can't price still pass
+    and get kept on the dashboard.
 
-    min_age_minutes: don't touch bids younger than this — AccuTrade
-    typically reports back within 2-5 minutes; give it a margin.
+    Delete when:
+      - AccuTrade explicitly says not_available=TRUE, OR
+      - VIN check digit fails AND AccuTrade returned no values.
+
+    Both gates require at least min_age_minutes since the AccuTrade
+    lookup — gives the worker a margin to finalize late writes.
     """
     db = get_db()
     cur = db.cursor()
@@ -7186,7 +7189,10 @@ def _cleanup_invalid_thalist_bids(min_age_minutes=10) -> dict:
                    tp.id AS ledger_id,
                    tp.post_id,
                    al.not_available,
-                   al.unavailable_reason
+                   al.unavailable_reason,
+                   al.guaranteed_offer,
+                   al.trade_in,
+                   al.market_avg
             FROM bids b
             JOIN thalist_posts tp ON tp.bid_id = b.id
             JOIN accutrade_lookups al ON al.bid_id = b.id
@@ -7194,14 +7200,27 @@ def _cleanup_invalid_thalist_bids(min_age_minutes=10) -> dict:
               AND tp.invalidated_at IS NULL
               AND al.looked_up_at IS NOT NULL
               AND al.looked_up_at < NOW() - (%s || ' minutes')::interval
-              AND (
-                    al.not_available IS TRUE
-                 OR (al.guaranteed_offer IS NULL
-                     AND al.trade_in IS NULL
-                     AND al.market_avg IS NULL)
-              )
         """, (str(min_age_minutes),))
-        victims = list(cur.fetchall())
+        candidates = list(cur.fetchall())
+
+        victims = []
+        for c in candidates:
+            no_accutrade_price = (c['guaranteed_offer'] is None
+                                  and c['trade_in'] is None
+                                  and c['market_avg'] is None)
+            # Treat AccuTrade's explicit "not available" as authoritative.
+            if c['not_available']:
+                victims.append(c)
+                continue
+            # Otherwise require BOTH a VIN check-digit failure AND no
+            # AccuTrade price. check-digit failure alone is enough to
+            # confirm the seller typo'd; we still gate on no_price to
+            # avoid deleting a bid that AccuTrade was able to value
+            # despite a malformed VIN (extremely unlikely but cheap to
+            # guard against).
+            if no_accutrade_price and c['vin'] \
+                    and not vin_check_digit_valid(c['vin']):
+                victims.append(c)
 
         for v in victims:
             reason = (v['unavailable_reason']
