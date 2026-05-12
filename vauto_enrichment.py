@@ -236,17 +236,33 @@ def build_vehicle_dict_from_bid(conn, bid_id: int):
                     bid_id, jar.age_seconds())
         return None
 
-    try:
-        r = requests.post(
+    def _post_vehicle_info():
+        return requests.post(
             VEHICLE_INFO_URL,
             json={'vin': vin, 'odometer': odometer, 'odometerUom': 'Miles'},
             headers=jar.get_headers(),
             cookies=jar.get_cookies(),
             timeout=15,
         )
+
+    try:
+        r = _post_vehicle_info()
     except Exception as e:
         log.warning('bid %d vehicleInfo POST failed: %s', bid_id, e)
         return None
+    # Single retry on 401 — vAuto BFF occasionally emits a transient
+    # "Entity and/or User is Null" 401 on otherwise-healthy sessions
+    # (verified bid 1192, 2026-05-12 07:59 — surrounding bids 1190/1191/
+    # 1194/1195 used the same session and succeeded). One immediate
+    # retry catches this without invoking the 7-minute legacy fallback.
+    if r.status_code == 401:
+        log.warning('bid %d vehicleInfo 401 (body=%s) — retrying once',
+                    bid_id, r.text[:120])
+        try:
+            r = _post_vehicle_info()
+        except Exception as e:
+            log.warning('bid %d vehicleInfo retry failed: %s', bid_id, e)
+            return None
     if r.status_code != 200:
         log.warning('bid %d vehicleInfo status=%d body=%s',
                     bid_id, r.status_code, r.text[:200])

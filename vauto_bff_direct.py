@@ -72,9 +72,20 @@ class VAutoBadRequestError(Exception):
 
 def _post(url: str, payload: dict, headers: dict, cookies: dict,
           timeout: int) -> requests.Response:
-    """Single POST with error classification."""
+    """Single POST with error classification.
+
+    Retries once on 401. vAuto BFF occasionally emits a transient
+    "Entity and/or User is Null" 401 on otherwise-healthy sessions —
+    surrounding bids using the same cookies+headers succeed within
+    seconds. One immediate retry catches this without invoking the
+    7-minute legacy fallback path. 403 is treated as permanent (likely
+    real auth failure) and is NOT retried.
+    """
     r = requests.post(url, json=payload, headers=headers, cookies=cookies,
                       timeout=timeout)
+    if r.status_code == 401:
+        r = requests.post(url, json=payload, headers=headers,
+                          cookies=cookies, timeout=timeout)
     if r.status_code in (401, 403):
         raise VAutoAuthError(f'auth failed: {r.status_code}')
     if 500 <= r.status_code < 600:
