@@ -7219,8 +7219,23 @@ def api_thalist_post():
     # Decompose for bid-creation path
     year         = data.get('year')
     make_id      = data.get('make_id')
-    make_name    = _thalist_resolve_make(make_id) or 'Unknown'
+    make_name    = _thalist_resolve_make(make_id)
     model        = (data.get('model') or '').strip() or None
+    # Fallback: parse make from the post title when we don't know the
+    # make_id mapping. The scraper's structured make_id field is the
+    # primary signal; for VIN-bearing posts NHTSA fills canon_make in
+    # the canonicalize pipeline. But VIN-less broker listings need this
+    # parse so the dashboard isn't blank. Format: "<year> <make> <rest>".
+    if not make_name:
+        title_raw = (data.get('title') or '').strip()
+        tm = re.match(r'^\s*(?:19|20)\d{2}\s+'
+                      r'(Mercedes[-\s]Benz|Aston[-\s]Martin|Land[-\s]Rover|'
+                      r'Rolls[-\s]Royce|Alfa[-\s]Romeo|\S+)',
+                      title_raw, re.IGNORECASE)
+        if tm:
+            make_name = tm.group(1).strip()
+    if not make_name:
+        make_name = 'Unknown'
     asking_price = data.get('asking_price')
     mileage      = data.get('mileage')
     title        = (data.get('title') or '').strip() or None
