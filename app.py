@@ -7231,6 +7231,13 @@ def api_thalist_post():
     poster_company_id = data.get('poster_company_id')
     location_zip = (data.get('location_zip') or '').strip() or None
     photos       = data.get('photos') or []
+    # Post type — 'WI' (Wholesale Inventory) or 'BL' (Broker Listing).
+    # Stored on thalist_posts for later filtering/audit. Bids still share
+    # one creation_source='thalist' so the dashboard badge stays uniform.
+    post_type_code = (data.get('post_type_code') or '').strip().upper() or None
+    post_type_name = (data.get('post_type_name') or '').strip() or None
+    if post_type_code and post_type_code not in ('WI', 'BL'):
+        post_type_code = None  # ignore anything unexpected from the scraper
 
     db = get_db()
     cur = db.cursor()
@@ -7241,16 +7248,22 @@ def api_thalist_post():
                 (post_id, vin, title, year, make_id, model, asking_price,
                  mileage, location_zip, description, teaser, title_holder,
                  poster_name, poster_company, poster_company_id, photos,
-                 detail_url, raw_payload, first_seen_at, last_seen_at)
+                 detail_url, raw_payload, post_type_code, post_type_name,
+                 first_seen_at, last_seen_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s,
                     %s, %s, %s, %s::jsonb,
-                    %s, %s::jsonb, NOW(), NOW())
+                    %s, %s::jsonb, %s, %s,
+                    NOW(), NOW())
             ON CONFLICT (post_id) DO UPDATE
               SET last_seen_at = NOW(),
                   asking_price = COALESCE(EXCLUDED.asking_price,
                                           thalist_posts.asking_price),
-                  raw_payload = EXCLUDED.raw_payload
+                  raw_payload = EXCLUDED.raw_payload,
+                  post_type_code = COALESCE(EXCLUDED.post_type_code,
+                                            thalist_posts.post_type_code),
+                  post_type_name = COALESCE(EXCLUDED.post_type_name,
+                                            thalist_posts.post_type_name)
             RETURNING id, bid_id, dedupe_target_bid_id,
                       (xmax = 0) AS is_insert
         """, (
@@ -7260,6 +7273,7 @@ def api_thalist_post():
             poster_name, poster_company, poster_company_id,
             json.dumps(photos) if photos else None,
             detail_url, json.dumps(data),
+            post_type_code, post_type_name,
         ))
         row = cur.fetchone()
         ledger_id = row['id']
@@ -7316,7 +7330,12 @@ def api_thalist_post():
         contact_id = cur.fetchone()['id']
 
         # Build the bid's notes + raw_message in EW's house style
-        note_parts = [f'[Thalist: {poster_name or poster_company or "?"}]']
+        type_label = post_type_name or (
+            'Broker Listing' if post_type_code == 'BL'
+            else 'Wholesale Inventory' if post_type_code == 'WI'
+            else 'Post')
+        note_parts = [f'[Thalist {type_label}: '
+                      f'{poster_name or poster_company or "?"}]']
         if poster_company and poster_company != poster_name:
             note_parts.append(poster_company)
         if location_zip:
@@ -7397,8 +7416,12 @@ def api_thalist_post():
         title_str = title or f'{year or ""} {make_name or ""} {model or ""}'.strip()
         price_str = f'${int(asking_price):,}' if asking_price else 'no price'
         miles_str = f'{int(mileage):,} mi' if mileage else '? mi'
+        type_label = post_type_name or (
+            'Broker Listing' if post_type_code == 'BL'
+            else 'Wholesale Inventory' if post_type_code == 'WI'
+            else 'Post')
         msg_text = (
-            f'🚗 New Thalist post → bid #{new_bid_id}\n'
+            f'🚗 New Thalist {type_label} → bid #{new_bid_id}\n'
             f'{title_str}\n'
             f'VIN: {vin or "(none)"}\n'
             f'{price_str} · {miles_str}\n'
@@ -7406,7 +7429,7 @@ def api_thalist_post():
             f'{detail_url}'
         )
         msg_html = (
-            f'<b>🚗 New Thalist post</b> → bid #<b>{new_bid_id}</b>\n'
+            f'<b>🚗 New Thalist {type_label}</b> → bid #<b>{new_bid_id}</b>\n'
             f'{title_str}\n'
             f'VIN: <code>{vin or "(none)"}</code>\n'
             f'{price_str} · {miles_str}\n'
@@ -13771,7 +13794,8 @@ def api_bid_network_push_preview(bid_id):
         db.close()
         return {'error': 'bid not found'}, 404
     cur.execute("""
-        SELECT id, name, salesperson, salesperson_phone, buy_profile
+        SELECT id, name, salesperson, salesperson_phone, buy_profile,
+               COALESCE(always_show_in_push, FALSE) AS always_show
           FROM dealers
          WHERE receive_inbound_pushes = TRUE AND active = TRUE
     """)
@@ -13787,8 +13811,17 @@ def api_bid_network_push_preview(bid_id):
             'score': score, 'reason': reason,
             'sms_to': d.get('salesperson_phone'),
             'salesperson': d.get('salesperson'),
+            'manual_pick': False,
         }
-        if score is not None and score >= INBOUND_PUSH_MIN_SCORE:
+        # Hard skips (VIN-on-lot, never-stocks) — never surface to operator
+        if score is None:
+            skipped.append(target)
+            continue
+        if score >= INBOUND_PUSH_MIN_SCORE:
+            sent.append(target)
+        elif d.get('always_show'):
+            # Below threshold but flagged: show in checkable list, defaulted OFF
+            target['manual_pick'] = True
             sent.append(target)
         else:
             skipped.append(target)
