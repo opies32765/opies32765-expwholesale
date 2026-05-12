@@ -5378,10 +5378,17 @@ def api_bids():
                b.has_unread, b.partner_dealer_id, b.partner_request_id, b.salesperson,
                b.bidder_name, b.awaiting_name,
                c.name as contact_name, c.company as contact_company, c.role as contact_role,
-               d.name as partner_dealer_name
+               d.name as partner_dealer_name,
+               dl.current_price       AS dc_current_price,
+               dl.end_time            AS dc_end_time,
+               dl.is_no_reserve       AS dc_no_reserve,
+               dl.reserve_met         AS dc_reserve_met,
+               dl.detail_url          AS dc_detail_url,
+               dl.status              AS dc_status
         FROM bids b
         LEFT JOIN contacts c ON b.contact_id = c.id
         LEFT JOIN dealers d ON b.partner_dealer_id = d.id
+        LEFT JOIN dealerclub_lots dl ON dl.bid_id = b.id
         {where}
         ORDER BY b.created_at DESC LIMIT 200
     """
@@ -5389,6 +5396,30 @@ def api_bids():
 
     bids = []
     for r in cur.fetchall():
+        # Per-bid DealerClub opportunity (only when this is a DC lot)
+        dc_tier = None
+        dc_pct = None
+        if r.get('dc_current_price') and r.get('ai_price'):
+            try:
+                ai_f = float(r['ai_price'])
+                all_in = float(r['dc_current_price']) \
+                         + DEALERCLUB_BUY_FEE_FLAT \
+                         + DEALERCLUB_TRANSPORT_EST
+                pct = (ai_f - all_in) / ai_f * 100 if ai_f else None
+                if pct is None:
+                    dc_tier = 'gray'
+                elif pct >= 15:
+                    dc_tier = 'green'
+                elif pct >= 5:
+                    dc_tier = 'yellow'
+                else:
+                    dc_tier = 'red'
+                dc_pct = round(pct, 1) if pct is not None else None
+            except (TypeError, ValueError):
+                dc_tier = 'gray'
+        elif r.get('dc_current_price'):
+            dc_tier = 'gray'
+
         bids.append({
             'id': r['id'],
             'phone': r['phone'],
@@ -5415,7 +5446,12 @@ def api_bids():
             'bidder_name': r.get('bidder_name'),
             'awaiting_name': bool(r.get('awaiting_name')),
             'is_new': r['id'] > since_id,
-            'has_unread': bool(r.get('has_unread'))
+            'has_unread': bool(r.get('has_unread')),
+            'dc_current_price': int(r['dc_current_price']) if r.get('dc_current_price') else None,
+            'dc_opp_tier': dc_tier,
+            'dc_opp_pct':  dc_pct,
+            'dc_detail_url': r.get('dc_detail_url'),
+            'dc_status': r.get('dc_status'),
         })
 
     cur.execute("SELECT bid_id, COUNT(*) as cnt FROM bid_photos GROUP BY bid_id")

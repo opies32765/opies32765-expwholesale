@@ -700,12 +700,38 @@ function renderRow(b, pc, fp, activeWorker) {
     const thumb = thumbSrc ? `<a href="/bid/${b.id}" class="photo-thumb-link" style="display:none"><img class="photo-thumb" src="${thumbSrc}" alt="" onload="this.parentElement.style.display='block'" onerror="this.parentElement.style.display='none'"></a>` : '';
     photos = `<div class="photo-cell">${thumb}<span class="photo-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>${pc}</span></div>`;
   }
-  // Three contact-cell shapes:
+  // Source-aware contact cell shapes:
   //  - is_field: traveling rep (badge: "Field Rep")
-  //  - is_db_push: bid created from Dealer DB Search (label: "EW Search" + dealer name)
+  //  - phone thalist:*: scraped from thalist.com (green badge)
+  //  - phone dealerclub:*: scraped from app.dealerclub.com (amber badge
+  //                       + green/yellow/red opportunity pill)
+  //  - is_db_push: bid created from Dealer DB Search (label: "EW Search")
   //  - default: real customer (name/company/phone)
+  const isThalist = (b.phone||'').startsWith('thalist:');
+  const isDealerClub = (b.phone||'').startsWith('dealerclub:');
+  let dcOppPill = '';
+  if (isDealerClub && b.dc_opp_tier) {
+    const tier = b.dc_opp_tier;
+    const pct = b.dc_opp_pct;
+    const cfg = {
+      green:  {bg:'rgba(74,222,128,.18)',  bd:'rgba(74,222,128,.45)',  fg:'#86efac', icon:'🟢', sign:'+'},
+      yellow: {bg:'rgba(250,204,21,.12)',  bd:'rgba(250,204,21,.4)',   fg:'#fde047', icon:'🟡', sign:'+'},
+      red:    {bg:'rgba(248,113,113,.12)', bd:'rgba(248,113,113,.35)', fg:'#fca5a5', icon:'🔴', sign:''},
+      gray:   {bg:'rgba(148,163,184,.12)', bd:'rgba(148,163,184,.3)',  fg:'#cbd5e1', icon:'⚪', sign:''},
+    }[tier] || {bg:'rgba(148,163,184,.12)', bd:'rgba(148,163,184,.3)', fg:'#cbd5e1', icon:'⚪', sign:''};
+    const pctTxt = (pct == null) ? 'analyzing' : (cfg.sign + pct + '%');
+    dcOppPill = ` <span title="DealerClub opportunity (AI buy vs current bid + fees + transport)" style="display:inline-block;padding:1px 7px;margin-left:3px;background:${cfg.bg};border:1px solid ${cfg.bd};border-radius:3px;font-size:9px;font-weight:700;color:${cfg.fg};letter-spacing:.4px;text-transform:uppercase">${cfg.icon} ${pctTxt}</span>`;
+  }
   const contactCell = b.is_field
     ? `<div class="contact-name">${b.contact_name||'Field Rep'}</div><div><span class="badge-field">${b.contact_role||'Field Rep'}</span></div>`
+    : isThalist
+    ? `<div class="contact-name" style="color:#34d399">${b.contact_name||'Thalist Post'}</div>`
+      + (b.contact_company ? `<div class="contact-company" style="color:#94a3b8;font-size:11px">${b.contact_company}</div>` : '')
+      + `<div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.3);border-radius:3px;font-size:9px;font-weight:700;color:#34d399;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from thalist.com Wholesale Inventory">Thalist</span></div>`
+    : isDealerClub
+    ? `<div class="contact-name" style="color:#f59e0b">DealerClub</div>`
+      + (b.dc_current_price ? `<div class="contact-company" style="color:#94a3b8;font-size:11px">Bid $${Number(b.dc_current_price).toLocaleString()}</div>` : `<div class="contact-company" style="color:#94a3b8;font-size:11px">Live auction</div>`)
+      + `<div style="margin-top:3px"><span style="display:inline-block;padding:1px 7px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);border-radius:3px;font-size:9px;font-weight:700;color:#f59e0b;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from app.dealerclub.com live auction">DealerClub</span>${dcOppPill}</div>`
     : b.is_db_push
     ? `<div class="contact-name" style="color:#a78bfa">EW Search</div>`
       + (b.partner_dealer_name ? `<div class="contact-company" style="color:#94a3b8;font-size:11px">${b.partner_dealer_name}</div>` : '')
