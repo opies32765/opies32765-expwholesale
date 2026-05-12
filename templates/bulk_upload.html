@@ -28,7 +28,7 @@
   button.secondary { background: #6b7280; }
   button.secondary:hover { background: #4b5563; }
   button:disabled { background: #9ca3af; cursor: not-allowed; }
-  .row { display: grid; grid-template-columns: 1.6fr 1fr 0.8fr 0.8fr; gap: 14px;
+  .row { display: grid; grid-template-columns: 1.8fr 1.4fr 0.8fr; gap: 14px;
          margin-bottom: 14px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px;
           background: #fff; }
@@ -74,10 +74,6 @@
       <div>
         <label>Source name (dealer or contact) <span style="color:#dc2626;">*</span></label>
         <input type="text" id="source_name" placeholder='e.g. "Bob @ ABC Motors"' required />
-      </div>
-      <div>
-        <label>Delay between bids (seconds)</label>
-        <input type="number" id="delay_seconds" value="5" min="0" max="60" />
       </div>
       <div>
         <label>Spreadsheet (.xlsx or .csv)</label>
@@ -244,9 +240,8 @@ document.getElementById('btn-commit').onclick = async () => {
     keep.push(row);
   });
   if (!keep.length) { statusEl.textContent = 'Nothing selected.'; statusEl.className = 'status-line err'; return; }
-  const delay = parseInt(document.getElementById('delay_seconds').value, 10) || 0;
   const source = document.getElementById('source_name').value;
-  statusEl.textContent = `Creating ${keep.length} bids (${delay}s stagger)…`;
+  statusEl.textContent = `Creating ${keep.length} bids…`;
   statusEl.className = 'status-line';
   document.getElementById('btn-commit').disabled = true;
   try {
@@ -254,7 +249,7 @@ document.getElementById('btn-commit').onclick = async () => {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       credentials: 'same-origin',
-      body: JSON.stringify({ rows: keep, delay_seconds: delay, source_name: source }),
+      body: JSON.stringify({ rows: keep, source_name: source }),
     });
     if (!ok || j.error) {
       statusEl.textContent = 'Commit failed: ' + (j.error || 'unknown');
@@ -263,7 +258,7 @@ document.getElementById('btn-commit').onclick = async () => {
     }
     const lines = (j.created || []).map(c => `  → bid #${c.bid_id} — ${c.vin}`).join('\n');
     statusEl.innerHTML = `<strong style="color:#166534;">Created ${j.created.length} bids</strong> ` +
-      `(skipped ${j.skipped}). Enrichment kicks staggered every ${delay}s.<br>` +
+      `(skipped ${j.skipped}). Enrichment is running in the background — refresh the dashboard to see them.<br>` +
       (j.bulk_upload_id ? `Batch ID: <a href="/admin/bulk_upload/${j.bulk_upload_id}">${j.bulk_upload_id}</a><br>` : '') +
       `<pre style="font-size:12px; background:#f9fafb; padding:8px; margin-top:8px;">` + escapeHtml(lines) + `</pre>`;
     statusEl.className = 'status-line ok';
