@@ -7411,35 +7411,43 @@ def api_thalist_post():
         try: db.close()
         except Exception: pass
 
-    # Fire alerts + downstream enrichment
-    try:
-        title_str = title or f'{year or ""} {make_name or ""} {model or ""}'.strip()
-        price_str = f'${int(asking_price):,}' if asking_price else 'no price'
-        miles_str = f'{int(mileage):,} mi' if mileage else '? mi'
-        type_label = post_type_name or (
-            'Broker Listing' if post_type_code == 'BL'
-            else 'Wholesale Inventory' if post_type_code == 'WI'
-            else 'Post')
-        msg_text = (
-            f'🚗 New Thalist {type_label} → bid #{new_bid_id}\n'
-            f'{title_str}\n'
-            f'VIN: {vin or "(none)"}\n'
-            f'{price_str} · {miles_str}\n'
-            f'by {poster_name or "?"} ({poster_company or "?"})\n'
-            f'{detail_url}'
-        )
-        msg_html = (
-            f'<b>🚗 New Thalist {type_label}</b> → bid #<b>{new_bid_id}</b>\n'
-            f'{title_str}\n'
-            f'VIN: <code>{vin or "(none)"}</code>\n'
-            f'{price_str} · {miles_str}\n'
-            f'by {poster_name or "?"} ({poster_company or "?"})\n'
-            f'<a href="{detail_url}">view on thalist</a>'
-        )
-        _tg_worker_alert(msg_html)
-        send_sms(THALIST_ALERT_PHONE, msg_text[:1200])
-    except Exception as e:
-        print(f'[thalist] alert error: {e}', flush=True)
+    # Fire alerts + downstream enrichment.
+    # quiet=True from the scraper (first-run backfill) suppresses the
+    # Telegram + SMS so the operator doesn't get text-bombed when the
+    # scraper first comes online and finds N already-active cards.
+    quiet = bool(data.get('quiet'))
+    if quiet:
+        print(f'[thalist] quiet=true — skipping alerts for bid #{new_bid_id}',
+              flush=True)
+    else:
+        try:
+            title_str = title or f'{year or ""} {make_name or ""} {model or ""}'.strip()
+            price_str = f'${int(asking_price):,}' if asking_price else 'no price'
+            miles_str = f'{int(mileage):,} mi' if mileage else '? mi'
+            type_label = post_type_name or (
+                'Broker Listing' if post_type_code == 'BL'
+                else 'Wholesale Inventory' if post_type_code == 'WI'
+                else 'Post')
+            msg_text = (
+                f'🚗 New Thalist {type_label} → bid #{new_bid_id}\n'
+                f'{title_str}\n'
+                f'VIN: {vin or "(none)"}\n'
+                f'{price_str} · {miles_str}\n'
+                f'by {poster_name or "?"} ({poster_company or "?"})\n'
+                f'{detail_url}'
+            )
+            msg_html = (
+                f'<b>🚗 New Thalist {type_label}</b> → bid #<b>{new_bid_id}</b>\n'
+                f'{title_str}\n'
+                f'VIN: <code>{vin or "(none)"}</code>\n'
+                f'{price_str} · {miles_str}\n'
+                f'by {poster_name or "?"} ({poster_company or "?"})\n'
+                f'<a href="{detail_url}">view on thalist</a>'
+            )
+            _tg_worker_alert(msg_html)
+            send_sms(THALIST_ALERT_PHONE, msg_text[:1200])
+        except Exception as e:
+            print(f'[thalist] alert error: {e}', flush=True)
 
     try:
         if vin:
@@ -13794,8 +13802,7 @@ def api_bid_network_push_preview(bid_id):
         db.close()
         return {'error': 'bid not found'}, 404
     cur.execute("""
-        SELECT id, name, salesperson, salesperson_phone, buy_profile,
-               COALESCE(always_show_in_push, FALSE) AS always_show
+        SELECT id, name, salesperson, salesperson_phone, buy_profile
           FROM dealers
          WHERE receive_inbound_pushes = TRUE AND active = TRUE
     """)
@@ -13811,17 +13818,8 @@ def api_bid_network_push_preview(bid_id):
             'score': score, 'reason': reason,
             'sms_to': d.get('salesperson_phone'),
             'salesperson': d.get('salesperson'),
-            'manual_pick': False,
         }
-        # Hard skips (VIN-on-lot, never-stocks) — never surface to operator
-        if score is None:
-            skipped.append(target)
-            continue
-        if score >= INBOUND_PUSH_MIN_SCORE:
-            sent.append(target)
-        elif d.get('always_show'):
-            # Below threshold but flagged: show in checkable list, defaulted OFF
-            target['manual_pick'] = True
+        if score is not None and score >= INBOUND_PUSH_MIN_SCORE:
             sent.append(target)
         else:
             skipped.append(target)
