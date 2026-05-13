@@ -24,6 +24,14 @@ try:
 except Exception as _e:
     print(f'[wsgi] wholesaler_review register failed: {_e}', flush=True)
 
+try:
+    from network_push_bp import bp as _np_bp
+    if "network_push" not in app.blueprints:
+        app.register_blueprint(_np_bp)
+        print("[wsgi] network_push blueprint registered (drift recovery)", flush=True)
+except Exception as _e:
+    print(f"[wsgi] network_push register failed: {_e}", flush=True)
+
 
 # Pre-warm ML models so the first bid card render doesn't pay the
 # 5s pandas/xgboost import + 700-1900ms per-make cold load. Each worker

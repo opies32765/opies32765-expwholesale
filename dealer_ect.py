@@ -271,8 +271,16 @@ def _ect_extract_one(vdp_url: str, sess) -> Optional[dict]:
             break
 
     # Display photo: prefer the structuredData image (Webflow CDN, smaller +
-    # the dealer's chosen hero shot), fall back to og:image.
-    img = sd_img or og_img
+    # the dealer's chosen hero shot), fall back to og:image. Skip the webflow
+    # placeholder ("passenger-white.webp") that ECT shows for cars added
+    # before real inventory photos are uploaded — better to store NULL than
+    # render a misleading generic icon downstream.
+    def _is_placeholder(u):
+        if not u:
+            return True
+        ul = u.lower()
+        return ("passenger-white" in ul or "placeholder" in ul)
+    img = sd_img if not _is_placeholder(sd_img) else (og_img if not _is_placeholder(og_img) else None)
 
     # Year / make / model from `name`
     year, make, model = _parse_name(product.get("name") or "")

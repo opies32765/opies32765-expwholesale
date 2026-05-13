@@ -1147,6 +1147,105 @@ def _bid_qualifies_for_push(bid: dict) -> tuple[bool, str]:
     return (True, '')
 
 
+
+# ── Match-routing score (2026-05-12) ─────────────────────────────────────
+# Uses dealers.buy_profile JSONB built nightly from dealer_inventory.
+# Returns (score, reason). score >= INBOUND_PUSH_MIN_SCORE → push allowed.
+INBOUND_PUSH_MIN_SCORE = int(os.environ.get('INBOUND_PUSH_MIN_SCORE', '60'))
+
+def _score_bid_for_dealer(bid: dict, profile: dict | None, dealer_id: int | None = None):
+    """Score a bid against a dealer's buy_profile. Returns (score, reason).
+    score >= INBOUND_PUSH_MIN_SCORE → push allowed. score is None → hard skip.
+
+    VIN-on-lot exclusion: if `dealer_id` is provided AND bid.vin matches an
+    active dealer_inventory row for that dealer, returns (None, 'has this VIN').
+    Prevents pushing a dealer their own stock back."""
+    if not profile or not (profile.get('makes')):
+        return None, 'no profile'
+    make = (bid.get('make') or '').upper().strip()
+    if not make:
+        return None, 'bid missing make'
+
+    # ── VIN-on-lot seller-protection ─────────────────────────────
+    vin = (bid.get('vin') or '').strip().upper()
+    if vin and dealer_id is not None:
+        try:
+            with _db() as _c, _c.cursor() as _cur:
+                _cur.execute("""
+                    SELECT 1 FROM dealer_inventory
+                     WHERE dealer_id = %s AND UPPER(vin) = %s AND status = 'active'
+                     LIMIT 1
+                """, (dealer_id, vin))
+                if _cur.fetchone():
+                    return None, f'has this VIN on lot ({vin})'
+        except Exception as _e:
+            print(f'[score] VIN check failed dealer={dealer_id} vin={vin}: {_e}',
+                  flush=True)
+
+    makes = profile.get('makes') or {}
+    bands = profile.get('bands') or {}
+    overrides = profile.get('overrides') or {}
+
+    asked = bid.get('asking_price') or 0
+    miles = bid.get('mileage')
+    year  = bid.get('year')
+
+    for rule in (overrides.get('never') or []):
+        if 'price_lt' in rule and asked and asked < rule['price_lt']:
+            return None, f"never (price<{rule['price_lt']})"
+        if 'miles_gt' in rule and miles and miles > rule['miles_gt']:
+            return None, f"never (miles>{rule['miles_gt']})"
+    for rule in (overrides.get('always') or []):
+        if rule.get('make') == make:
+            return 100, 'override always'
+
+    if make not in makes:
+        return None, f'never stocks {make.title()}'
+
+    m = makes[make]
+    s = 50
+    share = m.get('share') or 0
+    if share >= 20:   s += 15
+    elif share >= 10: s += 10
+    elif share >= 5:  s += 5
+
+    avg_y = m.get('avg_year')
+    if avg_y and year:
+        yd = abs(year - avg_y)
+        if yd <= 2:    s += 20
+        elif yd <= 5:  s += 10
+        elif yd <= 10: pass
+        else:          s -= 20
+
+    ymin = bands.get('year_min'); ymax = bands.get('year_max')
+    if year and ymin and ymax:
+        if year < ymin - 2 or year > ymax + 2:
+            s -= 25
+
+    sold_n = m.get('sold_n') or 0
+    days   = m.get('avg_days_on_lot') or 0
+    if sold_n >= 3 and 0 < days < 15:
+        s += 15
+    elif sold_n >= 1 and 0 < days < 30:
+        s += 5
+
+    p10 = bands.get('price_p10'); p90 = bands.get('price_p90')
+    if asked and p10 and p90:
+        if p10 <= asked <= p90:
+            s += 10
+        elif asked < p10 * 0.6 or asked > p90 * 1.5:
+            s -= 15
+
+    mp90 = bands.get('miles_p90')
+    if miles is not None and mp90:
+        if miles <= mp90:
+            s += 5
+        elif miles > mp90 * 1.5:
+            s -= 5
+
+    return s, 'ok'
+
+
 def _push_bid_to_subscribed_partners(bid_id: int) -> None:
     """Called from end of _run_assessment. Inserts bid_pushes rows for every
     subscribed dealer and notifies their partner_users. Idempotent via
@@ -1155,7 +1254,8 @@ def _push_bid_to_subscribed_partners(bid_id: int) -> None:
         with _db() as conn, conn.cursor() as cur:
             cur.execute("""
                 SELECT id, phone, status, year, make, model, trim, mileage, vin,
-                       creation_ip, creation_source
+                       creation_ip, creation_source,
+                       COALESCE(asking_price, ai_price, bid_amount) AS asking_price
                   FROM bids WHERE id = %s
             """, (bid_id,))
             bid = cur.fetchone()
@@ -1167,7 +1267,8 @@ def _push_bid_to_subscribed_partners(bid_id: int) -> None:
                       flush=True)
                 return
             cur.execute("""
-                SELECT id, name, portal_slug, dashboard_token, salesperson, salesperson_phone
+                SELECT id, name, portal_slug, dashboard_token, salesperson, salesperson_phone,
+                       buy_profile
                   FROM dealers
                  WHERE receive_inbound_pushes = TRUE AND active = TRUE
             """)
@@ -1175,6 +1276,12 @@ def _push_bid_to_subscribed_partners(bid_id: int) -> None:
             if not subscribers:
                 return
             for d in subscribers:
+                # 2026-05-12: match-routing score gate
+                score, reason = _score_bid_for_dealer(dict(bid), d.get('buy_profile'), dealer_id=d['id'])
+                if score is None or score < INBOUND_PUSH_MIN_SCORE:
+                    print(f'[bid-push] bid={bid_id} SKIP dealer={d["name"]} '
+                          f'score={score} reason={reason}', flush=True)
+                    continue
                 cur.execute("""
                     INSERT INTO bid_pushes (bid_id, dealer_id)
                     VALUES (%s, %s)
@@ -1185,7 +1292,7 @@ def _push_bid_to_subscribed_partners(bid_id: int) -> None:
                 conn.commit()
                 if inserted:
                     print(f'[bid-push] bid={bid_id} -> {d["name"]} '
-                          f'(dealer_id={d["id"]})', flush=True)
+                          f'score={score} reason={reason}', flush=True)
                     notify_partner_of_inbound_bid(bid_id, d)
     except Exception as e:
         print(f'[bid-push] error bid={bid_id}: {e}', flush=True)
@@ -1273,6 +1380,132 @@ def notify_partner_of_inbound_bid(bid_id: int, dealer: dict) -> None:
     except Exception as e:
         print(f'[inbound-notify] err bid={bid_id} dealer={dealer.get("id")}: {e}',
               flush=True)
+
+
+# ── 2026-05-12 — Bidder-triggered push with target ask + SMS ─────────────
+def push_bid_with_network_ask(bid_id: int, network_ask: float, note: str | None,
+                              pushed_by: str | None = 'bidder',
+                              only_dealer_ids: list[int] | None = None):
+    """Bidder's manual push: stamps bids.network_ask + broadcasts to scored,
+    VIN-filtered subscribed dealers + sends SMS to each surviving dealer.
+    Returns dict: {sent: [{dealer,name,score,sms_to}], skipped: [...], errors: [...]}"""
+    out = {'sent': [], 'skipped': [], 'errors': []}
+    try:
+        with _db() as conn, conn.cursor() as cur:
+            cur.execute("""
+                UPDATE bids
+                   SET network_ask = %s, network_ask_note = %s,
+                       network_pushed_at = NOW(), network_pushed_by = %s,
+                       network_push_count = COALESCE(network_push_count,0) + 1
+                 WHERE id = %s
+             RETURNING id, year, make, model, mileage, vin,
+                       COALESCE(asking_price, ai_price, bid_amount) AS asking_price
+            """, (network_ask, note, pushed_by, bid_id))
+            bid = cur.fetchone()
+            if not bid:
+                out['errors'].append(f'bid {bid_id} not found')
+                return out
+
+            cur.execute("""
+                SELECT id, name, portal_slug, dashboard_token, salesperson,
+                       salesperson_phone, buy_profile
+                  FROM dealers
+                 WHERE portal_slug IS NOT NULL AND active = TRUE
+            """)
+            subscribers = cur.fetchall()
+
+            for d in subscribers:
+                # 2026-05-12: per-call dealer filter from checkbox UI
+                if only_dealer_ids is not None and d['id'] not in only_dealer_ids:
+                    out['skipped'].append({'dealer_id': d['id'], 'name': d['name'],
+                                           'score': None, 'reason': 'unchecked by operator'})
+                    continue
+                score, reason = _score_bid_for_dealer(dict(bid),
+                                                     d.get('buy_profile'),
+                                                     dealer_id=d['id'])
+                # operator-override: when only_dealer_ids explicitly lists this dealer,
+                # bypass the score gate. We still hard-block VIN-on-lot (seller-protection
+                # — never sell a dealer their own car), but never-stocks / low-score are
+                # overridable because operator may know something the algorithm doesnt.
+                is_vin_protect = bool(reason and 'has this VIN' in (reason or ''))
+                operator_override = (only_dealer_ids is not None
+                                     and d['id'] in only_dealer_ids
+                                     and not is_vin_protect)
+                if not operator_override and (score is None or score < INBOUND_PUSH_MIN_SCORE):
+                    out['skipped'].append({
+                        'dealer_id': d['id'], 'name': d['name'],
+                        'score': score, 'reason': reason,
+                    })
+                    continue
+
+                cur.execute("""
+                    INSERT INTO bid_pushes (bid_id, dealer_id, score, score_reason)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (bid_id, dealer_id) DO UPDATE
+                       SET score = EXCLUDED.score, score_reason = EXCLUDED.score_reason
+                """, (bid_id, d['id'], score, reason))
+
+                # SMS the ask
+                phone = d.get('salesperson_phone')
+                if phone:
+                    sms_text = _compose_network_ask_sms(bid, network_ask, note, d)
+                    sent = _send_network_sms(phone, sms_text)
+                    if sent:
+                        cur.execute("""
+                            UPDATE bid_pushes SET sms_sent_at=NOW(), sms_to=%s
+                             WHERE bid_id=%s AND dealer_id=%s
+                        """, (phone, bid_id, d['id']))
+                        out['sent'].append({
+                            'dealer_id': d['id'], 'name': d['name'],
+                            'score': score, 'sms_to': phone,
+                            'salesperson': d.get('salesperson'),
+                        })
+                    else:
+                        out['errors'].append(f"{d['name']}: SMS send failed")
+                else:
+                    out['errors'].append(f"{d['name']}: no salesperson_phone")
+            conn.commit()
+    except Exception as e:
+        out['errors'].append(f'exception: {e}')
+    print(f'[network-push] bid={bid_id} ask=${network_ask:,.0f} '
+          f'sent={len(out["sent"])} skipped={len(out["skipped"])} '
+          f'errors={len(out["errors"])}', flush=True)
+    return out
+
+
+def _compose_network_ask_sms(bid: dict, ask: float, note: str | None,
+                              dealer: dict) -> str:
+    ymm = f"{bid.get('year') or ''} {bid.get('make') or ''} {bid.get('model') or ''}".strip()
+    miles = bid.get('mileage') or 0
+    body = (
+        f"EW network ask: {ymm}, {miles:,} mi. "
+        f"Need ${ask:,.0f} out. {note + ' ' if note else ''}"
+        f"Reply YES to claim."
+    )
+    return body[:320]
+
+
+def _send_network_sms(phone: str, body: str) -> bool:
+    """app.send_sms wrapper with test-gate override."""
+    try:
+        from app import send_sms as _app_send
+        gate = (os.environ.get("EW_SMS_TEST_GATE_PHONE") or "").strip()
+        if gate:
+            body = f"[TEST->{phone}] " + body
+            phone = gate
+        ok = _app_send(phone, body)
+        print(f"[network-sms] to={phone} gated={bool(gate)} ok={ok}", flush=True)
+        return bool(ok)
+    except Exception as e:
+        print(f"[network-sms] failed to={phone}: {e}", flush=True)
+        return False
+        client = _TwClient(sid, tok)
+        msg = client.messages.create(to=phone, from_=frm, body=body)
+        print(f'[network-sms] sent to={phone} sid={msg.sid}', flush=True)
+        return True
+    except Exception as e:
+        print(f'[network-sms] failed to={phone}: {e}', flush=True)
+        return False
 
 
 def notify_salesperson_of_partner_offer(offer_id: int) -> None:
@@ -2264,3 +2497,135 @@ def mark_seen(slug):
             """, (dealer['id'],))
         conn.commit()
     return jsonify({'ok': True})
+
+# ── 2026-05-12 — Inbound claim reply ("YES") handler ────────────────────
+def try_handle_network_claim(from_phone: str, body: str):
+    """Inbound SMS interceptor for network-push claim replies.
+    Returns (handled, reply_text). If handled=True, caller should TwiML-reply
+    with reply_text and stop further processing of the inbound message.
+
+    Match logic:
+      - Production: from_phone == bid_pushes.sms_to → claim the most recent
+        unclaimed push to that phone.
+      - Test-gate mode (EW_SMS_TEST_GATE_PHONE set): from_phone == gate phone
+        → claim the single most recent unclaimed push regardless of original
+        sms_to, since the gate rerouted ALL sends to this number.
+    """
+    if not body:
+        return False, None
+    txt = body.strip().upper()
+    # Normalize: drop apostrophes (straight + curly), collapse whitespace.
+    import re as _re
+    norm = _re.sub(r"[\u2018\u2019\u02BC']", "", txt)
+    norm = _re.sub(r"\s+", " ", norm).strip()
+    # Accept all natural-language affirmatives a dealer might text:
+    yes_exact = {"YES", "Y", "ILL TAKE IT", "I LL TAKE IT", "TAKE IT",
+                 "I TAKE IT", "I WILL TAKE IT", "ILLTAKE IT"}
+    yes_starts = ("YES ", "Y ", "ILL TAKE IT", "I LL TAKE IT", "TAKE IT",
+                  "I WILL TAKE IT")
+    if not (norm in yes_exact or any(norm.startswith(p) for p in yes_starts)):
+        return False, None
+
+    try:
+        with _db() as conn, conn.cursor() as cur:
+            # Match ONLY against partner_users.phone — primary dealer principal.
+            # Salespeople and operator-monitor phones cannot claim.
+            cur.execute("""
+                SELECT bp.id, bp.bid_id, bp.dealer_id, bp.sms_to
+                  FROM bid_pushes bp
+                  JOIN partner_users pu ON pu.dealer_id = bp.dealer_id
+                 WHERE bp.sms_sent_at IS NOT NULL
+                   AND bp.claimed_at IS NULL
+                   AND pu.phone = %s
+                 ORDER BY bp.sms_sent_at DESC LIMIT 1
+                   FOR UPDATE OF bp
+            """, (from_phone,))
+            row = cur.fetchone()
+            if not row:
+                # Phone is not a known partner_users entry — pass through silently
+                # so the operator monitor (and stray texts) don't hijack claim flow.
+                return False, None
+
+            bid_id = row['bid_id']
+
+            # 2. Check if THIS bid already has a winning claim
+            cur.execute("""
+                SELECT id, dealer_id FROM bid_pushes
+                 WHERE bid_id = %s AND claimed_at IS NOT NULL AND claim_late IS NOT TRUE
+                 LIMIT 1
+            """, (bid_id,))
+            existing_winner = cur.fetchone()
+
+            cur.execute("""
+                SELECT year, make, model FROM bids WHERE id = %s
+            """, (bid_id,))
+            b = cur.fetchone()
+            ymm = ((b and f"{b['year'] or ''} {b['make'] or ''} {b['model'] or ''}".strip())
+                   or 'the vehicle')
+
+            if existing_winner:
+                # Late claim
+                cur.execute("""
+                    UPDATE bid_pushes
+                       SET claimed_at = NOW(),
+                           claim_response = 'late',
+                           claim_from_phone = %s,
+                           claim_late = TRUE
+                     WHERE id = %s
+                """, (from_phone, row['id']))
+                conn.commit()
+                print(f'[network-claim] LATE bid={bid_id} dealer={row["dealer_id"]} '
+                      f'phone={from_phone}', flush=True)
+                return True, f"Sorry, that {ymm} was just claimed by another buyer."
+
+            # WINNER
+            cur.execute("""
+                UPDATE bid_pushes
+                   SET claimed_at = NOW(),
+                       claim_response = 'yes',
+                       claim_from_phone = %s,
+                       claim_late = FALSE
+                 WHERE id = %s
+            """, (from_phone, row['id']))
+            conn.commit()
+            print(f'[network-claim] WIN bid={bid_id} dealer={row["dealer_id"]} '
+                  f'phone={from_phone}', flush=True)
+
+            # Telegram alert to operator
+            try:
+                _notify_operator_of_claim(bid_id, row['dealer_id'])
+            except Exception as _e:
+                print(f'[network-claim] telegram alert failed: {_e}', flush=True)
+
+            return True, "It's yours. EW will contact you shortly, thank you."
+    except Exception as e:
+        print(f'[network-claim] exception: {e}', flush=True)
+        return False, None
+
+
+def _notify_operator_of_claim(bid_id: int, dealer_id: int) -> None:
+    """Telegram ping to Oscar's bot. Reuses the existing TELEGRAM env."""
+    import requests
+    tg_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    tg_chat  = os.environ.get('TELEGRAM_CHAT_ID')
+    if not (tg_token and tg_chat):
+        return
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT b.year, b.make, b.model, b.network_ask::int AS ask,
+                   d.name AS dealer, d.salesperson
+              FROM bids b
+              JOIN dealers d ON d.id = %s
+             WHERE b.id = %s
+        """, (dealer_id, bid_id))
+        r = cur.fetchone()
+    if not r:
+        return
+    msg = (f"🟢 CLAIM: {r['dealer']}{' (' + r['salesperson'] + ')' if r.get('salesperson') else ''} "
+           f"said YES to bid #{bid_id} — {r['year']} {r['make']} {r['model']} at ${r['ask']:,}")
+    try:
+        requests.post(f'https://api.telegram.org/bot{tg_token}/sendMessage',
+                      json={'chat_id': tg_chat, 'text': msg}, timeout=5)
+    except Exception as _e:
+        print(f'[network-claim] telegram POST failed: {_e}', flush=True)
+

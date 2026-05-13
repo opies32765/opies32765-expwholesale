@@ -125,17 +125,25 @@ def refresh_segments(window_days=30, conn=None):
         # independent data points. Keep the LAST assessment per VIN
         # (closest to the actual purchase decision).
         # Also: stale-actual filter — both dates must be in window.
+        # Combined signal: prefer acquired-purchase delta when available,
+        # fall back to operator-estimate delta. Either qualifies a row.
+        # Time window: actual_purchased_at OR client_estimate_at within window.
         cur.execute("""
-            SELECT make, model, year, mileage, delta_pct, abs_delta_pct
+            SELECT make, model, year, mileage,
+                   COALESCE(delta_pct, estimate_delta_pct) AS delta_pct,
+                   abs_delta_pct,
+                   CASE WHEN delta_pct IS NOT NULL THEN 'actual' ELSE 'estimate' END AS source
               FROM (
                 SELECT DISTINCT ON (vin)
-                       make, model, year, mileage, delta_pct, abs_delta_pct, vin
+                       make, model, year, mileage,
+                       delta_pct, abs_delta_pct, estimate_delta_pct, vin
                   FROM ai_accuracy
-                 WHERE delta_pct IS NOT NULL
+                 WHERE (delta_pct IS NOT NULL OR estimate_delta_pct IS NOT NULL)
                    AND bid_id > 0
                    AND vin IS NOT NULL AND vin <> ''
                    AND reconciled_at > NOW() - (%s || ' days')::interval
-                   AND actual_purchased_at > NOW() - (%s || ' days')::interval
+                   AND COALESCE(actual_purchased_at, client_estimate_at)
+                       > NOW() - (%s || ' days')::interval
                  ORDER BY vin, ai_assessed_at DESC NULLS LAST
               ) AS deduped
         """, (window_days, window_days))
@@ -146,35 +154,52 @@ def refresh_segments(window_days=30, conn=None):
         from statistics import mean, median, stdev
 
         agg = defaultdict(list)
-        for make, model_, year_, miles, dp, ap in rows:
+        n_actual_total = n_estimate_total = 0
+        for make, model_, year_, miles, dp, ap, source in rows:
             mk = _norm_make(make)
             md = _norm_model(model_)
             if not mk or not md:
                 continue
+            if source == 'actual':
+                n_actual_total += 1
+            else:
+                n_estimate_total += 1
             yb = year_band(year_)
             mb = mileage_band(miles)
-            agg[(mk, md, yb, mb)].append((float(dp), float(ap or 0)))
-            agg[(mk, md, yb, 'any')].append((float(dp), float(ap or 0)))
-            agg[(mk, md, 'any', 'any')].append((float(dp), float(ap or 0)))
+            # Each tuple now carries (delta_pct, abs_pct, source) so we
+            # can split per-source in the segment loop below
+            agg[(mk, md, yb, mb)].append((float(dp), float(ap or 0), source))
+            agg[(mk, md, yb, 'any')].append((float(dp), float(ap or 0), source))
+            agg[(mk, md, 'any', 'any')].append((float(dp), float(ap or 0), source))
+        print(f'[bias_correction] window={window_days}d signal mix: actual={n_actual_total} estimate={n_estimate_total}', flush=True)
 
         cur.execute("DELETE FROM bias_segments WHERE window_days = %s",
                     (window_days,))
         n_written = 0
-        for (mk, md, yb, mb), pairs in agg.items():
-            n = len(pairs)
+        for (mk, md, yb, mb), tuples in agg.items():
+            n = len(tuples)
             if n < 2:
                 continue
-            deltas = [p[0] for p in pairs]
-            abss = [p[1] for p in pairs if p[1] > 0]
+            deltas = [t[0] for t in tuples]
+            abss = [t[1] for t in tuples if t[1] > 0]
             bias = round(mean(deltas), 2)
             sd = round(stdev(deltas), 2) if n >= 2 else None
-            ap = round(median(abss), 2) if abss else None
+            ap_med = round(median(abss), 2) if abss else None
+            # Per-source split for the admin panel
+            actuals = [t[0] for t in tuples if t[2] == 'actual']
+            estimates = [t[0] for t in tuples if t[2] == 'estimate']
+            n_a = len(actuals)
+            n_e = len(estimates)
+            bias_a = round(mean(actuals), 2) if actuals else None
+            bias_e = round(mean(estimates), 2) if estimates else None
             cur.execute("""
                 INSERT INTO bias_segments
                   (make, model, year_band, mileage_band, n, bias_pct,
-                   abs_pct, stddev_pct, window_days)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (mk, md, yb, mb, n, bias, ap, sd, window_days))
+                   abs_pct, stddev_pct, window_days,
+                   n_actual, n_estimate, bias_pct_actual, bias_pct_estimate)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (mk, md, yb, mb, n, bias, ap_med, sd, window_days,
+                  n_a, n_e, bias_a, bias_e))
             n_written += 1
 
         conn.commit()

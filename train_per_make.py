@@ -67,6 +67,7 @@ def load_data() -> pd.DataFrame:
     print('[train] loading lsl_training from PG...', flush=True)
     conn = psycopg2.connect(EW_DB_URL)
     df = pd.read_sql("""
+        -- Primary source: actual LSL purchases
         SELECT
             deal_id, vin, make_name, model_name, body_type,
             year, odometer,
@@ -74,13 +75,54 @@ def load_data() -> pd.DataFrame:
             base_appraised_value, mileage_adjustment_value,
             sale_type, vehicle_sale_type, supplier_name,
             sold_at, days_on_lot, days_since_purchase,
-            purchase_cost, sale_price
+            purchase_cost, sale_price,
+            'lsl_actual' AS training_source
         FROM lsl_training
         WHERE purchase_cost IS NOT NULL AND purchase_cost > 0
           AND est_wholesale_price IS NOT NULL AND est_wholesale_price > 0
           AND year IS NOT NULL
           AND make_name IS NOT NULL
+
+        UNION ALL
+
+        -- Peer source: operator value estimates on EW bids
+        -- (treated as same-weight ground truth, per architecture spec)
+        SELECT
+            (-b.id) AS deal_id,             -- negative to avoid PK clash
+            b.vin,
+            UPPER(b.make) AS make_name,
+            b.model AS model_name,
+            NULL::text AS body_type,
+            b.year::int AS year,
+            b.mileage AS odometer,
+            (v.api_price_guides->'kbb'->'pricings'->0->>'basePrice')::numeric AS original_msrp,
+            v.rbook::numeric AS est_wholesale_price,
+            b.asking_price AS market_asking_price,
+            v.mmr::numeric AS base_appraised_value,
+            NULL::numeric AS mileage_adjustment_value,
+            NULL::text AS sale_type,
+            NULL::text AS vehicle_sale_type,
+            NULL::text AS supplier_name,
+            b.client_estimate_at AS sold_at,
+            NULL::int AS days_on_lot,
+            NULL::int AS days_since_purchase,
+            b.client_estimate::numeric AS purchase_cost,
+            NULL::numeric AS sale_price,
+            'ew_estimate' AS training_source
+        FROM bids b
+        LEFT JOIN vauto_lookups v ON v.bid_id = b.id
+        WHERE b.client_estimate IS NOT NULL
+          AND b.client_estimate > 0
+          AND b.vin IS NOT NULL AND length(b.vin) = 17
+          AND b.year IS NOT NULL
+          AND b.make IS NOT NULL
+          AND v.rbook IS NOT NULL  -- need est_wholesale_price (rBook) for the trainer's features
+          AND v.rbook > 0
     """, conn)
+    if 'training_source' in df.columns:
+        n_lsl = (df['training_source'] == 'lsl_actual').sum()
+        n_est = (df['training_source'] == 'ew_estimate').sum()
+        print(f'[train] data sources: lsl_actual={n_lsl:,} ew_estimate={n_est:,}', flush=True)
     conn.close()
 
     # Normalize make casing (LSL has 'BMW', 'Bmw' both — collapse to upper)

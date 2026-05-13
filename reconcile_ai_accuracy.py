@@ -69,6 +69,7 @@ def fetch_bid_assessments(bid_filter: int | None = None) -> list[dict]:
     params = [bid_filter] if bid_filter else []
     cur.execute(f"""
         SELECT b.id AS bid_id, b.vin, b.year, b.make, b.model, b.mileage,
+               b.client_estimate, b.client_estimate_at,
                l.id AS log_id, l.final_price, l.confidence_low, l.confidence_high,
                l.created_at AS ai_assessed_at
         FROM bids b
@@ -99,6 +100,8 @@ def upsert_accuracy(rows: list[dict]) -> int:
             actual_purchase_cost, actual_purchased_at,
             lsl_deal_id, lsl_deal_code,
             delta, delta_pct, abs_delta_pct, in_confidence_range,
+            client_estimate, client_estimate_at,
+            estimate_delta, estimate_delta_pct,
             reconciled_at
         ) VALUES (
             %(bid_id)s, %(vin)s, %(year)s, %(make)s, %(model)s, %(mileage)s,
@@ -107,6 +110,8 @@ def upsert_accuracy(rows: list[dict]) -> int:
             %(actual_purchase_cost)s, %(actual_purchased_at)s,
             %(lsl_deal_id)s, %(lsl_deal_code)s,
             %(delta)s, %(delta_pct)s, %(abs_delta_pct)s, %(in_confidence_range)s,
+            %(client_estimate)s, %(client_estimate_at)s,
+            %(estimate_delta)s, %(estimate_delta_pct)s,
             NOW()
         )
         ON CONFLICT (bid_id) DO UPDATE SET
@@ -123,6 +128,10 @@ def upsert_accuracy(rows: list[dict]) -> int:
             delta=EXCLUDED.delta, delta_pct=EXCLUDED.delta_pct,
             abs_delta_pct=EXCLUDED.abs_delta_pct,
             in_confidence_range=EXCLUDED.in_confidence_range,
+            client_estimate=EXCLUDED.client_estimate,
+            client_estimate_at=EXCLUDED.client_estimate_at,
+            estimate_delta=EXCLUDED.estimate_delta,
+            estimate_delta_pct=EXCLUDED.estimate_delta_pct,
             reconciled_at=NOW()
     """, rows)
     con.commit()
@@ -156,33 +165,67 @@ def main():
     print(f'[reconcile]   {len(bids)} bids with AI assessments', flush=True)
 
     matched = []
+    estimate_only = 0
+    actual_only = 0
+    both_signals = 0
     for b in bids:
         vin = (b['vin'] or '').strip().upper()
         deal = lsl_by_vin.get(vin)
-        if not deal:
-            continue
         ai_rec = b['final_price']
-        actual = int(deal['purchase_cost'] or 0)
-        if actual <= 0 or not ai_rec:
+        if not ai_rec:
             continue
-        delta = actual - ai_rec
-        delta_pct = round(100.0 * delta / ai_rec, 2) if ai_rec else None
-        abs_delta_pct = abs(delta_pct) if delta_pct is not None else None
-        in_range = (
-            b.get('confidence_low') is not None
-            and b.get('confidence_high') is not None
-            and b['confidence_low'] <= actual <= b['confidence_high']
-        )
-        # Parse LSL created_at (sqlite TEXT) → datetime
+
+        actual = int(deal['purchase_cost']) if (deal and deal.get('purchase_cost')) else None
+        if actual is not None and actual <= 0:
+            actual = None
+        client_est = b.get('client_estimate')
+
+        # Skip ONLY if neither signal is present (estimate-only bids are now welcomed)
+        if actual is None and client_est is None:
+            continue
+
+        # ── purchase-cost based delta (gold-standard signal) ──
+        if actual is not None:
+            delta = actual - ai_rec
+            delta_pct = round(100.0 * delta / ai_rec, 2) if ai_rec else None
+            abs_delta_pct = abs(delta_pct) if delta_pct is not None else None
+            in_range = (
+                b.get('confidence_low') is not None
+                and b.get('confidence_high') is not None
+                and b['confidence_low'] <= actual <= b['confidence_high']
+            )
+        else:
+            delta = delta_pct = abs_delta_pct = None
+            in_range = None
+
+        # ── estimate-vs-ai delta (peer signal for training) ──
+        if client_est is not None and ai_rec:
+            estimate_delta = client_est - ai_rec
+            estimate_delta_pct = round(100.0 * estimate_delta / ai_rec, 2)
+        else:
+            estimate_delta = None
+            estimate_delta_pct = None
+
+        # Volume tracking
+        if actual is not None and client_est is not None:
+            both_signals += 1
+        elif actual is not None:
+            actual_only += 1
+        else:
+            estimate_only += 1
+
+        # Parse LSL purchased_at if available
         purchased_at = None
-        for k in ('sold_at', 'created_at', 'modified_at'):
-            v = deal.get(k)
-            if v:
-                try:
-                    purchased_at = datetime.fromisoformat(v.replace('Z', '+00:00'))
-                    break
-                except Exception:
-                    pass
+        if deal:
+            for k in ('sold_at', 'created_at', 'modified_at'):
+                v = deal.get(k)
+                if v:
+                    try:
+                        purchased_at = datetime.fromisoformat(v.replace('Z', '+00:00'))
+                        break
+                    except Exception:
+                        pass
+
         matched.append({
             'bid_id':                  b['bid_id'],
             'vin':                     vin,
@@ -197,13 +240,19 @@ def main():
             'ai_assessed_at':          b.get('ai_assessed_at'),
             'actual_purchase_cost':    actual,
             'actual_purchased_at':     purchased_at,
-            'lsl_deal_id':             deal.get('id'),
-            'lsl_deal_code':           deal.get('code'),
+            'lsl_deal_id':             deal.get('id') if deal else None,
+            'lsl_deal_code':           deal.get('code') if deal else None,
             'delta':                   delta,
             'delta_pct':               delta_pct,
             'abs_delta_pct':           abs_delta_pct,
             'in_confidence_range':     in_range,
+            'client_estimate':         client_est,
+            'client_estimate_at':      b.get('client_estimate_at'),
+            'estimate_delta':          estimate_delta,
+            'estimate_delta_pct':      estimate_delta_pct,
         })
+
+    print(f'[reconcile]   signal mix: both={both_signals} actual_only={actual_only} estimate_only={estimate_only}', flush=True)
 
     print(f'[reconcile] matched {len(matched)} bid↔purchase pairs', flush=True)
     n_upserted = upsert_accuracy(matched)

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><title>Match-Routing Preview — EW</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+       margin: 0; background: #f5f7fa; color: #1a1a1a; line-height: 1.5; }
+.wrap { max-width: 1000px; margin: 0 auto; padding: 32px 28px 80px; }
+.back { color: #5a6878; text-decoration: none; font-size: 13px; }
+h1 { font-size: 24px; margin: 8px 0 4px; color: #0d2240; }
+.sub { color: #5a6878; margin: 0 0 24px; font-size: 14px; }
+
+.form { background: white; padding: 18px 22px; border-radius: 10px; margin-bottom: 22px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06); display: grid;
+        grid-template-columns: repeat(5, 1fr) auto; gap: 12px; align-items: end; }
+.form label { font-size: 11px; color: #5a6878; text-transform: uppercase; letter-spacing: 0.5px;
+              display: block; margin-bottom: 4px; font-weight: 600; }
+.form input { width: 100%; padding: 8px 10px; border: 1px solid #d4dae3; border-radius: 6px;
+              font-size: 14px; }
+.form button { background: #0d2240; color: white; padding: 9px 18px; border: none;
+               border-radius: 6px; font-weight: 600; font-size: 14px; cursor: pointer; height: 38px; }
+.form button:hover { background: #1a3a6b; }
+
+.examples { font-size: 12px; color: #5a6878; margin-bottom: 22px; }
+.examples a { color: #0d2240; margin: 0 6px; text-decoration: none; border-bottom: 1px dotted; }
+
+.tier-block { background: white; padding: 16px 22px; border-radius: 10px; margin-bottom: 14px;
+              box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+.tier-head { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+             margin-bottom: 10px; padding-bottom: 6px; border-bottom: 2px solid #eef1f5; }
+.tier-block.t1 .tier-head { color: #16a34a; border-bottom-color: #16a34a; }
+.tier-block.t2 .tier-head { color: #b45309; border-bottom-color: #fbbf24; }
+.tier-block.skip .tier-head { color: #5a6878; }
+
+.row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 14px; }
+.row .name { font-weight: 500; }
+.row .why { color: #9aa6b3; font-size: 12px; font-style: italic; }
+.score { background: #0d2240; color: white; padding: 2px 9px; border-radius: 10px; font-size: 12px;
+         font-weight: 600; font-variant-numeric: tabular-nums; }
+.score.high { background: #16a34a; }
+.score.mid { background: #b45309; }
+.score.low { background: #9aa6b3; }
+.empty { color: #aaa; font-style: italic; }
+</style></head>
+<body><div class="wrap">
+
+<a class="back" href="/admin/buy-profiles">← All profiles</a>
+<h1>Match-Routing Preview</h1>
+<p class="sub">Enter a hypothetical vehicle. See which of your 14 dealers would get the broker-ask, and at what tier.</p>
+
+<form class="form" method="POST">
+  <div><label>Year</label><input name="year" type="number" value="{{ bid.year or '' }}" placeholder="2024"></div>
+  <div><label>Make</label><input name="make" value="{{ bid.make or '' }}" placeholder="Porsche" required></div>
+  <div><label>Model</label><input name="model" value="{{ bid.model or '' }}" placeholder="911"></div>
+  <div><label>Miles</label><input name="miles" type="number" value="{{ bid.miles or '' }}" placeholder="15000"></div>
+  <div><label>Asking $</label><input name="price" type="number" value="{{ bid.price or '' }}" placeholder="125000"></div>
+  <div><button type="submit">Route</button></div>
+</form>
+
+<div class="examples">Examples:
+  <a href="?try=p911">2024 Porsche 911, $135K</a> ·
+  <a href="?try=corvette">2014 Chevrolet Corvette Z06, $70K</a> ·
+  <a href="?try=tahoe">2024 Chevrolet Tahoe, $41K</a> ·
+  <a href="?try=lambo">2024 Lamborghini Urus, $325K</a>
+</div>
+
+{% if routing is not none %}
+  {% set t1 = routing | selectattr('tier', 'equalto', 'T1') | list %}
+  {% set t2 = routing | selectattr('tier', 'equalto', 'T2') | list %}
+  {% set sk = routing | selectattr('tier', 'equalto', 'skip') | list %}
+
+  <div class="tier-block t1">
+    <div class="tier-head">🟢 Tier 1 — Text Immediately ({{ t1|length }} dealers)</div>
+    {% if t1 %}
+      {% for r in t1 %}
+        <div class="row"><span class="name">{{ r.name }}</span><span class="score high">{{ r.score }}</span></div>
+      {% endfor %}
+    {% else %}<div class="empty">No Tier-1 matches.</div>{% endif %}
+  </div>
+
+  <div class="tier-block t2">
+    <div class="tier-head">🟡 Tier 2 — Text in 15 min if no Tier-1 taker ({{ t2|length }} dealers)</div>
+    {% if t2 %}
+      {% for r in t2 %}
+        <div class="row"><span class="name">{{ r.name }}</span><span class="score mid">{{ r.score }}</span></div>
+      {% endfor %}
+    {% else %}<div class="empty">No Tier-2 matches.</div>{% endif %}
+  </div>
+
+  <div class="tier-block skip">
+    <div class="tier-head">⚪ Skipped ({{ sk|length }} dealers)</div>
+    {% if sk %}
+      {% for r in sk %}
+        <div class="row">
+          <span class="name">{{ r.name }}</span>
+          <span class="why">{{ r.why }}</span>
+          {% if r.score is not none %}<span class="score low">{{ r.score }}</span>{% endif %}
+        </div>
+      {% endfor %}
+    {% else %}<div class="empty">No skips — everyone wants this car.</div>{% endif %}
+  </div>
+{% endif %}
+
+<script>
+const presets = {
+  p911:     { year:2024, make:'Porsche',   model:'911',     miles:15000, price:135000 },
+  corvette: { year:2014, make:'Chevrolet', model:'Corvette Z06', miles:18000, price:70000 },
+  tahoe:    { year:2024, make:'Chevrolet', model:'Tahoe',   miles:30000, price:41500 },
+  lambo:    { year:2024, make:'Lamborghini', model:'Urus',  miles:8000,  price:325000 }
+};
+const p = new URLSearchParams(location.search).get('try');
+if (p && presets[p]) {
+  const f = document.querySelector('form');
+  for (const k in presets[p]) f.querySelector(`[name=${k}]`).value = presets[p][k];
+  f.submit();
+}
+</script>
+
+</div></body></html>

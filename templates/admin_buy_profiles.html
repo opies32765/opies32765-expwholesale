@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><title>Dealer Buy Profiles — EW</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+       margin: 0; background: #f5f7fa; color: #1a1a1a; line-height: 1.5; }
+.wrap { max-width: 1280px; margin: 0 auto; padding: 32px 28px 80px; }
+h1 { font-size: 24px; margin: 0 0 4px; color: #0d2240; }
+.sub { color: #5a6878; margin: 0 0 24px; font-size: 14px; }
+.tools { display: flex; gap: 10px; margin-bottom: 22px; }
+.btn { background: #0d2240; color: white; padding: 7px 14px; border-radius: 6px;
+       text-decoration: none; font-size: 13px; font-weight: 500; border: none; cursor: pointer; }
+.btn.alt { background: #16a34a; }
+.btn:hover { opacity: 0.9; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 14px; }
+.card { background: white; border-radius: 10px; padding: 16px 18px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06); border-left: 4px solid #0d2240; }
+.card.live { border-left-color: #16a34a; }
+.card-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+.card-name { font-weight: 600; font-size: 15px; color: #0d2240; }
+.card-name a { color: #0d2240; text-decoration: none; }
+.card-name a:hover { text-decoration: underline; }
+.live-pill { background: #16a34a; color: white; font-size: 10px; padding: 2px 7px;
+             border-radius: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+.stats-line { display: flex; gap: 14px; font-size: 12px; color: #5a6878; margin-bottom: 10px; }
+.stats-line b { color: #0d2240; font-size: 13px; }
+.makes-mini { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.make-pill { background: #f0f4f8; border-radius: 12px; padding: 2px 8px; font-size: 11px; }
+.make-pill b { color: #0d2240; }
+.bands { font-size: 11px; color: #5a6878; margin-top: 8px; border-top: 1px solid #eef1f5; padding-top: 8px; }
+.bands b { color: #0d2240; }
+.built { font-size: 10px; color: #9aa6b3; margin-top: 6px; }
+</style></head>
+<body><div class="wrap">
+
+<h1>Dealer Buy Profiles</h1>
+<p class="sub">Auto-derived from <code>dealer_inventory</code> daily scan. Rebuilt nightly at 08:30 ET. Drives match-routing for inbound bids.</p>
+
+<div class="tools">
+  <a class="btn" href="/admin/buy-profiles/preview">→ Try a hypothetical bid</a>
+  <button class="btn alt" onclick="rebuild()">↻ Rebuild all now</button>
+</div>
+
+<div class="grid">
+{% for d in dealers %}
+  <div class="card {% if d.receive_inbound_pushes %}live{% endif %}">
+    <div class="card-head">
+      <div class="card-name"><a href="/admin/dealer/{{ d.id }}/buy-profile">{{ d.name }}</a></div>
+      {% if d.receive_inbound_pushes %}<span class="live-pill">PUSH ON</span>{% endif %}
+    </div>
+    <div class="stats-line">
+      <span><b>{{ d._summary.active or 0 }}</b> active</span>
+      <span><b>{{ d._summary.sold_180d or 0 }}</b> sold/180d</span>
+      <span><b>{{ d._summary.makes_count }}</b> makes</span>
+    </div>
+    <div class="makes-mini">
+      {% for make, share in d._summary.top_makes %}
+        <span class="make-pill">{{ make.title() }} <b>{{ share }}%</b></span>
+      {% endfor %}
+    </div>
+    <div class="bands">
+      <b>Year:</b> {{ d._summary.year_min }}–{{ d._summary.year_max }} ·
+      <b>Price:</b> ${{ '{:,.0f}'.format(d._summary.price_p10 or 0) }}–${{ '{:,.0f}'.format(d._summary.price_p90 or 0) }}
+    </div>
+    <div class="built">Built {{ d.buy_profile_built_at.strftime('%Y-%m-%d %H:%M') if d.buy_profile_built_at else '—' }}</div>
+  </div>
+{% endfor %}
+</div>
+
+<script>
+async function rebuild() {
+  const r = await fetch('/api/admin/buy-profile/rebuild', { method: 'POST' });
+  const j = await r.json();
+  alert('Rebuilt ' + j.rebuilt + ' profiles. Reloading.');
+  location.reload();
+}
+</script>
+
+</div></body></html>

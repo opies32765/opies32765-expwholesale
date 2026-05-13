@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Opportunities — Experience Wholesale</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh;padding:24px}
+.wrap{max-width:1600px;margin:0 auto}
+.head{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;gap:16px;flex-wrap:wrap}
+.title-wrap{display:flex;align-items:center;gap:12px}
+.logo-mark{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;background:linear-gradient(135deg,#a855f7,#7c3aed);border-radius:8px;font-size:16px;font-weight:800;color:#fff}
+.title{font-size:18px;font-weight:700;color:#f1f5f9}
+.title-sub{font-size:12px;color:#64748b;margin-top:2px}
+.nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.nav a{font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px}
+.nav a:hover{color:#e2e8f0;border-color:#334155}
+.nav a.active{color:#a855f7;border-color:rgba(168,85,247,.4);background:rgba(168,85,247,.08)}
+
+.summary{display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+.metric{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:12px 16px;min-width:130px}
+.metric .label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.6px;font-weight:700;margin-bottom:4px}
+.metric .value{font-size:20px;font-weight:700;color:#f1f5f9;font-family:'JetBrains Mono','Consolas',monospace}
+.metric.purple .value{color:#c084fc}
+.metric.green .value{color:#4ade80}
+.metric.yellow .value{color:#fbbf24}
+
+.filters{display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;align-items:center}
+.filter-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.6px;font-weight:700;margin-right:6px}
+.chip{padding:5px 12px;border:1px solid #1e293b;border-radius:16px;background:transparent;color:#94a3b8;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit}
+.chip:hover{color:#e2e8f0;border-color:#334155}
+.chip.active{color:#c084fc;border-color:rgba(168,85,247,.4);background:rgba(168,85,247,.08)}
+.sort{margin-left:auto;display:flex;gap:6px;align-items:center}
+.sort select{background:#111827;border:1px solid #1e293b;color:#e2e8f0;padding:5px 10px;border-radius:6px;font-size:12px;font-family:inherit}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:14px}
+.card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:16px;position:relative;transition:border-color .15s}
+.card:hover{border-color:#334155}
+.card.s-pursuing{border-color:rgba(59,130,246,.4);background:linear-gradient(180deg,rgba(59,130,246,.04),#111827)}
+.card.s-passed{opacity:.55}
+.card.s-acquired{border-color:rgba(34,197,94,.4);background:linear-gradient(180deg,rgba(34,197,94,.04),#111827)}
+
+.card-head{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px;gap:12px}
+.score-badge{display:flex;flex-direction:column;align-items:center;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:6px 12px;min-width:56px}
+.score-badge .n{font-size:22px;font-weight:800;color:#c084fc;font-family:'JetBrains Mono','Consolas',monospace;line-height:1}
+.score-badge .l{font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-top:2px}
+.score-badge.hot .n{color:#f87171}
+.score-badge.warm .n{color:#fbbf24}
+.score-badge.mid .n{color:#c084fc}
+.score-badge.cool .n{color:#94a3b8}
+.otype{font-size:8.5px;font-weight:700;letter-spacing:.5px;margin-top:3px;padding:1px 4px;border-radius:3px;text-transform:uppercase}
+.otype.wholesale_arb{background:rgba(168,85,247,.15);color:#c084fc}
+.otype.retail_arb{background:rgba(34,197,94,.15);color:#4ade80}
+.otype.both{background:rgba(245,158,11,.15);color:#fbbf24}
+
+.vehicle{flex:1;min-width:0}
+.vehicle .ymm{font-size:15px;font-weight:700;color:#f1f5f9;margin-bottom:2px}
+.vehicle .trim{font-size:12px;color:#94a3b8;margin-bottom:6px}
+.vehicle .vin{font-size:10.5px;color:#64748b;font-family:'JetBrains Mono','Consolas',monospace}
+
+.photo{width:100%;height:160px;background:#0f172a;border-radius:8px;overflow:hidden;margin-bottom:12px;position:relative}
+.photo img{width:100%;height:100%;object-fit:cover}
+.photo .no-photo{display:flex;align-items:center;justify-content:center;height:100%;color:#475569;font-size:32px}
+
+.pricing{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:10px 12px;margin-bottom:10px}
+.pricing-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;text-align:center}
+.pricing-grid .pcol{padding:4px 0}
+.pricing-grid .pl{font-size:9.5px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;font-weight:700;margin-bottom:3px}
+.pricing-grid .pv{font-size:14px;font-weight:700;color:#e2e8f0;font-family:'JetBrains Mono','Consolas',monospace}
+.pricing-grid .pv.asking{color:#fbbf24}
+.pricing-grid .pv.mmr{color:#c084fc}
+.pricing-grid .pv.retail{color:#4ade80}
+.pricing-grid .pd{font-size:10px;color:#64748b;margin-top:2px}
+
+.signals{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;font-size:11px}
+.sig{background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:3px 8px;color:#94a3b8;font-family:'JetBrains Mono','Consolas',monospace}
+.sig.green{color:#4ade80;border-color:rgba(34,197,94,.3)}
+.sig.red{color:#f87171;border-color:rgba(239,68,68,.3)}
+.sig.yellow{color:#fbbf24;border-color:rgba(245,158,11,.3)}
+.sig.purple{color:#c084fc;border-color:rgba(168,85,247,.3)}
+
+.dealer{font-size:12px;color:#cbd5e1;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.dealer .dn{font-weight:600;color:#f1f5f9}
+.dealer .dol{font-size:11px;color:#94a3b8;margin-left:auto;font-family:'JetBrains Mono','Consolas',monospace}
+
+.actions{display:flex;gap:6px}
+.btn{flex:1;padding:7px 10px;border-radius:6px;border:1px solid #334155;background:transparent;color:#94a3b8;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;text-transform:uppercase;letter-spacing:.4px}
+.btn:hover{color:#e2e8f0;border-color:#475569;background:#1e293b}
+.btn.primary{color:#93c5fd;border-color:rgba(59,130,246,.3)}
+.btn.primary:hover{background:rgba(59,130,246,.1);border-color:rgba(59,130,246,.5)}
+.btn.success{color:#4ade80;border-color:rgba(34,197,94,.3)}
+.btn.success:hover{background:rgba(34,197,94,.1);border-color:rgba(34,197,94,.5)}
+.btn.danger{color:#f87171;border-color:rgba(239,68,68,.3)}
+.btn.danger:hover{background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.5)}
+
+.status-tag{position:absolute;top:10px;right:10px;font-size:10px;font-weight:700;padding:3px 8px;border-radius:6px;text-transform:uppercase;letter-spacing:.4px}
+.st-new{background:rgba(100,116,139,.2);color:#94a3b8}
+.st-called{background:rgba(245,158,11,.15);color:#fbbf24}
+.st-pursuing{background:rgba(59,130,246,.15);color:#93c5fd}
+.st-passed{background:rgba(100,116,139,.2);color:#64748b}
+.st-acquired{background:rgba(34,197,94,.15);color:#4ade80}
+.st-snoozed{background:rgba(100,116,139,.15);color:#94a3b8}
+
+.wishlist-banner{display:flex;gap:10px;align-items:flex-start;background:linear-gradient(180deg,rgba(251,191,36,.08),rgba(251,191,36,.03));border:1px solid rgba(251,191,36,.3);border-radius:8px;padding:9px 12px;margin-bottom:10px;font-size:12px;color:#fde68a}
+.wb-icon{font-size:16px;line-height:1}
+.wb-body{flex:1;line-height:1.5}
+.wb-row{margin-bottom:2px}
+.wb-row b{color:#fbbf24}
+.wb-phone,.wb-link{color:#93c5fd;text-decoration:none}
+.wb-phone:hover,.wb-link:hover{text-decoration:underline}
+.wb-more{color:#94a3b8;font-size:11px;margin-top:2px}
+.pitch-block{background:linear-gradient(180deg,rgba(168,85,247,.04),rgba(168,85,247,.02));border:1px solid rgba(168,85,247,.2);border-radius:8px;padding:10px 12px;margin-bottom:10px;min-height:40px}
+.pitch-text{font-size:12.5px;line-height:1.55;color:#cbd5e1}
+.pitch-block .btn{width:100%}
+.empty-state{background:#111827;border:1px dashed #1e293b;border-radius:12px;padding:48px 24px;text-align:center;color:#64748b;font-size:13px;grid-column:1/-1}
+.empty-state .ico{font-size:32px;margin-bottom:8px}
+
+.run-info{display:flex;gap:14px;font-size:11px;color:#64748b;font-family:'JetBrains Mono','Consolas',monospace;align-items:center}
+.run-info .live-dot{width:8px;height:8px;border-radius:50%;background:#4ade80}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="head">
+  <div class="title-wrap">
+    <div class="logo-mark">EW</div>
+    <div>
+      <div class="title">Buy Opportunities</div>
+      <div class="title-sub">Daily AI scout across the 14-dealer network</div>
+    </div>
+  </div>
+  <div class="nav">
+    <a href="/">Dashboard</a>
+    <a href="/admin/workers">Workers</a>
+    <a href="/opportunities" class="active">Opportunities</a>
+  </div>
+</div>
+
+<div class="summary" id="summary"></div>
+
+<div class="filters">
+  <span class="filter-label">Status</span>
+  <button class="chip active" data-filter="status" data-value="active">Active</button>
+  <button class="chip" data-filter="status" data-value="new">New</button>
+  <button class="chip" data-filter="status" data-value="pursuing">Pursuing</button>
+  <button class="chip" data-filter="status" data-value="passed">Passed</button>
+  <button class="chip" data-filter="status" data-value="acquired">Acquired</button>
+  <button class="chip" data-filter="status" data-value="all">All</button>
+
+  <span class="filter-label" style="margin-left:16px">Dealer</span>
+  <span id="dealerChips"></span>
+
+  <div class="sort">
+    <span class="filter-label">Sort</span>
+    <select id="sort">
+      <option value="score">Score (high→low)</option>
+      <option value="pct_under">% Under MMR</option>
+      <option value="dollars_under">$ Under MMR</option>
+      <option value="dealer_dol">Dealer DOL</option>
+      <option value="recent">Most recent</option>
+    </select>
+  </div>
+</div>
+
+<div class="grid" id="grid"></div>
+
+<div class="run-info" id="runInfo" style="margin-top:24px"></div>
+
+</div>
+
+<script>
+let state = {
+  rows: [],
+  filter: {status: 'active', dealer: 'all'},
+  sort: 'score',
+};
+
+function fmt(n) {
+  if (n === null || n === undefined) return '—';
+  return '$' + Number(n).toLocaleString();
+}
+function num(n) {
+  if (n === null || n === undefined) return '—';
+  return Number(n).toLocaleString();
+}
+function scoreClass(s) {
+  if (s >= 70) return 'hot';
+  if (s >= 50) return 'warm';
+  if (s >= 30) return 'mid';
+  return 'cool';
+}
+
+async function loadData() {
+  const r = await fetch('/api/opportunities/snapshot');
+  const d = await r.json();
+  state.rows = d.opportunities || [];
+  state.run = d.run || {};
+  state.dealers = d.dealers || [];
+  renderSummary(d.summary || {});
+  renderDealerChips();
+  renderRunInfo();
+  render();
+}
+
+function renderSummary(s) {
+  document.getElementById('summary').innerHTML = `
+    <div class="metric purple"><div class="label">Today's Opportunities</div><div class="value">${s.total||0}</div></div>
+    <div class="metric"><div class="label">New</div><div class="value">${s.new||0}</div></div>
+    <div class="metric yellow"><div class="label">Pursuing</div><div class="value">${s.pursuing||0}</div></div>
+    <div class="metric green"><div class="label">Acquired</div><div class="value">${s.acquired||0}</div></div>
+    <div class="metric"><div class="label">Top Score</div><div class="value">${s.top_score||0}</div></div>
+    <div class="metric"><div class="label">Total $ Under MMR</div><div class="value">${fmt(s.total_under_mmr)}</div></div>
+  `;
+}
+
+function renderDealerChips() {
+  const c = document.getElementById('dealerChips');
+  c.innerHTML = '<button class="chip active" data-filter="dealer" data-value="all">All</button>' +
+    state.dealers.map(d => `<button class="chip" data-filter="dealer" data-value="${d.id}">${d.name} (${d.n})</button>`).join('');
+}
+
+function renderRunInfo() {
+  const r = state.run || {};
+  if (!r.id) {
+    document.getElementById('runInfo').innerHTML = '<span>No pipeline runs recorded yet.</span>';
+    return;
+  }
+  document.getElementById('runInfo').innerHTML = `
+    <span class="live-dot"></span>
+    Last run: ${r.started_at_iso || '?'} •
+    MMR ok=${r.mmr_ok}/err=${r.mmr_errors}/no-data=${r.mmr_no_data} •
+    candidates=${r.candidates_5pct} •
+    rBook ok=${r.rbook_ok}/err=${r.rbook_errors} •
+    written=${r.opportunities_written}${r.auth_failed?' • AUTH FAILED':''}
+  `;
+}
+
+function passesFilter(r) {
+  const s = state.filter.status;
+  if (s === 'active' && (r.status==='passed' || r.status==='acquired')) return false;
+  if (s === 'all') { /* allow */ }
+  else if (s !== 'active' && r.status !== s) return false;
+  const d = state.filter.dealer;
+  if (d !== 'all' && String(r.dealer_id) !== String(d)) return false;
+  return true;
+}
+
+function sortRows(rows) {
+  const s = state.sort;
+  const k = {
+    score: r => -(r.score||0),
+    pct_under: r => -(r.pct_under_mmr||0),
+    dollars_under: r => -(r.dollars_under_mmr||0),
+    dealer_dol: r => -(r.dealer_dol||0),
+    recent: r => -(new Date(r.updated_at||r.created_at).getTime()),
+  }[s];
+  return [...rows].sort((a,b) => k(a) - k(b));
+}
+
+function render() {
+  const grid = document.getElementById('grid');
+  const filtered = sortRows(state.rows.filter(passesFilter));
+  if (!filtered.length) {
+    grid.innerHTML = '<div class="empty-state"><div class="ico">✓</div>No opportunities matching the filter.</div>';
+    return;
+  }
+  grid.innerHTML = filtered.map(card).join('');
+}
+
+function card(r) {
+  const headroom = r.retail_headroom;
+  const headroomTxt = headroom !== null && headroom !== undefined ? (headroom > 0 ? `+${fmt(headroom)} headroom` : `${fmt(headroom)} under retail`) : '';
+  const drop = r.recent_price_drop_amount;
+  const dropDays = r.recent_price_drop_days_ago;
+  const dropSig = (drop && drop > 0 && dropDays !== null && dropDays <= 30) ? `<span class="sig yellow">↓ ${fmt(drop)} ${dropDays}d ago</span>` : '';
+  const lslN = r.lsl_deal_count || 0;
+  const lslG = r.lsl_avg_gross || 0;
+  const lslSig = lslN > 0 ? `<span class="sig green">LSL ${lslN} sold · avg gross ${fmt(lslG)}</span>` : '';
+  const dolBadge = (r.dealer_dol||0) >= 60 ? `<span class="sig red">aged ${r.dealer_dol}d</span>` :
+                   (r.dealer_dol||0) >= 30 ? `<span class="sig yellow">${r.dealer_dol}d</span>` :
+                   r.dealer_dol ? `<span class="sig">${r.dealer_dol}d on lot</span>` : '';
+  const compsSig = r.rbook_comp_count ? `<span class="sig">${r.rbook_comp_count} comps · avg DOL ${r.rbook_avg_dol||'-'}d</span>` : '';
+  const cf = (r.signals && r.signals.carfax) || null;
+  let cfSig = '';
+  if (cf) {
+    const flags = [];
+    if (cf.total_loss)      flags.push({c:'red',  t:'⚠ TOTAL LOSS'});
+    if (cf.frame_damage)    flags.push({c:'red',  t:'⚠ FRAME DAMAGE'});
+    if (cf.odo_rollback)    flags.push({c:'red',  t:'⚠ ODOMETER ROLLBACK'});
+    if (cf.has_major)       flags.push({c:'red',  t:'⚠ Major issues'});
+    if (cf.airbag_deployed) flags.push({c:'yellow', t:'Airbag deployed'});
+    if (!cf.clean_title)    flags.push({c:'red',  t:'⚠ Title issue'});
+    if (cf.accidents > 0)   flags.push({c:'yellow', t:`${cf.accidents} accident${cf.accidents>1?'s':''}`});
+    if (cf.one_owner)       flags.push({c:'green', t:'1-owner'});
+    else if (cf.num_owners) flags.push({c:'',      t:`${cf.num_owners} owners`});
+    if (!flags.length && cf.clean_title) flags.push({c:'green', t:'✓ Clean Carfax'});
+    cfSig = flags.map(f => `<span class="sig ${f.c}">${f.t}</span>`).join('');
+  }
+  // referrerpolicy=no-referrer dodges WordPress hotlink protection (TXT Charlie etc.)
+  // crossorigin/loading=lazy help browser cache. Relative URLs from dealeron get
+  // a fallback domain prepended if we ever wire the dealer's base URL in signals.
+  const photo = r.photo_url
+    ? `<div class="photo"><img src="${r.photo_url}" referrerpolicy="no-referrer" loading="lazy" onerror="this.parentElement.innerHTML='<div class=no-photo>🚗</div>'"></div>`
+    : `<div class="photo"><div class="no-photo">🚗</div></div>`;
+  const dealerLink = r.detail_url ? `<a href="${r.detail_url}" target="_blank" style="color:#93c5fd;text-decoration:none">${r.dealer_name||'?'} ↗</a>` : (r.dealer_name||'?');
+  const wishlist = (r.signals && r.signals.wishlist_matches) || [];
+  const wishlistBanner = wishlist.length ? `
+    <div class="wishlist-banner">
+      <div class="wb-icon">📣</div>
+      <div class="wb-body">
+        ${wishlist.slice(0,3).map(w => `<div class="wb-row"><b>${escapeHtml(w.customer_name)}</b> asked ${w.days_old}d ago — <a href="tel:${escapeHtml(w.phone)}" class="wb-phone">${escapeHtml(w.phone)}</a> · <a href="/sourcing/${w.sourcing_id}" target="_blank" class="wb-link">thread ↗</a></div>`).join('')}
+        ${wishlist.length>3 ? `<div class="wb-more">+${wishlist.length-3} more</div>` : ''}
+      </div>
+    </div>` : '';
+  return `
+    <div class="card s-${r.status}" data-id="${r.id}">
+      <div class="status-tag st-${r.status}">${r.status}</div>
+      <div class="card-head">
+        <div class="vehicle">
+          <div class="ymm">${r.year||''} ${r.make||''} ${r.model||''}</div>
+          <div class="trim">${r.trim||''} · ${num(r.mileage)} mi${r.ext_color?' · '+r.ext_color:''}</div>
+          <div class="vin">${r.vin}</div>
+        </div>
+        <div class="score-badge ${scoreClass(r.score)}">
+          <div class="n">${r.score||0}</div>
+          <div class="l">score</div>
+          ${r.opportunity_type ? `<div class="otype ${r.opportunity_type}">${(r.opportunity_type==='wholesale_arb')?'WHOLESALE':(r.opportunity_type==='retail_arb')?'RETAIL':(r.opportunity_type==='both')?'BOTH':r.opportunity_type}</div>` : ''}
+        </div>
+      </div>
+      ${photo}
+      ${wishlistBanner}
+      <div class="pricing">
+        <div class="pricing-grid">
+          <div class="pcol"><div class="pl">Asking</div><div class="pv asking">${fmt(r.asking_price)}</div></div>
+          <div class="pcol"><div class="pl">MMR Avg</div><div class="pv mmr">${fmt(r.mmr_wholesale_avg)}</div><div class="pd">${r.pct_under_mmr ? r.pct_under_mmr.toFixed(1)+'% under' : ''}</div></div>
+          ${r.rbook_p25 ? `
+          <div class="pcol"><div class="pl">Retail P25</div><div class="pv retail">${fmt(r.rbook_p25)}</div><div class="pd">cheap end</div></div>
+          <div class="pcol"><div class="pl">Retail P50</div><div class="pv retail">${fmt(r.rbook_p50)}</div><div class="pd">${headroomTxt}</div></div>
+          ` : `
+          <div class="pcol"><div class="pl">Manheim Retail Low</div><div class="pv retail">${fmt(r.mmr_retail_below)}</div><div class="pd muted">no rBook comps</div></div>
+          <div class="pcol"><div class="pl">Manheim Retail Avg</div><div class="pv retail">${fmt(r.mmr_retail_avg)}</div><div class="pd">${r.mmr_retail_avg && r.asking_price ? (r.mmr_retail_avg - r.asking_price > 0 ? '+'+fmt(r.mmr_retail_avg - r.asking_price)+' headroom' : fmt(r.mmr_retail_avg - r.asking_price)+' under') : ''}</div></div>
+          `}
+        </div>
+      </div>
+      <div class="signals">
+        ${dolBadge}
+        ${dropSig}
+        ${compsSig}
+        ${lslSig}
+        ${cfSig}
+        ${r.mmr_grade ? `<span class="sig">grade ${r.mmr_grade}</span>` : ''}
+      </div>
+      <div class="dealer">
+        <span class="dn">${dealerLink}</span>
+      </div>
+      <div class="actions">
+        ${r.status === 'new' || r.status === 'called' ? `<button class="btn primary" onclick="setStatus(${r.id},'pursuing')">Pursue</button>` : ''}
+        ${r.status === 'pursuing' ? `<button class="btn success" onclick="setStatus(${r.id},'acquired')">Acquired</button>` : ''}
+        ${r.status !== 'passed' ? `<button class="btn danger" onclick="setStatus(${r.id},'passed')">Pass</button>` : ''}
+        ${r.status === 'passed' ? `<button class="btn" onclick="setStatus(${r.id},'new')">Reopen</button>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function escapeHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[m]);
+}
+
+async function genPitch(id) {
+  const block = document.getElementById(`pitch-${id}`);
+  block.innerHTML = '<div class="pitch-text" style="color:#94a3b8;font-style:italic">Generating…</div>';
+  try {
+    const r = await fetch(`/api/opportunities/${id}/pitch`, {method: 'POST'});
+    const d = await r.json();
+    if (d.ok) {
+      block.innerHTML = `<div class="pitch-text">${escapeHtml(d.pitch)}</div>`;
+      // also update local state so a re-render doesn't lose it
+      const row = state.rows.find(x => x.id === id);
+      if (row) row.gemini_pitch = d.pitch;
+    } else {
+      block.innerHTML = `<div class="pitch-text" style="color:#f87171">Failed: ${escapeHtml(d.error||'unknown')}</div>`;
+    }
+  } catch (e) {
+    block.innerHTML = `<div class="pitch-text" style="color:#f87171">Error: ${escapeHtml(String(e))}</div>`;
+  }
+}
+
+async function setStatus(id, status) {
+  await fetch(`/api/opportunities/${id}/status`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({status})
+  });
+  await loadData();
+}
+
+document.addEventListener('click', e => {
+  const c = e.target.closest('.chip');
+  if (!c) return;
+  const f = c.dataset.filter;
+  const v = c.dataset.value;
+  state.filter[f] = v;
+  document.querySelectorAll(`.chip[data-filter="${f}"]`).forEach(x => x.classList.toggle('active', x.dataset.value === v));
+  render();
+});
+
+document.getElementById('sort').addEventListener('change', e => {
+  state.sort = e.target.value;
+  render();
+});
+
+loadData();
+setInterval(loadData, 60000);  // refresh every 60s
+</script>
+</body>
+</html>

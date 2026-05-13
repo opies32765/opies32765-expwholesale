@@ -15064,5 +15064,148 @@ def api_opportunity_pitch(opp_id):
     return jsonify({'ok': True, 'cached': False, 'pitch': pitch})
 
 
+
+# ── /api/bid/<id>/estimate ─ operator value estimate (training signal) ──
+# Independent of the AI assessment — Gemini does NOT read this value.
+# Consumed by reconcile_ai_accuracy.py (every 30 min) + train_per_make.py
+# (nightly 04:30). Treated as peer ground-truth to actual_purchase_cost so
+# we can learn from bids we estimated but didn't acquire.
+@app.route('/api/bid/<int:bid_id>/estimate', methods=['POST'])
+def api_bid_estimate(bid_id):
+    """Set the operator's value estimate on a bid.
+
+    Body: {"estimate": <integer-dollars>, "actor": "<optional name>"}
+    Returns: {ok, bid_id, client_estimate, client_estimate_at,
+              ai_assessed_at, entered_before_ai}
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        est = int(data.get('estimate'))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'estimate (int dollars) required'}), 400
+    if est <= 0 or est > 5_000_000:
+        return jsonify({'ok': False, 'error': 'estimate out of range (1..5M)'}), 400
+
+    actor = (data.get('actor') or '').strip()[:64] or None
+    if not actor:
+        # Pull from session if available, else from logged-in email
+        try:
+            actor = (session.get('user_email') or '')[:64] or None
+        except Exception:
+            actor = None
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE bids
+           SET client_estimate    = %s,
+               client_estimate_at = NOW(),
+               client_estimate_by = %s,
+               updated_at         = NOW()
+         WHERE id = %s
+        RETURNING id, client_estimate, client_estimate_at, client_estimate_by,
+                  ai_assessed_at
+    """, (est, actor, bid_id))
+    row = cur.fetchone()
+    db.commit()
+    db.close()
+    if not row:
+        return jsonify({'ok': False, 'error': 'bid not found'}), 404
+
+    cea = row['client_estimate_at']
+    aaa = row.get('ai_assessed_at')
+    entered_before_ai = bool(aaa is None or (cea and aaa and cea.replace(tzinfo=None) < aaa.replace(tzinfo=None)))
+    return jsonify({
+        'ok': True,
+        'bid_id': row['id'],
+        'client_estimate': row['client_estimate'],
+        'client_estimate_at': cea.isoformat() if cea else None,
+        'client_estimate_by': row['client_estimate_by'],
+        'ai_assessed_at': aaa.isoformat() if aaa else None,
+        'entered_before_ai': entered_before_ai,
+    })
+
+
+@app.route('/api/bid/<int:bid_id>/estimate', methods=['DELETE'])
+def api_bid_estimate_clear(bid_id):
+    """Clear an erroneous estimate. Sets columns back to NULL."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE bids
+           SET client_estimate    = NULL,
+               client_estimate_at = NULL,
+               client_estimate_by = NULL,
+               updated_at         = NOW()
+         WHERE id = %s
+        RETURNING id
+    """, (bid_id,))
+    row = cur.fetchone()
+    db.commit()
+    db.close()
+    if not row:
+        return jsonify({'ok': False, 'error': 'bid not found'}), 404
+    return jsonify({'ok': True, 'bid_id': row['id'], 'cleared': True})
+
+
+
+# ── /admin/bias-segments — live source mix view ─────────────────────────
+@app.route('/admin/bias-segments')
+def admin_bias_segments():
+    """Live view of per-segment bias correction sources.
+    Shows where operator estimates have started influencing live AI output.
+    """
+    return render_template('admin_bias_segments.html')
+
+
+@app.route('/api/admin/bias-segments/data')
+def api_admin_bias_segments_data():
+    """Snapshot of bias_segments split by source (actual vs estimate)."""
+    window = request.args.get('window', 30, type=int)
+    if window not in (30, 90):
+        window = 30
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT make, model, year_band, mileage_band,
+               n, n_actual, n_estimate,
+               bias_pct, bias_pct_actual, bias_pct_estimate,
+               abs_pct, stddev_pct, refreshed_at
+          FROM bias_segments
+         WHERE window_days = %s
+         ORDER BY n_estimate DESC NULLS LAST, n DESC, abs(bias_pct) DESC
+    """, (window,))
+    rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        if r.get('refreshed_at'):
+            r['refreshed_at'] = r['refreshed_at'].isoformat()
+        for k in ('bias_pct', 'bias_pct_actual', 'bias_pct_estimate',
+                  'abs_pct', 'stddev_pct'):
+            if r.get(k) is not None:
+                r[k] = float(r[k])
+
+    # Summary stats
+    cur.execute("""
+        SELECT
+            count(*) AS segments,
+            sum(n) AS total_n,
+            sum(n_actual) AS total_actual,
+            sum(n_estimate) AS total_estimate,
+            count(*) FILTER (WHERE n_estimate > 0) AS segments_with_estimates,
+            count(*) FILTER (WHERE n_estimate >= n_actual AND n_estimate > 0)
+              AS segments_estimate_majority,
+            max(refreshed_at) AS last_refresh
+          FROM bias_segments
+         WHERE window_days = %s
+    """, (window,))
+    s = dict(cur.fetchone() or {})
+    if s.get('last_refresh'):
+        s['last_refresh'] = s['last_refresh'].isoformat()
+
+    db.close()
+    return jsonify({'rows': rows, 'summary': s, 'window': window})
+
+
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=9000)
