@@ -45,3 +45,13 @@ try:
           f'{(_t.monotonic()-_t0)*1000:.0f}ms', flush=True)
 except Exception as _ml_e:
     print(f'[wsgi] ml_predict preload failed: {_ml_e}', flush=True)
+
+
+# comp_msrp processor — env-gated daemon for parallel MSRP lookups
+# alongside VM 121's oscar-worker-2. Only fires when COMP_MSRP_DAEMON=1
+# is set in the environment (systemd dropin comp-msrp-daemon.conf).
+try:
+    from app import _start_comp_msrp_processor as _start_cmp
+    _start_cmp()
+except Exception as _cmp_e:
+    print(f'[wsgi] comp_msrp daemon start failed: {_cmp_e}', flush=True)

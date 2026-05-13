@@ -46,6 +46,7 @@ import requests
 from cookie_jar import CookieJar
 from vauto_bff_direct import (
     fetch_competitive_set, fetch_price_guides,
+    fetch_manheim_transactions,
     parse_competitive_set, parse_price_guides,
     VAutoAuthError, VAutoServerError, VAutoBadRequestError,
 )
@@ -460,3 +461,152 @@ def kick_direct_enrichment(bid_id: int, db_conn_factory) -> None:
             log.warning('bid %d direct write failed: %s', bid_id, e)
     except Exception as e:
         log.exception('bid %d kick_direct_enrichment unhandled: %s', bid_id, e)
+
+
+def kick_direct_manheim(bid_id: int, db_conn_factory) -> None:
+    """Direct-API replacement for the VM 120/121 Playwright Manheim
+    transactions scrape. Daemon-thread companion to kick_direct_enrichment
+    (rbook). ~1s end-to-end vs ~30-60s Playwright.
+
+    Mirrors kick_direct_enrichment: same appraisal_url precondition, same
+    cookie source, same fallback semantics (failure → legacy
+    EWEnrichMmr on VM 120/121 claims after 60s).
+
+    Idempotent: final UPDATE filters on manheim_completed_at IS NULL —
+    if a legacy worker beat us to it the write is a no-op.
+
+    Note this is a SECOND priceGuides call (in addition to the one
+    kick_direct_enrichment makes for rbook). The two calls use different
+    useSavedFields settings: rbook uses the default (true), manheim needs
+    false to populate the K-option list. Keeping them separate avoids
+    risking a regression in rbook's working flow.
+    """
+    try:
+        # Read appraisal_url — same precondition as rbook direct
+        try:
+            with db_conn_factory() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT appraisal_url, manheim_completed_at "
+                        "FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+                    row = cur.fetchone()
+        except Exception as e:
+            log.warning('bid %d manheim appraisal_url fetch failed: %s',
+                        bid_id, e)
+            return
+        if not row:
+            log.info('bid %d manheim direct deferred — no vauto_lookups row',
+                     bid_id)
+            return
+        if hasattr(row, 'keys'):
+            appraisal_url = row['appraisal_url']
+            already_done = row['manheim_completed_at']
+        else:
+            appraisal_url, already_done = row[0], row[1]
+        if already_done:
+            log.info('bid %d manheim direct skipped — completed_at already set',
+                     bid_id)
+            return
+        if not appraisal_url or appraisal_url == '__not_found__':
+            log.info('bid %d manheim direct deferred — no appraisal_url '
+                     '(legacy EWEnrichMmr will pick up)', bid_id)
+            return
+        try:
+            qs = parse_qs(urlparse(appraisal_url).query)
+            appraisal_id = (qs.get('Id') or [None])[0]
+        except Exception as e:
+            log.warning('bid %d manheim appraisal_url parse failed: %s',
+                        bid_id, e)
+            return
+        if not appraisal_id:
+            return
+
+        # Canonical vehicleInfo decode (same as rbook path)
+        try:
+            with db_conn_factory() as conn:
+                built = build_vehicle_dict_from_bid(conn, bid_id)
+        except Exception as e:
+            log.warning('bid %d manheim vehicle fetch failed: %s', bid_id, e)
+            return
+        if not built:
+            log.info('bid %d manheim direct skipped — vehicleInfo unavailable',
+                     bid_id)
+            return
+        vehicle, _option_codes = built
+
+        # Cookies + headers
+        try:
+            jar = _get_jar()
+        except Exception as e:
+            log.warning('bid %d manheim session load: %s', bid_id, e)
+            return
+        if _session_too_stale(jar):
+            log.warning('bid %d manheim session stale (%.0fs) — defer to legacy',
+                        bid_id, jar.age_seconds())
+            return
+
+        # Direct API call
+        t0 = time.monotonic()
+        try:
+            result = fetch_manheim_transactions(
+                vehicle, jar.get_cookies(), jar.get_headers(),
+                appraisal_id=appraisal_id)
+        except VAutoAuthError as e:
+            log.warning('bid %d manheim direct auth fail: %s — legacy will pick up',
+                        bid_id, e)
+            return
+        except (VAutoServerError, VAutoBadRequestError) as e:
+            log.warning('bid %d manheim direct API err: %s — legacy fallback',
+                        bid_id, e)
+            return
+        except Exception as e:
+            log.warning('bid %d manheim direct unexpected %s: %s — legacy fallback',
+                        bid_id, type(e).__name__, e)
+            return
+        ms = int((time.monotonic() - t0) * 1000)
+
+        n_tx = len(result.get('transactions') or [])
+        if n_tx == 0:
+            log.info('bid %d manheim direct: 0 transactions (panel_found=%s) '
+                     '— writing empty row to satisfy gate',
+                     bid_id, result.get('panel_found'))
+
+        # Persist — idempotent on manheim_completed_at IS NULL
+        try:
+            with db_conn_factory() as conn:
+                with conn.cursor() as cur:
+                    state_patch = {'manheim': {
+                        'status': 'done',
+                        'duration_ms': ms,
+                        'source': 'direct_api',
+                        'n_transactions': n_tx,
+                        'finished_at': time.strftime(
+                            '%Y-%m-%dT%H:%M:%S+00:00', time.gmtime()),
+                    }}
+                    cur.execute("""
+                        UPDATE vauto_lookups
+                           SET manheim_transactions = %s::jsonb,
+                               manheim_completed_at = NOW(),
+                               enrichment_state = COALESCE(
+                                   enrichment_state, '{}'::jsonb)
+                                   || %s::jsonb
+                         WHERE bid_id = %s
+                           AND manheim_completed_at IS NULL
+                    """, (json.dumps(result),
+                          json.dumps(state_patch),
+                          bid_id))
+                    rows_affected = cur.rowcount
+                conn.commit()
+            log.info('bid %d manheim direct write: %d rows, %d tx, %dms',
+                     bid_id, rows_affected, n_tx, ms)
+            if rows_affected:
+                try:
+                    from app import _maybe_fire_assessment
+                    _maybe_fire_assessment(bid_id, source='direct_api_manheim')
+                except Exception as gate_err:
+                    log.debug('bid %d manheim gate poke err: %s',
+                              bid_id, gate_err)
+        except Exception as e:
+            log.warning('bid %d manheim direct write failed: %s', bid_id, e)
+    except Exception as e:
+        log.exception('bid %d kick_direct_manheim unhandled: %s', bid_id, e)

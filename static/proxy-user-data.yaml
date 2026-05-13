@@ -1,0 +1,49 @@
+#cloud-config
+hostname: vm-scanner-proxy-1
+manage_etc_hosts: true
+
+users:
+  - name: root
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGsltFfIA/UnylsvmyLO0N2bzKVbsbLalftSTsS4/hqt root@vmi3197767
+
+ssh_pwauth: false
+disable_root: false
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - curl
+  - qemu-guest-agent
+  - tinyproxy
+
+write_files:
+  - path: /etc/tinyproxy/tinyproxy.conf
+    permissions: '0644'
+    owner: root:root
+    content: |
+      User tinyproxy
+      Group tinyproxy
+      Port 3128
+      Listen 0.0.0.0
+      Timeout 600
+      DefaultErrorFile "/usr/share/tinyproxy/default.html"
+      StatFile "/usr/share/tinyproxy/stats.html"
+      LogFile "/var/log/tinyproxy/tinyproxy.log"
+      LogLevel Info
+      PidFile "/run/tinyproxy/tinyproxy.pid"
+      MaxClients 100
+      Allow 100.64.0.0/10
+      ViaProxyName "ew-scanner-proxy"
+      ConnectPort 443
+      ConnectPort 80
+
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+  - curl -fsSL https://tailscale.com/install.sh | sh
+  - systemctl enable --now tailscaled
+  - tailscale up --authkey=tskey-auth-k44Tgx2MpV11CNTRL-5nu3ec3fSW2q5K2xm9BTW24u8ucuJCEmA --hostname=vm-scanner-proxy-1 --accept-routes=false
+  - systemctl enable --now tinyproxy
+  - tailscale ip -4 > /var/tmp/tailscale-ip.txt
+  - echo "PROVISION COMPLETE" > /var/tmp/provision.done

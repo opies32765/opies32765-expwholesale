@@ -9620,6 +9620,39 @@ def _stamp_rbook_direct_started(bid_id):
         print(f'[direct-stamp] bid={bid_id} stamp failed: {e}', flush=True)
 
 
+def _stamp_manheim_direct_started(bid_id):
+    """Mirror of _stamp_rbook_direct_started for Manheim transactions.
+
+    Stamped synchronously before spawning the direct manheim daemon
+    thread. enrichment_api.claim_job reads
+    enrichment_state.manheim.direct_started_at and defers EWEnrichMmr
+    (VM 120/121) claims for 60s after the stamp, so legacy only races
+    in when direct API has had its shot AND hasn't completed.
+    """
+    import time as _time
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            UPDATE vauto_lookups
+               SET enrichment_state =
+                   COALESCE(enrichment_state, '{}'::jsonb)
+                   || jsonb_build_object(
+                          'manheim',
+                          COALESCE(enrichment_state->'manheim', '{}'::jsonb)
+                          || jsonb_build_object(
+                                 'direct_started_at', %s::text,
+                                 'status', 'direct_in_flight'))
+             WHERE bid_id = %s
+               AND manheim_completed_at IS NULL
+        """, (_time.strftime('%Y-%m-%dT%H:%M:%S+00:00', _time.gmtime()),
+              bid_id))
+        db.commit()
+        db.close()
+    except Exception as e:
+        print(f'[direct-stamp-mh] bid={bid_id} stamp failed: {e}', flush=True)
+
+
 def _kick_direct_for_intake(bid_id):
     """Kick direct vAuto BFF API enrichment for a freshly-created bid.
 
@@ -10821,14 +10854,22 @@ def api_vauto_url_capture_result():
     # (which now defers for 60s after _stamp_rbook_direct_started).
     if url:
         _stamp_rbook_direct_started(bid_id)
+        _stamp_manheim_direct_started(bid_id)
         try:
             import threading
-            from vauto_enrichment import kick_direct_enrichment
+            from vauto_enrichment import (kick_direct_enrichment,
+                                          kick_direct_manheim)
             threading.Thread(
                 target=kick_direct_enrichment,
                 args=(int(bid_id), get_db),
                 daemon=True,
                 name=f'direct-enrich-{bid_id}',
+            ).start()
+            threading.Thread(
+                target=kick_direct_manheim,
+                args=(int(bid_id), get_db),
+                daemon=True,
+                name=f'direct-manheim-{bid_id}',
             ).start()
         except Exception as _direct_err:
             print(f'[direct-enrich] kick failed bid={bid_id}: '
@@ -11092,14 +11133,22 @@ def api_vauto_submit():
     _ap_url = (data.get('appraisal_url') or '').strip()
     if _ap_url.startswith('https://provision.vauto.app.coxautoinc.com/Va/Appraisal/Default.aspx'):
         _stamp_rbook_direct_started(bid_id)
+        _stamp_manheim_direct_started(bid_id)
         try:
             import threading
-            from vauto_enrichment import kick_direct_enrichment
+            from vauto_enrichment import (kick_direct_enrichment,
+                                          kick_direct_manheim)
             threading.Thread(
                 target=kick_direct_enrichment,
                 args=(int(bid_id), get_db),
                 daemon=True,
                 name=f'direct-enrich-{bid_id}',
+            ).start()
+            threading.Thread(
+                target=kick_direct_manheim,
+                args=(int(bid_id), get_db),
+                daemon=True,
+                name=f'direct-manheim-{bid_id}',
             ).start()
         except Exception as _direct_err:
             print(f'[direct-enrich] submit-kick failed bid={bid_id}: '
@@ -12363,26 +12412,35 @@ def _comp_msrp_processor_loop():
 
 
 def _start_comp_msrp_processor():
-    """Start the daemon thread once per gunicorn worker. Idempotent.
-    Gated by env COMP_MSRP_DAEMON=1 — default OFF since VM 121
-    (oscar-worker-2) is the canonical comp_msrp processor. Set the env
-    var only when VM 121 is offline and you need the server to fall
-    back to handling comp_msrp jobs."""
+    """Start the daemon thread once per HOST (not per gunicorn worker).
+    iPacket rate-limits aggressively (~401s on concurrent >2 callers), so
+    we use a file-based exclusive lock to ensure only ONE gunicorn worker
+    process runs the loop; the other 5 skip. Combined with VM 121's
+    oscar-worker-2, total concurrency = 2 (1 C2 + 1 VM 121).
+    Gated by env COMP_MSRP_DAEMON=1."""
     if os.environ.get('COMP_MSRP_DAEMON', '0') != '1':
         return
-    import threading
-    global _COMP_MSRP_THREAD_STARTED
+    import threading, fcntl
+    global _COMP_MSRP_THREAD_STARTED, _COMP_MSRP_LOCK_FH
     try:
         _COMP_MSRP_THREAD_STARTED
     except NameError:
         _COMP_MSRP_THREAD_STARTED = False
+        _COMP_MSRP_LOCK_FH = None
     if _COMP_MSRP_THREAD_STARTED:
         return
+    try:
+        fh = open('/tmp/ew_comp_msrp_daemon.lock', 'w')
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError):
+        return
+    _COMP_MSRP_LOCK_FH = fh
     _COMP_MSRP_THREAD_STARTED = True
     t = threading.Thread(target=_comp_msrp_processor_loop,
                          name='comp_msrp_processor', daemon=True)
     t.start()
-    print('[comp_msrp processor] DAEMON STARTED (env COMP_MSRP_DAEMON=1)',
+    print(f'[comp_msrp processor] DAEMON STARTED (pid={os.getpid()}, '
+          f'single-host singleton via /tmp/ew_comp_msrp_daemon.lock)',
           flush=True)
 
 

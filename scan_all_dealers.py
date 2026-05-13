@@ -18,6 +18,12 @@ from datetime import datetime
 import requests
 
 import dealer_scanner
+import os as _os_for_timeout
+# Wall-clock budget per dealer scan. Stuck WAF (Sucuri/CF) can otherwise
+# hang the entire daily run indefinitely. 30 min covers the slowest
+# legitimate scans (Napletons today: 66 min on CF challenge — exceptions
+# happen but we'd rather skip + retry than block the queue).
+PER_DEALER_TIMEOUT_SEC = int(_os_for_timeout.environ.get('DEALER_SCAN_PER_DEALER_TIMEOUT', '1800'))
 
 # Reuse Orlando AI Solutions Telegram bot (@OrlandoAISolutionsBOT → Oscar's chat).
 # Tokens live in /opt/orlando-chatbot/.env on Contabo 2; we read once at startup
@@ -96,7 +102,45 @@ def main():
         print(f'\n--- dealer {d["id"]}: {d["name"]} ---', flush=True)
         try:
             scanner = dealer_scanner.DealerScanner.from_dealer_id(d['id'])
-            stats = scanner.run()
+            _ok, stats = dealer_scanner._call_with_timeout(
+                scanner.run, PER_DEALER_TIMEOUT_SEC)
+            if not _ok:
+                # Wall-clock budget exceeded — mark this dealer as timed_out,
+                # don't fail the whole run. Inventory rows are untouched
+                # (scan_id never got finalize()'d, no INSERT/UPDATE damage).
+                stats = {
+                    'status': 'timed_out',
+                    'error': f'wall-clock deadline {PER_DEALER_TIMEOUT_SEC}s exceeded',
+                    'tier': 'direct',
+                    'platform_detected': '?',
+                    'vehicles_found': 0,
+                    'new_count': 0, 'sold_count': 0, 'missing_count': 0,
+                    'colors_detected': 0, 'price_drop_count': 0,
+                }
+                # Close any 'running' dealer_scans row for this dealer so the
+                # next run's _zero_vehicle_abort_check doesn't see a stale
+                # in-flight scan and bail.
+                try:
+                    with dealer_scanner.get_conn() as _cn, _cn.cursor() as _cu:
+                        _cu.execute(
+                            """UPDATE dealer_scans
+                                  SET status='timed_out',
+                                      finished_at=NOW(),
+                                      error_message=%s
+                                WHERE dealer_id=%s AND status='running'""",
+                            (stats['error'], d['id']))
+                        _cn.commit()
+                except Exception as _e:
+                    print(f'  failed to close orphan scan row: {_e}', flush=True)
+                # Telegram alert — we want to know which dealer choked
+                try:
+                    tg_send(
+                        f'⏱️ <b>{d["name"]} scan TIMED OUT</b>\n'
+                        f'<i>exceeded {PER_DEALER_TIMEOUT_SEC // 60}-min budget</i>\n'
+                        f'inventory preserved, will retry tomorrow'
+                    )
+                except Exception:
+                    pass
             status = stats.get('status', '?')
             totals[status] = totals.get(status, 0) + 1
             totals['new']         += stats.get('new_count', 0)

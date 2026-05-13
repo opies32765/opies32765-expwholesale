@@ -131,16 +131,19 @@ def claim_job():
             #   chance: either direct_started_at is set AND >= 60s old, OR
             #   no direct attempt happened at all AND the bid is old enough
             #   (5 min from looked_up_at) that we assume direct won't fire.
-            # manheim is unchanged — direct API doesn't return the
-            # transaction-level Manheim rows that the scraper produces, so
-            # legacy MUST run for manheim.
-            if jtype == 'rbook':
-                direct_defer_clause = """
+            # manheim now follows the same direct-first pattern as rbook
+            # (2026-05-13): kick_direct_manheim hits the two-call BFF API
+            # (priceGuides useSavedFields=false → ManheimTransactions) in
+            # ~1s and stamps enrichment_state.manheim.direct_started_at.
+            # Legacy EWEnrichMmr on VM 120/121 only claims when direct has
+            # had a chance — same 60s defer window as rbook.
+            if jtype in ('rbook', 'manheim'):
+                direct_defer_clause = f"""
                   AND (
-                       (enrichment_state->'rbook'->>'direct_started_at' IS NOT NULL
-                        AND (enrichment_state->'rbook'->>'direct_started_at')::timestamptz
+                       (enrichment_state->'{jtype}'->>'direct_started_at' IS NOT NULL
+                        AND (enrichment_state->'{jtype}'->>'direct_started_at')::timestamptz
                             < NOW() - INTERVAL '60 seconds')
-                    OR (enrichment_state->'rbook'->>'direct_started_at' IS NULL
+                    OR (enrichment_state->'{jtype}'->>'direct_started_at' IS NULL
                         AND looked_up_at < NOW() - INTERVAL '5 minutes')
                   )
                 """
@@ -263,17 +266,17 @@ def submit_job():
             new_state[jtype]['error'] = str(err)[:500]
 
         if status == 'done':
-            # Guard: for rbook jobs, skip the write if direct_api has
-            # already populated this bid. Without this, a legacy
-            # EWEnrichRbook scrape that started before the direct_api
-            # kick would later overwrite the fresher direct_api data
-            # with its 99s+ result. Manheim has no parallel direct path,
-            # so it's unaffected.
+            # Guard: skip the write if direct_api has already populated
+            # this bid. Without this, a legacy scrape that started before
+            # the direct_api kick would later overwrite the fresher
+            # direct_api data with its 30-99s+ result. Applies to both
+            # rbook AND manheim (manheim added 2026-05-13 with
+            # kick_direct_manheim two-call BFF API).
             guard = ''
-            if jtype == 'rbook':
-                guard = (" AND (rbook_completed_at IS NULL OR "
-                         "COALESCE(enrichment_state->'rbook'->>'source', '') "
-                         "!= 'direct_api')")
+            if jtype in ('rbook', 'manheim'):
+                guard = (f" AND ({completed_col} IS NULL OR "
+                         f"COALESCE(enrichment_state->'{jtype}'->>'source', '') "
+                         f"!= 'direct_api')")
             cur.execute(f"""
                 UPDATE vauto_lookups
                 SET {data_col} = %s::jsonb,
@@ -282,9 +285,9 @@ def submit_job():
                 WHERE id = %s{guard}
             """, (json.dumps(data) if data is not None else None,
                   json.dumps(new_state), vl_id))
-            if jtype == 'rbook' and cur.rowcount == 0:
+            if jtype in ('rbook', 'manheim') and cur.rowcount == 0:
                 print(f'[enrichment submit] bid={body.get("bid_id")} '
-                      f'rbook from {worker_id} skipped — direct_api owns this bid',
+                      f'{jtype} from {worker_id} skipped — direct_api owns this bid',
                       flush=True)
             cur.execute("""
                 UPDATE enrichment_workers

@@ -2599,10 +2599,19 @@ class DealerScanner:
                 elif platform == 'ridemotive':
                     urls = discover_via_ridemotive(self.base_url, self.sess)
                 else:
-                    urls = discover_via_sitemap(self.base_url, self.sess)
-                    if len(urls) < 5:
-                        urls = list(set(urls) | set(
-                            discover_via_crawl(self.base_url, self.sess)))
+                    # Per-dealer skip_sitemap bypasses doomed sitemap probes
+                    # for sites whose WAF rate-blocks /sitemap_index.xml
+                    # (Ferrari of Washington / Sucuri — 2026-05-13 hang root cause).
+                    # Their /inventory/ page works fine; the crawl path finds
+                    # all VDPs without ever touching the WAF's tripwire.
+                    if self.dealer.get('skip_sitemap'):
+                        print(f'  skipping sitemap discovery (dealers.skip_sitemap=TRUE)', flush=True)
+                        urls = list(discover_via_crawl(self.base_url, self.sess))
+                    else:
+                        urls = discover_via_sitemap(self.base_url, self.sess)
+                        if len(urls) < 5:
+                            urls = list(set(urls) | set(
+                                discover_via_crawl(self.base_url, self.sess)))
                 urls = urls[:CRAWL_MAX_URLS]
                 # Live progress: stamp urls_total now (after discovery) and
                 # bump urls_fetched every 5 VDPs so the dashboard can show

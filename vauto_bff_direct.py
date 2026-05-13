@@ -334,3 +334,140 @@ def parse_price_guides(response: dict) -> dict:
             }
 
     return out
+
+
+# ── Manheim Transactions (direct-API replacement for VM 120/121 Playwright)
+
+MANHEIM_TRANSACTIONS_URL = (
+    'https://bff.vaweb.vauto.app.coxautoinc.com/api/ManheimTransactions'
+)
+PRICE_GUIDES_URL_UNSAVED = f'{BFF_BASE}/api/priceGuides?useSavedFields=false'
+
+
+def _extract_manheim_id_from_price_guides(response: dict) -> Optional[str]:
+    """Pull the selected K-field optionId from a priceGuides response.
+
+    Only populated when the response was fetched with useSavedFields=false;
+    with the default useSavedFields=true the manheim.fields[] block is empty.
+
+    Returns None when no K field is present (VIN didn't decode, vAuto has
+    no Manheim style match, etc).
+    """
+    m = (response or {}).get('manheim') or {}
+    for field in (m.get('fields') or []):
+        if field.get('fieldId') != 'K':
+            continue
+        options = field.get('fieldOptions') or []
+        for opt in options:
+            if opt.get('isSelected'):
+                return opt.get('optionId')
+        if options:
+            return options[0].get('optionId')
+    return None
+
+
+def _normalize_manheim_transactions(rows: list, manheim_summary: dict) -> dict:
+    """Convert vAuto's ManheimTransactions response into the snake_case
+    JSONB shape that vauto_lookups.manheim_transactions has historically
+    received from the Playwright scrape.
+
+    market_intel.compute_market_intel reads:
+        manheim_transactions.transactions[].sale_price
+        manheim_transactions.transactions[].odometer
+        manheim_transactions.transactions[].date_sold
+        manheim_transactions.summary.*
+
+    MUST keep that shape stable — downstream mmr_median / market_intel
+    cache depend on it.
+    """
+    txs: list[dict] = []
+    for r in (rows or []):
+        if not isinstance(r, dict):
+            continue
+        cond = r.get('Condition')
+        if cond is None:
+            cond = r.get('Grade')
+        txs.append({
+            'sale_price':    r.get('PurchasePrice'),
+            'odometer':      r.get('Odometer'),
+            'date_sold':     r.get('TransactionDate'),
+            'sale_type':     r.get('SaleType'),
+            'auction':       r.get('Auction'),
+            'region':        r.get('Region'),
+            'color':         r.get('ExteriorColor'),
+            'condition':     cond,
+            'engine_trans':  r.get('EngineTransmission'),
+        })
+    return {
+        'transactions': txs,
+        'summary': manheim_summary or {},
+    }
+
+
+def fetch_manheim_transactions(vehicle: dict, cookies: dict[str, str],
+                               headers: dict[str, str],
+                               appraisal_id: str = 'unused',
+                               page_size: int = 500,
+                               timeout: int = 30) -> dict:
+    """Direct-API replacement for the VM 120/121 Playwright Manheim
+    transactions scrape. ~1s end-to-end vs ~30-60s Playwright.
+
+    Two-call flow:
+      1. POST /api/priceGuides?useSavedFields=false (extract K optionId)
+      2. POST /api/ManheimTransactions (using that ManheimId)
+
+    Returns dict shape compatible with vauto_lookups.manheim_transactions:
+        {
+          'transactions': [ {sale_price, odometer, date_sold, ...}, ...],
+          'summary': {avg_odometer, base_mmr, ...},
+          'manheim_id': str,
+          'total_row_count': int,
+          'source': 'direct_api',
+          'panel_found': bool,
+        }
+
+    Raises VAutoAuthError / VAutoServerError / VAutoBadRequestError
+    on hard failures (caller catches and lets legacy worker take over).
+    """
+    payload = {
+        'appraisalId': appraisal_id,
+        'vehicle': vehicle,
+        'priceGuideOptions': dict(ALL_PRICE_GUIDE_OPTIONS),
+        'availablePriceGuides': list(DEFAULT_AVAILABLE_GUIDES),
+        'postalCode': None,
+    }
+    r = _post(PRICE_GUIDES_URL_UNSAVED, payload, headers, cookies, timeout)
+    pg_response = r.json()
+    manheim_block = pg_response.get('manheim') or {}
+    manheim_id = _extract_manheim_id_from_price_guides(pg_response)
+
+    summary = {
+        'base_mmr':     manheim_block.get('averageAuctionPrice'),
+        'avg_odometer': manheim_block.get('averageOdometer'),
+        'pricing_date': None,
+    }
+
+    if not manheim_id:
+        return {
+            'transactions': [], 'summary': summary,
+            'manheim_id': None, 'total_row_count': 0,
+            'source': 'direct_api', 'panel_found': False,
+        }
+
+    body = {
+        'ManheimId': manheim_id,
+        'Region': 'NA',
+        'SortColumn': 0,
+        'SortDirection': 0,
+        'FirstRecord': 0,
+        'PageSize': page_size,
+    }
+    r2 = _post(MANHEIM_TRANSACTIONS_URL, body, headers, cookies, timeout)
+    body2 = r2.json()
+    rows = body2.get('ManheimTransactions') or []
+    out = _normalize_manheim_transactions(rows, summary)
+    out['manheim_id'] = manheim_id
+    out['total_row_count'] = body2.get('TotalRowCount', len(rows))
+    out['source'] = 'direct_api'
+    out['panel_found'] = bool(rows)
+    return out

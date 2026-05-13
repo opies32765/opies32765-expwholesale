@@ -124,6 +124,7 @@ def _score(bid: dict, profile: dict | None, dealer_id: int | None = None):
 # ── Template helpers — registered as Jinja globals via @app_context_processor
 # ============================================================
 def _get_bid_network_sold(bid_id):
+    db = None
     try:
         db = _db()
         cur = db.cursor()
@@ -152,6 +153,7 @@ def _get_bid_network_sold(bid_id):
 
 
 def _get_bid_network_claim(bid_id):
+    db = None
     try:
         db = _db()
         cur = db.cursor()
@@ -175,6 +177,7 @@ def _get_bid_network_claim(bid_id):
 
 
 def _get_network_claims_banner():
+    db = None
     try:
         db = _db()
         cur = db.cursor()
