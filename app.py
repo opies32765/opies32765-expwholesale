@@ -7225,11 +7225,17 @@ THALIST_SECRET = os.environ.get(
 THALIST_ALERT_PHONE = '+14074309675'  # operator's phone for new-post SMS
 
 _THALIST_MAKE_ID_TO_NAME = {
-    # Backfilled lazily as the scraper sends us posts whose Make is unknown.
-    # The list dropdown carries the mapping; we'll harvest it from the
-    # scraper's first call (sends a 'makes' bootstrap payload) — for now we
-    # know a few from the sample scrape.
+    # Harvested from thalist_posts data 2026-05-13. New IDs auto-discovered
+    # via title-parse fallback in api_thalist_post (committed a0f475f) AND
+    # the nightly thalist_make_sweep job which backfills any bid that landed
+    # with make=NULL.
+    4:  'Bentley',
+    5:  'BMW',
+    11: 'Ferrari',
+    17: 'Land Rover',
     18: 'Lexus',
+    22: 'Mercedes-Benz',
+    32: 'Rolls-Royce',
 }
 
 
@@ -15301,6 +15307,121 @@ def api_admin_bias_segments_data():
 
     db.close()
     return jsonify({'rows': rows, 'summary': s, 'window': window})
+
+
+
+# ── /api/thalist/make_sweep ─ defense-in-depth backfill for NULL makes ──
+# Catches thalist bids where the make_id wasn\'t in the static map AND the
+# title-parse fallback wasn\'t in place at intake time. Backfills make from
+# the title, then re-fires AI assessment if the bid was stuck on analyzing
+# (ai_assessed_at stamped, ai_price NULL).
+def _thalist_parse_make_from_title(title: str) -> str | None:
+    """Same regex as api_thalist_post intake (single source of truth).
+    Extracts make from \"<year> <make> <rest>\" titles."""
+    if not title:
+        return None
+    import re as _re
+    m = _re.match(
+        r'^\s*(?:19|20)\d{2}\s+'
+        r'(Mercedes[-\s]Benz|Aston[-\s]Martin|Land[-\s]Rover|'
+        r'Rolls[-\s]Royce|Alfa[-\s]Romeo|\S+)',
+        title.strip(), _re.IGNORECASE,
+    )
+    return m.group(1).strip() if m else None
+
+
+@app.route('/api/thalist/make_sweep', methods=['POST'])
+def api_thalist_make_sweep():
+    """Sweep thalist bids with make=NULL, backfill from title + re-assess.
+
+    Optional body: {"limit": N} to cap how many bids to process this call.
+    Default cap: 50.
+    """
+    data = request.get_json(silent=True) or {}
+    limit = int(data.get('limit') or 50)
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT b.id, b.year, b.vin, tp.title, tp.make_id
+          FROM bids b
+          JOIN thalist_posts tp ON tp.bid_id = b.id
+         WHERE b.creation_source = 'thalist'
+           AND (b.make IS NULL OR b.make = '' OR b.make = 'Unknown')
+           AND tp.title IS NOT NULL
+         ORDER BY b.id DESC
+         LIMIT %s
+    """, (limit,))
+    candidates = cur.fetchall()
+
+    fixed = []
+    reassessed = []
+    skipped = []
+    new_make_ids = {}  # harvested ID → parsed name (for ops to add to map later)
+
+    for row in candidates:
+        bid_id = row['id']
+        title = row['title']
+        make_id = row['make_id']
+        # Try static map first
+        parsed = _thalist_resolve_make(make_id)
+        if not parsed:
+            parsed = _thalist_parse_make_from_title(title)
+            if parsed and make_id and make_id not in _THALIST_MAKE_ID_TO_NAME:
+                new_make_ids[make_id] = parsed
+        if not parsed:
+            skipped.append({'bid_id': bid_id, 'title': title, 'make_id': make_id,
+                            'reason': 'unparseable'})
+            continue
+        cur.execute("""
+            UPDATE bids SET make = %s, updated_at = NOW() WHERE id = %s
+        """, (parsed, bid_id))
+        fixed.append({'bid_id': bid_id, 'make': parsed, 'make_id': make_id,
+                      'from_static_map': bool(_thalist_resolve_make(make_id))})
+    db.commit()
+
+    # For each fixed bid that\'s stuck on \"analyzing\" (ai_assessed_at set,
+    # ai_price NULL), re-fire the assessment in a daemon thread so the
+    # request returns fast.
+    if fixed:
+        cur.execute("""
+            SELECT id FROM bids
+             WHERE id = ANY(%s)
+               AND ai_assessed_at IS NOT NULL
+               AND ai_price IS NULL
+        """, ([f['bid_id'] for f in fixed],))
+        stuck_ids = [r['id'] for r in cur.fetchall()]
+        # Clear ai_assessed_at so _maybe_fire_assessment will re-fire
+        if stuck_ids:
+            cur.execute("""
+                UPDATE bids SET ai_assessed_at = NULL WHERE id = ANY(%s)
+            """, (stuck_ids,))
+            db.commit()
+            for bid_id in stuck_ids:
+                try:
+                    threading.Thread(
+                        target=_run_assessment,
+                        args=(bid_id,),
+                        kwargs={},
+                        daemon=True,
+                        name=f'reassess-thalist-{bid_id}',
+                    ).start()
+                    reassessed.append(bid_id)
+                except Exception as e:
+                    print(f'[thalist-sweep] re-assess thread failed bid={bid_id}: {e}',
+                          flush=True)
+
+    db.close()
+    return jsonify({
+        'ok': True,
+        'fixed_count': len(fixed),
+        'fixed': fixed,
+        'reassessed_count': len(reassessed),
+        'reassessed': reassessed,
+        'skipped_count': len(skipped),
+        'skipped': skipped,
+        'new_make_ids_to_add': new_make_ids,
+    })
 
 
 if __name__ == '__main__':
