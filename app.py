@@ -8057,6 +8057,102 @@ def admin_live_auctions_page():
     return render_template('live_auctions.html')
 
 
+# ── Thalist inventory tile view ──────────────────────────────────────────
+#
+# Same shape as /admin/live_auctions but for thalist.com wholesale posts.
+# Differences from DealerClub: no countdown (these aren't auctions), no
+# reserve, no bid count. Opportunity = ai_price - (asking_price +
+# THALIST_TRANSPORT_EST). Buy fee is zero (asking IS the price).
+#
+# Sources for one row:
+#   thalist_posts  ledger row (one per active post)
+#   bids           AI assessment + canon decode
+#   bid_photos     first photo URL for the tile (after local download)
+
+THALIST_TRANSPORT_EST = 700   # flat for now; no API equivalent on thalist
+
+
+@app.route('/admin/thalist_inventory')
+def admin_thalist_inventory_page():
+    """Tile grid of every active thalist Wholesale Inventory post."""
+    return render_template('thalist_inventory.html')
+
+
+@app.route('/api/admin/thalist/state')
+def api_admin_thalist_state():
+    """JSON state for the thalist inventory dashboard. Polled by JS every
+    30s. Returns one row per active thalist post (not invalidated, not
+    deduped to an old bid), joined with the EW bid's ai_price so the
+    client can render the opportunity tier."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT tp.id              AS post_row_id,
+               tp.post_id,
+               tp.vin,
+               tp.title,
+               tp.year, tp.make_id, tp.model,
+               tp.asking_price,
+               tp.mileage,
+               tp.location_zip,
+               tp.description,
+               tp.teaser,
+               tp.poster_name,
+               tp.poster_company,
+               tp.poster_company_id,
+               tp.post_type_code,
+               tp.detail_url,
+               tp.first_seen_at,
+               tp.bid_id,
+               b.ai_price                       AS ai_price,
+               b.year                           AS bid_year,
+               b.make                           AS bid_make,
+               b.model                          AS bid_model,
+               b.trim                           AS bid_trim,
+               b.status                         AS bid_status,
+               (SELECT url FROM bid_photos
+                 WHERE bid_id = b.id
+                 ORDER BY id ASC LIMIT 1)       AS photo_url
+        FROM thalist_posts tp
+        JOIN bids b ON b.id = tp.bid_id
+        WHERE tp.invalidated_at IS NULL
+          AND tp.bid_id IS NOT NULL
+          AND COALESCE(b.status,'') NOT IN ('cancelled','rejected','passed','bought')
+        ORDER BY tp.first_seen_at DESC
+        LIMIT 200
+    """)
+    rows = list(cur.fetchall())
+    db.close()
+    posts = []
+    for r in rows:
+        d = dict(r)
+        ai = d.get('ai_price')
+        ai_int = int(float(ai)) if ai is not None else None
+        ask = d.get('asking_price')
+        # Opportunity = AI ceiling - (asking + flat transport).
+        # Buy fee is 0 (wholesale offers don't carry one on top).
+        all_in = None
+        gap = None
+        pct = None
+        if ask is not None and ai_int is not None and ai_int > 0:
+            all_in = int(ask) + THALIST_TRANSPORT_EST
+            gap = ai_int - all_in
+            pct = round(gap / ai_int * 100, 2)
+        d['ai_price'] = ai_int
+        d['all_in_cost'] = all_in
+        d['opportunity_gap'] = gap
+        d['opportunity_pct'] = pct
+        # Friendly display fields
+        d['ymm'] = (f'{d.get("bid_year") or d.get("year") or ""} '
+                    f'{d.get("bid_make") or ""} '
+                    f'{d.get("bid_model") or d.get("model") or ""} '
+                    f'{d.get("bid_trim") or ""}').strip()
+        if d.get('first_seen_at') and hasattr(d['first_seen_at'], 'isoformat'):
+            d['first_seen_at'] = d['first_seen_at'].isoformat()
+        posts.append(d)
+    return jsonify({'posts': posts, 'as_of': time.strftime('%Y-%m-%dT%H:%M:%S')})
+
+
 @app.route('/api/admin/dealerclub/state')
 def api_admin_dealerclub_state():
     """JSON state for the live auction dashboard. Polled by JS every 15s.

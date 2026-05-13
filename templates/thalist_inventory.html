@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Thalist Inventory — Experience Wholesale</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         margin: 0; background: #0f172a; color: #e2e8f0; }
+  header { padding: 14px 24px; background: #020617; color: #fff; display: flex;
+           justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; }
+  header a { color: #94a3b8; text-decoration: none; font-size: 13px; }
+  main { max-width: 1500px; margin: 0 auto; padding: 22px; }
+  h1 { font-size: 22px; margin: 0 0 4px 0; }
+  .sub { color: #64748b; font-size: 13px; margin-bottom: 18px; }
+  .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+             margin-bottom: 18px; }
+  .toolbar button { background:#1e293b; color:#e2e8f0; border:1px solid #334155;
+                    padding:6px 12px; border-radius:6px; cursor:pointer;
+                    font-size:13px; font-weight:500; }
+  .toolbar button.active { background:#34d399; border-color:#6ee7b7; color:#0f172a;
+                           font-weight:700; }
+  .toolbar button:hover { background:#334155; }
+  .toolbar .count { color:#64748b; font-size:12px; margin-left:auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+          gap: 14px; }
+  .tile { background:#1e293b; border:1px solid #334155; border-radius:10px;
+          overflow:hidden; transition: all .15s; position:relative; }
+  .tile.green  { border-color: rgba(74,222,128,.45); }
+  .tile.yellow { border-color: rgba(250,204,21,.45); }
+  .tile.red    { border-color: rgba(248,113,113,.35); opacity: .82; }
+  .tile.gray   { border-color: rgba(148,163,184,.25); }
+  .photo { width:100%; height:180px; background:#0f172a; object-fit:cover;
+           display:block; }
+  .body { padding: 12px 14px; }
+  .title { font-size: 14px; font-weight: 600; color:#f1f5f9;
+           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .meta { font-size:11px; color:#94a3b8; margin: 2px 0 8px 0;
+          font-family: 'SF Mono', Consolas, monospace; }
+  .row-money { display:flex; justify-content:space-between;
+               font-size:12px; line-height: 1.55; }
+  .row-money .lbl { color:#94a3b8; }
+  .row-money .val { color:#e2e8f0; font-weight: 500; }
+  .opportunity { margin-top:10px; padding:8px 10px; border-radius:6px;
+                 font-weight:700; font-size:13px; display:flex;
+                 justify-content:space-between; align-items:center; }
+  .opportunity.green  { background:rgba(74,222,128,.12);  color:#86efac; }
+  .opportunity.yellow { background:rgba(250,204,21,.12);  color:#fde047; }
+  .opportunity.red    { background:rgba(248,113,113,.12); color:#fca5a5; }
+  .opportunity.gray   { background:rgba(148,163,184,.12); color:#cbd5e1; }
+  .footer { display:flex; gap:8px; justify-content:space-between;
+            margin-top:10px; align-items:center; font-size:11px;
+            color:#94a3b8; }
+  .footer .ago { font-family:'SF Mono',Consolas,monospace; }
+  .poster { font-size:11px; color:#cbd5e1; margin-top:6px; }
+  .poster strong { color:#34d399; }
+  .view-btn { display:inline-block; background:#34d399; color:#0f172a;
+              padding:7px 14px; border-radius:6px; text-decoration:none;
+              font-weight:700; font-size:12px; text-transform:uppercase;
+              letter-spacing:.4px; }
+  .view-btn:hover { background:#6ee7b7; }
+  .ew-link { color:#94a3b8; text-decoration:none; font-size:11px;
+             border-bottom: 1px dotted #475569; }
+  .ew-link:hover { color:#cbd5e1; }
+  .empty { padding: 60px; text-align:center; color:#64748b; }
+  .last-update { color:#475569; font-size:11px; margin-left: 8px; }
+  .bl-badge { display:inline-block; padding:1px 6px; border-radius:3px;
+              background:rgba(245,158,11,.15); color:#fbbf24;
+              font-size:9px; font-weight:700; letter-spacing:.4px;
+              text-transform:uppercase; margin-left:6px; }
+</style>
+</head>
+<body>
+<header>
+  <div><strong style="color:#34d399">Thalist</strong> <span style="color:#64748b">·</span> Wholesale Inventory</div>
+  <a href="/">← Dashboard</a>
+</header>
+
+<main>
+  <h1>Thalist Inventory <span class="last-update" id="last-update"></span></h1>
+  <div class="sub">Sorted by opportunity. Refreshes every 30 seconds.</div>
+
+  <div class="toolbar">
+    <button class="active" data-filter="all">All</button>
+    <button data-filter="green">🟢 Green only (15%+)</button>
+    <button data-filter="green-yellow">🟢🟡 Green + Yellow</button>
+    <button data-filter="has-photo">Has photo</button>
+    <span class="count" id="tile-count"></span>
+  </div>
+
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" style="display:none;">No active Thalist posts right now.</div>
+</main>
+
+<script>
+let allPosts = [];
+let activeFilter = 'all';
+
+document.querySelectorAll('.toolbar button[data-filter]').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeFilter = btn.dataset.filter;
+    render();
+  };
+});
+
+function tierFor(opp_pct) {
+  if (opp_pct == null) return 'gray';
+  if (opp_pct >= 15) return 'green';
+  if (opp_pct >= 5)  return 'yellow';
+  return 'red';
+}
+
+function fmt$(n) {
+  if (n == null) return '—';
+  return '$' + Number(n).toLocaleString();
+}
+
+function timeAgo(iso) {
+  if (!iso) return '';
+  const t = new Date(iso);
+  const s = Math.floor((Date.now() - t) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  if (s < 86400) return `${Math.floor(s/3600)}h ago`;
+  return `${Math.floor(s/86400)}d ago`;
+}
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function tileHtml(P) {
+  const tier = tierFor(P.opportunity_pct);
+  const oppFmt = (P.opportunity_pct == null)
+    ? 'analyzing…'
+    : (P.opportunity_pct >= 0 ? '+' : '') + P.opportunity_pct.toFixed(1) + '%';
+  const oppDollar = (P.opportunity_gap == null) ? ''
+    : (P.opportunity_gap >= 0 ? '+' : '') + '$' + Math.abs(Math.round(P.opportunity_gap)).toLocaleString();
+  const photo = P.photo_url
+    ? `<img class="photo" src="${escapeHtml(P.photo_url)}" alt="">`
+    : `<div class="photo" style="display:flex;align-items:center;justify-content:center;color:#64748b">no photo</div>`;
+  const ymm = (P.ymm || P.title || '').trim();
+  const blBadge = P.post_type_code === 'BL' ? '<span class="bl-badge">Broker</span>' : '';
+  return `
+    <div class="tile ${tier}">
+      ${photo}
+      <div class="body">
+        <div class="title" title="${escapeHtml(ymm)}">${escapeHtml(ymm)}${blBadge}</div>
+        <div class="meta">${escapeHtml(P.vin || '(no VIN)')} · ${(P.mileage || 0).toLocaleString()} mi${P.location_zip ? ' · zip ' + P.location_zip : ''}</div>
+        <div class="row-money"><span class="lbl">Asking:</span><span class="val">${fmt$(P.asking_price)}</span></div>
+        <div class="row-money"><span class="lbl">AI buy ceiling:</span><span class="val">${P.ai_price ? fmt$(P.ai_price) : '<span style="color:#64748b">analyzing…</span>'}</span></div>
+        <div class="row-money"><span class="lbl">All-in (+$700 transport):</span><span class="val">${P.all_in_cost ? fmt$(P.all_in_cost) : '—'}</span></div>
+        <div class="opportunity ${tier}">
+          <span>${tier === 'green' ? '🟢' : tier === 'yellow' ? '🟡' : tier === 'red' ? '🔴' : '⚪'} OPPORTUNITY</span>
+          <span>${oppFmt}${oppDollar ? ' (' + oppDollar + ')' : ''}</span>
+        </div>
+        <div class="poster">by <strong>${escapeHtml(P.poster_name || '?')}</strong>${P.poster_company ? ' · ' + escapeHtml(P.poster_company) : ''}</div>
+        <div class="footer">
+          <span class="ago">${timeAgo(P.first_seen_at)}</span>
+          ${P.bid_id ? `<a class="ew-link" href="/bid/${P.bid_id}">EW bid #${P.bid_id}</a>` : '<span style="color:#475569">no bid</span>'}
+        </div>
+        <div class="footer" style="margin-top:8px;">
+          <span></span>
+          <a class="view-btn" href="${escapeHtml(P.detail_url)}" target="_blank">View on Thalist ↗</a>
+        </div>
+      </div>
+    </div>`;
+}
+
+function render() {
+  let posts = allPosts.slice();
+  if (activeFilter === 'green') posts = posts.filter(P => tierFor(P.opportunity_pct) === 'green');
+  else if (activeFilter === 'green-yellow') posts = posts.filter(P => {
+    const t = tierFor(P.opportunity_pct);
+    return t === 'green' || t === 'yellow';
+  });
+  else if (activeFilter === 'has-photo') posts = posts.filter(P => P.photo_url);
+  // Sort: opportunity desc (nulls last), then newest first
+  posts.sort((a, b) => {
+    const ao = (a.opportunity_pct == null) ? -1e9 : a.opportunity_pct;
+    const bo = (b.opportunity_pct == null) ? -1e9 : b.opportunity_pct;
+    if (ao !== bo) return bo - ao;
+    return new Date(b.first_seen_at||0) - new Date(a.first_seen_at||0);
+  });
+  const grid = document.getElementById('grid');
+  grid.innerHTML = posts.map(tileHtml).join('');
+  document.getElementById('empty').style.display = posts.length === 0 ? 'block' : 'none';
+  document.getElementById('tile-count').textContent =
+    `${posts.length} of ${allPosts.length} shown`;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/admin/thalist/state', { credentials: 'same-origin' });
+    if (!r.ok) return;
+    const j = await r.json();
+    allPosts = j.posts || [];
+    render();
+    document.getElementById('last-update').textContent =
+      'updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    console.error('refresh failed', e);
+  }
+}
+
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
