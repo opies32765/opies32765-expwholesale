@@ -463,6 +463,31 @@ def kick_direct_enrichment(bid_id: int, db_conn_factory) -> None:
         log.exception('bid %d kick_direct_enrichment unhandled: %s', bid_id, e)
 
 
+def _mark_manheim_failed(db_conn_factory, bid_id: int, reason: str) -> None:
+    """Stamp enrichment_state.manheim.status='failed' so the legacy worker
+    can claim. Called from kick_direct_manheim on any exception path —
+    without this, the claim_job query rejects the bid forever because
+    status remains 'direct_in_flight'."""
+    try:
+        with db_conn_factory() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE vauto_lookups
+                       SET enrichment_state = COALESCE(enrichment_state, '{}'::jsonb)
+                           || jsonb_build_object(
+                                  'manheim',
+                                  COALESCE(enrichment_state->'manheim', '{}'::jsonb)
+                                  || jsonb_build_object(
+                                         'status', 'failed',
+                                         'error', %s::text,
+                                         'finished_at', %s::text))
+                     WHERE bid_id = %s AND manheim_completed_at IS NULL
+                """, (reason[:300], time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime()), bid_id))
+            conn.commit()
+    except Exception as e:
+        log.warning('bid %d _mark_manheim_failed write failed: %s', bid_id, e)
+
+
 def kick_direct_manheim(bid_id: int, db_conn_factory) -> None:
     """Direct-API replacement for the VM 120/121 Playwright Manheim
     transactions scrape. Daemon-thread companion to kick_direct_enrichment
@@ -554,14 +579,17 @@ def kick_direct_manheim(bid_id: int, db_conn_factory) -> None:
         except VAutoAuthError as e:
             log.warning('bid %d manheim direct auth fail: %s — legacy will pick up',
                         bid_id, e)
+            _mark_manheim_failed(db_conn_factory, bid_id, f'auth: {e}')
             return
         except (VAutoServerError, VAutoBadRequestError) as e:
             log.warning('bid %d manheim direct API err: %s — legacy fallback',
                         bid_id, e)
+            _mark_manheim_failed(db_conn_factory, bid_id, f'{type(e).__name__}: {e}')
             return
         except Exception as e:
             log.warning('bid %d manheim direct unexpected %s: %s — legacy fallback',
                         bid_id, type(e).__name__, e)
+            _mark_manheim_failed(db_conn_factory, bid_id, f'{type(e).__name__}: {e}')
             return
         ms = int((time.monotonic() - t0) * 1000)
 
