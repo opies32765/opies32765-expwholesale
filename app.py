@@ -15380,17 +15380,32 @@ def api_thalist_make_sweep():
                       'from_static_map': bool(_thalist_resolve_make(make_id))})
     db.commit()
 
-    # For each fixed bid that\'s stuck on \"analyzing\" (ai_assessed_at set,
+    # Also catch any thalist bid stuck on "analyzing" regardless of whether
+    # we just backfilled make. Covers the silent-Gemini-abort case
+    # (bid 1222: make set, Gemini failed mid-flight, ai_price stayed NULL).
+    cur.execute("""
+        SELECT id FROM bids
+         WHERE creation_source = 'thalist'
+           AND ai_assessed_at IS NOT NULL
+           AND ai_price IS NULL
+           AND make IS NOT NULL
+           AND created_at > NOW() - INTERVAL '7 days'
+         ORDER BY id DESC LIMIT %s
+    """, (limit,))
+    extra_stuck = [r['id'] for r in cur.fetchall()]
+
+    # For each fixed bid that\'s stuck on "analyzing" (ai_assessed_at set,
     # ai_price NULL), re-fire the assessment in a daemon thread so the
     # request returns fast.
-    if fixed:
+    if fixed or extra_stuck:
         cur.execute("""
             SELECT id FROM bids
              WHERE id = ANY(%s)
                AND ai_assessed_at IS NOT NULL
                AND ai_price IS NULL
         """, ([f['bid_id'] for f in fixed],))
-        stuck_ids = [r['id'] for r in cur.fetchall()]
+        stuck_from_fixed = [r['id'] for r in cur.fetchall()]
+        stuck_ids = list(set(stuck_from_fixed) | set(extra_stuck))
         # Clear ai_assessed_at so _maybe_fire_assessment will re-fire
         if stuck_ids:
             cur.execute("""
