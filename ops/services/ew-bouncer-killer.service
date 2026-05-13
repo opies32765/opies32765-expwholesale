@@ -1,0 +1,12 @@
+[Unit]
+Description=EW bouncer killer — surgically kills runaway "systemctl restart expwholesale" calls
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ew-bouncer-killer.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

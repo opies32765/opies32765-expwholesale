@@ -1,0 +1,15 @@
+[Unit]
+Description=EW failover watchdog — monitors C2, promotes C1 if dead
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/ew-failover-watchdog/watchdog.sh
+Restart=always
+RestartSec=15
+StandardOutput=append:/var/log/ew_failover_watchdog.log
+StandardError=append:/var/log/ew_failover_watchdog.log
+
+[Install]
+WantedBy=multi-user.target
