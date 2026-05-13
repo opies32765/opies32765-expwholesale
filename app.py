@@ -3759,6 +3759,84 @@ def decode_vin_route(bid_id):
     return jsonify({'success': True, **decoded})
 
 
+# ── _get_thalist_asks_for_bid ─ wholesale-ask context for Gemini ───────
+def _get_thalist_asks_for_bid(bid: dict, db=None) -> dict | None:
+    """Pull active Thalist posts matching this bid\'s year/make/model
+    and aggregate the asking prices into P25/P50/P75.
+
+    Excludes the bid\'s own thalist post (so we don\'t self-anchor).
+    Returns None when there\'s nothing useful to show.
+    """
+    year = bid.get('year')
+    make = (bid.get('make') or '').strip()
+    model = (bid.get('model') or '').strip()
+    if not (year and make and model):
+        return None
+    own = db is None
+    if own:
+        db = get_db()
+    try:
+        cur = db.cursor()
+        # Match year+make+model on active posts (not invalidated).
+        # The make matching is fuzzy to handle "Mercedes-Benz" vs
+        # "MERCEDES-BENZ" vs "Mercedes Benz".
+        # Posts have NO direct make column — we look up via title prefix
+        # OR via the bid that consumed them (b.make).
+        cur.execute("""
+            SELECT tp.id, tp.title, tp.asking_price, tp.mileage,
+                   tp.poster_company, tp.first_seen_at
+              FROM thalist_posts tp
+              LEFT JOIN bids b2 ON b2.id = tp.bid_id
+             WHERE tp.invalidated_at IS NULL
+               AND tp.asking_price IS NOT NULL
+               AND tp.asking_price > 0
+               AND tp.year = %s
+               AND (
+                   upper(coalesce(b2.make, '')) = upper(%s)
+                   OR upper(tp.title) LIKE upper(%s) || '%%'
+                   OR upper(tp.title) LIKE '%%' || upper(%s) || '%%'
+               )
+               AND (
+                   upper(coalesce(b2.model, '')) = upper(%s)
+                   OR upper(tp.model) = upper(%s)
+                   OR upper(tp.title) LIKE '%%' || upper(%s) || '%%'
+               )
+               AND (tp.bid_id IS NULL OR tp.bid_id <> %s)
+             ORDER BY tp.first_seen_at DESC
+             LIMIT 200
+        """, (year, make, f'{year} {make}', make, model, model, model, bid.get('id') or 0))
+        rows = cur.fetchall()
+        if not rows:
+            return None
+        prices = sorted([int(r['asking_price']) for r in rows
+                         if r.get('asking_price')])
+        n = len(prices)
+        if n == 0:
+            return None
+        # Percentiles (linear)
+        def _pct(p):
+            if n == 1:
+                return prices[0]
+            idx = max(0, min(n - 1, int(round(p * (n - 1)))))
+            return prices[idx]
+        return {
+            'n': n,
+            'p25': _pct(0.25),
+            'p50': _pct(0.50),
+            'p75': _pct(0.75),
+            'posts': [dict(r) for r in rows[:5]],
+        }
+    except Exception as e:
+        print(f'[ASSESS] thalist_asks query err: {e}', flush=True)
+        return None
+    finally:
+        if own:
+            try: db.close()
+            except Exception: pass
+
+
+
+
 def _run_assessment(bid_id):
     """Core assessment logic — callable from endpoint or background thread.
     Returns dict: {'success': True, 'assessment': ..., 'buy_price': ...} or {'error': ...}
@@ -4790,6 +4868,20 @@ def _run_assessment(bid_id):
     except Exception as _ml_e:
         print(f'[ASSESS] ml_predict err: {_ml_e}', flush=True)
 
+    # Thalist live wholesale-ask context for Gemini's prompt. Same-YMM
+    # active posts; framed as ceiling, not transaction. Doesn't anchor
+    # if framing is preserved.
+    _thalist_asks = None
+    try:
+        _thalist_asks = _get_thalist_asks_for_bid(bid)
+        if _thalist_asks:
+            print(f'[ASSESS] Bid {bid_id} thalist asks: n={_thalist_asks["n"]} '
+                  f'P25=${_thalist_asks.get("p25") or 0:,} '
+                  f'P50=${_thalist_asks.get("p50") or 0:,} '
+                  f'P75=${_thalist_asks.get("p75") or 0:,}', flush=True)
+    except Exception as _ta_e:
+        print(f'[ASSESS] thalist_asks err: {_ta_e}', flush=True)
+
     if _v2_build_prompt:
         prompt = _v2_build_prompt(
             dict(bid),
@@ -4807,6 +4899,7 @@ def _run_assessment(bid_id):
             tesla=tesla_data,
             purchase_history=_purchase_history,
             ml_prediction=_ml_pred_assess,
+            thalist_asks=_thalist_asks,
         )
     else:
         # Module unavailable — emit a minimal prompt so we still return something

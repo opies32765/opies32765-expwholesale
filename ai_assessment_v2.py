@@ -39,6 +39,8 @@ EW buys cars and resells them to retail dealers, who then retail them to consume
 
 {market_stack}
 
+{thalist_asks_section}
+
 {book_values_section}
 
 {purchase_history_section}
@@ -429,6 +431,48 @@ def _velocity_section(velocity: dict | None) -> str:
 
 # ── Public API ────────────────────────────────────────────────────────────
 
+def _thalist_asks_section(asks: dict | None) -> str:
+    """Build the Thalist wholesale-ask context block.
+
+    `asks` is a dict from _get_thalist_asks_for_bid() in app.py:
+      {n: int, p25: int|None, p50: int|None, p75: int|None,
+       posts: [{title, asking_price, mileage, poster_company}, ...]}
+
+    Returns an empty string when there\'s no matching data, so the
+    prompt doesn\'t clutter with "no data" lines.
+    """
+    if not asks or not asks.get('n'):
+        return ''
+    n = asks['n']
+    p25, p50, p75 = asks.get('p25'), asks.get('p50'), asks.get('p75')
+    if not p50:
+        return ''
+    lines = [
+        '═══ THALIST WHOLESALE ASKS (live wholesaler marketplace) ═══',
+        '',
+        f'{n} other wholesalers actively asking for same year/make/model:',
+        f'  P25 ask: ${p25:,}     P50 ask: ${p50:,}     P75 ask: ${p75:,}',
+        '',
+        'These are ASKING prices (what sellers HOPE to get), not closed',
+        'transactions. Treat as a CEILING reference — actual clearance',
+        'typically runs 3-7% below median ask. MMR transactions remain',
+        'your primary wholesale anchor.',
+    ]
+    # Show a few raw post lines if available (helps Gemini see breadth)
+    posts = asks.get('posts') or []
+    if posts:
+        lines.append('')
+        lines.append('Sample posts:')
+        for p in posts[:5]:
+            ask_s = f'${p.get("asking_price"):,}' if p.get('asking_price') else 'no price'
+            miles_s = f'{int(p["mileage"]):,} mi' if p.get('mileage') else 'no miles'
+            title = (p.get('title') or '')[:60]
+            company = (p.get('poster_company') or '')[:30]
+            lines.append(f'  • {ask_s} · {miles_s} · {title}'
+                         f'{" @ " + company if company else ""}')
+    return '\n'.join(lines)
+
+
 def build_prompt(bid: dict, *, vauto: dict | None = None,
                  accutrade: dict | None = None, ipacket: dict | None = None,
                  photos: list | None = None,
@@ -440,7 +484,8 @@ def build_prompt(bid: dict, *, vauto: dict | None = None,
                  nhtsa: dict | None = None,
                  tesla: dict | None = None,
                  purchase_history: dict | None = None,
-                 ml_prediction: dict | None = None) -> str:
+                 ml_prediction: dict | None = None,
+                 thalist_asks: dict | None = None) -> str:
     """Compose the v2 assessment prompt. All inputs optional; sections render
     with placeholders when data is missing."""
     asking = bid.get('asking_price')
@@ -460,6 +505,7 @@ def build_prompt(bid: dict, *, vauto: dict | None = None,
         purchase_history_section=_purchase_history_section(purchase_history),
         ml_section=_ml_section(ml_prediction),
         velocity_section=_velocity_section(velocity),
+        thalist_asks_section=_thalist_asks_section(thalist_asks),
         asking_constraint=asking_constraint,
     )
 
