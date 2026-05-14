@@ -82,6 +82,13 @@ tr.status-passed:hover td{background:rgba(239,68,68,.11)}
 /* Bought row */
 tr.status-bought td{background:rgba(34,197,94,.05)}
 tr.status-bought:hover td{background:rgba(34,197,94,.09)}
+/* Bad-VIN row — 2026-05-14 — visually unmistakable so the operator notices.
+   Bid is gated out of the worker pool; this just makes it stand out at a
+   glance across a long bid list. Stronger tint than status-passed because
+   bad-VIN is actionable (fix the VIN), not historical. */
+tr.bad-vin td{background:rgba(220,38,38,.13);border-bottom-color:rgba(220,38,38,.25)}
+tr.bad-vin:hover td{background:rgba(220,38,38,.20)}
+tr.bad-vin td:first-child{box-shadow:inset 4px 0 0 0 #dc2626}
 
 /* Table */
 .table-wrap{padding:24px 32px}
@@ -751,7 +758,7 @@ function renderRow(b, pc, fp, activeWorker) {
               + (b.partner_dealer_name ? `<div class="contact-company" style="color:#a78bfa;font-size:11px">${b.partner_dealer_name}</div>` : '')
               + `<div class="contact-phone">${b.phone}</div>`
             : `<div class="contact-name">${b.contact_name||b.phone}</div>${b.contact_name?`<div class="contact-phone">${b.phone}</div>`:''}${b.contact_company?`<div class="contact-company">${b.contact_company}</div>`:''}`));
-  const rowClass = ['status-'+b.status, b.is_new ? 'row-new' : ''].filter(Boolean).join(' ');
+  const rowClass = ['status-'+b.status, b.is_new ? 'row-new' : '', b.vin_invalid_reason ? 'bad-vin' : ''].filter(Boolean).join(' ');
   const askPrice = b.asking_price ? `<div style="font-size:15px;font-weight:700;color:#94a3b8">$${Math.round(b.asking_price).toLocaleString()}</div>` : '—';
   const aiPrice  = b.ai_price    ? `<div style="font-size:15px;font-weight:700;color:#a78bfa">$${Math.round(b.ai_price).toLocaleString()}</div>` : '—';
   const bidSent  = b.bid_amount  ? `<div style="font-size:15px;font-weight:700;color:#34d399">$${Math.round(b.bid_amount).toLocaleString()}</div>` : '—';
