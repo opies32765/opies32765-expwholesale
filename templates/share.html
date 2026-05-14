@@ -76,6 +76,35 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:
 /* Footer */
 .footer{text-align:center;padding:32px 20px;color:#334155;font-size:12px}
 </style>
+<style>
+/* share-card-collapsible-marker-20260514 — collapsible report cards (Manheim, rBook, Carfax, AutoCheck, iPacket) */
+details.share-card { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px; margin: 12px 0; overflow: hidden; }
+details.share-card[open] { border-color: #d1d5db; }
+details.share-card summary { list-style: none; cursor: pointer; padding: 14px 16px; display: flex; justify-content: space-between; align-items: center; font-size: 15px; font-weight: 600; color: #111827; user-select: none; }
+details.share-card summary::-webkit-details-marker { display: none; }
+details.share-card summary::after { content: '▾'; font-size: 12px; color: #6b7280; transition: transform .2s; margin-left: 8px; }
+details.share-card[open] summary::after { transform: rotate(180deg); }
+details.share-card .sc-summary-meta { font-size: 12px; color: #6b7280; font-weight: 500; text-align: right; flex: 1; margin-right: 12px; }
+details.share-card .sc-body { padding: 0 16px 16px 16px; }
+details.share-card .sc-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f3f4f6; font-size: 13px; }
+details.share-card .sc-row:last-child { border-bottom: none; }
+details.share-card .sc-lbl { color: #6b7280; }
+details.share-card .sc-val { color: #111827; font-weight: 600; font-family: 'SFMono-Regular', Menlo, monospace; }
+details.share-card .sc-comp { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 12px; margin-top: 8px; font-family: 'SFMono-Regular', Menlo, monospace; }
+details.share-card .sc-comp.sc-top { background: #ecfdf5; border-color: #6ee7b7; }
+details.share-card .sc-comp-top-line { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+details.share-card .sc-comp-miles { font-size: 15px; font-weight: 700; color: #111827; }
+details.share-card .sc-comp-price { font-size: 16px; font-weight: 700; color: #059669; white-space: nowrap; }
+details.share-card .sc-comp-meta { font-size: 11px; color: #6b7280; margin-top: 5px; line-height: 1.4; }
+details.share-card .sc-comp-meta a { color: #2563eb; text-decoration: none; border-bottom: 1px dashed rgba(37,99,235,.4); }
+details.share-card img.sc-report-img { width: 100%; border-radius: 8px; cursor: zoom-in; display: block; }
+details.share-card.manheim { border-left: 4px solid #8b5cf6; }
+details.share-card.rbook { border-left: 4px solid #06b6d4; }
+details.share-card.carfax { border-left: 4px solid #dc2626; }
+details.share-card.autocheck { border-left: 4px solid #2563eb; }
+details.share-card.ipacket { border-left: 4px solid #4338ca; }
+details.share-card.accutrade { border-left: 4px solid #065f46; }
+</style>
 </head>
 <body>
 
@@ -195,31 +224,137 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;min-height:
       {% endif %}
     </div>
 
-    <!-- Carfax Report Screenshot -->
-    {% if vauto and vauto.carfax_screenshot %}
-    <div class="report-card">
-      <div class="report-label">Carfax Report</div>
-      <img class="report-img" src="{{ vauto.carfax_screenshot }}" alt="Carfax Report" onclick="openLightbox(this.src)">
-    </div>
+    {# Manheim Auction — wholesale floor pricing #}
+    {% if share_cards.manheim and mh and mh.count %}
+    <details class="share-card manheim">
+      <summary>
+        <span>Manheim Auction</span>
+        <span class="sc-summary-meta">{{ mh.count }} sale{% if mh.count != 1 %}s{% endif %}{% if mh.median %} · median ${{ '{:,}'.format(mh.median|int) }}{% endif %}</span>
+      </summary>
+      <div class="sc-body">
+        <div class="sc-row"><span class="sc-lbl">Total sales</span><span class="sc-val">{{ mh.count }}</span></div>
+        {% if mh.median %}<div class="sc-row"><span class="sc-lbl">Median</span><span class="sc-val">${{ '{:,}'.format(mh.median|int) }}</span></div>{% endif %}
+        {% if mh.lo and mh.hi %}<div class="sc-row"><span class="sc-lbl">Range</span><span class="sc-val">${{ '{:,}'.format(mh.lo|int) }} – ${{ '{:,}'.format(mh.hi|int) }}</span></div>{% endif %}
+        {% if mh.closest %}
+        <div class="sc-comp sc-top" style="margin-top:12px">
+          <div style="font-size:10px;font-weight:700;color:#059669;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Closest-mile sale</div>
+          <div class="sc-comp-top-line">
+            <span class="sc-comp-miles">{{ '{:,}'.format(mh.closest.mileage|int) if mh.closest.mileage else '?' }} mi</span>
+            <span class="sc-comp-price">${{ '{:,}'.format(mh.closest.price|int) if mh.closest.price else '—' }}</span>
+          </div>
+          <div class="sc-comp-meta">
+            {% if mh.closest.date %}{{ mh.closest.date }}{% endif %}{% if mh.closest.condition %} · {{ mh.closest.condition }}{% endif %}{% if mh.closest.region %} · {{ mh.closest.region }}{% endif %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </details>
     {% endif %}
 
-    <!-- AutoCheck Report Screenshot -->
-    {% if vauto and vauto.autocheck_screenshot %}
-    <div class="report-card">
-      <div class="report-label">AutoCheck Report</div>
-      <img class="report-img" src="{{ vauto.autocheck_screenshot }}" alt="AutoCheck Report" onclick="openLightbox(this.src)">
-    </div>
+    {# rBook Retail Comps — comparable dealer listings #}
+    {% if share_cards.rbook and rb and (rb.count or rb.median) %}
+    <details class="share-card rbook">
+      <summary>
+        <span>rBook Retail Comps</span>
+        <span class="sc-summary-meta">{% if rb.count %}{{ rb.count }} comp{% if rb.count != 1 %}s{% endif %}{% endif %}{% if rb.median %} · median ${{ '{:,}'.format(rb.median|int) }}{% endif %}</span>
+      </summary>
+      <div class="sc-body">
+        {% if rb.median %}<div class="sc-row"><span class="sc-lbl">Asking median</span><span class="sc-val">${{ '{:,}'.format(rb.median|int) }}</span></div>{% endif %}
+        {% if rb.lo and rb.hi %}<div class="sc-row"><span class="sc-lbl">Range</span><span class="sc-val">${{ '{:,}'.format(rb.lo|int) }} – ${{ '{:,}'.format(rb.hi|int) }}</span></div>{% endif %}
+        {% if rb.median_dol %}<div class="sc-row"><span class="sc-lbl">Median days on lot</span><span class="sc-val">{{ rb.median_dol }}d</span></div>{% endif %}
+        {% if rb.avg_mileage %}<div class="sc-row"><span class="sc-lbl">Avg mileage in comps</span><span class="sc-val">{{ '{:,}'.format(rb.avg_mileage|int) }} mi</span></div>{% endif %}
+        {% if rb.closest_3 and bid.mileage %}
+        <div style="margin-top:12px">
+          <div style="font-size:10px;font-weight:700;color:#0e7490;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Closest-mile comps · subject {{ '{:,}'.format(bid.mileage) }} mi</div>
+          {% for c in rb.closest_3 %}
+          {% set delta = (c.mileage or 0) - bid.mileage %}
+          {% set sign = '+' if delta >= 0 else '' %}
+          {% set is_top = loop.index == 1 %}
+          <div class="sc-comp{% if is_top %} sc-top{% endif %}">
+            <div class="sc-comp-top-line">
+              <span class="sc-comp-miles">#{{ loop.index }} · {{ '{:,}'.format(c.mileage|int) }} mi <span style="font-size:11px;font-weight:400;color:#6b7280">({{ sign }}{{ '{:,}'.format(delta|int) }})</span></span>
+              <span class="sc-comp-price">{% if c.price %}${{ '{:,}'.format(c.price|int) }}{% else %}—{% endif %}</span>
+            </div>
+            <div class="sc-comp-meta">
+              {% if c.detail_uri %}<a href="{{ c.detail_uri }}" target="_blank" rel="noopener noreferrer" title="Open dealer listing for VIN {{ c.vin }}">{% if c.dealer %}{{ c.dealer }}{% if c.dealer_city %} · {{ c.dealer_city }}{% if c.dealer_state %}, {{ c.dealer_state }}{% endif %}{% endif %}{% else %}view listing{% endif %} ↗</a>{% elif c.dealer %}{{ c.dealer }}{% if c.dealer_city %} · {{ c.dealer_city }}{% if c.dealer_state %}, {{ c.dealer_state }}{% endif %}{% endif %}{% endif %}
+              {% if c.days_on_lot is not none %} · {{ c.days_on_lot|int }}d on lot{% endif %}
+              {% if c.is_certified %} · CPO{% endif %}
+              {% if c.pending_sale %} · pending sale{% endif %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+    </details>
     {% endif %}
 
-    {# AccuTrade removed from share page 2026-04-24 — kept in EW admin bid
-       detail, but not shared externally with prospective buyers. #}
+    {# Carfax Report Screenshot — collapsible #}
+    {% if share_cards.carfax and vauto and vauto.carfax_screenshot %}
+    <details class="share-card carfax">
+      <summary>
+        <span>Carfax Report</span>
+        <span class="sc-summary-meta">Tap to view</span>
+      </summary>
+      <div class="sc-body">
+        <img class="sc-report-img" src="{{ vauto.carfax_screenshot }}" alt="Carfax Report" loading="lazy" onclick="openLightbox(this.src)">
+      </div>
+    </details>
+    {% endif %}
 
-    <!-- iPacket Window Sticker / OEM info -->
-    {% if ipacket and ipacket.screenshot %}
-    <div class="report-card">
-      <div class="report-label">iPacket Window Sticker</div>
-      <img class="report-img" src="{{ ipacket.screenshot }}" alt="iPacket Window Sticker" referrerpolicy="no-referrer" onclick="openLightbox(this.src)">
-    </div>
+    {# AutoCheck Report Screenshot — collapsible #}
+    {% if share_cards.autocheck and vauto and vauto.autocheck_screenshot %}
+    <details class="share-card autocheck">
+      <summary>
+        <span>AutoCheck Report</span>
+        <span class="sc-summary-meta">Tap to view</span>
+      </summary>
+      <div class="sc-body">
+        <img class="sc-report-img" src="{{ vauto.autocheck_screenshot }}" alt="AutoCheck Report" loading="lazy" onclick="openLightbox(this.src)">
+      </div>
+    </details>
+    {% endif %}
+
+    {# share-card-accutrade-marker-20260514 — Accutrade re-added 2026-05-14 #}
+    {% if share_cards.get('accutrade', True) and accutrade and not accutrade.not_available %}
+    <details class="share-card accutrade">
+      <summary>
+        <span>AccuTrade Appraisal</span>
+        <span class="sc-summary-meta">{% if accutrade.guaranteed_offer %}Instant Offer ${{ '{:,}'.format(accutrade.guaranteed_offer|int) }}{% elif accutrade.trade_in %}Target Auction ${{ '{:,}'.format(accutrade.trade_in|int) }}{% endif %}</span>
+      </summary>
+      <div class="sc-body">
+        {% set at_books = [
+          ('Instant Offer', accutrade.guaranteed_offer),
+          ('Target Auction', accutrade.trade_in),
+          ('Target Retail', accutrade.trade_market),
+          ('Manheim', accutrade.retail),
+          ('Wholesale / Avg', accutrade.market_avg),
+        ] %}
+        {% for label, val in at_books %}
+          {% if val %}
+          <div class="sc-row"><span class="sc-lbl">{{ label }}</span><span class="sc-val">${{ '{:,}'.format(val|int) }}</span></div>
+          {% endif %}
+        {% endfor %}
+        {% if accutrade.screenshot %}
+        <div style="margin-top:12px">
+          <img class="sc-report-img" src="{{ accutrade.screenshot }}" alt="AccuTrade Appraisal" loading="lazy" onclick="openLightbox(this.src)">
+        </div>
+        {% endif %}
+      </div>
+    </details>
+    {% endif %}
+
+    {# iPacket Window Sticker — collapsible #}
+    {% if share_cards.ipacket and ipacket and ipacket.screenshot and not ipacket.not_available %}
+    <details class="share-card ipacket">
+      <summary>
+        <span>iPacket Window Sticker</span>
+        <span class="sc-summary-meta">Tap to view</span>
+      </summary>
+      <div class="sc-body">
+        <img class="sc-report-img" src="{{ ipacket.screenshot }}" alt="iPacket Window Sticker" loading="lazy" referrerpolicy="no-referrer" onclick="openLightbox(this.src)">
+      </div>
+    </details>
     {% endif %}
 
   </div>

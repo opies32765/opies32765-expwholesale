@@ -2626,6 +2626,111 @@ def twilio_webhook():
         except Exception:
             pass
 
+    # ── #BIDNUMBER SMS attach (added 2026-05-14) ──
+    # Whitelisted operators (in `contacts` table) can text "#1394" to route
+    # photos to a specific bid. Opens a 2-minute sliding window that auto-
+    # refreshes on each new photo. Photos arriving with no #bid but an
+    # active context still route to that bid. Strictly additive to webhook
+    # entry; falls through to existing logic when not applicable.
+    import re as _re_hb
+    _HB_RE = _re_hb.compile(r"#\s*(\d{2,6})\b")
+    _hb_match = _HB_RE.search(body) if body else None
+    _hb_phone_norm = _re_hb.sub(r"[^0-9]", "", from_phone or "")
+    _hb_whitelisted = False
+    if _hb_phone_norm:
+        try:
+            cur.execute("""SELECT 1 FROM contacts
+                            WHERE regexp_replace(phone, '[^0-9]', '', 'g') = %s
+                            LIMIT 1""", (_hb_phone_norm,))
+            _hb_whitelisted = cur.fetchone() is not None
+        except Exception as _hb_e:
+            print(f"[#bid] whitelist check error: {_hb_e}", flush=True)
+            try: db.rollback()
+            except Exception: pass
+            _hb_whitelisted = False
+
+    def _hb_attach_photos(target_bid_id):
+        """Ingest all media_urls from this MMS into target_bid_id. Returns count."""
+        n = 0
+        for i, media_url in enumerate(_media_urls):
+            mt = request.form.get(f"MediaContentType{i}", "image/jpeg")
+            if not mt.startswith("image/"):
+                continue
+            try:
+                _ingest_sms_photo(cur, target_bid_id, media_url, mt, from_phone=from_phone)
+                n += 1
+            except Exception as _ie:
+                print(f"[#bid] photo ingest error bid={target_bid_id}: {_ie}", flush=True)
+        return n
+
+    def _hb_xml_reply(text):
+        from html import escape as _esc
+        return ('<?xml version="1.0" encoding="UTF-8"?><Response><Message>' +
+                _esc(text) + '</Message></Response>',
+                200, {'Content-Type': 'application/xml'})
+
+    # 1) Explicit "#1394" in body
+    if _hb_match and _hb_whitelisted:
+        _hb_bid_id = int(_hb_match.group(1))
+        cur.execute("SELECT id, year, make, model FROM bids WHERE id = %s", (_hb_bid_id,))
+        _hb_bid = cur.fetchone()
+        if _hb_bid:
+            _hb_ymm = " ".join(str(x) for x in (_hb_bid.get("year"), _hb_bid.get("make"), _hb_bid.get("model")) if x).strip() or f"bid #{_hb_bid_id}"
+            _hb_ingested = _hb_attach_photos(_hb_bid_id)
+            cur.execute("""INSERT INTO sms_attach_context (from_phone, bid_id, expires_at)
+                            VALUES (%s, %s, NOW() + INTERVAL '2 minutes')
+                            ON CONFLICT (from_phone) DO UPDATE
+                            SET bid_id = EXCLUDED.bid_id,
+                                expires_at = EXCLUDED.expires_at,
+                                set_at = NOW()""", (from_phone, _hb_bid_id))
+            if _hb_ingested:
+                _hb_reply = f"✓ {_hb_ingested} photo(s) attached to bid #{_hb_bid_id} ({_hb_ymm}). Window open 2 min for more."
+            else:
+                _hb_reply = f"📎 Ready — photos for next 2 min attach to bid #{_hb_bid_id} ({_hb_ymm})."
+            _finalize_sms_intake(cur, intake_log_id, "hashbid_attach",
+                                 bid_id=_hb_bid_id,
+                                 reason=f"#bid prefix matched bid {_hb_bid_id}; ingested {_hb_ingested} photos",
+                                 parsed_vin=None, parsed_miles=None)
+            db.commit()
+            db.close()
+            return _hb_xml_reply(_hb_reply)
+        else:
+            _finalize_sms_intake(cur, intake_log_id, "hashbid_not_found",
+                                 reason=f"#bid {_hb_bid_id} not found in bids table",
+                                 parsed_vin=None, parsed_miles=None)
+            db.commit()
+            db.close()
+            return _hb_xml_reply(f"Bid #{_hb_bid_id} not found.")
+
+    # 2) MMS with no #bid prefix but active context for this phone
+    if num_media > 0 and _hb_whitelisted and not _hb_match:
+        try:
+            cur.execute("""SELECT bid_id FROM sms_attach_context
+                            WHERE from_phone = %s AND expires_at > NOW()
+                            LIMIT 1""", (from_phone,))
+            _hb_ctx = cur.fetchone()
+        except Exception:
+            _hb_ctx = None
+            try: db.rollback()
+            except Exception: pass
+        if _hb_ctx:
+            _hb_bid_id = _hb_ctx["bid_id"]
+            cur.execute("SELECT id, year, make, model FROM bids WHERE id = %s", (_hb_bid_id,))
+            _hb_bid = cur.fetchone()
+            if _hb_bid:
+                _hb_ymm = " ".join(str(x) for x in (_hb_bid.get("year"), _hb_bid.get("make"), _hb_bid.get("model")) if x).strip() or f"bid #{_hb_bid_id}"
+                _hb_ingested = _hb_attach_photos(_hb_bid_id)
+                cur.execute("""UPDATE sms_attach_context
+                                  SET expires_at = NOW() + INTERVAL '2 minutes'
+                                WHERE from_phone = %s""", (from_phone,))
+                _finalize_sms_intake(cur, intake_log_id, "hashbid_attach",
+                                     bid_id=_hb_bid_id,
+                                     reason=f"active #bid context routed {_hb_ingested} photos to bid {_hb_bid_id}",
+                                     parsed_vin=None, parsed_miles=None)
+                db.commit()
+                db.close()
+                return _hb_xml_reply(f"✓ {_hb_ingested} photo(s) attached to bid #{_hb_bid_id} ({_hb_ymm}).")
+
     # ── Name-reply routing (Phase 3 onboarding) ──
     # If this phone has one or more held bids (status='awaiting_name'),
     # AND the inbound has no VIN and no media (a plausible name-only reply),
@@ -13551,8 +13656,72 @@ def api_bid_share_media(bid_id):
         thumb = base_url + '/thumb?url=' + url + '&size=mobile' if url.startswith('/static/uploads/') else base_url + '/thumb?url=' + url + '&size=mobile' if not url.startswith('http') else base_url + '/thumb?url=' + url + '&size=mobile'
         photos.append({'id': row['id'], 'url': url if url.startswith('http') else base_url + url, 'thumb': thumb})
 
+    # share_cards_response_marker_20260514 — enhance share-media payload with
+    # per-bid card selection state + what data is actually available so the
+    # modal can show pre-checked enabled checkboxes (and grey out cards that
+    # have no data for this VIN yet).
+    cur.execute("SELECT share_cards FROM bids WHERE id=%s", (bid_id,))
+    _sc_row = cur.fetchone()
+    _share_cards = (_sc_row or {}).get('share_cards') or {}
+    if isinstance(_share_cards, str):
+        try:
+            _share_cards = json.loads(_share_cards)
+        except Exception:
+            _share_cards = {}
+    # Defaults for any missing key (older bids predating the column)
+    for _k in ('carfax', 'autocheck', 'ipacket', 'manheim', 'rbook'):
+        if _k not in _share_cards:
+            _share_cards[_k] = True
+
+    # cards_available: which cards have actual data for this VIN
+    _cards_available = {
+        'carfax':    bool(vauto_row and vauto_row.get('carfax_screenshot')),
+        'autocheck': bool(vauto_row and vauto_row.get('autocheck_screenshot')),
+        'ipacket':   False,
+        'manheim':   False,
+        'rbook':     False,
+        'accutrade': False,
+    }
+    try:
+        cur.execute("SELECT screenshot, not_available FROM ipacket_lookups WHERE bid_id=%s", (bid_id,))
+        _ip_r = cur.fetchone()
+        # Only mark iPacket available if screenshot exists AND not flagged not_available
+        _cards_available['ipacket'] = bool(_ip_r and _ip_r.get('screenshot') and not _ip_r.get('not_available'))
+    except Exception:
+        pass
+    try:
+        cur.execute("""SELECT guaranteed_offer, trade_in, trade_market, retail,
+                              market_avg, screenshot, not_available
+                         FROM accutrade_lookups WHERE bid_id=%s""", (bid_id,))
+        _at_r = cur.fetchone()
+        _cards_available['accutrade'] = bool(_at_r and not _at_r.get('not_available') and (
+            _at_r.get('guaranteed_offer') or _at_r.get('trade_in') or
+            _at_r.get('trade_market') or _at_r.get('retail') or
+            _at_r.get('market_avg') or _at_r.get('screenshot')
+        ))
+    except Exception:
+        pass
+    try:
+        cur.execute("SELECT market_intel_cached, manheim_transactions FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+        _va_r = cur.fetchone() or {}
+        _mi_raw = _va_r.get('market_intel_cached')
+        if _mi_raw:
+            _mi = _mi_raw if isinstance(_mi_raw, dict) else (json.loads(_mi_raw) if isinstance(_mi_raw, str) else {})
+            _cards_available['rbook'] = bool((_mi.get('rbook') or {}).get('retail_median'))
+        _mh_raw = _va_r.get('manheim_transactions')
+        if _mh_raw:
+            _mh = _mh_raw if isinstance(_mh_raw, dict) else (json.loads(_mh_raw) if isinstance(_mh_raw, str) else {})
+            _cards_available['manheim'] = bool(_mh.get('transactions'))
+    except Exception:
+        pass
+
     db.close()
-    return jsonify({'reports': reports, 'photos': photos})
+    return jsonify({
+        'reports': reports,
+        'photos': photos,
+        'share_cards': _share_cards,
+        'cards_available': _cards_available,
+    })
 
 
 @app.route('/api/bid/<int:bid_id>/share', methods=['POST'])
@@ -13586,9 +13755,23 @@ def api_bid_share(bid_id):
         except (ValueError, TypeError):
             pass
 
-    cur.execute("""
-        UPDATE bids SET share_token=%s, share_notes=%s, share_asking=%s WHERE id=%s
-    """, (token, share_notes, share_asking, bid_id))
+    # share_cards: optional JSONB toggle map ({carfax,autocheck,ipacket,manheim,rbook}: bool)
+    _sc_in = data.get('share_cards')
+    _sc_to_save = None
+    if isinstance(_sc_in, dict):
+        # Whitelist keys + force booleans
+        _allowed = {'carfax', 'autocheck', 'ipacket', 'manheim', 'rbook', 'accutrade'}
+        _sc_to_save = {k: bool(_sc_in.get(k)) for k in _allowed if k in _sc_in}
+    if _sc_to_save is not None:
+        cur.execute("""
+            UPDATE bids SET share_token=%s, share_notes=%s, share_asking=%s,
+                            share_cards=%s::jsonb
+             WHERE id=%s
+        """, (token, share_notes, share_asking, json.dumps(_sc_to_save), bid_id))
+    else:
+        cur.execute("""
+            UPDATE bids SET share_token=%s, share_notes=%s, share_asking=%s WHERE id=%s
+        """, (token, share_notes, share_asking, bid_id))
     db.commit()
     db.close()
 
@@ -13709,6 +13892,167 @@ def toggle_photo_share(photo_id):
     return jsonify({'ok': True, 'id': row['id'], 'include_in_share': row['include_in_share']})
 
 
+@app.route('/api/bid/<int:bid_id>/dealer_gallery', methods=['GET'])
+def api_bid_dealer_gallery(bid_id):
+    """Surface VIN-matched photos from dealer_inventory so admin can pull
+    them into the bid without re-uploading. Strictly read-only."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT vin FROM bids WHERE id = %s", (bid_id,))
+    row = cur.fetchone()
+    if not row or not row.get("vin"):
+        db.close()
+        return jsonify({"groups": []})
+    vin = row["vin"].strip()
+    if len(vin) != 17:
+        db.close()
+        return jsonify({"groups": []})
+    cur.execute("SELECT url FROM bid_photos WHERE bid_id = %s", (bid_id,))
+    existing = {r["url"] for r in cur.fetchall()}
+    _JUNK = ("logo", "badge", "icon", "placeholder", "/cms/", "/ui/",
+             "facebook", "instagram", "twitter", "youtube")
+    cur.execute("""
+        SELECT di.id, di.dealer_id, d.name AS dealer_name, di.photos, di.url,
+               di.last_seen_at, di.status
+        FROM dealer_inventory di
+        LEFT JOIN dealers d ON d.id = di.dealer_id
+        WHERE di.vin = %s
+        ORDER BY di.last_seen_at DESC NULLS LAST
+    """, (vin,))
+    dealer_rows = cur.fetchall()
+    groups = []
+    for r in dealer_rows:
+        raw_photos = r.get("photos") or []
+        if not isinstance(raw_photos, list):
+            raw_photos = []
+        clean = []
+        for p in raw_photos:
+            if not isinstance(p, str):
+                continue
+            u = p.strip().split(" ", 1)[0].replace("&amp;", "&")
+            if not u.startswith("http"):
+                continue
+            if any(j in u.lower() for j in _JUNK):
+                continue
+            if u in existing:
+                continue
+            clean.append(u)
+        if clean:
+            groups.append({
+                "dealer_inventory_id": r["id"],
+                "dealer_name": r.get("dealer_name") or ("dealer_" + str(r.get("dealer_id"))),
+                "listing_url": r.get("url"),
+                "status": r.get("status"),
+                "last_seen_at": r["last_seen_at"].isoformat() if r.get("last_seen_at") else None,
+                "photos": clean,
+            })
+    db.close()
+    return jsonify({"groups": groups})
+
+
+@app.route('/api/bid/<int:bid_id>/add_dealer_photos', methods=['POST'])
+def api_bid_add_dealer_photos(bid_id):
+    """Copy selected URLs from dealer_inventory.photos into bid_photos.
+    Idempotent: skips URLs already present on this bid."""
+    data = request.get_json(silent=True) or {}
+    urls = data.get("urls") or []
+    if not isinstance(urls, list):
+        return jsonify({"error": "urls must be a list"}), 400
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT id FROM bids WHERE id = %s", (bid_id,))
+    if not cur.fetchone():
+        db.close()
+        return jsonify({"error": "bid not found"}), 404
+    cur.execute("SELECT url FROM bid_photos WHERE bid_id = %s", (bid_id,))
+    existing = {r["url"] for r in cur.fetchall()}
+    _JUNK = ("logo", "badge", "icon", "placeholder", "/cms/", "/ui/",
+             "facebook", "instagram", "twitter", "youtube")
+    added = []
+    for raw in urls:
+        if not isinstance(raw, str):
+            continue
+        u = raw.strip().split(" ", 1)[0].replace("&amp;", "&")
+        if not u.startswith("http"):
+            continue
+        if any(j in u.lower() for j in _JUNK):
+            continue
+        if u in existing:
+            continue
+        cur.execute("INSERT INTO bid_photos (bid_id, url) VALUES (%s, %s) RETURNING id",
+                    (bid_id, u))
+        new_id = cur.fetchone()["id"]
+        added.append({"id": new_id, "url": u})
+        existing.add(u)
+    db.commit()
+    db.close()
+    return jsonify({"added": added, "count": len(added)})
+
+
+@app.route('/api/bid/<int:bid_id>/upload_photos', methods=['POST'])
+def api_bid_upload_photos(bid_id):
+    """Drag-drop or file-input upload of photos directly into a bid.
+    Accepts multipart with field 'photos' (multi). Saves to
+    static/uploads/bid/<bid_id>/<uuid>.<ext>."""
+    import os as _os, uuid as _uuid
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT id FROM bids WHERE id = %s", (bid_id,))
+    if not cur.fetchone():
+        db.close()
+        return jsonify({"error": "bid not found"}), 404
+    files = request.files.getlist("photos")
+    if not files:
+        single = request.files.get("photo")
+        if single:
+            files = [single]
+    if not files:
+        db.close()
+        return jsonify({"error": "no files in upload"}), 400
+    upload_dir = _os.path.join("/opt/expwholesale/static/uploads/bid", str(bid_id))
+    _os.makedirs(upload_dir, exist_ok=True)
+    _ALLOWED_EXT = {"jpg", "jpeg", "png", "gif", "webp", "heic", "heif"}
+    _MAX_BYTES = 30 * 1024 * 1024
+    added = []
+    skipped = []
+    for f in files:
+        try:
+            filename = (f.filename or "").lower()
+            ext = filename.rsplit(".", 1)[-1] if "." in filename else ""
+            if ext not in _ALLOWED_EXT:
+                ct = (f.content_type or "").lower()
+                if "png" in ct: ext = "png"
+                elif "jpeg" in ct or "jpg" in ct: ext = "jpg"
+                elif "gif" in ct: ext = "gif"
+                elif "webp" in ct: ext = "webp"
+                elif "heic" in ct or "heif" in ct: ext = "heic"
+                else:
+                    skipped.append({"name": filename or "(unnamed)", "reason": "unsupported type"})
+                    continue
+            f.stream.seek(0, 2)
+            size = f.stream.tell()
+            f.stream.seek(0)
+            if size > _MAX_BYTES:
+                skipped.append({"name": filename, "reason": "too large"})
+                continue
+            if size <= 0:
+                skipped.append({"name": filename, "reason": "empty"})
+                continue
+            pid = _uuid.uuid4().hex[:16]
+            target = _os.path.join(upload_dir, pid + "." + ext)
+            f.save(target)
+            url_path = "/static/uploads/bid/" + str(bid_id) + "/" + pid + "." + ext
+            cur.execute("INSERT INTO bid_photos (bid_id, url, local_path) VALUES (%s, %s, %s) RETURNING id",
+                        (bid_id, url_path, target))
+            new_id = cur.fetchone()["id"]
+            added.append({"id": new_id, "url": url_path})
+        except Exception as e:
+            skipped.append({"name": f.filename or "(unnamed)", "reason": "error: " + str(e)})
+    db.commit()
+    db.close()
+    return jsonify({"added": added, "skipped": skipped, "count": len(added)})
+
+
 @app.route('/share/<token>')
 def share_page(token):
     """Public share page — no login required."""
@@ -13753,7 +14097,71 @@ def share_page(token):
 
     db.close()
 
-    return render_template('share.html', bid=bid, photos=photos, vauto=vauto, accutrade=accutrade, ipacket=ipacket)
+    # ── mh + rb prep (mirrors driver_full_page logic 2026-05-14) ──
+    def _j_share(v):
+        if v is None: return None
+        if isinstance(v, str):
+            try: return json.loads(v)
+            except Exception: return None
+        return v
+
+    mh = None
+    if vauto and vauto.get('manheim_transactions'):
+        _mh_data = _j_share(vauto['manheim_transactions']) or {}
+        _txns = _mh_data.get('transactions') or []
+        if _txns:
+            _prices = sorted(int(t.get('sale_price') or 0) for t in _txns if t.get('sale_price'))
+            mh = {
+                'count': len(_txns),
+                'median': _prices[len(_prices)//2] if _prices else None,
+                'lo': _prices[0] if _prices else None,
+                'hi': _prices[-1] if _prices else None,
+            }
+            if bid.get('mileage'):
+                try:
+                    _bm = int(bid['mileage'])
+                    _twm = [t for t in _txns if t.get('odometer')]
+                    if _twm:
+                        _closest = min(_twm, key=lambda t: abs(int(t.get('odometer') or 0) - _bm))
+                        mh['closest'] = {
+                            'mileage': _closest.get('odometer'),
+                            'price': _closest.get('sale_price'),
+                            'date': _closest.get('date_sold') or _closest.get('sold_at'),
+                            'condition': _closest.get('condition'),
+                            'region': _closest.get('region') or _closest.get('auction_region'),
+                        }
+                except Exception:
+                    pass
+
+    rb = None
+    if vauto and vauto.get('market_intel_cached'):
+        _cached = _j_share(vauto['market_intel_cached']) or {}
+        if _cached.get('rbook'):
+            rb = dict(_cached['rbook'])
+            rb['count'] = rb.get('n_rows') or len(rb.get('all_rows') or []) or rb.get('n_visible')
+            rb['median'] = rb.get('retail_median')
+            rb['lo'] = rb.get('retail_min')
+            rb['hi'] = rb.get('retail_max')
+            rb['median_dol'] = rb.get('median_days_on_lot')
+
+    # Share-card toggle state (defaults all-on for older bids w/o the column)
+    _sc = bid.get('share_cards') or {}
+    if isinstance(_sc, str):
+        try: _sc = json.loads(_sc)
+        except Exception: _sc = {}
+    # accutrade_full_marker_20260514 — add accutrade to share_cards picker
+    share_cards = {
+        'carfax':    _sc.get('carfax',    True),
+        'autocheck': _sc.get('autocheck', True),
+        'ipacket':   _sc.get('ipacket',   True),
+        'manheim':   _sc.get('manheim',   True),
+        'rbook':     _sc.get('rbook',     True),
+        'accutrade': _sc.get('accutrade', True),
+    }
+
+    return render_template('share.html', bid=bid, photos=photos, vauto=vauto,
+                           accutrade=accutrade, ipacket=ipacket,
+                           mh=mh, rb=rb, share_cards=share_cards)
 
 
 # ---------------------------------------------------------------------------

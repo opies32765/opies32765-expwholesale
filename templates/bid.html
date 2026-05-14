@@ -492,7 +492,130 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
   </div>
   {% endif %}
 
-  <!-- ROW 3: Scrollable Columns -->
+  <!-- DEALER GALLERY: VIN-matched photos from tracked dealers (auto-loaded by JS) -->
+<div id="dealer-gallery-section" style="display:none;margin:0 0 12px 0;padding:12px;background:#0f1e0f;border:1px solid #1a3d1a;border-radius:8px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <span style="font-size:13px;font-weight:700;color:#86efac">Photos from dealer gallery (VIN match)</span>
+    <button id="dealer-gallery-add-btn" onclick="addSelectedDealerPhotos()" style="padding:6px 14px;background:#16a34a;border:none;border-radius:6px;color:#fff;font-size:13px;font-weight:600;cursor:pointer" disabled>Add Selected (0)</button>
+  </div>
+  <div id="dealer-gallery-groups"></div>
+</div>
+
+<!-- DRAG-DROP UPLOAD ZONE -->
+<div id="bid-dropzone" style="margin:0 0 12px 0;padding:14px;background:#0f172a;border:2px dashed #1e293b;border-radius:8px;text-align:center;color:#7a9bb5;font-size:13px;cursor:pointer;transition:all .2s">
+  <span id="bid-dropzone-text">Drag photos here from Messages, Finder, or click to choose files</span>
+  <input type="file" id="bid-dropzone-input" multiple accept="image/*" style="display:none">
+</div>
+<style>
+  #bid-dropzone.dragover { border-color:#60a5fa; background:#0a1a33; color:#93c5fd }
+  #bid-dropzone.uploading { opacity:.6; pointer-events:none }
+  .dealer-gallery-group { margin-bottom:10px }
+  .dealer-gallery-group-name { font-size:11px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px }
+  .dealer-gallery-thumbs { display:flex;flex-wrap:wrap;gap:6px }
+  .dealer-gallery-thumb { position:relative;width:80px;height:60px;border-radius:5px;overflow:hidden;cursor:pointer;border:2px solid transparent }
+  .dealer-gallery-thumb.selected { border-color:#16a34a }
+  .dealer-gallery-thumb img { width:100%;height:100%;object-fit:cover;pointer-events:none }
+  .dealer-gallery-thumb .chk { position:absolute;top:2px;left:2px;width:16px;height:16px;background:rgba(0,0,0,.7);border-radius:3px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;line-height:1 }
+  .dealer-gallery-thumb.selected .chk { background:#16a34a }
+</style>
+<script>
+(function(){
+  const BID_ID = {{ bid.id }};
+  const dz = document.getElementById("bid-dropzone");
+  const dzInput = document.getElementById("bid-dropzone-input");
+  const dzText = document.getElementById("bid-dropzone-text");
+  if (dz) {
+    dz.addEventListener("click", () => dzInput.click());
+    dzInput.addEventListener("change", e => uploadFiles(e.target.files));
+    ["dragenter","dragover"].forEach(ev => dz.addEventListener(ev, e => {
+      e.preventDefault(); e.stopPropagation(); dz.classList.add("dragover");
+    }));
+    ["dragleave","drop"].forEach(ev => dz.addEventListener(ev, e => {
+      e.preventDefault(); e.stopPropagation(); dz.classList.remove("dragover");
+    }));
+    dz.addEventListener("drop", e => {
+      const files = e.dataTransfer.files;
+      if (files && files.length) uploadFiles(files);
+    });
+  }
+  function uploadFiles(fileList) {
+    if (!fileList || !fileList.length) return;
+    const fd = new FormData();
+    for (const f of fileList) fd.append("photos", f);
+    dz.classList.add("uploading");
+    dzText.textContent = "Uploading " + fileList.length + " file(s)...";
+    fetch("/api/bid/" + BID_ID + "/upload_photos", { method:"POST", body: fd })
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) { alert("Upload error: " + d.error); return; }
+        dzText.textContent = "Added " + d.count + " photo(s). Reloading...";
+        setTimeout(() => location.reload(), 600);
+      })
+      .catch(e => {
+        alert("Upload failed: " + e.message);
+        dz.classList.remove("uploading");
+        dzText.textContent = "Drag photos here from Messages, Finder, or click to choose files";
+      });
+  }
+  fetch("/api/bid/" + BID_ID + "/dealer_gallery")
+    .then(r => r.ok ? r.json() : {groups: []})
+    .then(d => {
+      const section = document.getElementById("dealer-gallery-section");
+      const groupsDiv = document.getElementById("dealer-gallery-groups");
+      if (!d.groups || !d.groups.length) return;
+      section.style.display = "block";
+      groupsDiv.innerHTML = d.groups.map(g => 
+        "<div class=\"dealer-gallery-group\">" +
+        "<div class=\"dealer-gallery-group-name\">" + escapeHtml(g.dealer_name) + " (" + g.photos.length + " photos)</div>" +
+        "<div class=\"dealer-gallery-thumbs\">" +
+        g.photos.map(url =>
+          "<div class=\"dealer-gallery-thumb\" data-url=\"" + escapeAttr(url) + "\" onclick=\"toggleDealerThumb(this)\">" +
+          "<img src=\"" + escapeAttr(url) + "\" referrerpolicy=\"no-referrer\" loading=\"lazy\">" +
+          "<span class=\"chk\">✓</span></div>"
+        ).join("") +
+        "</div></div>"
+      ).join("");
+    });
+  window.toggleDealerThumb = function(el) {
+    el.classList.toggle("selected");
+    const n = document.querySelectorAll(".dealer-gallery-thumb.selected").length;
+    const btn = document.getElementById("dealer-gallery-add-btn");
+    btn.disabled = n === 0;
+    btn.textContent = "Add Selected (" + n + ")";
+  };
+  window.addSelectedDealerPhotos = function() {
+    const urls = Array.from(document.querySelectorAll(".dealer-gallery-thumb.selected")).map(el => el.dataset.url);
+    if (!urls.length) return;
+    const btn = document.getElementById("dealer-gallery-add-btn");
+    btn.disabled = true;
+    btn.textContent = "Adding...";
+    fetch("/api/bid/" + BID_ID + "/add_dealer_photos", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({urls})
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) { alert(d.error); return; }
+        btn.textContent = "Added " + d.count + ". Reloading...";
+        setTimeout(() => location.reload(), 500);
+      })
+      .catch(e => {
+        alert("Failed: " + e.message);
+        btn.disabled = false;
+        btn.textContent = "Add Selected";
+      });
+  };
+  function escapeHtml(s) {
+    const d = document.createElement("div");
+    d.textContent = String(s || "");
+    return d.innerHTML;
+  }
+  function escapeAttr(s) { return escapeHtml(s); }
+})();
+</script>
+
+<!-- ROW 3: Scrollable Columns -->
   <div class="columns-area">
 
     <!-- COL 1: Vehicle Details (collapsible) + Message Thread -->
@@ -1912,6 +2035,13 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
       <label>Notes</label>
       <textarea id="shareNotes" placeholder="Add any notes..."></textarea>
     </div>
+    <!-- share-cards-checkbox-marker-20260514 -->
+    <div class="field" id="shareCardsField">
+      <label>Include on Share</label>
+      <div id="shareCardsList" style="display:flex;flex-direction:column;gap:8px;padding:10px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:8px">
+        <div style="font-size:12px;color:#475569;font-style:italic">Loading available reports...</div>
+      </div>
+    </div>
     <div class="field">
       <label>Send To</label>
       <div style="display:flex;gap:8px;align-items:center">
@@ -2447,6 +2577,46 @@ function openShareModal() {
     _shareContactsLoaded = true;
     loadShareContacts();
   }
+  loadShareCardsForModal();
+}
+
+// share-cards-checkbox-marker-20260514 — fetch available cards + current selection state
+async function loadShareCardsForModal() {
+  const list = document.getElementById('shareCardsList');
+  if (!list) return;
+  try {
+    const r = await fetch(`/api/bid/${BID_ID}/share-media`);
+    if (!r.ok) {
+      list.innerHTML = '<div style="font-size:12px;color:#f87171">Could not load card list.</div>';
+      return;
+    }
+    const d = await r.json();
+    const cards = [
+      {key: 'carfax',    label: 'Carfax Report'},
+      {key: 'autocheck', label: 'AutoCheck Report'},
+      {key: 'ipacket',   label: 'iPacket Window Sticker'},
+      {key: 'manheim',   label: 'Manheim Auction Comps'},
+      {key: 'rbook',     label: 'rBook Retail Comps'},
+      {key: 'accutrade', label: 'Accutrade Appraisal'},
+    ];
+    const sc = d.share_cards || {};
+    const avail = d.cards_available || {};
+    let html = '';
+    for (const c of cards) {
+      const hasData = avail[c.key] === true;
+      const checked = sc[c.key] !== false && hasData;  // unchecked if no data
+      const disabled = !hasData;
+      const opacity = hasData ? '1' : '.45';
+      const subtext = hasData ? '' : ' <span style="font-size:11px;color:#64748b;font-style:italic">(no data)</span>';
+      html += `<label style="display:flex;align-items:center;gap:10px;cursor:${disabled ? 'not-allowed' : 'pointer'};opacity:${opacity};user-select:none;font-size:13px;color:#e2e8f0;font-weight:500">`
+            + `<input type="checkbox" class="share-card-cb" data-key="${c.key}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} style="width:16px;height:16px;cursor:${disabled ? 'not-allowed' : 'pointer'}">`
+            + `<span>${c.label}${subtext}</span>`
+            + `</label>`;
+    }
+    list.innerHTML = html;
+  } catch (e) {
+    list.innerHTML = '<div style="font-size:12px;color:#f87171">Could not load card list: ' + e.message + '</div>';
+  }
 }
 function closeShareModal() {
   document.getElementById('shareOverlay').classList.remove('show');
@@ -2549,11 +2719,17 @@ async function submitShare(action) {
   const share_phone = action === 'sms' ? document.getElementById('sharePhone').value.trim() : '';
 
 
+  // Collect share_cards selections from checkboxes
+  const share_cards = {};
+  document.querySelectorAll('.share-card-cb').forEach(cb => {
+    share_cards[cb.dataset.key] = cb.checked;
+  });
+
   try {
     const r = await fetch(`/api/bid/${BID_ID}/share`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({share_notes, share_asking, share_phone})
+      body: JSON.stringify({share_notes, share_asking, share_phone, share_cards})
     });
     const d = await r.json();
     if (!d.success) {
