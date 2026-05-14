@@ -145,9 +145,18 @@ def _has_recent_sms_bid(cur, phone):
 
 
 def _phone_allowed(phone):
+    # _GATE_OPEN is the env-only emergency "open to all" switch (a literal
+    # '*' in SOURCING_PHONE_GATE / PHASE2_PHONE_GATE). Otherwise we consult
+    # gate_helpers, which UNIONs the env baseline with the gated_phones DB
+    # table (30s cache, refreshed by /admin/phone-gates writes).
     if _GATE_OPEN:
         return True
-    return _digits(phone) in _GATED_DIGITS
+    try:
+        import gate_helpers
+        return _digits(phone) in gate_helpers.gate_digits('sourcing')
+    except Exception as e:
+        print(f'[sourcing-gate] gate_helpers failed, falling back to env-only: {e}', flush=True)
+        return _digits(phone) in _GATED_DIGITS
 
 
 def _append_msg(conversation, role, text, raw=None):

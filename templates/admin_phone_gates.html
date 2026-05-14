@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><title>Phone Gates — EW Admin</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+* { box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+       margin: 0; background: #f5f7fa; color: #1a1a1a; line-height: 1.5; }
+.wrap { max-width: 1100px; margin: 0 auto; padding: 28px 22px 80px; }
+h1 { font-size: 24px; margin: 0 0 4px; color: #0d2240; }
+.sub { color: #5a6878; margin: 0 0 24px; font-size: 14px; }
+.sub code { background:#eef1f5; padding:1px 6px; border-radius:4px; font-size:12px; }
+
+.section { background: white; border-radius: 10px; padding: 18px 20px;
+           box-shadow: 0 1px 3px rgba(0,0,0,0.06); margin-bottom: 18px;
+           border-left: 4px solid #0d2240; }
+.section.sourcing { border-left-color: #16a34a; }
+.section h2 { font-size: 16px; margin: 0 0 4px; color: #0d2240; }
+.section .what { color:#5a6878; font-size:12px; margin: 0 0 12px; }
+
+.add-form { display:flex; gap:8px; flex-wrap:wrap; margin: 0 0 14px; align-items:center;
+            background:#f9fbfd; border:1px dashed #d0d7e0; border-radius:8px; padding:10px 12px; }
+.add-form input[type=text] { padding:7px 10px; border:1px solid #cdd5dd; border-radius:6px; font-size:13px; }
+.add-form input[name=phone] { width:170px; font-variant-numeric: tabular-nums; }
+.add-form input[name=label] { flex:1; min-width:180px; }
+.add-form .btn-add { background:#0d2240; color:white; border:none; padding:7px 16px;
+                     border-radius:6px; cursor:pointer; font-size:13px; font-weight:600; }
+.add-form .btn-add:hover { background:#1a3560; }
+.sourcing .add-form .btn-add { background:#16a34a; }
+.sourcing .add-form .btn-add:hover { background:#22c55e; }
+
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th { text-align:left; padding:7px 8px; background:#eef1f5; color:#0d2240;
+     font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.3px; }
+td { padding:7px 8px; border-bottom:1px solid #f0f3f7; font-variant-numeric: tabular-nums; }
+tr:hover td { background:#fafcff; }
+.phone { font-weight:600; }
+.label-cell { color:#5a6878; }
+.label-cell.empty { color:#bbc4cd; font-style:italic; }
+.meta { color:#9aa6b3; font-size:11px; }
+.env-pill { background:#eef1f5; color:#5a6878; padding:1px 8px; border-radius:8px;
+            font-size:10px; text-transform:uppercase; letter-spacing:.4px; font-weight:600; }
+.db-pill { background:#dcfce7; color:#15803d; padding:1px 8px; border-radius:8px;
+           font-size:10px; text-transform:uppercase; letter-spacing:.4px; font-weight:600; }
+.btn-remove { background:transparent; border:1px solid #d0d7e0; color:#9aa6b3;
+              padding:3px 10px; border-radius:5px; cursor:pointer; font-size:11px; }
+.btn-remove:hover { border-color:#f87171; color:#dc2626; }
+
+.archive { margin-top: 22px; }
+.archive h3 { font-size:13px; color:#9aa6b3; margin: 0 0 8px; font-weight:600;
+              text-transform:uppercase; letter-spacing:.4px; }
+.archive table td { color:#9aa6b3; }
+.archive table .phone { color:#5a6878; }
+
+.flash { position:fixed; top:18px; right:18px; padding:10px 16px; border-radius:8px;
+         background:#0d2240; color:white; font-size:13px; box-shadow:0 4px 12px rgba(0,0,0,.15);
+         opacity:0; transition:opacity .2s; pointer-events:none; z-index:50; }
+.flash.show { opacity:1; }
+.flash.err { background:#dc2626; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Phone Gates</h1>
+<p class="sub">
+Phones that get auto-replies when they text a bid. Two channels —
+<b style="color:#0d2240">Full Broker</b> (mini-page + AI report SMS) and
+<b style="color:#16a34a">Sourcing-Bot</b> (open conversational sourcing).
+Each gate = <code>PHASE2_PHONE_GATE</code>/<code>SOURCING_PHONE_GATE</code> env baseline plus the table below.
+Changes apply within 30s — no restart.
+</p>
+
+{% set fb_active = rows | selectattr('disabled_at', 'none') | selectattr('gate_type', 'equalto', 'full_broker') | list %}
+{% set sc_active = rows | selectattr('disabled_at', 'none') | selectattr('gate_type', 'equalto', 'sourcing') | list %}
+{% set disabled = rows | rejectattr('disabled_at', 'none') | list %}
+
+<div class="section">
+  <h2>Full Broker — Phase 1 + Phase 2 SMS</h2>
+  <p class="what">These numbers get the mini-page link + AI report after texting a bid in.</p>
+  <form class="add-form" onsubmit="return addGate(event, 'full_broker')">
+    <input type="text" name="phone" placeholder="305-555-1234" autocomplete="off" required>
+    <input type="text" name="label" placeholder="Name / Dealer (optional)" autocomplete="off">
+    <button class="btn-add" type="submit">+ Add to Full Broker</button>
+  </form>
+  <table>
+    <thead><tr><th>Phone</th><th>Label</th><th>Source</th><th>Added</th><th></th></tr></thead>
+    <tbody>
+    {% for e in env_full_broker %}
+      <tr>
+        <td class="phone">{{ e.pretty }}</td>
+        <td class="label-cell empty">(baseline)</td>
+        <td><span class="env-pill">env</span></td>
+        <td class="meta">systemd</td>
+        <td class="meta" style="font-size:10px;">edit service file</td>
+      </tr>
+    {% endfor %}
+    {% for r in fb_active %}
+      <tr id="row-{{ r.id }}">
+        <td class="phone">{{ r.phone_pretty }}</td>
+        <td class="label-cell {% if not r.label %}empty{% endif %}">{{ r.label or '—' }}</td>
+        <td><span class="db-pill">db</span></td>
+        <td class="meta">{{ r.added_at.strftime('%Y-%m-%d %H:%M') if r.added_at else '—' }}{% if r.added_by %} · {{ r.added_by }}{% endif %}</td>
+        <td><button class="btn-remove" onclick="removeGate({{ r.id }})">remove</button></td>
+      </tr>
+    {% else %}
+      {% if not env_full_broker %}<tr><td colspan="5" class="meta">No phones gated. Everyone gets Phase 1+2.</td></tr>{% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="section sourcing">
+  <h2>Sourcing-Bot — Free-form Sourcing SMS</h2>
+  <p class="what">These numbers can chat with the AI sourcing-bot (free-text wholesale requests).</p>
+  <form class="add-form" onsubmit="return addGate(event, 'sourcing')">
+    <input type="text" name="phone" placeholder="305-555-1234" autocomplete="off" required>
+    <input type="text" name="label" placeholder="Name / Dealer (optional)" autocomplete="off">
+    <button class="btn-add" type="submit">+ Add to Sourcing</button>
+  </form>
+  <table>
+    <thead><tr><th>Phone</th><th>Label</th><th>Source</th><th>Added</th><th></th></tr></thead>
+    <tbody>
+    {% for e in env_sourcing %}
+      <tr>
+        <td class="phone">{{ e.pretty }}</td>
+        <td class="label-cell empty">(baseline)</td>
+        <td><span class="env-pill">env</span></td>
+        <td class="meta">systemd</td>
+        <td class="meta" style="font-size:10px;">edit service file</td>
+      </tr>
+    {% endfor %}
+    {% for r in sc_active %}
+      <tr id="row-{{ r.id }}">
+        <td class="phone">{{ r.phone_pretty }}</td>
+        <td class="label-cell {% if not r.label %}empty{% endif %}">{{ r.label or '—' }}</td>
+        <td><span class="db-pill">db</span></td>
+        <td class="meta">{{ r.added_at.strftime('%Y-%m-%d %H:%M') if r.added_at else '—' }}{% if r.added_by %} · {{ r.added_by }}{% endif %}</td>
+        <td><button class="btn-remove" onclick="removeGate({{ r.id }})">remove</button></td>
+      </tr>
+    {% else %}
+      {% if not env_sourcing %}<tr><td colspan="5" class="meta">No phones gated. Sourcing-bot effectively closed.</td></tr>{% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if disabled %}
+<div class="archive">
+  <h3>Disabled history ({{ disabled | length }})</h3>
+  <table>
+    <thead><tr><th>Phone</th><th>Gate</th><th>Label</th><th>Disabled</th></tr></thead>
+    <tbody>
+    {% for r in disabled %}
+      <tr>
+        <td class="phone">{{ r.phone_pretty }}</td>
+        <td>{{ r.gate_type }}</td>
+        <td>{{ r.label or '—' }}</td>
+        <td>{{ r.disabled_at.strftime('%Y-%m-%d %H:%M') if r.disabled_at else '—' }}{% if r.disabled_by %} · {{ r.disabled_by }}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+</div>
+
+<div id="flash" class="flash"></div>
+
+<script>
+function flash(msg, isErr) {
+  var el = document.getElementById('flash');
+  el.textContent = msg;
+  el.className = 'flash show' + (isErr ? ' err' : '');
+  setTimeout(function(){ el.className = 'flash' + (isErr ? ' err' : ''); }, 2400);
+}
+
+async function addGate(ev, gateType) {
+  ev.preventDefault();
+  var form = ev.target;
+  var fd = new FormData(form);
+  fd.set('gate_type', gateType);
+  var r = await fetch('/admin/phone-gates/add', { method: 'POST', body: fd });
+  var j = await r.json();
+  if (!j.ok) { flash(j.error || 'Add failed', true); return false; }
+  flash('Added ' + j.phone_digits + ' to ' + j.gate_type);
+  setTimeout(function(){ location.reload(); }, 600);
+  return false;
+}
+
+async function removeGate(id) {
+  if (!confirm('Remove this phone from the gate? Stops future auto-replies; existing SMS threads are unaffected.')) return;
+  var fd = new FormData();
+  var r = await fetch('/admin/phone-gates/' + id + '/remove', { method: 'POST', body: fd });
+  var j = await r.json();
+  if (!j.ok) { flash(j.error || 'Remove failed', true); return; }
+  flash('Removed ' + j.phone_digits);
+  setTimeout(function(){ location.reload(); }, 500);
+}
+</script>
+
+</body></html>

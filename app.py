@@ -9,6 +9,7 @@ import traceback
 import psycopg2
 import psycopg2.extras
 import requests
+import gate_helpers
 from ew_v4_router import should_use_v4, v4_extract
 _BIDS_COLUMNS_CACHE = None  # populated on first auto-decode VIN call
 from datetime import datetime
@@ -1447,15 +1448,12 @@ def _phone_digits(p):
 
 def _bid_full_gate_digits():
     """Digit-set of phones that get Phase 1 + Phase 2 (mini-page + full
-    report). Reads PHASE2_PHONE_GATE fresh on every call so env-only
-    changes take effect on systemctl restart without a code redeploy.
-    Empty env = no gating (everyone gets Phase 1+2 — back-compat for prod
-    before this feature shipped)."""
-    gate = (os.environ.get('PHASE2_PHONE_GATE') or '').strip()
-    if not gate:
-        return None  # sentinel for "no gating"
-    return {_phone_digits(tok) for tok in gate.replace(',', ' ').split()
-            if len(_phone_digits(tok)) == 10}
+    report). UNION of PHASE2_PHONE_GATE env baseline + active rows in
+    gated_phones (gate_type='full_broker'), via gate_helpers (30s cache).
+    Empty result = no gating (everyone gets Phase 1+2). Add/remove numbers
+    from /admin/phone-gates — no restart needed."""
+    digits = gate_helpers.gate_digits('full_broker')
+    return digits if digits else None  # None sentinel = open (back-compat)
 
 
 def _is_full_broker_phone(phone):
@@ -16071,6 +16069,103 @@ def api_thalist_make_sweep():
         'skipped': skipped,
         'new_make_ids_to_add': new_make_ids,
     })
+
+
+# ── Phone-gate admin (added 2026-05-14) ─────────────────────────────────
+# UI for managing the gated_phones table. Reads env baselines + DB rows.
+# gate_helpers.bust_gate_cache() fires after every write so the next SMS
+# check sees the change immediately (no service restart).
+
+@app.route('/admin/phone-gates')
+def admin_phone_gates():
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""SELECT id, phone_digits, gate_type, label, added_by,
+                          added_at, disabled_at, disabled_by
+                     FROM gated_phones
+                    ORDER BY disabled_at IS NULL DESC, added_at DESC""")
+    rows = [dict(r) for r in cur.fetchall()]
+    db.close()
+    for r in rows:
+        d = r['phone_digits']
+        r['phone_pretty'] = f'({d[0:3]}) {d[3:6]}-{d[6:10]}' if len(d) == 10 else d
+        if r.get('added_at') and hasattr(r['added_at'], 'isoformat'):
+            r['added_at_iso'] = r['added_at'].isoformat()
+        if r.get('disabled_at') and hasattr(r['disabled_at'], 'isoformat'):
+            r['disabled_at_iso'] = r['disabled_at'].isoformat()
+    # Env baselines (read-only; edit /etc/systemd/system/expwholesale.service)
+    env_full_broker = sorted(gate_helpers._env_digits('PHASE2_PHONE_GATE'))
+    env_sourcing = sorted(gate_helpers._env_digits('SOURCING_PHONE_GATE')
+                          or gate_helpers._env_digits('PHASE2_PHONE_GATE'))
+    def _pretty(d):
+        return f'({d[0:3]}) {d[3:6]}-{d[6:10]}' if len(d) == 10 else d
+    env_full_broker = [{'digits': d, 'pretty': _pretty(d)} for d in env_full_broker]
+    env_sourcing = [{'digits': d, 'pretty': _pretty(d)} for d in env_sourcing]
+    return render_template('admin_phone_gates.html',
+                           rows=rows,
+                           env_full_broker=env_full_broker,
+                           env_sourcing=env_sourcing)
+
+
+@app.route('/admin/phone-gates/add', methods=['POST'])
+def admin_phone_gates_add():
+    phone_raw = (request.form.get('phone') or '').strip()
+    gate_type = (request.form.get('gate_type') or '').strip()
+    label = (request.form.get('label') or '').strip() or None
+    digits = gate_helpers.phone_digits(phone_raw)
+    if len(digits) != 10:
+        return jsonify({'ok': False, 'error': f'invalid phone (need 10 digits, got {len(digits)})'}), 400
+    if gate_type not in ('full_broker', 'sourcing'):
+        return jsonify({'ok': False, 'error': 'gate_type must be full_broker or sourcing'}), 400
+    db = get_db()
+    cur = db.cursor()
+    # If a previously-disabled row exists, re-enable it (preserves history).
+    cur.execute("""SELECT id FROM gated_phones
+                    WHERE phone_digits=%s AND gate_type=%s AND disabled_at IS NOT NULL
+                    ORDER BY disabled_at DESC LIMIT 1""", (digits, gate_type))
+    prior = cur.fetchone()
+    if prior:
+        cur.execute("""UPDATE gated_phones SET disabled_at=NULL, disabled_by=NULL,
+                                                  label=COALESCE(%s, label),
+                                                  added_by=%s, added_at=NOW()
+                          WHERE id=%s""",
+                    (label, 'admin', prior['id']))
+        action = 're-enabled'
+        row_id = prior['id']
+    else:
+        try:
+            cur.execute("""INSERT INTO gated_phones (phone_digits, gate_type, label, added_by)
+                              VALUES (%s, %s, %s, %s) RETURNING id""",
+                        (digits, gate_type, label, 'admin'))
+            row_id = cur.fetchone()['id']
+            action = 'added'
+        except psycopg2.errors.UniqueViolation:
+            db.rollback()
+            db.close()
+            return jsonify({'ok': False, 'error': 'already active for this gate'}), 409
+    db.commit()
+    db.close()
+    gate_helpers.bust_gate_cache()
+    return jsonify({'ok': True, 'action': action, 'id': row_id,
+                    'phone_digits': digits, 'gate_type': gate_type, 'label': label})
+
+
+@app.route('/admin/phone-gates/<int:row_id>/remove', methods=['POST'])
+def admin_phone_gates_remove(row_id):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""UPDATE gated_phones
+                      SET disabled_at=NOW(), disabled_by=%s
+                    WHERE id=%s AND disabled_at IS NULL
+                RETURNING id, phone_digits, gate_type""", ('admin', row_id))
+    row = cur.fetchone()
+    db.commit()
+    db.close()
+    if not row:
+        return jsonify({'ok': False, 'error': 'not found or already disabled'}), 404
+    gate_helpers.bust_gate_cache()
+    return jsonify({'ok': True, 'id': row['id'],
+                    'phone_digits': row['phone_digits'], 'gate_type': row['gate_type']})
 
 
 if __name__ == '__main__':
