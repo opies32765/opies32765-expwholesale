@@ -1,0 +1,15 @@
+[Unit]
+Description=EW failed-host auto-recovery daemon (rebuilds dead server as standby of survivor after failover)
+After=network-online.target ew-failover-watchdog.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/ew-failover-watchdog/recovery_daemon.sh
+Restart=always
+RestartSec=30
+StandardOutput=append:/var/log/ew_recovery_daemon.log
+StandardError=append:/var/log/ew_recovery_daemon.log
+
+[Install]
+WantedBy=multi-user.target

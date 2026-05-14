@@ -133,6 +133,13 @@ while true; do
             log "triggering $promote_script on $new_primary ($secondary_host)"
             ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=20 root@"$secondary_host" "$promote_script" 2>&1
             tg "🚨 EW FAILOVER FIRED: $promote_script triggered on $new_primary."
+            # Write state file so recovery daemon can rebuild the failed host
+            # once it comes back online.
+            mkdir -p /var/lib/ew-watchdog
+            cat > /var/lib/ew-watchdog/last_failover.json <<JSON
+{"survivor":"$new_primary","dead":"$CURRENT_PRIMARY","at":"$(date -Iseconds)","promote_script":"$promote_script"}
+JSON
+            log "wrote state file: survivor=$new_primary dead=$CURRENT_PRIMARY"
             log 'watchdog exiting after promote'
             exit 0
         fi
