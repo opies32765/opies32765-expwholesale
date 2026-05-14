@@ -813,17 +813,39 @@ function updateStats(s) {
   });
 }
 
+// 2026-05-14: track mousedown/touchstart on the bid table so the auto-poll
+// doesn't rebuild tbody mid-click. Replacing innerHTML between mousedown
+// and mouseup destroys the click target and the browser swallows the
+// click — operator has to tap a second time. capture-phase listener so
+// we see the event even if a descendant stopPropagations.
+let _lastTableInteraction = 0;
+document.addEventListener('mousedown', (e) => {
+  if (e.target && e.target.closest && e.target.closest('tbody')) _lastTableInteraction = Date.now();
+}, true);
+document.addEventListener('touchstart', (e) => {
+  if (e.target && e.target.closest && e.target.closest('tbody')) _lastTableInteraction = Date.now();
+}, true);
+
 // Track which bids had unread on last poll to detect new messages
 let _prevUnread = new Set(
   Array.from(document.querySelectorAll('tr[data-unread="1"]')).map(r => r.dataset.id)
 );
 
 async function poll() {
+  // Skip in background tabs — no point repainting what nobody can see, and
+  // it frees a gunicorn worker for whoever IS looking at a bid page.
+  if (document.hidden) return;
   try {
     const r = await fetch(`/api/bids?since_id=${highestId}&status=${currentFilter}&rep=${currentRep}`);
     const d = await r.json();
 
-    updateStats(d.stats);
+    updateStats(d.stats);  // stats always update (cheap text-only swaps)
+
+    // If the operator just touched the table, don't tear down tbody under
+    // their finger. Stats + new-bid chime + worker chip data still update;
+    // only the full tbody.innerHTML replace is skipped this cycle.
+    const _interactionAgeMs = Date.now() - _lastTableInteraction;
+    const _skipTableRebuild = _interactionAgeMs < 1500;
 
     const tbody = document.querySelector('tbody');
     const empty = document.querySelector('.empty');
@@ -860,8 +882,8 @@ async function poll() {
     // this the column flickers off-and-on across reload cycles.
     window._partnerOfferCounts = d.partner_offer_counts || {};
 
-    // Re-render table
-    if (d.bids.length > 0) {
+    // Re-render table — skip during user interaction (mousedown<1.5s ago)
+    if (d.bids.length > 0 && !_skipTableRebuild) {
       if (empty) empty.style.display = 'none';
       if (tbody) {
         tbody.innerHTML = d.bids.map(b => renderRow(b, d.photo_counts[b.id], (d.first_photos||{})[b.id], (d.active_workers||{})[b.id])).join('');
@@ -902,7 +924,7 @@ function showNewBidAlert(count) {
 }
 
 // Poll every 3 seconds
-setInterval(poll, 3000);
+setInterval(poll, 10000);  // 2026-05-14: 3s→10s — reduces tbody flicker + gunicorn load 3.3x; stats still feel live, new-bid chime fires within 10s
 
 // Poll active reps every 10 seconds
 async function pollActiveReps() {
