@@ -191,10 +191,21 @@ def now_utc():
 # ── HTTP ─────────────────────────────────────────────────────────────────
 def _session():
     s = requests.Session()
+    # Accept-Encoding: only advertise br when the `brotli` package is installed
+    # so requests can decompress the response. Sucuri/LiteSpeed WAFs (Ferrari of
+    # Washington, etc.) will serve Brotli regardless of what we ask for, and a
+    # missing brotli decoder turns a 200 OK into binary garbage and the regex
+    # crawl returns 0 hrefs (2026-05-13 Ferrari hang root cause).
+    try:
+        import brotli  # noqa: F401
+        accept_enc = 'gzip, deflate, br'
+    except ImportError:
+        accept_enc = 'gzip, deflate'
     s.headers.update({
         'User-Agent': USER_AGENT,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': accept_enc,
     })
     return s
 
