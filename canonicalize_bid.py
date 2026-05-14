@@ -85,20 +85,46 @@ def canonicalize_bid_vin(bid_id: int, conn,
         out['ok'] = True
         return out
 
-    # 1) NHTSA decode (cached)
+    # 1) Claude Sonnet 4.6 → NHTSA fallback (cached forever per VIN in
+    # vin_decode_cache). decode_vin_smart's cascade:
+    #   cache hit → return
+    #   miss → Claude call (~3s); conf ≥ 0.7 → use, cache as claude_sonnet_4_6
+    #   Claude error or low conf → NHTSA fallback, cache as nhtsa_fallback
+    # Returns same year/make/model/trim shape the rest of this function
+    # expects, plus body_style and confidence we propagate up.
+    nhtsa = {}
+    nh_err = None
     try:
+        from claude_vin_decoder import decode_vin_smart
         from nhtsa_decode import decode_vin as nhtsa_decode
-        nhtsa = nhtsa_decode(vin, conn=conn) or {}
+        smart = decode_vin_smart(vin, conn, nhtsa_fallback=nhtsa_decode) or {}
+        if smart:
+            nhtsa = {
+                'year':       smart.get('year'),
+                'make':       smart.get('make'),
+                'model':      smart.get('model'),
+                'trim':       smart.get('trim'),
+                'body_class': smart.get('body_style'),
+                '_smart_source':     smart.get('source'),
+                '_smart_confidence': float(smart.get('confidence') or 0),
+            }
     except Exception as e:
-        log.warning('bid %d nhtsa decode failed: %s', bid_id, e)
-        nhtsa = {'error': f'nhtsa_exception: {e}'}
+        log.warning('bid %d decode_vin_smart failed: %s', bid_id, e)
+        nh_err = f'smart_exception: {e}'
+        # Last-ditch: try raw NHTSA so we don't leave canon_* empty
+        try:
+            from nhtsa_decode import decode_vin as _nh
+            nhtsa = _nh(vin, conn=conn) or {}
+        except Exception as e2:
+            log.warning('bid %d raw NHTSA fallback failed: %s', bid_id, e2)
+            nhtsa = {'error': f'all_decoders_failed: {e} | {e2}'}
 
     nh_year = nhtsa.get('year')
     nh_make = (nhtsa.get('make') or '').strip() or None
     nh_model = (nhtsa.get('model') or '').strip() or None
     nh_trim = (nhtsa.get('trim') or '').strip() or None
     nh_body = (nhtsa.get('body_class') or '').strip() or None
-    nh_err = nhtsa.get('error')
+    nh_err = nh_err or nhtsa.get('error')
 
     # 2) VIN-prefix fallback for trim-blind makes (Porsche etc.)
     try:
@@ -116,13 +142,20 @@ def canonicalize_bid_vin(bid_id: int, conn,
     canon_trim = None
     canon_source = None
     canon_confidence = 0.5
-    if nh_trim and pfx_trim:
-        # Both agree (or NHTSA has finer detail). Prefer NHTSA but record
-        # high confidence because both signals voted.
+    smart_src = nhtsa.get('_smart_source')
+    smart_conf = nhtsa.get('_smart_confidence') or 0.0
+    if nh_trim and pfx_trim and smart_src in (None, 'nhtsa_fallback'):
+        # Legacy v1 path — NHTSA + VIN prefix both voted, no Claude signal.
         canon_trim = nh_trim
         canon_source = 'nhtsa+vin_prefix'
         canon_confidence = 0.95
+    elif nh_trim and smart_src:
+        # decode_vin_smart returned a trim — trust Claude's confidence directly.
+        canon_trim = nh_trim
+        canon_source = smart_src  # 'claude_sonnet_4_6' / 'cache' / 'nhtsa_fallback' / 'claude_low_conf'
+        canon_confidence = max(smart_conf, 0.5)
     elif nh_trim:
+        # NHTSA-only path (decode_vin_smart unavailable)
         canon_trim = nh_trim
         canon_source = 'nhtsa'
         canon_confidence = 0.85
@@ -131,12 +164,11 @@ def canonicalize_bid_vin(bid_id: int, conn,
         canon_source = 'vin_prefix'
         canon_confidence = pfx_conf
     elif nh_make and nh_model:
-        # We have YMM but no trim — leave canon_trim None, set lower confidence.
         canon_trim = None
-        canon_source = 'nhtsa_ymm_only'
-        canon_confidence = 0.5
+        canon_source = smart_src or 'nhtsa_ymm_only'
+        canon_confidence = max(smart_conf, 0.5)
     elif nh_err:
-        canon_source = 'nhtsa_error'
+        canon_source = 'decode_error'
         canon_confidence = 0.0
 
     # ── Persist canonical YMM + trim ─────────────────────────────────────
@@ -145,29 +177,52 @@ def canonicalize_bid_vin(bid_id: int, conn,
     canon_conf_text = (f'{canon_confidence:.3f}'
                        if canon_confidence is not None else None)
     try:
-        cur.execute("""
-            UPDATE bids SET
-                canon_year       = COALESCE(%s, canon_year),
-                canon_make       = COALESCE(%s, canon_make),
-                canon_model      = COALESCE(%s, canon_model),
-                canon_trim       = CASE
-                    WHEN %s::text IS NOT NULL
-                         AND (canon_trim IS NULL OR canon_trim = '')
-                    THEN %s::text ELSE canon_trim END,
-                canon_source     = CASE
-                    WHEN canon_source IS NULL THEN %s::text
-                    ELSE canon_source END,
-                canon_confidence = CASE
-                    WHEN canon_confidence IS NULL THEN %s::text
-                    ELSE canon_confidence END,
-                canon_decoded_at = COALESCE(canon_decoded_at, NOW())
-            WHERE id = %s
-        """, (
-            nh_year, nh_make, nh_model,
-            canon_trim, canon_trim,
-            canon_source, canon_conf_text,
-            bid_id,
-        ))
+        # When force=True, overwrite ALL canon_* unconditionally — caller
+        # explicitly asked us to re-decode (e.g. backfilling bids whose
+        # canon was set by the old NHTSA-only path and is now wrong).
+        # When force=False (default), the idempotency CASE only fills
+        # NULL/empty cells so we never clobber a high-confidence write
+        # from a downstream pipeline (e.g. accutrade_overseer canon_trim).
+        if force:
+            cur.execute("""
+                UPDATE bids SET
+                    canon_year       = %s,
+                    canon_make       = %s,
+                    canon_model      = %s,
+                    canon_trim       = %s,
+                    canon_source     = %s,
+                    canon_confidence = %s,
+                    canon_decoded_at = NOW()
+                WHERE id = %s
+            """, (
+                nh_year, nh_make, nh_model,
+                canon_trim, canon_source, canon_conf_text,
+                bid_id,
+            ))
+        else:
+            cur.execute("""
+                UPDATE bids SET
+                    canon_year       = COALESCE(%s, canon_year),
+                    canon_make       = COALESCE(%s, canon_make),
+                    canon_model      = COALESCE(%s, canon_model),
+                    canon_trim       = CASE
+                        WHEN %s::text IS NOT NULL
+                             AND (canon_trim IS NULL OR canon_trim = '')
+                        THEN %s::text ELSE canon_trim END,
+                    canon_source     = CASE
+                        WHEN canon_source IS NULL THEN %s::text
+                        ELSE canon_source END,
+                    canon_confidence = CASE
+                        WHEN canon_confidence IS NULL THEN %s::text
+                        ELSE canon_confidence END,
+                    canon_decoded_at = COALESCE(canon_decoded_at, NOW())
+                WHERE id = %s
+            """, (
+                nh_year, nh_make, nh_model,
+                canon_trim, canon_trim,
+                canon_source, canon_conf_text,
+                bid_id,
+            ))
         # Note: NOT committing here — caller owns the transaction
         out.update({
             'ok': True,
