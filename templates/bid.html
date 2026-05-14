@@ -2855,6 +2855,29 @@ async function clearEstimate() {
   await fetch(`/api/bid/{{ bid.id }}/estimate`, {method: 'DELETE'});
   location.reload();
 }
+
+// 2026-05-14: periodic background refresh — Dealer Network Intel and LSL
+// Past-Deals cards are SSR-only (no JS poll watches their JSON columns),
+// so without this the operator had to F5 to see them populate. 45s is a
+// compromise between freshness and not disrupting the UI.
+//
+// Guards (skip refresh if):
+//   - operator is typing in an input/textarea (don't blow away their text)
+//   - the Share modal overlay is open (don't dismiss it mid-action)
+//   - hidden tab (no point reloading in the background)
+//   - <5 s since last reload (avoid double-fires with the 4 enrichment pollers)
+(function _autoRefresh() {
+  let lastReload = Date.now();
+  setInterval(() => {
+    if (document.hidden) return;
+    if (Date.now() - lastReload < 5000) return;
+    const a = document.activeElement;
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && !a.readOnly) return;
+    if (document.querySelector('.share-overlay.show')) return;
+    lastReload = Date.now();
+    location.reload();
+  }, 45000);
+})();
 </script>
 
 </body>
