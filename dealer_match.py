@@ -177,6 +177,50 @@ DEFAULT_CONFIG = {'max_active': 5, 'max_sales': 10, 'max_pitch': 3,
                   'recent_days': 90, 'min_sold_confidence': 0.70}
 
 
+def _sonnet_filter_rows(rows, eff_make, eff_model, eff_year, eff_trim, db_conn, bid_id=None, kind='active'):
+    """Drop rows whose trim Sonnet says is NOT equivalent to eff_trim.
+
+    Tier-1.5 filter. Skipped when eff_trim is empty (we'd be asking Sonnet
+    to compare "" against something — pointless and the SQL already handles
+    base-trim semantics). Falls open on any failure so the matcher never
+    starves the card on infra problems.
+
+    Returns (filtered_rows, kept_n, dropped_n, applied_bool). Each kept row
+    is annotated with sonnet_trim_{match,confidence,reason}.
+    """
+    if not rows or not eff_trim:
+        return rows, len(rows), 0, False
+    try:
+        import claude_trim_match
+    except Exception as e:
+        print(f'[dm-diag] sonnet import err bid_id={bid_id}: {e!r}', flush=True)
+        return rows, len(rows), 0, False
+    filtered = []
+    for r in rows:
+        dealer_trim = (r.get('nhtsa_trim') if isinstance(r, dict) else None)                       or (r.get('trim') if isinstance(r, dict) else '') or ''
+        try:
+            d = claude_trim_match.is_same_trim(
+                eff_make, eff_model, eff_year, eff_trim, dealer_trim,
+                db_conn=db_conn)
+        except Exception as e:
+            print(f'[dm-diag] sonnet call err bid_id={bid_id} kind={kind}: {e!r}',
+                  flush=True)
+            # Fall open for THIS row — keep it so we don't drop good matches on infra error.
+            filtered.append(r)
+            continue
+        r['sonnet_trim_match'] = bool(d.get('match'))
+        r['sonnet_trim_confidence'] = float(d.get('confidence') or 0.0)
+        r['sonnet_trim_reason'] = d.get('reason') or ''
+        r['sonnet_trim_source'] = d.get('source') or ''
+        if d.get('match'):
+            filtered.append(r)
+    kept = len(filtered)
+    dropped = len(rows) - kept
+    print(f'[dm-diag] sonnet filter bid_id={bid_id} kind={kind} '
+          f'kept={kept} dropped={dropped}', flush=True)
+    return filtered, kept, dropped, True
+
+
 def find_dealer_matches(db_conn, year, make, model,
                         trim=None, trim_confidence=None,
                         bid_id=None, vin=None, config=None):
@@ -306,6 +350,25 @@ def find_dealer_matches(db_conn, year, make, model,
     print(f'[dm-diag] OK bid_id={bid_id} tier={chosen_tier} '
           f'active={len(active_rows)}', flush=True)
 
+    # ── Tier-1.5 Sonnet filter ─────────────────────────────────────────
+    # Tier 1 is exact-trim so doesn't need filtering. Tier 2 drops trim entirely
+    # (silent false positives like Scat Pack vs Hellcat). Tier 3 is SQL body-strip
+    # which still leaks variants. Hand each candidate's trim to claude_trim_match
+    # which caches per-pair forever in trim_match_cache. Falls open on any error.
+    sonnet_active_kept = sonnet_active_dropped = 0
+    sonnet_applied = False
+    if chosen_tier in ('tier2_canon_ymm', 'tier3_freetext') and active_rows:
+        active_rows, sonnet_active_kept, sonnet_active_dropped, sonnet_applied =             _sonnet_filter_rows(active_rows, eff_make, eff_model, eff_year,
+                                eff_trim, db_conn, bid_id=bid_id, kind='active')
+        if sonnet_applied:
+            if active_rows:
+                # Sonnet-filtered candidates are semantically same trim → high conf
+                chosen_conf = 'high'
+            else:
+                # All candidates rejected → preserve tier label for the sales lookup,
+                # but tag confidence as none so the card doesn't claim a match.
+                chosen_conf = 'none'
+
     # Recent-sales tier query — same WHERE on whichever tier hit
     # (intentionally simpler — match on the tier that produced active rows
     # so the two tabs stay coherent)
@@ -358,6 +421,12 @@ def find_dealer_matches(db_conn, year, make, model,
             try: db_conn.rollback()
             except Exception: pass
 
+    # Filter sales_rows with Sonnet too — same Tier 2/3 leak applies here.
+    sonnet_sales_kept = sonnet_sales_dropped = 0
+    if chosen_tier in ('tier2_canon_ymm', 'tier3_freetext') and sales_rows:
+        sales_rows, sonnet_sales_kept, sonnet_sales_dropped, _ =             _sonnet_filter_rows(sales_rows, eff_make, eff_model, eff_year,
+                                eff_trim, db_conn, bid_id=bid_id, kind='sales')
+
     # ── Aggregate per-dealer sold patterns (restored from pre-strict v1) ──
     # Group deduped sales_rows by dealer_id → sold_count + avg_days_to_sell.
     # Drives the "Sold at partner dealers · last Nd" section on bid.html
@@ -401,6 +470,13 @@ def find_dealer_matches(db_conn, year, make, model,
         'config_used': dict(cfg),
         'tier_used': chosen_tier,
         'tier_confidence': chosen_conf,
+        'sonnet_filter': {
+            'applied': sonnet_applied,
+            'active_kept':    sonnet_active_kept,
+            'active_dropped': sonnet_active_dropped,
+            'sales_kept':     sonnet_sales_kept,
+            'sales_dropped':  sonnet_sales_dropped,
+        },
     }
 
 
