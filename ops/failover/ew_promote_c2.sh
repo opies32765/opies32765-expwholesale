@@ -40,7 +40,17 @@ crontab -l | sed -E 's|^# DISABLED 2026-05-13 failover-state[^:]*: ||' | crontab
 log 'enabling thalist-scrape.timer'
 systemctl enable --now thalist-scrape.timer
 
-# 4. Start EW gunicorn + bouncer-killer
+# 4a. Remove the failover-state db_url.conf dropin (C2 was pointing at C1
+#     for the failback duration; now that C2 IS primary, gunicorn should
+#     write to LOCAL postgres). Idempotent — silent if dropin already gone.
+DROPIN=/etc/systemd/system/expwholesale.service.d/db_url.conf
+if [[ -f "$DROPIN" ]]; then
+    log 'removing failover-state db_url.conf dropin (C2 now writes to local PG)'
+    rm -f "$DROPIN"
+    systemctl daemon-reload
+fi
+
+# 4b. Start EW gunicorn + bouncer-killer
 log 'starting expwholesale + ew-bouncer-killer'
 systemctl start expwholesale ew-bouncer-killer
 sleep 6
