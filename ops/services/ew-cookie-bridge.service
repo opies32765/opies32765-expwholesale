@@ -1,0 +1,10 @@
+[Unit]
+Description=EW vAuto cookie bridge (vauto_session table -> file for BFF)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/expwholesale/venv/bin/python /opt/expwholesale/cookie_bridge.py
+StandardOutput=journal
+StandardError=journal

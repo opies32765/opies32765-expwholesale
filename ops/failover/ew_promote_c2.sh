@@ -40,6 +40,16 @@ crontab -l | sed -E 's|^# DISABLED 2026-05-13 failover-state[^:]*: ||' | crontab
 log 'enabling thalist-scrape.timer'
 systemctl enable --now thalist-scrape.timer
 
+# Install + enable cookie-bridge timer. Source-of-truth lives in
+# ops/services/; copy into /etc/systemd/system/ then enable. Idempotent.
+# Added 2026-05-14 — without this, failover loses the cookie pool safety net.
+log 'installing + enabling ew-cookie-bridge.timer'
+cp -f /opt/expwholesale/ops/services/ew-cookie-bridge.service /etc/systemd/system/ 2>/dev/null || log '  ew-cookie-bridge.service: skipping (not in rsync yet?)'
+cp -f /opt/expwholesale/ops/services/ew-cookie-bridge.timer   /etc/systemd/system/ 2>/dev/null || log '  ew-cookie-bridge.timer: skipping (not in rsync yet?)'
+systemctl daemon-reload
+systemctl enable --now ew-cookie-bridge.timer 2>/dev/null || log '  ew-cookie-bridge.timer: enable failed (units missing?)'
+
+
 # 4a. Remove the failover-state db_url.conf dropin (C2 was pointing at C1
 #     for the failback duration; now that C2 IS primary, gunicorn should
 #     write to LOCAL postgres). Idempotent — silent if dropin already gone.

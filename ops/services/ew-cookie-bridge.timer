@@ -1,0 +1,13 @@
+[Unit]
+Description=Fire EW vAuto cookie bridge every 30s
+Requires=ew-cookie-bridge.service
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Persistent=true
+Unit=ew-cookie-bridge.service
+
+[Install]
+WantedBy=timers.target
