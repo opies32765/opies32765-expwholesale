@@ -28,7 +28,14 @@ def _post_jwt_refresh(jwt):
         req = _ureq.Request(
             f"{EW_SERVER}/api/ipacket/refresh_token",
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                # Cloudflare WAF blocks default Python-urllib/3.x UA with 403.
+                # Pass a real browser UA so the push gets through. 2026-05-14.
+                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/147.0.0.0 Safari/537.36"),
+            },
             method="POST",
         )
         with _ureq.urlopen(req, timeout=8) as resp:
@@ -39,10 +46,15 @@ def _post_jwt_refresh(jwt):
         print(f"[ipacket] JWT refresh skipped: {type(e).__name__}: {str(e)[:80]}")
 
 
-def _attach_jwt_capture(page):
-    """Hook page.on('request') to capture Authorization Bearer tokens from
+def _attach_jwt_capture(ctx):
+    """Hook context.on('request') to capture Authorization Bearer tokens from
     autoipacket.com XHRs and POST them to the refresh endpoint. Idempotent —
-    only POSTs when the token actually changes."""
+    only POSTs when the token actually changes.
+
+    2026-05-14: Switched from page.on -> ctx.on. The lookup() flow reassigns
+    `page` mid-call (to whichever ctx page is logged in), so a page-level
+    hook attached early misses every subsequent XHR. Context-level catches
+    requests from ALL pages in the context regardless of identity."""
     last = {"token": None}
     def _on_request(request):
         try:
@@ -60,7 +72,7 @@ def _attach_jwt_capture(page):
         except Exception:
             pass
     try:
-        page.on("request", _on_request)
+        ctx.on("request", _on_request)
     except Exception:
         pass
 
@@ -182,7 +194,7 @@ def auto_login(page, ctx, max_seconds=60):
 
 def lookup(page, ctx, vin, t):
     print(f"[+{time.time()-t:5.1f}s] [ipacket] start")
-    _attach_jwt_capture(page)  # 2026-05-08: keep server JWT fresh on every call
+    _attach_jwt_capture(ctx)  # 2026-05-08: keep server JWT fresh on every call (ctx-level since 2026-05-14)
     page.goto(IPACKET_DPAPP, wait_until="domcontentloaded", timeout=30000); time.sleep(3)
     if not is_logged_in(page):
         if not auto_login(page, ctx):

@@ -30,6 +30,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
 .filter-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.6px;font-weight:700;margin-right:6px}
 .chip{padding:5px 12px;border:1px solid #1e293b;border-radius:16px;background:transparent;color:#94a3b8;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit}
 .chip:hover{color:#e2e8f0;border-color:#334155}
+.chip.dim{opacity:0.45}
 .chip.active{color:#c084fc;border-color:rgba(168,85,247,.4);background:rgba(168,85,247,.08)}
 .sort{margin-left:auto;display:flex;gap:6px;align-items:center}
 .sort select{background:#111827;border:1px solid #1e293b;color:#e2e8f0;padding:5px 10px;border-radius:6px;font-size:12px;font-family:inherit}
@@ -216,9 +217,25 @@ function renderSummary(s) {
 }
 
 function renderDealerChips() {
+  // Compute counts that respect the current status filter so chips don't
+  // say (7) and then click-through to an empty grid.
+  const s = state.filter.status;
+  const inStatus = r => {
+    if (s === 'active') return r.status !== 'passed' && r.status !== 'acquired';
+    if (s === 'all') return true;
+    return r.status === s;
+  };
+  const tally = {};
+  for (const r of state.rows) if (inStatus(r)) tally[r.dealer_id] = (tally[r.dealer_id]||0) + 1;
+  const total = Object.values(tally).reduce((a,b)=>a+b,0);
+  const isActive = state.filter.dealer || 'all';
   const c = document.getElementById('dealerChips');
-  c.innerHTML = '<button class="chip active" data-filter="dealer" data-value="all">All</button>' +
-    state.dealers.map(d => `<button class="chip" data-filter="dealer" data-value="${d.id}">${d.name} (${d.n})</button>`).join('');
+  c.innerHTML = `<button class="chip ${isActive==='all'?'active':''}" data-filter="dealer" data-value="all">All (${total})</button>` +
+    state.dealers.map(d => {
+      const n = tally[d.id] || 0;
+      const cls = String(isActive) === String(d.id) ? 'active' : (n === 0 ? 'dim' : '');
+      return `<button class="chip ${cls}" data-filter="dealer" data-value="${d.id}">${d.name} (${n})</button>`;
+    }).join('');
 }
 
 function renderRunInfo() {
@@ -233,7 +250,7 @@ function renderRunInfo() {
     MMR ok=${r.mmr_ok}/err=${r.mmr_errors}/no-data=${r.mmr_no_data} •
     candidates=${r.candidates_5pct} •
     rBook ok=${r.rbook_ok}/err=${r.rbook_errors} •
-    written=${r.opportunities_written}${r.auth_failed?' • AUTH FAILED':''}
+    written=${r.opportunities_written}${r.orphans_removed?' • orphans='+r.orphans_removed:''}${r.auth_failed?' • AUTH FAILED':''}
   `;
 }
 
@@ -263,7 +280,20 @@ function render() {
   const grid = document.getElementById('grid');
   const filtered = sortRows(state.rows.filter(passesFilter));
   if (!filtered.length) {
-    grid.innerHTML = '<div class="empty-state"><div class="ico">✓</div>No opportunities matching the filter.</div>';
+    const dealerName = state.filter.dealer === 'all' || !state.filter.dealer
+      ? null
+      : (state.dealers.find(d => String(d.id) === String(state.filter.dealer)) || {}).name;
+    const statusLbl = state.filter.status === 'active' ? 'active (new/pursuing/called)' : state.filter.status;
+    const totalHere = state.rows.filter(r => dealerName ? String(r.dealer_id) === String(state.filter.dealer) : true).length;
+    let msg = `No <b>${statusLbl}</b> opportunities`;
+    if (dealerName) msg += ` at <b>${dealerName}</b>`;
+    if (dealerName && totalHere > 0) {
+      const statuses = [...new Set(state.rows.filter(r => String(r.dealer_id) === String(state.filter.dealer)).map(r => r.status))];
+      msg += `. ${dealerName} has ${totalHere} opportunit${totalHere===1?'y':'ies'} with status: ${statuses.join(', ')}.`;
+    } else {
+      msg += '.';
+    }
+    grid.innerHTML = `<div class="empty-state"><div class="ico">✓</div>${msg}</div>`;
     return;
   }
   grid.innerHTML = filtered.map(card).join('');
@@ -405,6 +435,8 @@ document.addEventListener('click', e => {
   const v = c.dataset.value;
   state.filter[f] = v;
   document.querySelectorAll(`.chip[data-filter="${f}"]`).forEach(x => x.classList.toggle('active', x.dataset.value === v));
+  // When status changes, dealer chip counts need to update too.
+  if (f === 'status') renderDealerChips();
   render();
 });
 

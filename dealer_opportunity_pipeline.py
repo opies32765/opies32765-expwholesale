@@ -293,8 +293,9 @@ def insert_run(stats: dict) -> int:
             INSERT INTO opportunity_runs
               (mmr_attempted, mmr_ok, mmr_no_data, mmr_errors,
                candidates_5pct, rbook_attempted, rbook_ok, rbook_errors,
-               opportunities_written, auth_failed, notes, finished_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NOW())
+               opportunities_written, orphans_removed,
+               auth_failed, notes, finished_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NOW())
             RETURNING id
         """, (
             stats.get('mmr_attempted', 0), stats.get('mmr_ok', 0),
@@ -303,6 +304,7 @@ def insert_run(stats: dict) -> int:
             stats.get('rbook_attempted', 0), stats.get('rbook_ok', 0),
             stats.get('rbook_errors', 0),
             stats.get('opportunities_written', 0),
+            stats.get('orphans_removed', 0),
             stats.get('auth_failed', False),
             stats.get('notes', ''),
         ))
@@ -917,6 +919,32 @@ def main():
                 stats['opportunities_written'] += 1
             except Exception as e:
                 log.error('upsert failed for %s: %s', c['vin'], e)
+
+    # ── Phase 5b: orphan cleanup ─────────────────────────────────────────
+    # If this is a re-run for the same snapshot_date (manual trigger,
+    # retry-on-failure, threshold tweak, etc.), drop same-day rows whose
+    # VIN no longer qualifies AND whose status is still untouched (new).
+    # Operator-touched rows (pursuing/passed/acquired) are preserved.
+    if not args.dry_run:
+        current_vins = [c['vin'] for c in candidates if c.get('vin')]
+        with conn() as c_db, c_db.cursor() as cur:
+            if current_vins:
+                cur.execute("""
+                    DELETE FROM dealer_opportunities
+                     WHERE snapshot_date = CURRENT_DATE
+                       AND status = 'new'
+                       AND vin <> ALL(%s)
+                """, (current_vins,))
+            else:
+                cur.execute("""
+                    DELETE FROM dealer_opportunities
+                     WHERE snapshot_date = CURRENT_DATE
+                       AND status = 'new'
+                """)
+            removed = cur.rowcount
+            if removed > 0:
+                log.info('orphan cleanup: removed %d stale same-day rows', removed)
+            stats['orphans_removed'] = removed
 
     # ── Audit row ─────────────────────────────────────────────────────────
     if not args.dry_run:

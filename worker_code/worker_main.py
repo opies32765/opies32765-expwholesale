@@ -289,72 +289,122 @@ def _heartbeat_loop():
 # ── Cookie export thread ─────────────────────────────────────────────────────
 
 def _cookie_export_loop():
-    """Open a lightweight Playwright context against the same persistent
-    profile, scrape Cox/vAuto cookies, POST to EW. Repeats every minute.
+    """Read Chrome SQLite cookies directly (no Playwright launch — no profile
+    lock contention with main bid loop) and POST to /api/vauto/refresh_session
+    in the format the BFF reads. Replaces v1 Playwright-based loop that
+    silently skipped >95% of cycles because the main loop held the profile lock.
 
-    Uses a separate browser instance to avoid colliding with the main
-    process_bid context (Playwright can't share a persistent profile across
-    two simultaneous launches). To prevent that collision we only RUN this
-    thread between bids — it acquires the context, dumps cookies, closes.
-    Worst case the thread fails to open (profile in use) and we just skip.
+    Requires the calling process to be the same Windows user that owns the
+    Chrome profile (DPAPI scope). The ewworker service runs as worker-1, so
+    in-process DPAPI decryption works. Added 2026-05-14.
     """
-    from playwright.sync_api import sync_playwright
+    import os as _osmod
+    print("  [cookie-export v2] thread started pid=%d" % _osmod.getpid(), flush=True)
+    import base64 as _b64
+    import json as _j
+    import shutil as _shutil
+    import sqlite3 as _sqlite
+    import tempfile as _tf
+    try:
+        import win32crypt as _w32c
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM
+    except ImportError as _e:
+        print(f"  [cookie-export v2] missing deps ({_e}) — loop disabled")
+        return
+
+    EW_SESSION_URL = f"{EW_SERVER}/api/vauto/refresh_session"
+    EW_SECRET = os.environ.get(
+        "EW_VAUTO_REFRESH_SECRET",
+        "72bb9c82c4fb8d72220cdff8292afb7d1e8cc73bd073c67a5d4c3b4e1ed0a420")
+    APPRAISAL_ID = os.environ.get(
+        "EW_VAUTO_SESSION_APPRAISAL_ID",
+        "qWNKSOaUPCW6x4lPKnM8iojBTMhHy415I2iIv9GiCZ4=")
+    HEADERS_TEMPLATE = {
+        "platformuserid": PLATFORM_USER_ID,
+        "appraisalentityid": ENTITY_ID,
+        "currententityid": ENTITY_ID,
+        "accept": "application/json",
+        "content-type": "application/json",
+        "referer": "https://provision.vauto.app.coxautoinc.com/",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/147.0.0.0 Safari/537.36",
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-ch-ua": '"Chromium";v="147", "Not-A.Brand";v="99"',
+    }
+
+    def _get_aes_key():
+        ls_path = PROFILE_DIR / "Local State"
+        with open(ls_path, encoding="utf-8") as f:
+            ls = _j.load(f)
+        enc = _b64.b64decode(ls["os_crypt"]["encrypted_key"])[5:]
+        return _w32c.CryptUnprotectData(enc, None, None, None, 0)[1]
+
+    def _read_cookies():
+        cdb = PROFILE_DIR / "Default" / "Network" / "Cookies"
+        if not cdb.exists():
+            return []
+        key = _get_aes_key()
+        aesgcm = _AESGCM(key)
+        with _tf.TemporaryDirectory() as tmp:
+            tmp_db = Path(tmp) / "Cookies.copy"
+            _shutil.copy2(cdb, tmp_db)
+            conn = _sqlite.connect(f"file:{tmp_db}?mode=ro", uri=True)
+            rows = conn.execute(
+                "SELECT host_key,name,encrypted_value,path,expires_utc,"
+                "is_secure,is_httponly,samesite FROM cookies "
+                "WHERE host_key LIKE '%cox%' OR host_key LIKE '%vauto%' "
+                "OR host_key LIKE '%okta%' OR host_key LIKE '%megazord%'"
+            ).fetchall()
+            conn.close()
+        out = []
+        for host, name, ev, path, exp, sec, ho, ss in rows:
+            try:
+                if ev[:3] in (b"v10", b"v11"):
+                    val = aesgcm.decrypt(ev[3:15], ev[15:], None).decode("utf-8")
+                else:
+                    val = _w32c.CryptUnprotectData(ev, None, None, None, 0)[1].decode("utf-8")
+            except Exception:
+                continue
+            out.append({
+                "name": name, "value": val, "domain": host,
+                "path": path or "/", "expires": -1,
+                "secure": bool(sec), "httpOnly": bool(ho),
+                "sameSite": {0: "None", 1: "Lax", 2: "Strict"}.get(ss, "Lax"),
+            })
+        return out
 
     while not _stop_event.is_set():
-        # Sleep first so we don't fight the very first bid for the profile lock
         for _ in range(COOKIE_EXPORT_INTERVAL):
             if _stop_event.is_set():
                 return
             time.sleep(1)
-
-        scoped = {}
         try:
-            with sync_playwright() as p:
-                ctx = p.chromium.launch_persistent_context(  # STEALTH-2026-05-10
-                    user_data_dir=str(PROFILE_DIR),
-                    headless=True,
-                    viewport={"width": 1200, "height": 800},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                    locale="en-US",
-                    timezone_id="America/New_York",
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                    ],
-                )
-                try:
-                    raw = ctx.cookies()
-                finally:
-                    ctx.close()
-            for c in raw:
-                domain = (c.get("domain") or "").lstrip(".")
-                if any(d in domain for d in WANTED_COOKIE_DOMAINS):
-                    scoped[c["name"]] = c["value"]
+            cookies = _read_cookies()
         except Exception as e:
-            # Most likely "profile in use" — main loop is mid-bid. Skip silently.
-            msg = str(e)
-            if "in use" not in msg.lower() and "lock" not in msg.lower():
-                print(f"  [cookie-export] context failed: {e}")
+            print(f"  [cookie-export v2] read failed: {e}", flush=True)
             continue
-
-        if "vAutoAuth" not in scoped:
+        print(f"  [cookie-export v2] tick: cookies={len(cookies)} vAutoAuth={any(c['name']=='vAutoAuth' for c in cookies)}", flush=True)
+        if not any(c["name"] == "vAutoAuth" for c in cookies):
             # No Cox session yet — don't push junk
             continue
-
+        payload = {
+            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "cookies": cookies,
+            "headers": HEADERS_TEMPLATE,
+            "session_appraisal_id": APPRAISAL_ID,
+        }
         try:
-            r = http_requests.post(EW_REFRESH_URL, json={
-                "label": WORKER_ID,
-                "cookies": scoped,
-                "entity_id": ENTITY_ID,
-                "platform_user_id": PLATFORM_USER_ID,
-            }, timeout=10)
+            r = http_requests.post(
+                EW_SESSION_URL, json=payload,
+                headers={"X-Auth": EW_SECRET}, timeout=10)
             if r.status_code == 200:
-                print(f"  [cookie-export] OK ({len(scoped)} cookies)")
+                print(f"  [cookie-export v2] OK ({len(cookies)} cookies, vAutoAuth)")
             else:
-                print(f"  [cookie-export] HTTP {r.status_code}: {r.text[:120]}")
+                print(f"  [cookie-export v2] HTTP {r.status_code}: {r.text[:120]}")
         except Exception as e:
-            print(f"  [cookie-export] post failed: {e}")
+            print(f"  [cookie-export v2] post failed: {e}")
 
 
 # ── Per-bid pipeline ─────────────────────────────────────────────────────────

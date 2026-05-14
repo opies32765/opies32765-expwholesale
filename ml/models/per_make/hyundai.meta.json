@@ -1,9 +1,9 @@
 {
   "make_name": "HYUNDAI",
-  "trained_at": "2026-05-13T08:31:43.717696Z",
-  "n_total": 343,
+  "trained_at": "2026-05-14T08:32:57.069480Z",
+  "n_total": 344,
   "n_train": 329,
-  "n_test": 14,
+  "n_test": 15,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,15 +219,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1428.0,
-    "mape_pct": 6.01,
-    "r2": 0.9175,
-    "within_5pct": 57.1,
-    "within_10pct": 78.6
+    "mae_dollars": 1376.0,
+    "mape_pct": 5.83,
+    "r2": 0.9194,
+    "within_5pct": 60.0,
+    "within_10pct": 80.0
   },
   "baseline_metrics": {
-    "mae_dollars": 1459.0,
-    "mape_pct": 5.53,
+    "mae_dollars": 1463.0,
+    "mape_pct": 5.68,
     "ratio": 1.0168
   },
   "top_features": [

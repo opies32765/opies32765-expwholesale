@@ -25,6 +25,97 @@ APPRAISAL_LIST = "https://provision.vauto.app.coxautoinc.com/Va/Appraisal/List.a
 SUCCESS_HOSTS = ("provision.vauto.app.coxautoinc.com", "vauto.app.coxautoinc.com")
 HYDRATE_TIMEOUT = 60
 
+# ── Worker-side cookie pusher (added 2026-05-14) ──────────────────────────────
+# Every successful lookup() captures the live Cox cookies from the Playwright
+# context and POSTs the BFF-format payload to /api/vauto/refresh_session on C1.
+# Mirrors verifier's cookie_export.py — gives 10+ producers feeding the pool
+# so the verifier stops being a single point of failure.
+EW_SERVER = os.environ.get("EW_SERVER", "https://experience-wholesale.net").rstrip("/")
+EW_REFRESH_SECRET = os.environ.get(
+    "EW_VAUTO_REFRESH_SECRET",
+    "72bb9c82c4fb8d72220cdff8292afb7d1e8cc73bd073c67a5d4c3b4e1ed0a420")
+SESSION_APPRAISAL_ID = os.environ.get(
+    "EW_VAUTO_SESSION_APPRAISAL_ID",
+    "qWNKSOaUPCW6x4lPKnM8iojBTMhHy415I2iIv9GiCZ4=")
+PLATFORM_USER_ID = os.environ.get(
+    "EW_PLATFORM_USER_ID", "871ccb54-8ee2-4b06-884c-763673204ae9")
+ENTITY_ID = os.environ.get(
+    "EW_ENTITY_ID", "jwaCvVdjsSFLY6C4O3LS63o-dJrUWByBui-rLqfI30Y=")
+_WANTED_DOMAINS = ("coxautoinc.com", "vauto.com", "vauto.app.coxautoinc.com",
+                   "okta", "megazord")
+_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+
+
+def _push_vauto_session(ctx):
+    """Snapshot ctx.cookies() and POST a BFF-shaped payload to refresh_session.
+    Skips silently if vAutoAuth absent (Cox session not yet established) or
+    if anything else fails (never wants to break a bid)."""
+    try:
+        all_cookies = ctx.cookies()
+    except Exception as _e:
+        print(f"[vauto] cookie snapshot failed: {type(_e).__name__}: {_e}")
+        return
+    bff_cookies = []
+    have_vauto_auth = False
+    for _c in all_cookies:
+        _d = (_c.get("domain") or "").lstrip(".").lower()
+        if not any(_dom in _d for _dom in _WANTED_DOMAINS):
+            continue
+        if _c.get("name") == "vAutoAuth":
+            have_vauto_auth = True
+        bff_cookies.append({
+            "name":     _c.get("name"),
+            "value":    _c.get("value"),
+            "domain":   _c.get("domain", ""),
+            "path":     _c.get("path", "/"),
+            "secure":   bool(_c.get("secure", False)),
+            "httpOnly": bool(_c.get("httpOnly", False)),
+            "sameSite": _c.get("sameSite", "Lax"),
+            "expires":  _c.get("expires", -1),
+        })
+    if not have_vauto_auth or len(bff_cookies) < 10:
+        return  # not a real session yet
+    payload = {
+        "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "cookies": bff_cookies,
+        "headers": {
+            "platformuserid":    PLATFORM_USER_ID,
+            "appraisalentityid": ENTITY_ID,
+            "currententityid":   ENTITY_ID,
+            "accept":             "application/json",
+            "content-type":       "application/json",
+            "referer":            "https://provision.vauto.app.coxautoinc.com/",
+            "user-agent":         _BROWSER_UA,
+            "sec-ch-ua-mobile":   "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-ch-ua":          '"Chromium";v="147", "Not.A/Brand";v="8"',
+        },
+        "session_appraisal_id": SESSION_APPRAISAL_ID,
+    }
+    try:
+        import json as _json
+        from urllib import request as _ureq
+        _data = _json.dumps(payload).encode("utf-8")
+        _req = _ureq.Request(
+            f"{EW_SERVER}/api/vauto/refresh_session",
+            data=_data,
+            headers={
+                "Content-Type": "application/json",
+                "X-Auth": EW_REFRESH_SECRET,
+                "User-Agent": _BROWSER_UA,
+            },
+            method="POST",
+        )
+        with _ureq.urlopen(_req, timeout=8) as _resp:
+            if _resp.status == 200:
+                print(f"[vauto] session pushed ({len(bff_cookies)} cookies, vAutoAuth)")
+            else:
+                print(f"[vauto] session push HTTP {_resp.status}")
+    except Exception as _e:
+        print(f"[vauto] session push skipped: {type(_e).__name__}: {str(_e)[:120]}")
+
+
 JS_HELPERS = r"""
 window.__vauto = (function() {
   function findByLabel(labelText) {
@@ -411,6 +502,9 @@ def lookup(page, ctx, vin, miles, t):
                     print(f"[+{time.time()-t:5.1f}s] [vauto] permalink attempt {attempt}: {result.get('err','no-titles')}, retrying")
     except Exception as e:
         print(f"[+{time.time()-t:5.1f}s] [vauto] permalink FAIL: {e}")
+
+    # Push fresh Cox cookies to C1 pool (best-effort, never blocks bid)
+    _push_vauto_session(ctx)
 
     return {
         "rbook":      _parse_dollars(last.get("rbook")),

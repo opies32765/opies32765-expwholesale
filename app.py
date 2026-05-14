@@ -72,6 +72,17 @@ try:
 except Exception as _e:
     print(f'[enrichment_api] blueprint not loaded: {_e}', flush=True)
 
+# Network Push blueprint — registers Jinja globals (get_bid_network_sold,
+# get_bid_network_claim, get_network_claims_banner) the bid.html template
+# expects. Without this, every bid page 500s with UndefinedError. The blueprint
+# was added 2026-05-12 (commit fc9129f) but its registration line never landed
+# in app.py until 2026-05-14. Drift-safe via @bp.record_once.
+try:
+    from network_push_bp import bp as _network_push_bp
+    app.register_blueprint(_network_push_bp)
+except Exception as _e:
+    print(f'[network_push] blueprint not loaded: {_e}', flush=True)
+
 # ── Dashboard login ───────────────────────────────────────────────────────────
 EW_USERNAME = os.environ.get('EW_USERNAME', 'admin')
 EW_PASSWORD = os.environ.get('EW_PASSWORD', 'Sedecrem3')
@@ -1958,6 +1969,12 @@ def bid_detail(bid_id):
                 bid['dc_opp_tier'] = 'gray'
         else:
             bid['dc_opp_tier'] = 'gray'
+        # Ensure every dc_* key the template reads exists, even on the
+        # try/except + else paths above. Avoids /bid/<id> 500s when
+        # ai_price is NULL or pct math bails (DealerClub bids pre-AI).
+        for _k in ('dc_opp_pct', 'dc_opp_gap', 'dc_all_in',
+                   'dc_buy_fee_used', 'dc_transport_used'):
+            bid.setdefault(_k, None)
 
     cur.execute("SELECT * FROM bid_photos WHERE bid_id = %s ORDER BY id", (bid_id,))
     photos = cur.fetchall()
@@ -9116,6 +9133,40 @@ def api_vauto_refresh_session():
                     'header_count': len(headers),
                     'captured_at': data.get('captured_at'),
                     'written_to': target})
+
+
+@app.route('/api/vauto/get_current_cookies', methods=['GET'])
+def api_vauto_get_current_cookies():
+    """Return the current vauto_session.json payload so consumers (verifiers,
+    other workers) can inject fresh cookies into their own Selenium/Playwright
+    context. Drops the verifiers' dependency on maintaining their own Cox
+    session — they become pool consumers.
+
+    Auth: X-Auth header must match EW_VAUTO_REFRESH_SECRET (same as
+    /api/vauto/refresh_session). Added 2026-05-14.
+    """
+    import json as _json
+    import os as _os
+    expected = (_os.environ.get('EW_VAUTO_REFRESH_SECRET') or '').strip()
+    if not expected:
+        return jsonify({'ok': False, 'error': 'server missing EW_VAUTO_REFRESH_SECRET'}), 500
+    provided = (request.headers.get('X-Auth') or '').strip()
+    if provided != expected:
+        return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+    target = '/opt/expwholesale/state/vauto_session.json'
+    try:
+        with open(target, 'r', encoding='utf-8') as fp:
+            payload = _json.load(fp)
+    except FileNotFoundError:
+        return jsonify({'ok': False, 'error': 'no cookies in pool yet'}), 503
+    except Exception as e:
+        return jsonify({'ok': False, 'error': f'read failed: {type(e).__name__}: {e}'}), 500
+    # Quick sanity — make sure pool has vAutoAuth
+    cookies = payload.get('cookies') or []
+    names = {(c.get('name') or '') for c in cookies if isinstance(c, dict)}
+    if 'vAutoAuth' not in names:
+        return jsonify({'ok': False, 'error': 'pool missing vAutoAuth'}), 503
+    return jsonify(payload)
 
 
 @app.route('/api/vauto/heartbeat', methods=['POST'])
