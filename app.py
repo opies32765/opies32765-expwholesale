@@ -1804,10 +1804,18 @@ def dashboard():
     # Sourcing-bot active requests for the sticky top banner. Stays in
     # priority order (matched first → wishlist last). Pre-computes last
     # user/bot messages so the template stays simple.
+    # 2026-05-14: uses its own connection — the main `db` was closed above,
+    # so the old `cur.execute` was failing silently against a closed conn,
+    # leaving the banner empty while ew_alert_unseen_count (computed by a
+    # separate context processor) still incremented. That mismatch caused
+    # the Buyer Inbox nav tab to pulse but have no anchor to scroll to.
     sourcing_active = []
     sourcing_unseen_count = 0
+    _src_db = None
     try:
-        cur.execute('''
+        _src_db = get_db()
+        _src_cur = _src_db.cursor()
+        _src_cur.execute('''
             SELECT id, phone, status, year_min, year_max, make, model, trim,
                    ext_color, miles_max, customer_name, conversation,
                    last_msg_at, last_inbound_at, created_at, seen_at
@@ -1824,7 +1832,7 @@ def dashboard():
                last_msg_at DESC
              LIMIT 50
         ''')
-        rows = cur.fetchall()
+        rows = _src_cur.fetchall()
         for r in rows:
             r = dict(r)
             conv = r.get('conversation') or []
@@ -1843,10 +1851,12 @@ def dashboard():
             sourcing_active.append(r)
     except Exception as _se:
         print(f'[dashboard] sourcing query error: {_se}', flush=True)
-        try: db.rollback()
-        except Exception: pass
         sourcing_active = []
         sourcing_unseen_count = 0
+    finally:
+        if _src_db is not None:
+            try: _src_db.close()
+            except Exception: pass
 
     # 2026-05-11: partner offer counts per bid for the yellow-star indicator.
     # Fresh connection — the main `db` is already closed by the time we get
@@ -15067,7 +15077,7 @@ def api_opportunities_snapshot():
         SELECT id, started_at, finished_at, mmr_attempted, mmr_ok,
                mmr_no_data, mmr_errors, candidates_5pct,
                rbook_attempted, rbook_ok, rbook_errors,
-               opportunities_written, auth_failed
+               opportunities_written, orphans_removed, auth_failed
           FROM opportunity_runs
          WHERE started_at::date = CURRENT_DATE
          ORDER BY started_at DESC
