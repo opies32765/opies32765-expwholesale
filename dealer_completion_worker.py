@@ -126,7 +126,16 @@ def _fill_color(row, sess):
             if resp.status_code != 200 or not resp.content:
                 fetch_failed = True
                 continue
-            mime = resp.headers.get('Content-Type', 'image/jpeg').split(';')[0]
+            mime = resp.headers.get('Content-Type', 'image/jpeg').split(';')[0].strip().lower()
+            # Skip non-image responses. Some dealer sites (e.g. TXT Charlie)
+            # serve HTTP 200 with text/html for missing image URLs (a 404
+            # page rendered for any unknown path). Sending that HTML to
+            # Gemini as image bytes was the cause of the
+            # 1095944 > 1048576 token-count INVALID_ARGUMENT errors
+            # observed 2026-05-14 — HTML body got binary-tokenized.
+            if not mime.startswith('image/'):
+                fetch_failed = True
+                continue
             # Capture Gemini's stdout + enforce a timeout so a hung SDK call
             # doesn't stall the whole worker.
             buf = io.StringIO()

@@ -556,6 +556,34 @@ def _gemini():
     return _gemini_client if _gemini_client else None
 
 
+def _resize_image_for_gemini(image_bytes, max_dim=1536, quality=85):
+    """Resize image to keep Gemini token count manageable. Vehicle photos
+    from dealer sites often arrive at 4000x3000+ which can push a single-image
+    request over Gemini's 1M-token cap (1095944 observed 2026-05-14 on
+    dealer_completion_worker).
+
+    Resizes to max_dim on the longest side preserving aspect, re-encodes
+    as JPEG (small + universal). Returns (new_bytes, 'image/jpeg').
+    Falls through to original bytes if PIL fails or image is already small.
+    """
+    try:
+        from PIL import Image
+        import io as _io
+        img = Image.open(_io.BytesIO(image_bytes))
+        w, h = img.size
+        if max(w, h) <= max_dim and len(image_bytes) < 2_000_000:
+            return image_bytes, 'image/jpeg'  # already small enough
+        if img.mode not in ('RGB', 'L'):
+            img = img.convert('RGB')
+        img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+        buf = _io.BytesIO()
+        img.save(buf, format='JPEG', quality=quality, optimize=True)
+        return buf.getvalue(), 'image/jpeg'
+    except Exception as e:
+        print(f'gemini: image resize failed ({e}); sending original', flush=True)
+        return image_bytes, 'image/jpeg'
+
+
 def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-flash',
                 max_tokens=1024, temperature=0.4):
     """One-shot Gemini call. Returns text response or None on failure.
@@ -565,6 +593,10 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-f
     2026-05-09: Auto-retries up to 2 times on 429 RESOURCE_EXHAUSTED with
     exponential backoff (1s, 2s). Per-minute Vertex quota recovers fast,
     so this self-heals burst spikes from concurrent bid assessments.
+
+    2026-05-14: Auto-resize large images (>1536 longest side) to keep
+    request under Gemini's 1M-token cap. Was causing 400 INVALID_ARGUMENT
+    on dealer photos from premium dealer sites (DealerClub, etc).
     """
     import time as _time
     client = _gemini()
@@ -572,6 +604,9 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-f
         return None
     from google.genai import types
     if image_bytes:
+        # Downsize oversized images before encoding — Gemini's per-request
+        # token budget is finite; high-res dealer photos can blow it.
+        image_bytes, mime = _resize_image_for_gemini(image_bytes)
         contents = [
             types.Part.from_bytes(data=image_bytes, mime_type=mime),
             prompt,
@@ -12412,35 +12447,26 @@ def _comp_msrp_processor_loop():
 
 
 def _start_comp_msrp_processor():
-    """Start the daemon thread once per HOST (not per gunicorn worker).
-    iPacket rate-limits aggressively (~401s on concurrent >2 callers), so
-    we use a file-based exclusive lock to ensure only ONE gunicorn worker
-    process runs the loop; the other 5 skip. Combined with VM 121's
-    oscar-worker-2, total concurrency = 2 (1 C2 + 1 VM 121).
-    Gated by env COMP_MSRP_DAEMON=1."""
+    """Start the daemon thread once per gunicorn worker. Idempotent.
+    Gated by env COMP_MSRP_DAEMON=1 — default OFF since VM 121
+    (oscar-worker-2) is the canonical comp_msrp processor. Set the env
+    var only when VM 121 is offline and you need the server to fall
+    back to handling comp_msrp jobs."""
     if os.environ.get('COMP_MSRP_DAEMON', '0') != '1':
         return
-    import threading, fcntl
-    global _COMP_MSRP_THREAD_STARTED, _COMP_MSRP_LOCK_FH
+    import threading
+    global _COMP_MSRP_THREAD_STARTED
     try:
         _COMP_MSRP_THREAD_STARTED
     except NameError:
         _COMP_MSRP_THREAD_STARTED = False
-        _COMP_MSRP_LOCK_FH = None
     if _COMP_MSRP_THREAD_STARTED:
         return
-    try:
-        fh = open('/tmp/ew_comp_msrp_daemon.lock', 'w')
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (OSError, BlockingIOError):
-        return
-    _COMP_MSRP_LOCK_FH = fh
     _COMP_MSRP_THREAD_STARTED = True
     t = threading.Thread(target=_comp_msrp_processor_loop,
                          name='comp_msrp_processor', daemon=True)
     t.start()
-    print(f'[comp_msrp processor] DAEMON STARTED (pid={os.getpid()}, '
-          f'single-host singleton via /tmp/ew_comp_msrp_daemon.lock)',
+    print('[comp_msrp processor] DAEMON STARTED (env COMP_MSRP_DAEMON=1)',
           flush=True)
 
 
