@@ -5638,7 +5638,7 @@ def api_bids():
         SELECT b.id, b.phone, b.vin, b.year, b.make, b.model, b.mileage,
                b.raw_message, b.status, b.created_at, b.bid_amount, b.ai_price, b.asking_price,
                b.has_unread, b.partner_dealer_id, b.partner_request_id, b.salesperson,
-               b.bidder_name, b.awaiting_name,
+               b.bidder_name, b.awaiting_name, b.vin_invalid_reason,
                c.name as contact_name, c.company as contact_company, c.role as contact_role,
                d.name as partner_dealer_name,
                dl.current_price       AS dc_current_price,
@@ -5714,6 +5714,7 @@ def api_bids():
             'dc_opp_pct':  dc_pct,
             'dc_detail_url': r.get('dc_detail_url'),
             'dc_status': r.get('dc_status'),
+            'vin_invalid_reason': r.get('vin_invalid_reason'),
         })
 
     cur.execute("SELECT bid_id, COUNT(*) as cnt FROM bid_photos GROUP BY bid_id")
@@ -8838,6 +8839,7 @@ def api_vauto_pending():
             SELECT b.id
             FROM bids b
             WHERE b.vin IS NOT NULL AND length(b.vin) = 17
+              AND b.vin_invalid_reason IS NULL  -- 2026-05-14: skip ISO-3779-invalid VINs (e.g. bid 1438 typo) so workers don't spin
               AND NOT EXISTS (
                   SELECT 1 FROM vauto_lookups vl
                    WHERE vl.bid_id = b.id

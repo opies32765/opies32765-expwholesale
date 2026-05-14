@@ -695,7 +695,13 @@ function renderRow(b, pc, fp, activeWorker) {
     ? '<span title="Scan complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>'
     : '<span title="Scanning…" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px;animation:pulse 2s infinite">vA</span>'
   ) : '';
-  const vehicle = b.vin ? `<div class="vehicle-vin">${b.vin}${vaBadge}</div>${vehicleDesc}` : '<div class="no-vin">No VIN extracted</div>';
+  // RED 'INVALID VIN' badge when vin_invalid_reason is set (ISO 3779 check
+  // digit / illegal char / wrong length). Worker eligibility query excludes
+  // these so they stop spinning the worker pool. The dashboard shows WHY.
+  const invBadge = b.vin_invalid_reason
+    ? `<span title="VIN failed structural check: ${b.vin_invalid_reason}. Worker pool will not pick this up." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ INVALID VIN</span>`
+    : '';
+  const vehicle = b.vin ? `<div class="vehicle-vin"${b.vin_invalid_reason ? ' style="color:#fca5a5;text-decoration:line-through"' : ''}>${b.vin}${vaBadge}${invBadge}</div>${vehicleDesc}` : '<div class="no-vin">No VIN extracted</div>';
   let photos = '—';
   if ((pc||0) > 0) {
     const thumbSrc = fp ? (fp.startsWith('/static/') ? fp : ('/thumb?url=' + encodeURIComponent(fp) + '&size=mobile')) : null;

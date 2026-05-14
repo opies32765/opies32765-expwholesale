@@ -71,8 +71,30 @@ def canonicalize_bid_vin(bid_id: int, conn,
         existing_canon_source = row[7]
 
     out['vin'] = vin
-    if not vin or len(vin) != 17:
-        out['reason'] = 'invalid_vin'
+
+    # ── VIN structural validation (length + char set + ISO 3779 check digit)
+    # Failing here is terminal — write bids.vin_invalid_reason so the worker
+    # eligibility query excludes this bid and the dashboard shows a red
+    # 'INVALID VIN' badge. Skip the decode entirely.
+    try:
+        from vin_validate import validate as _vin_validate
+        v_check = _vin_validate(vin)
+    except Exception as _e:
+        log.warning('bid %d vin_validate import failed: %s', bid_id, _e)
+        v_check = {'valid': True, 'reason': None}  # fail open
+    if not v_check['valid']:
+        try:
+            cur.execute(
+                'UPDATE bids SET vin_invalid_reason = %s WHERE id = %s',
+                (v_check['reason'], bid_id))
+            # Release any in-flight claim so the worker pool moves on.
+            cur.execute(
+                'UPDATE bids SET vauto_claimed_at = NULL, vauto_claimed_by = NULL '
+                'WHERE id = %s', (bid_id,))
+        except Exception as _e:
+            log.warning('bid %d set vin_invalid_reason failed: %s', bid_id, _e)
+        out['reason'] = f'invalid_vin:{v_check["reason"]}'
+        out['vin_invalid_reason'] = v_check['reason']
         return out
 
     # Idempotency: don't overwrite a high-confidence canon (e.g. overseer

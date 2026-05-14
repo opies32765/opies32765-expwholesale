@@ -55,7 +55,7 @@ def main():
                EXTRACT(EPOCH FROM (NOW() - claimed_at))::int AS age_sec
           FROM worker_jobs
          WHERE completed_at IS NULL
-           AND status IS NULL
+           AND (status IS NULL OR status = 'in_progress')
            AND job_type = 'vauto'
            AND claimed_at < NOW() - (%s || ' seconds')::interval
          ORDER BY id ASC
