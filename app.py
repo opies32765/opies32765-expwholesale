@@ -7087,14 +7087,46 @@ _ensure_vds_unknown_table()
 
 # ── Precise VIN decoder wrapper — wraps decode_vin with VDS tables + auto.dev
 def decode_vin_precise_wrapper(vin):
-    """Calls vin_precise.decode_vin_precise passing our NHTSA decoder + a
-    fresh DB conn for vds_unknown logging. Returns dict with trim_confidence.
-    Caller should update bids.trim_confidence if desired."""
+    """claude_vin_decoder_live_marker_20260514 — Now calls Claude Sonnet 4.6
+    via decode_vin_smart() FIRST. Falls back to existing VDS+NHTSA cascade
+    only if Claude returns nothing or low confidence (<0.5).
+
+    trim_confidence is capped at 'high' (never 'deterministic') so downstream
+    Carfax/vAuto/AccuTrade consensus can still override when Claude is wrong.
+    """
+    if not vin or len(vin) != 17:
+        return None
+
+    # ── Primary path: Claude Sonnet 4.6 via decode_vin_smart ──
+    try:
+        from claude_vin_decoder import decode_vin_smart
+        _db_c = get_db()
+        try:
+            result = decode_vin_smart(vin, _db_c, nhtsa_fallback=decode_vin)
+        finally:
+            _db_c.close()
+        if result and float(result.get('confidence') or 0) >= 0.5:
+            conf = float(result.get('confidence') or 0)
+            trim_conf = 'high' if conf >= 0.85 else ('medium' if conf >= 0.65 else 'low')
+            return {
+                'vin': vin,
+                'year': result.get('year'),
+                'make': (result.get('make') or '').upper() or None,
+                'model': result.get('model'),
+                'trim': result.get('trim'),
+                'style': result.get('body_style'),
+                'trim_confidence': trim_conf,
+                'source': result.get('source') or 'claude_sonnet_4_6',
+            }
+    except Exception as e:
+        print(f'[decode_vin_precise_wrapper] Claude path error: {e}', flush=True)
+        # fall through to legacy cascade
+
+    # ── Legacy fallback: existing VDS+NHTSA cascade ──
     try:
         from vin_precise import decode_vin_precise
     except Exception as e:
         print(f'vin_precise import failed: {e}', flush=True)
-        # Graceful fallback — wrap the NHTSA decoder in the precise-shape dict
         b = decode_vin(vin) or {}
         t = b.get('trim')
         return {
@@ -7108,7 +7140,7 @@ def decode_vin_precise_wrapper(vin):
         _db.close()
         return r
     except Exception as e:
-        print(f'decode_vin_precise_wrapper error: {e}', flush=True)
+        print(f'decode_vin_precise_wrapper legacy error: {e}', flush=True)
         b = decode_vin(vin) or {}
         return {
             'vin': vin, 'year': b.get('year'), 'make': b.get('make'),
@@ -9054,6 +9086,13 @@ def api_vauto_refresh_session():
     if not any(any(d in dom for d in ('cox', 'vauto', 'okta', 'megazord'))
                for dom in domains):
         return jsonify({'ok': False, 'error': 'no cox/vauto/okta/megazord domain cookies'}), 400
+    # vAutoAuth is Cox's session auth cookie. A push lacking it means the
+    # pusher's Cox session has expired and they're sending pre-login junk
+    # (analytics/marketing cookies only). Reject — keep the previous valid
+    # file rather than overwrite with garbage. Added 2026-05-14.
+    cookie_names = {(c.get('name') or '') for c in cookies if isinstance(c, dict)}
+    if 'vAutoAuth' not in cookie_names:
+        return jsonify({'ok': False, 'error': 'vAutoAuth cookie missing — pre-login junk rejected'}), 400
 
     target = '/opt/expwholesale/state/vauto_session.json'
     try:
