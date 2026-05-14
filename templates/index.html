@@ -440,7 +440,7 @@ setInterval(() => {
     <tbody>
       {% for bid in bids %}
       {% set _po = partner_offer_counts.get(bid.id, {'n':0,'unseen':0}) if partner_offer_counts is defined else {'n':0,'unseen':0} %}
-      <tr data-id="{{ bid.id }}" data-created="{{ bid.created_at.isoformat() if bid.created_at else '' }}" data-unread="{{ '1' if bid.has_unread else '0' }}" class="status-{{ bid.status }}">
+      <tr data-id="{{ bid.id }}" data-created="{{ bid.created_at.isoformat() if bid.created_at else '' }}" data-unread="{{ '1' if bid.has_unread else '0' }}" class="status-{{ bid.status }}{% if bid.vin_invalid_reason %} bad-vin{% endif %}">
         <td>
           <div class="bid-num">{% if bid.has_unread %}<span class="unread-star" title="Unread message">&#9733;</span>{% endif %}{% if _po.n %}<span title="{{ _po.n }} partner offer{% if _po.n != 1 %}s{% endif %} received{% if _po.unseen %} ({{ _po.unseen }} new){% endif %}" style="color:#fbbf24;font-weight:700;margin-right:3px">&#9733;</span>{% endif %}#{{ bid.id }}</div>
           <div class="bid-time">{{ time_ago(bid.created_at) }}</div>
@@ -505,7 +505,7 @@ setInterval(() => {
         </td>
         <td>
           {% if bid.vin %}
-            <div class="vehicle-vin">{{ bid.vin }}{% if bid.id in vauto_done %}<span title="vAuto complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% else %}<span title="vAuto pending" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% endif %}</div>
+            <div class="vehicle-vin"{% if bid.vin_invalid_reason %} style="color:#fca5a5;text-decoration:line-through"{% endif %}>{{ bid.vin }}{% if bid.vin_invalid_reason %} <span title="VIN failed structural check: {{ bid.vin_invalid_reason }}. Worker pool will not pick this up." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ INVALID VIN</span>{% endif %}{% if bid.id in vauto_done %}<span title="vAuto complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% else %}<span title="vAuto pending" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% endif %}</div>
             {% if bid.year or bid.make or bid.mileage %}
               <div class="vehicle-desc">{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }}{% if bid.mileage %} {% if bid.year or bid.make %}· {% endif %}{{ '{:,}'.format(bid.mileage) }} mi{% endif %}</div>
             {% endif %}
