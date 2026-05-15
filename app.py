@@ -9130,11 +9130,50 @@ def api_vauto_refresh_session():
     except Exception as e:
         return jsonify({'ok': False, 'error': f'write failed: {e}'}), 500
 
+    # Also UPSERT into vauto_session table so cookie_bridge sees a fresh row
+    # next poll. Without this, the bridge re-reads its last stale row every
+    # 30s and overwrites THIS file write with stale data. (2026-05-15)
+    # Label: X-Worker-Id header > payload.label > 'worker_pool'.
+    db_upsert_ok = None
+    try:
+        _label = (request.headers.get('X-Worker-Id') or
+                  data.get('label') or 'worker_pool')[:64]
+        _cookies_dict = {c['name']: c['value'] for c in cookies
+                         if isinstance(c, dict) and c.get('name')}
+        _entity_id = (headers.get('appraisalentityid') or
+                      headers.get('currententityid') or '')
+        _platform_user_id = headers.get('platformuserid') or ''
+        _user_agent = headers.get('user-agent') or ''
+        _db = get_db()
+        _cur = _db.cursor()
+        _cur.execute("""
+            INSERT INTO vauto_session
+                (label, cookies, entity_id, platform_user_id, user_agent,
+                 refreshed_at, refreshed_by)
+            VALUES (%s, %s, %s, %s, %s, NOW(), %s)
+            ON CONFLICT (label) DO UPDATE SET
+                cookies          = EXCLUDED.cookies,
+                entity_id        = EXCLUDED.entity_id,
+                platform_user_id = EXCLUDED.platform_user_id,
+                user_agent       = EXCLUDED.user_agent,
+                refreshed_at     = NOW(),
+                refreshed_by     = EXCLUDED.refreshed_by
+        """, (_label, _json.dumps(_cookies_dict), _entity_id,
+              _platform_user_id, _user_agent, 'refresh_session_endpoint'))
+        _db.commit()
+        _db.close()
+        db_upsert_ok = True
+    except Exception as _e:
+        db_upsert_ok = False
+        print(f'[refresh_session] db upsert failed: {type(_e).__name__}: {_e}',
+              flush=True)
+
     return jsonify({'ok': True,
                     'cookie_count': len(cookies),
                     'header_count': len(headers),
                     'captured_at': data.get('captured_at'),
-                    'written_to': target})
+                    'written_to': target,
+                    'db_upsert_ok': db_upsert_ok})
 
 
 @app.route('/api/vauto/get_current_cookies', methods=['GET'])

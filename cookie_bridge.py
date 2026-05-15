@@ -29,7 +29,7 @@ TARGET = os.environ.get(
 # Labels to prefer (newest-with-valid-vAutoAuth wins). Order matters: tried
 # in priority order. Adding worker labels here as workers start pushing.
 LABEL_PRIORITY = (os.environ.get('EW_BRIDGE_LABELS')
-                  or 'oscarpas,vm-worker-1,vm-worker-2,vm-worker-3,'
+                  or 'worker_pool,oscarpas,vm-worker-1,vm-worker-2,vm-worker-3,'
                      'vm-worker-4,vm-worker-5,vm-worker-6,vm-worker-7,'
                      'vm-worker-8,vm-worker-9,vm-worker-10,vm-worker-11,'
                      'vm-worker-12,vm-worker-13').split(',')
