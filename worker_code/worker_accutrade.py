@@ -322,13 +322,44 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
             i.dispatchEvent(new Event('blur',   {bubbles: true}));
         }
     }""", int(miles))
-    # Was time.sleep(7) — replaced with poll-until-values-appear loop.
-    # Most lookups finish recalc in 2-4s; we cap at 7s so worst case == old behavior.
-    deadline = time.time() + 7
+    # MILEAGE_COMMIT_FIX_2026_05_15: JS dispatchEvent('blur') above doesn't
+    # actually move focus, so on some vehicles (e.g. bid 1446 Audi R8 RWS)
+    # AccuTrade's Angular CDK never sees a real blur -> recalc doesn't fire
+    # -> base-mileage values stay on the page and the old poll exits early
+    # because the $-labels already exist. Force a true Tab via Playwright,
+    # then poll for an explicit commit signal (badge OR odometer adjustment).
+    try:
+        page.keyboard.press('Tab')
+    except Exception:
+        pass
+    deadline = time.time() + 12  # was 7
+    mileage_committed = False
     while time.time() < deadline:
-        ready = page.evaluate(r"""() => {
+        sig = page.evaluate(r"""(target) => {
+            const text = (document.body && document.body.innerText) || '';
+            // Strong commit signal: 'Mileage entered' badge AccuTrade renders
+            // beneath the input after a successful commit.
+            if (/Mileage\s+entered/i.test(text)) return 'badge';
+            // Fallback signal: Odometer line shows a non-$0 dollar adjustment
+            // (penalty for high miles or bonus for low miles vs. base).
+            const om = text.match(/Odometer[\s\S]{0,60}(-?\$\s*[\d,]+)/);
+            if (om) {
+                const amt = parseInt(om[1].replace(/[^0-9-]/g, ''));
+                if (Number.isFinite(amt) && amt !== 0) return 'odometer';
+            }
+            return '';
+        }""", int(miles))
+        if sig:
+            mileage_committed = True
+            break
+        time.sleep(0.4)
+    # If no commit signal at all, also check that at least 2 $-labels exist
+    # (pre-fix behavior) as a soft pass. This keeps coverage for vehicles
+    # whose entered miles happen to == base miles (rare; no odometer adjust
+    # AND AccuTrade may or may not show 'Mileage entered' badge in that case).
+    if not mileage_committed:
+        soft_ok = page.evaluate(r"""() => {
             const text = document.body.innerText || '';
-            // Need at least 2 of the dollar-value labels to have a $value next to them
             const labels = ['Instant Offer','Target Auction','Target Retail','Wholesale'];
             let hits = 0;
             for (const lab of labels) {
@@ -339,8 +370,18 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
             }
             return hits >= 2;
         }""")
-        if ready: break
-        time.sleep(0.4)
+        if not soft_ok:
+            # Page didn't even render dollar values — total failure.
+            return {
+                "guaranteed_offer": None, "trade_in": None, "trade_market": None,
+                "retail": None, "market_avg": None, "screenshot": None,
+                "appraisal_url": page.url if "/appraisal/" in page.url else None,
+                "selected_trim_text": selected_trim_text,
+                "trim_select_source": trim_select_source,
+                "not_available_reason": "mileage_did_not_commit_no_values",
+            }
+        # Soft pass: log it. Server-side handler can decide whether to trust.
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] WARN: no commit signal for miles={miles}; storing anyway with soft flag")
 
     values = page.evaluate(r"""() => {
         const map = [
@@ -384,8 +425,8 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
         screenshot = None
 
     appraisal_url = page.url if "/appraisal/" in page.url else None
-    print(f"[+{time.time()-t:5.1f}s] [accutrade] done values={values} url={appraisal_url}")
-    return {
+    print(f"[+{time.time()-t:5.1f}s] [accutrade] done values={values} url={appraisal_url} committed={mileage_committed}")
+    result = {
         "guaranteed_offer": values.get("guaranteed_offer"),
         "trade_in": values.get("trade_in"),
         "trade_market": values.get("trade_market"),
@@ -396,3 +437,8 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
         "selected_trim_text": selected_trim_text,
         "trim_select_source": trim_select_source,
     }
+    if not mileage_committed:
+        # Surfaced for server-side to mark unavailable_reason; values may be
+        # base-mileage, not user-entered.
+        result["mileage_uncommitted"] = True
+    return result
