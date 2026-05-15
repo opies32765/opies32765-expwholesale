@@ -10542,7 +10542,7 @@ def api_correction_lookup_segment():
         cur.execute("""
             SELECT bid_id, vin, year, mileage,
                    ai_recommendation, actual_purchase_cost, delta_pct,
-                   actual_purchased_at::date AS sold_date
+                   actual_purchased_at::date AS purchased_date
               FROM (
                 SELECT DISTINCT ON (vin) bid_id, vin, year, mileage,
                        ai_recommendation, actual_purchase_cost, delta_pct,
@@ -10558,13 +10558,13 @@ def api_correction_lookup_segment():
              ORDER BY actual_purchased_at DESC LIMIT 5
         """, (make.upper(), model.upper()))
         cols = ['bid_id','vin','year','mileage','ai_recommendation',
-                'actual_purchase_cost','delta_pct','sold_date']
+                'actual_purchase_cost','delta_pct','purchased_date']
         bids = []
         for r in cur.fetchall():
             d = dict(r) if isinstance(r, dict) else dict(zip(cols, r))
             if d.get('delta_pct') is not None: d['delta_pct'] = float(d['delta_pct'])
-            if d.get('sold_date') and hasattr(d['sold_date'], 'isoformat'):
-                d['sold_date'] = d['sold_date'].isoformat()
+            if d.get('purchased_date') and hasattr(d['purchased_date'], 'isoformat'):
+                d['purchased_date'] = d['purchased_date'].isoformat()
             bids.append(d)
         db.close()
 

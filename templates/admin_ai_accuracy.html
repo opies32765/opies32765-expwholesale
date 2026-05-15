@@ -480,7 +480,7 @@ function renderSegmentModal(d, ctx){
   let bidsHtml = '';
   if(d.last_5_bids && d.last_5_bids.length){
     bidsHtml = `<div style="font-size:11px;color:#94a3b8;margin:14px 0 6px;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Recent unique cars (newest first)</div>
-      <table><thead><tr><th>Bid</th><th>Year</th><th style="text-align:right">Miles</th><th style="text-align:right">AI rec</th><th style="text-align:right">Sold</th><th style="text-align:right">Δ%</th><th>Date</th></tr></thead><tbody>`;
+      <table><thead><tr><th>Bid</th><th>Year</th><th style="text-align:right">Miles</th><th style="text-align:right">AI rec</th><th style="text-align:right">Paid</th><th style="text-align:right">Δ%</th><th>Date</th></tr></thead><tbody>`;
     d.last_5_bids.forEach(b => {
       const bcls = b.delta_pct==null?'':(Math.abs(b.delta_pct)<=5?'b-green':Math.abs(b.delta_pct)<=10?'b-yellow':'b-red');
       bidsHtml += `<tr>
@@ -490,7 +490,7 @@ function renderSegmentModal(d, ctx){
         <td style="text-align:right">${b.ai_recommendation?'$'+Number(b.ai_recommendation).toLocaleString():'—'}</td>
         <td style="text-align:right">${b.actual_purchase_cost?'$'+Number(b.actual_purchase_cost).toLocaleString():'—'}</td>
         <td style="text-align:right"><span class="badge ${bcls}">${b.delta_pct!=null?((-b.delta_pct>=0?'+':''))+(-b.delta_pct).toFixed(1)+'%':'—'}</span></td>
-        <td>${b.sold_date||'—'}</td>
+        <td>${b.purchased_date||'—'}</td>
       </tr>`;
     });
     bidsHtml += '</tbody></table>';
@@ -508,7 +508,7 @@ function renderSegmentModal(d, ctx){
         <div>
           <div style="font-size:18px;font-weight:800;color:#e2e8f0">${ymmTitle}</div>
           <div style="font-size:11px;color:#64748b;margin-top:2px">${miles} ${ctx.bid_id?' · bid #'+ctx.bid_id:''} ${ctx.vin?' · '+ctx.vin:''}</div>
-          ${ctx.delta_pct!=null?`<div style="font-size:12px;color:#94a3b8;margin-top:6px">AI rec ${aiRec} · sold ${actual} · <span style="color:${deltaColor};font-weight:700">${delta}</span></div>`:''}
+          ${ctx.delta_pct!=null?`<div style="font-size:12px;color:#94a3b8;margin-top:6px">AI rec ${aiRec} · paid ${actual} · <span style="color:${deltaColor};font-weight:700">${delta}</span></div>`:''}
         </div>
         <button onclick="closeSegmentModal()" style="background:transparent;border:1px solid #475569;color:#94a3b8;border-radius:4px;width:28px;height:28px;cursor:pointer;font-size:16px">×</button>
       </div>
