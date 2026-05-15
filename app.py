@@ -98,6 +98,7 @@ _PUBLIC_PREFIXES = (
     '/api/thalist/',     # thalist.com scraper -> EW (shared-secret auth)
     '/api/dealerclub/',  # dealerclub live-auction scraper -> EW (shared-secret auth)
     '/api/comp_msrp/',   # VM 121 comp_msrp worker (claim, submit, jwt, status)
+    "/api/internal/",  # internal worker -> SMS bridge (X-Auth gated inside handler)
     '/api/worker/',  # progress, session_lost — worker-facing, no login
     '/api/dealer/vauto_verify', '/api/dealer/vauto_verify_queue',
     '/api/dealer/beelink_scrape_queue', '/api/dealer/beelink_scrape_result',
@@ -727,8 +728,12 @@ def filter_rbook_to_strict_peers(subject_vin, rows, min_kept=5):
     return kept, dropped, 'strict_vin_pfx5'
 
 
+# MILES_DECIMAL_K_2026_05_15: added \d{1,3}\.\d{1,2} branch so "15.6k"
+# / "1.5k" / "47.5k" parse correctly. Also relaxed \d{3,6} to \d{2,6}
+# so bare "15k" works without commas. Decimal-k is converted in the
+# parser body (see extract_miles_from_text below).
 _MILES_RE_LABELED = re.compile(
-    r'(\d{1,3}(?:[,. ]\d{3})+|\d{3,6})\s*(?:k\b|mi\b|miles?\b|mileage\b)',
+    r'(\d{1,3}\.\d{1,2}|\d{1,3}(?:[,. ]\d{3})+|\d{2,6})\s*(?:k\b|mi\b|miles?\b|mileage\b)',
     re.IGNORECASE)
 _MILES_RE_KSHORT = re.compile(r'\b(\d{2,3})\s*[kK]\b')
 # Bare comma-grouped numbers like "47,000" or "120,500" — used only when a VIN
@@ -860,14 +865,25 @@ def extract_miles_from_text(text, has_vin=False):
     if not text:
         return None
     for m in _MILES_RE_LABELED.finditer(text):
-        raw = m.group(1).replace(',', '').replace('.', '').replace(' ', '')
-        try:
-            n = int(raw)
-        except ValueError:
-            continue
+        raw = m.group(1)
+        # Suffix is the LAST char of the full match — k / i / s / e
+        # (mi → i, miles → s, mileage → e, k → k).
         suffix = m.group(0).rstrip()[-1].lower()
-        if suffix == 'k' and n < 1000:
-            n *= 1000
+        # MILES_DECIMAL_K_2026_05_15: handle decimal-k like "15.6k" → 15600.
+        # Only when there's a dot AND the suffix is k.
+        if '.' in raw and suffix == 'k':
+            try:
+                n = int(round(float(raw) * 1000))
+            except ValueError:
+                continue
+        else:
+            cleaned = raw.replace(',', '').replace('.', '').replace(' ', '')
+            try:
+                n = int(cleaned)
+            except ValueError:
+                continue
+            if suffix == 'k' and n < 1000:
+                n *= 1000
         if 100 <= n <= 999999:
             return n
     m = _MILES_RE_KSHORT.search(text)
@@ -1249,14 +1265,52 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
                     print(f'[OCR] Mileage via Google Vision (label-before): {n}', flush=True)
                     return n
 
-        # Then: numbers explicitly labeled "mi" / "miles" / "km" — label AFTER number
-        labeled = re.findall(r'(\d{1,3}(?:,\d{3})+|\d{3,7})\s*(?:MI|MILES|KM)\b', up)
-        if labeled:
-            for c in labeled:
-                n = int(c.replace(',', ''))
-                if 100 <= n <= 999999:
-                    print(f'[OCR] Mileage via Google Vision (labeled): {n}', flush=True)
-                    return n
+        # MILES_OCR_DECIMAL_K_2026_05_15: K-suffix shorthand like "47K",
+        # "15.6K", "100.5K". Rare on physical dashboards but appears in
+        # mobile-app summary screens and typed-note photos. Convert via
+        # float * 1000.
+        for _cm in re.finditer(r'(\d{1,3}(?:\.\d{1,2})?)\s*K\b', up):
+            try:
+                _n = int(round(float(_cm.group(1)) * 1000))
+            except ValueError:
+                continue
+            if 100 <= _n <= 999999:
+                print(f'[OCR] Mileage via Google Vision (K-suffix): {_n}',
+                      flush=True)
+                return _n
+
+        # Then: numbers explicitly labeled "mi" / "miles" / "km" — label AFTER number.
+        # TESLA_DASH_FIX_2026_05_15: Tesla displays many "mi"-suffixed values
+        # (range, trip, battery-to-empty, status-bar range). The literal
+        # odometer reading is the LARGEST plausible number on screen — an
+        # odometer can't legally go down, so any same-photo competitor like
+        # "234 mi range remaining" will be smaller than the real reading.
+        # Old code returned the FIRST match, which always picked the
+        # status-bar range on Tesla dashes. Fix: collect all, filter Tesla
+        # noise contexts, return max.
+        _labeled_noise = (
+            'RANGE', 'TRIP', 'MI/KWH', 'MIKWH', 'REMAINING', 'REMAIN',
+            'BATTERY', 'TO EMPTY', 'UNTIL EMPTY', 'CHARGE',
+            'AVERAGE', 'EST. MI', 'EST MI', 'KWH', 'TO GO',
+            'EFFICIENCY', 'CONSUMPTION',
+        )
+        _mi_candidates = []
+        for _mm in re.finditer(
+                r'(\d{1,3}(?:,\d{3})+|\d{3,7})\s*(?:MI|MILES|KM)\b', up):
+            _ns = _mm.group(1)
+            _n = int(_ns.replace(',', ''))
+            if not (100 <= _n <= 999999):
+                continue
+            _cs = max(0, _mm.start() - 60)
+            _ctx = up[_cs:_mm.end() + 10]
+            if any(_noise in _ctx for _noise in _labeled_noise):
+                continue
+            _mi_candidates.append(_n)
+        if _mi_candidates:
+            _result = max(_mi_candidates)
+            print(f'[OCR] Mileage via Google Vision (labeled, max of '
+                  f'{len(_mi_candidates)}): {_result}', flush=True)
+            return _result
 
         # Fallback: any 4-7 digit number but avoid obvious false positives
         # (skip numbers immediately followed/preceded by LBS, KG, $, year contexts)
@@ -2971,6 +3025,24 @@ def twilio_webhook():
     if has_recent_sms_bid:
         looks_like_new_bid = True  # let stitch path handle it below
 
+    # VERIFY_STITCH_FRONT_2026_05_15: customer reply to a needs_verification
+    # SMS takes priority over share-reply routing. Without this, a bare
+    # number reply ("12000") from a phone that also has a previously-shared
+    # bid would get share-replied to the WRONG bid. Setting looks_like_new_bid
+    # diverts to the normal flow where verify-stitch (line ~3115 area) attaches
+    # to the right verification-pending bid.
+    cur.execute("""SELECT id FROM bids
+                    WHERE phone = %s
+                      AND needs_verification_at IS NOT NULL
+                      AND needs_verification_cleared_at IS NULL
+                      AND created_at > NOW() - INTERVAL '24 hours'
+                    ORDER BY id DESC LIMIT 1""", (from_phone,))
+    _vp_row = cur.fetchone()
+    if _vp_row:
+        print(f'[stitch] verify-pending bid #{_vp_row["id"]} found for '
+              f'{from_phone}, bypassing share-reply routing', flush=True)
+        looks_like_new_bid = True  # bypass share_reply so verify-stitch handles
+
     if share_row and not looks_like_new_bid:
         # This is a reply to a shared bid — add as message, don't create new bid
         shared_bid_id = share_row['bid_id']
@@ -3059,13 +3131,61 @@ def twilio_webhook():
     """, (from_phone,))
     recent = cur.fetchone()
 
+    # VERIFY_STITCH_2026_05_15: when no rapid-stitch match, look for an
+    # OPEN needs_verification bid from this phone that the inbound text
+    # plausibly satisfies. Window: 24h (covers customer reply latency from
+    # busy partners). Match logic:
+    #   - inbound has bare miles AND bid has missing_miles flag -> stitch
+    #   - inbound has VIN AND bid awaiting VIN verification     -> stitch
+    _verify_stitched = False
+    if not recent:
+        # Re-derive a bare-number miles candidate even if extract_miles_from_text
+        # returned None (it requires "k" / "mi" / labels). Bare "12000" by
+        # itself doesn't trigger but in verification-reply context it should.
+        _bare_miles = None
+        if body and not miles:
+            _bm = __import__('re').search(r'\b(\d{3,6})\b', body.strip())
+            if _bm:
+                _n = int(_bm.group(1))
+                if 100 <= _n <= 999999:
+                    _bare_miles = _n
+        cur.execute("""
+            SELECT id, vin, mileage, needs_verification_reason
+              FROM bids
+             WHERE phone = %s
+               AND needs_verification_at IS NOT NULL
+               AND needs_verification_cleared_at IS NULL
+               AND created_at > NOW() - INTERVAL '24 hours'
+             ORDER BY id DESC LIMIT 1
+        """, (from_phone,))
+        _vpend = cur.fetchone()
+        if _vpend:
+            _vreason = (_vpend.get('needs_verification_reason') or '').lower()
+            _can_miles = ('missing_miles' in _vreason
+                          and (miles or _bare_miles)
+                          and not _vpend.get('mileage'))
+            _can_vin = (('vin_invalid' in _vreason
+                         or 'vin_not_found' in _vreason)
+                        and vin)
+            if _can_miles or _can_vin:
+                recent = _vpend
+                if _can_miles and not miles:
+                    miles = _bare_miles
+                _verify_stitched = True
+                print(f'[stitch] verify-pending bid={_vpend["id"]} '
+                      f'reason={_vreason} miles_added={bool(_can_miles)} '
+                      f'vin_added={bool(_can_vin)}', flush=True)
+
     can_stitch = False
     if recent:
         existing_vin = (recent['vin'] or '').strip().upper()
         new_vin = (vin or '').strip().upper()
         # Stitch when: new text has no VIN, OR new VIN matches existing,
-        # OR existing has no VIN yet (still being extracted async)
-        if not new_vin or not existing_vin or new_vin == existing_vin:
+        # OR existing has no VIN yet (still being extracted async),
+        # OR this is a verification-pending stitch (different rules).
+        if (_verify_stitched
+                or not new_vin or not existing_vin
+                or new_vin == existing_vin):
             can_stitch = True
 
     if can_stitch:
@@ -3139,9 +3259,84 @@ def twilio_webhook():
             if res and res[1]:
                 photo_files.append((res[1], res[2]))
         cur.execute("UPDATE bids SET updated_at=NOW() WHERE id=%s", (bid_id,))
+        # STITCH_VERIFY_UNIFIED_2026_05_15: clear verification + force-
+        # reprocess whenever a stitch satisfies an open verification flag,
+        # REGARDLESS of which stitch path matched (60s-window OR verify-
+        # pending). Without this, a customer reply that comes within 60s
+        # got correctly stitched but the verification flag stayed set
+        # forever — workers wouldn't claim and AI wouldn't fire.
+        # Check: did we just add miles or VIN to a bid that had an open
+        # verification flag? Then clear it.
+        _just_added_data = bool(miles or (vin and not recent.get('vin')))
+        if _just_added_data and not _verify_stitched:
+            try:
+                cur.execute(
+                    "SELECT id FROM bids WHERE id = %s "
+                    "AND needs_verification_at IS NOT NULL "
+                    "AND needs_verification_cleared_at IS NULL",
+                    (bid_id,))
+                if cur.fetchone():
+                    _verify_stitched = True  # trigger the block below
+                    print(f'[stitch] 60s-window stitch satisfied open '
+                          f'verification flag for bid {bid_id}', flush=True)
+            except Exception as _vcse:
+                print(f'[stitch] verify-check err bid={bid_id}: {_vcse}',
+                      flush=True)
+        if _verify_stitched:
+            try:
+                cur.execute("UPDATE bids SET needs_verification_cleared_at = NOW(), "
+                            "needs_verification_cleared_by = 'auto:sms_reply' "
+                            "WHERE id = %s", (bid_id,))
+                # iPacket: keep recent good capture (<5min). Same SQL as
+                # /api/admin/bid/<id>/force-reprocess preservation block.
+                cur.execute("""DELETE FROM ipacket_lookups
+                                  WHERE bid_id = %s
+                                    AND (looked_up_at IS NULL
+                                         OR looked_up_at < NOW() - INTERVAL '5 minutes'
+                                         OR not_available = true)""", (bid_id,))
+                cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s",
+                            (bid_id,))
+                cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s",
+                            (bid_id,))
+                cur.execute("UPDATE bids SET vauto_claimed_by=NULL, "
+                            "vauto_claimed_at=NULL, ai_assessed_at=NULL, "
+                            "ai_price=NULL, ai_assessment=NULL, "
+                            "miles_audit_at=NULL WHERE id=%s", (bid_id,))
+                cur.execute("UPDATE worker_jobs SET completed_at=NOW(), "
+                            "status='released_verify_sms_clear', "
+                            "duration_ms=EXTRACT(EPOCH FROM (NOW()-claimed_at))::int*1000 "
+                            "WHERE bid_id=%s AND completed_at IS NULL",
+                            (bid_id,))
+                try:
+                    _tg_worker_alert(
+                        f"\u2705 EW verify cleared by customer SMS reply\n"
+                        f"bid <b>#{bid_id}</b> \u00b7 phone {from_phone} \u00b7 force-reprocess fired")
+                except Exception:
+                    pass
+                # IMMEDIATE_RECEIPT_SMS_2026_05_15: instant ack so customer
+                # knows we got their reply (avoid 60-90s silence before AI fires).
+                try:
+                    _parts = []
+                    if miles:
+                        _parts.append(f"the {miles:,} miles")
+                    if vin and not recent.get("vin"):
+                        _parts.append(f"VIN {vin}")
+                    if _parts:
+                        _body = ("Got " + " and ".join(_parts)
+                                 + " - working on it now. Standby for the offer!")
+                        send_sms(from_phone, _body)
+                        print(f"[immediate-receipt-sms] bid={bid_id} sent",
+                              flush=True)
+                except Exception as _irse:
+                    print(f"[immediate-receipt-sms] err bid={bid_id}: {_irse}",
+                          flush=True)
+            except Exception as _vcse:
+                print(f'[verify-stitch-clear] err bid={bid_id}: '
+                      f'{type(_vcse).__name__}: {_vcse}', flush=True)
         _finalize_sms_intake(
             cur, intake_log_id, 'stitched', bid_id=bid_id,
-            reason=(f"Stitched into bid #{bid_id} (same phone, <60s old). "
+            reason=(f"Stitched into bid #{bid_id} "
+                    f"({'verification_reply' if _verify_stitched else 'same phone, <60s old'}). "
                     f"vin_added={bool(vin and not recent['vin'])} "
                     f"miles_added={bool(miles and not recent['mileage'])} "
                     f"photos_added={len(photo_files)}"),
@@ -3711,6 +3906,58 @@ def update_bid(bid_id):
 
     db.close()
 
+    # PHASE_D_VERIFY_GATE_2026_05_15: VIN or miles edit clears open verify
+    # flag + force-reprocess. iPacket preserved if <5 min old (operator's
+    # quick correction shouldn't lose a good sticker to iPacket rate limit).
+    _verif_cleared = False
+    if 'vin' in data or 'mileage' in data:
+        try:
+            _vdb = get_db()
+            _vcur = _vdb.cursor()
+            _vcur.execute(
+                "SELECT needs_verification_at, needs_verification_cleared_at "
+                "FROM bids WHERE id = %s", (bid_id,))
+            _vrow = _vcur.fetchone()
+            if (_vrow and _vrow.get('needs_verification_at')
+                    and not _vrow.get('needs_verification_cleared_at')):
+                _vcur.execute(
+                    "UPDATE bids SET needs_verification_cleared_at = NOW(), "
+                    "needs_verification_cleared_by = 'auto:operator_edit' "
+                    "WHERE id = %s", (bid_id,))
+                # iPacket: keep recent good capture; wipe vauto + accutrade.
+                _vcur.execute("""DELETE FROM ipacket_lookups
+             WHERE bid_id = %s
+               AND (looked_up_at IS NULL
+                    OR looked_up_at < NOW() - INTERVAL '5 minutes'
+                    OR not_available = true)""", (bid_id,))
+                _vcur.execute(
+                    'DELETE FROM accutrade_lookups WHERE bid_id=%s', (bid_id,))
+                _vcur.execute(
+                    'DELETE FROM vauto_lookups WHERE bid_id=%s', (bid_id,))
+                _vcur.execute(
+                    "UPDATE bids SET vauto_claimed_by=NULL, "
+                    "vauto_claimed_at=NULL, ai_assessed_at=NULL, "
+                    "ai_price=NULL, ai_assessment=NULL, "
+                    "miles_audit_at=NULL WHERE id = %s", (bid_id,))
+                _vcur.execute(
+                    "UPDATE worker_jobs SET completed_at=NOW(), "
+                    "status='released_verify_autoclear', "
+                    "duration_ms=EXTRACT(EPOCH FROM (NOW()-claimed_at))::int*1000 "
+                    "WHERE bid_id = %s AND completed_at IS NULL", (bid_id,))
+                _vdb.commit()
+                _verif_cleared = True
+                try:
+                    _tg_worker_alert(
+                        f"\u2705 EW verify flag auto-cleared (VIN/miles edit)\n"
+                        f"bid <b>#{bid_id}</b> \u00b7 force-reprocess fired "
+                        f"(iPacket preserved if <5min)")
+                except Exception:
+                    pass
+            _vdb.close()
+        except Exception as _ace:
+            print(f'[update_bid] verify auto-clear error bid={bid_id}: '
+                  f'{type(_ace).__name__}: {_ace}', flush=True)
+
     # Market check fires after DB close so worker thread doesn't share cur.
     if _vin_just_added:
         try:
@@ -3718,7 +3965,9 @@ def update_bid(bid_id):
         except Exception as _e:
             print(f'[update_bid] market_check error bid={bid_id}: {_e}', flush=True)
 
-    return jsonify({'success': True, 'vin_pipeline_triggered': _vin_just_added})
+    return jsonify({'success': True,
+                    'vin_pipeline_triggered': _vin_just_added,
+                    'verification_cleared': _verif_cleared})
 
 
 def _run_market_check_playwright(bid_id, vin):
@@ -5434,13 +5683,27 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
     try:
         db = get_db()
         cur = db.cursor()
-        cur.execute("SELECT ai_assessed_at, ai_assessment FROM bids WHERE id=%s", (bid_id,))
+        cur.execute("SELECT ai_assessed_at, ai_assessment, "
+                    "needs_verification_at, needs_verification_cleared_at, "
+                    "needs_verification_reason "
+                    "FROM bids WHERE id=%s", (bid_id,))
         row = cur.fetchone()
         if not row:
             db.close()
             return False
         # If already claimed or assessed, bail
         if row['ai_assessed_at'] is not None:
+            db.close()
+            return False
+        # PHASE_D_VERIFY_GATE_2026_05_15: block AI when bid has open
+        # verification flag. Cleared by operator edit on VIN/miles, manual
+        # dismiss, or customer SMS reply with corrected data.
+        if (row.get('needs_verification_at')
+                and not row.get('needs_verification_cleared_at')):
+            print(f"assess-gate bid={bid_id} source={source} "
+                  f"BLOCKED by needs_verification="
+                  f"{row.get('needs_verification_reason') or 'unknown'}",
+                  flush=True)
             db.close()
             return False
 
@@ -5639,6 +5902,10 @@ def api_bids():
                b.raw_message, b.status, b.created_at, b.bid_amount, b.ai_price, b.asking_price,
                b.has_unread, b.partner_dealer_id, b.partner_request_id, b.salesperson,
                b.bidder_name, b.awaiting_name, b.vin_invalid_reason,
+               b.needs_verification_at, b.needs_verification_cleared_at,
+               b.needs_verification_reason,  -- BADGE_NEEDS_VERIFY_API_2026_05_15
+               b.damage_signal,  -- DAMAGE_BADGE_API_2026_05_15
+               b.carfax_damage, b.autocheck_damage,
                c.name as contact_name, c.company as contact_company, c.role as contact_role,
                d.name as partner_dealer_name,
                dl.current_price       AS dc_current_price,
@@ -5715,6 +5982,16 @@ def api_bids():
             'dc_detail_url': r.get('dc_detail_url'),
             'dc_status': r.get('dc_status'),
             'vin_invalid_reason': r.get('vin_invalid_reason'),
+            # BADGE_NEEDS_VERIFY_API_2026_05_15: surface verification
+            # flag so dashboard JS poll can keep the yellow badge
+            # visible between full-page renders.
+            'needs_verification_at': r.get('needs_verification_at').isoformat() if r.get('needs_verification_at') else None,
+            'needs_verification_cleared_at': r.get('needs_verification_cleared_at').isoformat() if r.get('needs_verification_cleared_at') else None,
+            'needs_verification_reason': r.get('needs_verification_reason'),
+            # DAMAGE_BADGE_API_2026_05_15: Carfax/AutoCheck damage cross-check
+            'damage_signal': r.get('damage_signal'),
+            'carfax_damage': r.get('carfax_damage'),
+            'autocheck_damage': r.get('autocheck_damage'),
         })
 
     cur.execute("SELECT bid_id, COUNT(*) as cnt FROM bid_photos GROUP BY bid_id")
@@ -8840,6 +9117,19 @@ def api_vauto_pending():
             FROM bids b
             WHERE b.vin IS NOT NULL AND length(b.vin) = 17
               AND b.vin_invalid_reason IS NULL  -- 2026-05-14: skip ISO-3779-invalid VINs (e.g. bid 1438 typo) so workers don't spin
+              -- PHASE1_MILES_GATE_2026_05_15: skip bids without mileage so
+              -- workers don't waste cycles on AccuTrade that needs miles
+              -- to produce useful values. miles_audit_worker SMSes the
+              -- bidder; when they reply, update_bid auto-clear fires
+              -- force-reprocess and workers re-pick at full eligibility.
+              AND b.mileage IS NOT NULL AND b.mileage > 0
+              -- PHASE1_MILES_GATE_2026_05_15: skip bids with an open
+              -- verification flag (missing_miles / vin_not_found /
+              -- vin_invalid / miles_discrepancy). Cleared by operator
+              -- edit on VIN/miles (auto-fires force-reprocess), customer
+              -- SMS reply, or dashboard Clear button.
+              AND (b.needs_verification_at IS NULL
+                   OR b.needs_verification_cleared_at IS NOT NULL)
               AND NOT EXISTS (
                   SELECT 1 FROM vauto_lookups vl
                    WHERE vl.bid_id = b.id
@@ -10980,8 +11270,23 @@ def api_admin_force_reprocess(bid_id):
         db.close()
         return jsonify({'ok': False, 'error': 'bid not found'}), 404
 
-    # Wipe phase-1 lookups
-    cur.execute('DELETE FROM ipacket_lookups WHERE bid_id=%s', (bid_id,))
+    # Wipe phase-1 lookups. PHASE_D_VERIFY_GATE_2026_05_15: iPacket has a
+    # ~1h rate limit on same-VIN resubmits — a quick reprocess can lose the
+    # sticker entirely. Preserve iPacket rows <5min old that succeeded
+    # (looked_up_at fresh, not_available=false). Operator can override with
+    # ?force_ipacket=1 query string OR JSON body {force_ipacket: true}.
+    _force_ipkt = (
+        request.args.get('force_ipacket', '').lower() in ('1', 'true', 'yes')
+        or bool((request.get_json(silent=True) or {}).get('force_ipacket'))
+    )
+    if _force_ipkt:
+        cur.execute('DELETE FROM ipacket_lookups WHERE bid_id=%s', (bid_id,))
+    else:
+        cur.execute("""DELETE FROM ipacket_lookups
+             WHERE bid_id = %s
+               AND (looked_up_at IS NULL
+                    OR looked_up_at < NOW() - INTERVAL '5 minutes'
+                    OR not_available = true)""", (bid_id,))
     n_ipacket = cur.rowcount
     cur.execute('DELETE FROM accutrade_lookups WHERE bid_id=%s', (bid_id,))
     n_accu = cur.rowcount
@@ -11851,6 +12156,86 @@ def api_trim_select():
     })
 
 
+# PHASE_D_VERIFY_GATE_2026_05_15: miles-discrepancy SMS helper. Triggered by
+# miles_audit_worker via /api/internal/bid/<id>/miles-verify-sms when it
+# detects Carfax/AutoCheck odometer > customer-reported by > +2000.
+def _maybe_send_miles_verify_sms(bid_id, reason='miles_discrepancy'):
+    """Fire one SMS asking the bidder to confirm mileage. Idempotent via
+    bids.miles_verify_sms_sent_at. No phone gating, no quiet hours."""
+    try:
+        _db = get_db()
+        _cur = _db.cursor()
+        _cur.execute(
+            "SELECT id, vin, mileage, miles_carfax, miles_autocheck, "
+            "miles_higher_source, miles_discrepancy, phone, bidder_name, "
+            "miles_verify_sms_sent_at, year, make, model "
+            "FROM bids WHERE id = %s", (bid_id,))
+        _row = _cur.fetchone()
+        if not _row:
+            _db.close(); return False
+        if _row.get('miles_verify_sms_sent_at'):
+            _db.close(); return False
+        _phone = (_row.get('phone') or '').strip()
+        if not _phone:
+            _db.close(); return False
+        _name_raw = (_row.get('bidder_name') or '').strip()
+        _first = _name_raw.split()[0] if _name_raw else 'there'
+        _customer_miles = int(_row.get('mileage') or 0)
+        _higher_source = _row.get('miles_higher_source') or 'history'
+        if _higher_source == 'carfax':
+            _higher_miles = int(_row.get('miles_carfax') or 0)
+        else:
+            _higher_miles = int(_row.get('miles_autocheck') or 0)
+        _y = _row.get('year') or ''
+        _mk = (_row.get('make') or '').title() if _row.get('make') else ''
+        _md = _row.get('model') or ''
+        _vehicle = (f"{_y} {_mk} {_md}").strip() or "vehicle"
+
+        _body = (
+            f"Hey, its the EW Bot. "  # EW_BOT_WORDING_2026_05_15
+            f"Quick odometer check on the {_vehicle} — you sent in "
+            f"{_customer_miles:,} mi but {_higher_source.title()} shows the "
+            f"most recent reading is {_higher_miles:,} mi. Could you confirm "
+            f"which is right? Reply with the correct mileage or send a clear "
+            f"odometer photo. Thanks!"
+        )
+
+        _sent = send_sms(_phone, _body)
+        if not _sent:
+            _db.close()
+            print(f'[miles-verify-sms] bid={bid_id} send_sms returned False',
+                  flush=True)
+            return False
+
+        _cur.execute(
+            "UPDATE bids SET miles_verify_sms_sent_at = NOW() WHERE id = %s",
+            (bid_id,))
+        _db.commit()
+        _db.close()
+
+        try:
+            _delta = int(_row.get('miles_discrepancy') or 0)
+            _tg_worker_alert(
+                f"\U0001f504 EW auto-miles-verify SMS sent\n"
+                f"bid <b>#{bid_id}</b> \u00b7 {_first} \u00b7 {_phone}\n"
+                f"{_vehicle}\n"
+                f"customer: <b>{_customer_miles:,} mi</b>, "
+                f"{_higher_source}: <b>{_higher_miles:,} mi</b> "
+                f"(\u0394 +{_delta:,})"
+            )
+        except Exception:
+            pass
+
+        print(f'[miles-verify-sms] bid={bid_id} sent to {_phone} '
+              f'customer={_customer_miles} higher={_higher_miles} '
+              f'source={_higher_source}', flush=True)
+        return True
+    except Exception as _e:
+        print(f'[miles-verify-sms] error bid={bid_id}: '
+              f'{type(_e).__name__}: {_e}', flush=True)
+        return False
+
+
 # VIN_VERIFY_SMS_2026_05_15: auto-text bidder when AccuTrade can't find the
 # VIN they sent. Strong typo signal — AccuTrade has the biggest VIN database;
 # if it can't resolve, it's almost always a 1-character mistype.
@@ -11886,7 +12271,7 @@ def _maybe_send_vin_verify_sms(bid_id, reason='accutrade_vin_not_found'):
 
         if _alt_vin:
             _body = (
-                f"Hi {_first}, it's Oscar from Experience Wholesale. "
+                f"Hey, its the EW Bot. "  # EW_BOT_WORDING_2026_05_15
                 f"Quick check on that VIN — {_vin} — our system can't find it "
                 f"in the AccuTrade database, which usually means a 1-character typo. "
                 f"We also see {_alt_vin} on the photos you sent — is that the right one? "
@@ -11895,7 +12280,7 @@ def _maybe_send_vin_verify_sms(bid_id, reason='accutrade_vin_not_found'):
                 f"Thanks!")
         else:
             _body = (
-                f"Hi {_first}, it's Oscar from Experience Wholesale. "
+                f"Hey, its the EW Bot. "  # EW_BOT_WORDING_2026_05_15
                 f"Quick check on that VIN — {_vin} — our system can't find it "
                 f"in the AccuTrade database, which usually means a 1-character typo. "
                 f"Could you re-type the VIN from the dash, door jamb, or windshield "
@@ -11933,6 +12318,75 @@ def _maybe_send_vin_verify_sms(bid_id, reason='accutrade_vin_not_found'):
         print(f'[vin-verify-sms] error bid={bid_id}: '
               f'{type(_e).__name__}: {_e}', flush=True)
         return False
+
+
+@app.route('/api/internal/bid/<int:bid_id>/miles-verify-sms', methods=['POST'])
+def api_internal_miles_verify_sms(bid_id):
+    """PHASE_D_VERIFY_GATE_2026_05_15: triggered by miles_audit_worker when
+    it flags a bid. Auth: X-Auth = EW_VAUTO_REFRESH_SECRET (shared)."""
+    import os as _os
+    _expected = (_os.environ.get('EW_VAUTO_REFRESH_SECRET') or '').strip()
+    _provided = (request.headers.get('X-Auth') or '').strip()
+    if not _expected or _provided != _expected:
+        return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+    _sent = _maybe_send_miles_verify_sms(bid_id, reason='miles_discrepancy')
+    return jsonify({'ok': bool(_sent), 'bid_id': bid_id})
+
+
+@app.route('/api/bid/<int:bid_id>/clear-verification', methods=['POST'])
+def api_clear_verification(bid_id):
+    """Operator dismiss button. body: {note?, reprocess?, force_ipacket?}.
+    If reprocess=true, wipes Phase 1 lookups (preserving recent iPacket
+    unless force_ipacket=true). AI re-fires once lookups land."""
+    data = request.get_json(silent=True) or {}
+    note = (data.get('note') or 'manual_clear')[:200]
+    do_reprocess = bool(data.get('reprocess'))
+    force_ipacket = bool(data.get('force_ipacket'))
+    db = get_db()
+    cur = db.cursor()
+    cur.execute(
+        "UPDATE bids SET needs_verification_cleared_at = NOW(), "
+        "needs_verification_cleared_by = %s WHERE id = %s "
+        "AND needs_verification_at IS NOT NULL "
+        "AND needs_verification_cleared_at IS NULL",
+        (f'operator:{note}', bid_id))
+    if cur.rowcount == 0:
+        db.close()
+        return jsonify({'ok': False, 'error': 'no open verification flag'}), 404
+    if do_reprocess:
+        # iPacket: preserve recent good capture unless explicitly forced.
+        if force_ipacket:
+            cur.execute('DELETE FROM ipacket_lookups WHERE bid_id=%s', (bid_id,))
+        else:
+            cur.execute("""DELETE FROM ipacket_lookups
+             WHERE bid_id = %s
+               AND (looked_up_at IS NULL
+                    OR looked_up_at < NOW() - INTERVAL '5 minutes'
+                    OR not_available = true)""", (bid_id,))
+        cur.execute('DELETE FROM accutrade_lookups WHERE bid_id=%s', (bid_id,))
+        cur.execute('DELETE FROM vauto_lookups WHERE bid_id=%s', (bid_id,))
+        cur.execute(
+            "UPDATE bids SET vauto_claimed_by=NULL, vauto_claimed_at=NULL, "
+            "ai_assessed_at=NULL, ai_price=NULL, ai_assessment=NULL, "
+            "miles_audit_at=NULL WHERE id=%s", (bid_id,))
+        cur.execute(
+            "UPDATE worker_jobs SET completed_at=NOW(), "
+            "status='released_verify_clear', "
+            "duration_ms=EXTRACT(EPOCH FROM (NOW()-claimed_at))::int*1000 "
+            "WHERE bid_id=%s AND completed_at IS NULL", (bid_id,))
+    db.commit()
+    db.close()
+    try:
+        _tg_worker_alert(
+            f"\u2705 EW verify flag cleared (operator)\n"
+            f"bid <b>#{bid_id}</b> note: {note}"
+            + (' \u00b7 force-reprocess fired' if do_reprocess else '')
+            + (' (forced iPacket refetch)' if force_ipacket else ''))
+    except Exception:
+        pass
+    return jsonify({'ok': True, 'bid_id': bid_id,
+                    'reprocessed': do_reprocess,
+                    'forced_ipacket': force_ipacket})
 
 
 @app.route('/api/accutrade/submit', methods=['POST'])
@@ -11991,6 +12445,25 @@ def api_accutrade_submit():
             or ('vin' in _ua_reason and 'no match' in _ua_reason)
         ):
             _maybe_send_vin_verify_sms(bid_id, reason='accutrade_vin_not_found')
+            # PHASE_D_VERIFY_GATE_2026_05_15: stamp needs_verification so the
+            # AI gate trips. SMS alone tells customer; this also blocks the
+            # downstream AI assessment until the VIN is corrected.
+            try:
+                cur.execute(
+                    "UPDATE bids SET "
+                    "needs_verification_at = COALESCE(needs_verification_at, NOW()), "
+                    "needs_verification_reason = CASE "
+                    "  WHEN needs_verification_reason IS NULL "
+                    "       THEN 'vin_not_found' "
+                    "  WHEN position('vin_not_found' IN needs_verification_reason) > 0 "
+                    "       THEN needs_verification_reason "
+                    "  ELSE needs_verification_reason || ',vin_not_found' END "
+                    "WHERE id = %s AND needs_verification_cleared_at IS NULL",
+                    (bid_id,))
+                db.commit()
+            except Exception as _vvste:
+                print(f'[vin-verify-stamp] err bid={bid_id}: {_vvste}',
+                      flush=True)
     except Exception as _vvse:
         print(f'[vin-verify-sms] hook error bid={bid_id}: '
               f'{type(_vvse).__name__}: {_vvse}', flush=True)

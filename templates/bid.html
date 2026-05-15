@@ -352,7 +352,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
     <div class="vb-left">
       <div class="vb-meta">
         <div class="bid-id">Bid #{{ bid.id }} · {{ time_ago(bid.created_at) }} <a href="#" onclick="forceReprocess(event, {{ bid.id }})" style="margin-left:10px;font-size:11px;color:#a78bfa;text-decoration:none;border:1px solid rgba(167,139,250,.3);border-radius:4px;padding:2px 8px;font-weight:600" title="Hard reset: wipe all 3 lookups + claim, queue for fresh worker pick-up">↻ Force re-process</a></div>
-        <div class="vin-big"{% if bid.vin_invalid_reason %} style="color:#fca5a5;text-decoration:line-through;text-decoration-color:rgba(220,38,38,.55)"{% endif %}>{{ bid.vin or 'No VIN' }}{% if bid.vin_invalid_reason %} <span title="VIN failed structural check: {{ bid.vin_invalid_reason }}. Worker pool will not pick this up — release any in-flight claim with Force re-process if you fix the VIN." style="display:inline-block;margin-left:8px;font-size:11px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:4px;padding:2px 8px;vertical-align:middle;letter-spacing:.5px;text-transform:uppercase;font-family:Inter,system-ui,sans-serif;text-decoration:none">⚠ INVALID VIN · {{ bid.vin_invalid_reason }}</span>{% endif %}</div>
+        <div class="vin-big"{% if bid.vin_invalid_reason %} style="color:#fca5a5;text-decoration:line-through;text-decoration-color:rgba(220,38,38,.55)"{% endif %}>{{ bid.vin or 'No VIN' }}{% if bid.vin_invalid_reason %} <span title="VIN failed structural check: {{ bid.vin_invalid_reason }}. Worker pool will not pick this up — release any in-flight claim with Force re-process if you fix the VIN." style="display:inline-block;margin-left:8px;font-size:11px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:4px;padding:2px 8px;vertical-align:middle;letter-spacing:.5px;text-transform:uppercase;font-family:Inter,system-ui,sans-serif;text-decoration:none">⚠ INVALID VIN · {{ bid.vin_invalid_reason }}</span>{% endif %}{% if bid.needs_verification_at and not bid.needs_verification_cleared_at %} <span title="Awaiting verification — AI assessment paused until VIN/miles is confirmed" style="display:inline-block;margin-left:8px;font-size:11px;font-weight:800;color:#fbbf24;background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.55);border-radius:4px;padding:2px 8px;vertical-align:middle;letter-spacing:.5px;text-transform:uppercase;font-family:Inter,system-ui,sans-serif;text-decoration:none">⚠ VERIFY · {{ bid.needs_verification_reason or "data check" }}</span>{% endif %}</div>{% if bid.needs_verification_at and not bid.needs_verification_cleared_at %}<div style="margin-top:10px;padding:12px 14px;background:linear-gradient(180deg,rgba(245,158,11,.10),rgba(245,158,11,.04));border:1px solid rgba(245,158,11,.45);border-radius:8px;color:#fbbf24;font-size:13px;line-height:1.5;font-family:Inter,system-ui,sans-serif"><div style="font-weight:800;letter-spacing:.5px;text-transform:uppercase;font-size:11px;color:#fbbf24;margin-bottom:6px">⚠ Awaiting verification</div>{% if "miles_discrepancy" in (bid.needs_verification_reason or "") %}<div>Customer reported <b style="color:#fff">{{ "{:,}".format(bid.mileage or 0) }} mi</b>. {% if bid.miles_higher_source == "carfax" %}Carfax{% else %}AutoCheck{% endif %} shows <b style="color:#fff">{{ "{:,}".format(bid.miles_carfax if bid.miles_higher_source == "carfax" else bid.miles_autocheck) }} mi</b> as the most recent odometer (Δ +{{ "{:,}".format(bid.miles_discrepancy) }} mi).</div>{% endif %}{% if "vin_not_found" in (bid.needs_verification_reason or "") %}<div>AccuTrade has no data for VIN <code style="color:#fff;background:rgba(255,255,255,.08);padding:1px 5px;border-radius:3px">{{ bid.vin }}</code> — likely a 1-character typo.</div>{% endif %}{% if "vin_invalid" in (bid.needs_verification_reason or "") or bid.vin_invalid_reason %}<div>VIN failed structural check: {{ bid.vin_invalid_reason }}.</div>{% endif %}<div style="margin-top:8px;font-size:12px;color:#cbd5e1">AI assessment is paused. Edit the VIN or mileage in <b>Vehicle Details</b> below (or wait for SMS reply) — the bid will reprocess automatically once corrected.</div><div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button onclick="clearVerification({{ bid.id }}, true, false)" style="padding:7px 12px;background:#f59e0b;color:#0f172a;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;font-family:Inter,system-ui,sans-serif;letter-spacing:.3px">✓ Clear flag &amp; reprocess</button><button onclick="clearVerification({{ bid.id }}, false, false)" style="padding:7px 12px;background:transparent;color:#fbbf24;border:1px solid rgba(251,191,36,.5);border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:Inter,system-ui,sans-serif">Clear flag only (skip reprocess)</button></div><!-- NEEDS_VERIFY_BID_HTML_2026_05_15 marker --></div>{% endif %}
         {% if vin_candidate %}
         <div style="margin-top:6px;padding:6px 10px;background:rgba(251,191,36,.10);border:1px solid rgba(251,191,36,.4);border-radius:6px;font-size:12px;color:#fbbf24;display:inline-flex;align-items:center;gap:8px;font-family:'JetBrains Mono',ui-monospace,monospace">
           <span style="font-family:'Inter',sans-serif;font-weight:600">Photo VIN (verify):</span>
@@ -2797,6 +2797,41 @@ async function submitShare(action) {
 })();
 {% endif %}
 
+
+// CLEAR_VERIFY_BTN_2026_05_15
+async function clearVerification(bidId, reprocess, forceIpacket){
+  const msg = reprocess
+    ? 'Clear the verification flag AND force-reprocess this bid?\n\n'
+      + 'Phase 1 lookups will be wiped (iPacket preserved if <5min old) '
+      + 'and AI will re-fire.'
+    : 'Clear the verification flag (no reprocess)?';
+  if(!confirm(msg)) return;
+  const btn = event && event.target;
+  if(btn){ btn.disabled = true; btn.textContent = 'Clearing...'; }
+  try {
+    const r = await fetch(`/api/bid/${bidId}/clear-verification`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        note: 'dashboard_click',
+        reprocess: !!reprocess,
+        force_ipacket: !!forceIpacket,
+      })
+    });
+    const d = await r.json();
+    if(d.ok){
+      if(typeof toast === 'function') toast('Verification cleared');
+      setTimeout(() => location.reload(), 800);
+    } else {
+      alert('Clear failed: ' + (d.error || 'unknown'));
+      if(btn){ btn.disabled = false; btn.textContent = reprocess
+          ? '✓ Clear flag & reprocess' : 'Clear flag only (skip reprocess)'; }
+    }
+  } catch(e){
+    alert('Clear failed: ' + e.message);
+    if(btn){ btn.disabled = false; }
+  }
+}
 
 function forceReprocess(e, bid_id){
   e.preventDefault();

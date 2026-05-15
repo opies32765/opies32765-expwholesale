@@ -1042,6 +1042,11 @@ def try_handle_sourcing(from_phone, body, db, cur, intake_log_id=None,
     Returns True if this inbound was handled by the sourcing flow.
     Returns False to fall through to the existing bid-reply logic.
     """
+    # SOURCING_KILL_SWITCH_2026_05_15: file-flag emergency disable.
+    # Touch /tmp/sourcing_disabled to disable instantly; rm to re-enable.
+    import os as _os_ks
+    if _os_ks.path.exists("/tmp/sourcing_disabled"):
+        return False
     if not _phone_allowed(from_phone):
         return False
 

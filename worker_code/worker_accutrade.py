@@ -396,7 +396,7 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
             "appraisal_url": page.url if "/appraisal/" in page.url else None,
             "selected_trim_text": selected_trim_text,
             "trim_select_source": trim_select_source,
-            "not_available_reason": "mileage_did_not_commit_v2",
+            "not_available": True, "unavailable_reason": "mileage_did_not_commit_v2",
         }
 
     values = page.evaluate(r"""() => {

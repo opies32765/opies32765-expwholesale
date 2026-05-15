@@ -90,6 +90,14 @@ tr.bad-vin td{background:rgba(220,38,38,.13);border-bottom-color:rgba(220,38,38,
 tr.bad-vin:hover td{background:rgba(220,38,38,.20)}
 tr.bad-vin td:first-child{box-shadow:inset 4px 0 0 0 #dc2626}
 
+/* NEEDS_VERIFY_BADGE_2026_05_15 — yellow-tinted row when needs_verification_at
+   is set + not cleared. Bid is awaiting VIN/miles confirmation. AI assessment
+   gated. Distinguishes from bad-vin (red, math-invalid): yellow = data
+   reconciliation needed, not impossible. */
+tr.needs-verify td{background:rgba(245,158,11,.10);border-bottom-color:rgba(245,158,11,.25)}
+tr.needs-verify:hover td{background:rgba(245,158,11,.18)}
+tr.needs-verify td:first-child{box-shadow:inset 4px 0 0 0 #f59e0b}
+
 /* Table */
 .table-wrap{padding:24px 32px}
 table{width:100%;border-collapse:collapse}
@@ -440,7 +448,7 @@ setInterval(() => {
     <tbody>
       {% for bid in bids %}
       {% set _po = partner_offer_counts.get(bid.id, {'n':0,'unseen':0}) if partner_offer_counts is defined else {'n':0,'unseen':0} %}
-      <tr data-id="{{ bid.id }}" data-created="{{ bid.created_at.isoformat() if bid.created_at else '' }}" data-unread="{{ '1' if bid.has_unread else '0' }}" class="status-{{ bid.status }}{% if bid.vin_invalid_reason %} bad-vin{% endif %}">
+      <tr data-id="{{ bid.id }}" data-created="{{ bid.created_at.isoformat() if bid.created_at else '' }}" data-unread="{{ '1' if bid.has_unread else '0' }}" class="status-{{ bid.status }}{% if bid.vin_invalid_reason %} bad-vin{% endif %}{% if bid.needs_verification_at and not bid.needs_verification_cleared_at %} needs-verify{% endif %}">
         <td>
           <div class="bid-num">{% if bid.has_unread %}<span class="unread-star" title="Unread message">&#9733;</span>{% endif %}{% if _po.n %}<span title="{{ _po.n }} partner offer{% if _po.n != 1 %}s{% endif %} received{% if _po.unseen %} ({{ _po.unseen }} new){% endif %}" style="color:#fbbf24;font-weight:700;margin-right:3px">&#9733;</span>{% endif %}#{{ bid.id }}</div>
           <div class="bid-time">{{ time_ago(bid.created_at) }}</div>
@@ -505,7 +513,7 @@ setInterval(() => {
         </td>
         <td>
           {% if bid.vin %}
-            <div class="vehicle-vin"{% if bid.vin_invalid_reason %} style="color:#fca5a5;text-decoration:line-through"{% endif %}>{{ bid.vin }}{% if bid.vin_invalid_reason %} <span title="VIN failed structural check: {{ bid.vin_invalid_reason }}. Worker pool will not pick this up." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ INVALID VIN</span>{% endif %}{% if bid.id in vauto_done %}<span title="vAuto complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% else %}<span title="vAuto pending" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% endif %}</div>
+            <div class="vehicle-vin"{% if bid.vin_invalid_reason %} style="color:#fca5a5;text-decoration:line-through"{% endif %}>{{ bid.vin }}{% if bid.vin_invalid_reason %} <span title="VIN failed structural check: {{ bid.vin_invalid_reason }}. Worker pool will not pick this up." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ INVALID VIN</span>{% endif %}{% if bid.needs_verification_at and not bid.needs_verification_cleared_at %} <span title="Awaiting verification: {{ bid.needs_verification_reason or 'data check' }}. AI assessment paused until VIN/miles confirmed via SMS or operator edit." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fbbf24;background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ VERIFY</span>{% endif %}{% if bid.damage_signal == 'disagreement' %} <span title="Carfax/AutoCheck disagree on damage. Operator review needed." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ DAMAGE MISMATCH</span>{% elif bid.damage_signal == 'both_damaged' %} <span title="Both Carfax and AutoCheck report damage/accidents." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fbbf24;background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ DAMAGE</span>{% endif %}{% if bid.id in vauto_done %}<span title="vAuto complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% else %}<span title="vAuto pending" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% endif %}</div>
             {% if bid.year or bid.make or bid.mileage %}
               <div class="vehicle-desc">{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }}{% if bid.mileage %} {% if bid.year or bid.make %}· {% endif %}{{ '{:,}'.format(bid.mileage) }} mi{% endif %}</div>
             {% endif %}
@@ -708,7 +716,25 @@ function renderRow(b, pc, fp, activeWorker) {
   const invBadge = b.vin_invalid_reason
     ? `<span title="VIN failed structural check: ${b.vin_invalid_reason}. Worker pool will not pick this up." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ INVALID VIN</span>`
     : '';
-  const vehicle = b.vin ? `<div class="vehicle-vin"${b.vin_invalid_reason ? ' style="color:#fca5a5;text-decoration:line-through"' : ''}>${b.vin}${vaBadge}${invBadge}</div>${vehicleDesc}` : '<div class="no-vin">No VIN extracted</div>';
+  // BADGE_NEEDS_VERIFY_JS_2026_05_15: yellow ⚠ VERIFY badge when bid has
+  // open needs_verification flag (missing_miles / vin_not_found / etc).
+  // Without this, the 10s api/bids poll rebuilds the row without the badge
+  // (server-render template-side already shows it on full F5 — flicker fix).
+  const verifyOpen = !!b.needs_verification_at && !b.needs_verification_cleared_at;
+  const verifyBadge = verifyOpen
+    ? `<span title="Awaiting verification: ${b.needs_verification_reason || 'data check'}. AI assessment paused until VIN/miles confirmed." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fbbf24;background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ VERIFY</span>`
+    : '';
+  // DAMAGE_BADGE_JS_2026_05_15: Carfax+AutoCheck damage cross-check badge.
+  //   disagreement -> RED (one report damage, other clean)
+  //   both_damaged -> YELLOW (both reports show damage)
+  //   both_clean / unknown -> no badge
+  let damageBadge = '';
+  if (b.damage_signal === 'disagreement') {
+    damageBadge = `<span title="Carfax/AutoCheck disagree on damage. Operator review needed." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ DAMAGE MISMATCH</span>`;
+  } else if (b.damage_signal === 'both_damaged') {
+    damageBadge = `<span title="Both Carfax and AutoCheck report damage/accidents." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fbbf24;background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ DAMAGE</span>`;
+  }
+  const vehicle = b.vin ? `<div class="vehicle-vin"${b.vin_invalid_reason ? ' style="color:#fca5a5;text-decoration:line-through"' : ''}>${b.vin}${vaBadge}${invBadge}${verifyBadge}${damageBadge}</div>${vehicleDesc}` : '<div class="no-vin">No VIN extracted</div>';
   let photos = '—';
   if ((pc||0) > 0) {
     const thumbSrc = fp ? (fp.startsWith('/static/') ? fp : ('/thumb?url=' + encodeURIComponent(fp) + '&size=mobile')) : null;
@@ -758,7 +784,7 @@ function renderRow(b, pc, fp, activeWorker) {
               + (b.partner_dealer_name ? `<div class="contact-company" style="color:#a78bfa;font-size:11px">${b.partner_dealer_name}</div>` : '')
               + `<div class="contact-phone">${b.phone}</div>`
             : `<div class="contact-name">${b.contact_name||b.phone}</div>${b.contact_name?`<div class="contact-phone">${b.phone}</div>`:''}${b.contact_company?`<div class="contact-company">${b.contact_company}</div>`:''}`));
-  const rowClass = ['status-'+b.status, b.is_new ? 'row-new' : '', b.vin_invalid_reason ? 'bad-vin' : ''].filter(Boolean).join(' ');
+  const rowClass = ['status-'+b.status, b.is_new ? 'row-new' : '', b.vin_invalid_reason ? 'bad-vin' : '', verifyOpen ? 'needs-verify' : ''].filter(Boolean).join(' ');
   const askPrice = b.asking_price ? `<div style="font-size:15px;font-weight:700;color:#94a3b8">$${Math.round(b.asking_price).toLocaleString()}</div>` : '—';
   const aiPrice  = b.ai_price    ? `<div style="font-size:15px;font-weight:700;color:#a78bfa">$${Math.round(b.ai_price).toLocaleString()}</div>` : '—';
   const bidSent  = b.bid_amount  ? `<div style="font-size:15px;font-weight:700;color:#34d399">$${Math.round(b.bid_amount).toLocaleString()}</div>` : '—';
