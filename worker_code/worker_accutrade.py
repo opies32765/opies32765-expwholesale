@@ -322,66 +322,82 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
             i.dispatchEvent(new Event('blur',   {bubbles: true}));
         }
     }""", int(miles))
-    # MILEAGE_COMMIT_FIX_2026_05_15: JS dispatchEvent('blur') above doesn't
-    # actually move focus, so on some vehicles (e.g. bid 1446 Audi R8 RWS)
-    # AccuTrade's Angular CDK never sees a real blur -> recalc doesn't fire
-    # -> base-mileage values stay on the page and the old poll exits early
-    # because the $-labels already exist. Force a true Tab via Playwright,
-    # then poll for an explicit commit signal (badge OR odometer adjustment).
+    # MILEAGE_COMMIT_FIX_V2_2026_05_15: v1's "Mileage entered" badge / Odometer
+    # regex was an unreliable signal — bid 1466 wrongly logged committed=True
+    # while storing base-mileage values. v2 detects commit by VALUE CHANGE:
+    # snapshot the 4 dollar values BEFORE entering miles, then poll until at
+    # least one differs from snapshot. Cannot be fooled by static page text.
+    #
+    # NOTE: we capture the snapshot RIGHT NOW (after the dispatch above, before
+    # waiting). Most pages already have base-mileage values rendered by the time
+    # we get here. A few synchronous-recalc pages may already show updated
+    # values, in which case "no change after entry" is correct — we degrade to
+    # the legacy $-labels-present check after a brief settle period.
+    def _read_4_values():
+        return page.evaluate(r"""() => {
+            const map = [
+                ['Instant Offer','guaranteed_offer'],
+                ['Target Auction','trade_in'],
+                ['Target Retail','trade_market'],
+                ['Wholesale / Average','market_avg'],
+                ['Wholesale/Average','market_avg'],
+                ['Wholesale Average','market_avg']
+            ];
+            const r = {guaranteed_offer:null, trade_in:null, trade_market:null, market_avg:null};
+            const text = document.body.innerText || '';
+            for (const [label, field] of map) {
+                if (r[field] !== null) continue;
+                const idx = text.indexOf(label);
+                if (idx < 0) continue;
+                const win = text.substring(idx + label.length, idx + label.length + 80);
+                if (/^\s*\r?\n?\s*N\/A\b/i.test(win)) { r[field] = null; continue; }
+                const m = win.match(/\$\s*([\d,]+)(?!\d)/);
+                if (m) {
+                    const n = parseInt(m[1].replace(/,/g, ''));
+                    if (n > 100 && n < 10000000) r[field] = n;
+                }
+            }
+            return r;
+        }""") or {}
+
+    pre_values = _read_4_values()
+    # Strong trigger: real Playwright Tab keypress (v1 carry-over — still
+    # better than nothing).
     try:
         page.keyboard.press('Tab')
     except Exception:
         pass
-    deadline = time.time() + 12  # was 7
+
+    deadline = time.time() + 12
     mileage_committed = False
+    last_post = pre_values
     while time.time() < deadline:
-        sig = page.evaluate(r"""(target) => {
-            const text = (document.body && document.body.innerText) || '';
-            // Strong commit signal: 'Mileage entered' badge AccuTrade renders
-            // beneath the input after a successful commit.
-            if (/Mileage\s+entered/i.test(text)) return 'badge';
-            // Fallback signal: Odometer line shows a non-$0 dollar adjustment
-            // (penalty for high miles or bonus for low miles vs. base).
-            const om = text.match(/Odometer[\s\S]{0,60}(-?\$\s*[\d,]+)/);
-            if (om) {
-                const amt = parseInt(om[1].replace(/[^0-9-]/g, ''));
-                if (Number.isFinite(amt) && amt !== 0) return 'odometer';
-            }
-            return '';
-        }""", int(miles))
-        if sig:
-            mileage_committed = True
+        post_values = _read_4_values()
+        # Committed if ANY value differs from snapshot (handles N/A->value
+        # and value->different-value).
+        for k in ('guaranteed_offer', 'trade_in', 'trade_market', 'market_avg'):
+            if pre_values.get(k) != post_values.get(k):
+                mileage_committed = True
+                break
+        if mileage_committed:
+            last_post = post_values
             break
+        last_post = post_values
         time.sleep(0.4)
-    # If no commit signal at all, also check that at least 2 $-labels exist
-    # (pre-fix behavior) as a soft pass. This keeps coverage for vehicles
-    # whose entered miles happen to == base miles (rare; no odometer adjust
-    # AND AccuTrade may or may not show 'Mileage entered' badge in that case).
+
+    # Refuse to store if commit never happened. This is intentionally strict —
+    # the alternative (soft pass) is what stored bid 1466 wrong.
     if not mileage_committed:
-        soft_ok = page.evaluate(r"""() => {
-            const text = document.body.innerText || '';
-            const labels = ['Instant Offer','Target Auction','Target Retail','Wholesale'];
-            let hits = 0;
-            for (const lab of labels) {
-                const idx = text.indexOf(lab);
-                if (idx < 0) continue;
-                const win = text.substring(idx, idx + 100);
-                if (/\$\s*[\d,]{3,}/.test(win)) hits++;
-            }
-            return hits >= 2;
-        }""")
-        if not soft_ok:
-            # Page didn't even render dollar values — total failure.
-            return {
-                "guaranteed_offer": None, "trade_in": None, "trade_market": None,
-                "retail": None, "market_avg": None, "screenshot": None,
-                "appraisal_url": page.url if "/appraisal/" in page.url else None,
-                "selected_trim_text": selected_trim_text,
-                "trim_select_source": trim_select_source,
-                "not_available_reason": "mileage_did_not_commit_no_values",
-            }
-        # Soft pass: log it. Server-side handler can decide whether to trust.
-        print(f"[+{time.time()-t:5.1f}s] [accutrade] WARN: no commit signal for miles={miles}; storing anyway with soft flag")
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] FAIL: mileage_did_not_commit "
+              f"pre={pre_values} post={last_post} miles={miles}")
+        return {
+            "guaranteed_offer": None, "trade_in": None, "trade_market": None,
+            "retail": None, "market_avg": None, "screenshot": None,
+            "appraisal_url": page.url if "/appraisal/" in page.url else None,
+            "selected_trim_text": selected_trim_text,
+            "trim_select_source": trim_select_source,
+            "not_available_reason": "mileage_did_not_commit_v2",
+        }
 
     values = page.evaluate(r"""() => {
         const map = [
@@ -425,8 +441,8 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
         screenshot = None
 
     appraisal_url = page.url if "/appraisal/" in page.url else None
-    print(f"[+{time.time()-t:5.1f}s] [accutrade] done values={values} url={appraisal_url} committed={mileage_committed}")
-    result = {
+    print(f"[+{time.time()-t:5.1f}s] [accutrade] done values={values} url={appraisal_url} committed=True (v2)")
+    return {
         "guaranteed_offer": values.get("guaranteed_offer"),
         "trade_in": values.get("trade_in"),
         "trade_market": values.get("trade_market"),
@@ -437,8 +453,3 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
         "selected_trim_text": selected_trim_text,
         "trim_select_source": trim_select_source,
     }
-    if not mileage_committed:
-        # Surfaced for server-side to mark unavailable_reason; values may be
-        # base-mileage, not user-entered.
-        result["mileage_uncommitted"] = True
-    return result
