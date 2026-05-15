@@ -11851,6 +11851,90 @@ def api_trim_select():
     })
 
 
+# VIN_VERIFY_SMS_2026_05_15: auto-text bidder when AccuTrade can't find the
+# VIN they sent. Strong typo signal — AccuTrade has the biggest VIN database;
+# if it can't resolve, it's almost always a 1-character mistype.
+def _maybe_send_vin_verify_sms(bid_id, reason='accutrade_vin_not_found'):
+    """Fire one SMS asking the bidder to verify their VIN. Idempotent — gated
+    on bids.vin_verify_sms_sent_at IS NULL so we never re-send. If a photo on
+    this bid OCR'd a DIFFERENT 17-char VIN, include it as a suggestion.
+    No phone gating, no quiet hours (operator direction)."""
+    try:
+        _db = get_db()
+        _cur = _db.cursor()
+        _cur.execute(
+            "SELECT id, vin, phone, bidder_name, vin_verify_sms_sent_at "
+            "FROM bids WHERE id = %s", (bid_id,))
+        _row = _cur.fetchone()
+        if not _row:
+            _db.close(); return False
+        if _row.get('vin_verify_sms_sent_at'):
+            _db.close(); return False
+        _phone = (_row.get('phone') or '').strip()
+        if not _phone:
+            _db.close(); return False
+        _vin = (_row.get('vin') or '').strip().upper()
+        _name_raw = (_row.get('bidder_name') or '').strip()
+        _first = _name_raw.split()[0] if _name_raw else 'there'
+        _cur.execute(
+            "SELECT DISTINCT vin_extracted FROM bid_photos WHERE bid_id = %s "
+            "AND vin_extracted IS NOT NULL AND length(vin_extracted) = 17 "
+            "AND upper(vin_extracted) <> %s ORDER BY vin_extracted LIMIT 1",
+            (bid_id, _vin))
+        _alt_row = _cur.fetchone()
+        _alt_vin = (_alt_row.get('vin_extracted') or '').strip().upper() if _alt_row else ''
+
+        if _alt_vin:
+            _body = (
+                f"Hi {_first}, it's Oscar from Experience Wholesale. "
+                f"Quick check on that VIN — {_vin} — our system can't find it "
+                f"in the AccuTrade database, which usually means a 1-character typo. "
+                f"We also see {_alt_vin} on the photos you sent — is that the right one? "
+                f"If not, please re-type the VIN from the dash, door jamb, or "
+                f"windshield sticker, or send a clearer photo and we'll pull it from there. "
+                f"Thanks!")
+        else:
+            _body = (
+                f"Hi {_first}, it's Oscar from Experience Wholesale. "
+                f"Quick check on that VIN — {_vin} — our system can't find it "
+                f"in the AccuTrade database, which usually means a 1-character typo. "
+                f"Could you re-type the VIN from the dash, door jamb, or windshield "
+                f"sticker, or send a clearer photo and we'll grab it from there? "
+                f"Thanks!")
+
+        _sent = send_sms(_phone, _body)
+        if not _sent:
+            _db.close()
+            print(f'[vin-verify-sms] bid={bid_id} send_sms returned False '
+                  f'(phone={_phone}, vin={_vin}) — not stamping', flush=True)
+            return False
+
+        _cur.execute(
+            "UPDATE bids SET vin_verify_sms_sent_at = NOW(), "
+            "vin_verify_sms_reason = %s WHERE id = %s",
+            (reason, bid_id))
+        _db.commit()
+        _db.close()
+
+        try:
+            _alt_line = (f" suggested-alt: <code>{_alt_vin}</code>"
+                         if _alt_vin else " no photo alternative")
+            _tg_worker_alert(
+                f"🔄 EW auto-VIN-verify SMS sent\n"
+                f"bid <b>#{bid_id}</b> · {_first} · {_phone}\n"
+                f"vin: <code>{_vin}</code> ({reason}){_alt_line}")
+        except Exception:
+            pass
+
+        print(f'[vin-verify-sms] bid={bid_id} sent to {_phone} '
+              f'reason={reason} vin={_vin} alt={_alt_vin or chr(45)}', flush=True)
+        return True
+    except Exception as _e:
+        print(f'[vin-verify-sms] error bid={bid_id}: '
+              f'{type(_e).__name__}: {_e}', flush=True)
+        return False
+
+
 @app.route('/api/accutrade/submit', methods=['POST'])
 def api_accutrade_submit():
     """Accept AccuTrade lookup results from worker."""
@@ -11896,6 +11980,20 @@ def api_accutrade_submit():
         data.get('trim_select_source'),
     ))
     db.commit()
+
+    # VIN_VERIFY_SMS_2026_05_15: auto-text bidder if AccuTrade reports no VIN.
+    # Detector fires once per bid (idempotent via vin_verify_sms_sent_at).
+    try:
+        _ua_reason = (data.get('unavailable_reason') or '').lower()
+        if bool(data.get('not_available')) and (
+            'no appraisal data' in _ua_reason
+            or ('vin' in _ua_reason and 'not found' in _ua_reason)
+            or ('vin' in _ua_reason and 'no match' in _ua_reason)
+        ):
+            _maybe_send_vin_verify_sms(bid_id, reason='accutrade_vin_not_found')
+    except Exception as _vvse:
+        print(f'[vin-verify-sms] hook error bid={bid_id}: '
+              f'{type(_vvse).__name__}: {_vvse}', flush=True)
 
     # 2026-05-11: canon_trim writeback. When the AccuTrade overseer picked
     # a trim with confidence >= 0.7, propagate it to bids.canon_trim so the
