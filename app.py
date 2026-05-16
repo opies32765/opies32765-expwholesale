@@ -2648,9 +2648,29 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                 if vin:
                     bg_cur.execute("UPDATE bid_photos SET vin_extracted=%s WHERE id=%s",
                                    (vin, photo_id))
+                    # VIN_VOTE_2026_05_16: majority vote across all OCR'd
+                    # photos in this bid, instead of "first arrival wins".
+                    # All bid_photos.vin_extracted values were already gated
+                    # on vin_check_digit_valid() upstream in
+                    # extract_vin_from_file(), so any non-null row is a
+                    # check-digit-valid candidate. Tiebreaker: earliest
+                    # arrival. Only sets bids.vin when still NULL/empty,
+                    # preserving operator dashboard edits.
+                    bg_cur.execute("""
+                        SELECT vin_extracted AS v, COUNT(*) AS n
+                          FROM bid_photos
+                         WHERE bid_id=%s
+                           AND vin_extracted IS NOT NULL
+                           AND LENGTH(vin_extracted) = 17
+                         GROUP BY vin_extracted
+                         ORDER BY n DESC, MIN(created_at) ASC
+                         LIMIT 1
+                    """, (bid_id,))
+                    _vrow = bg_cur.fetchone()
+                    _winner = (_vrow.get('v') if _vrow else vin) or vin
                     bg_cur.execute("""UPDATE bids SET vin=%s, updated_at=NOW()
                                       WHERE id=%s AND (vin IS NULL OR vin='')""",
-                                   (vin, bid_id))
+                                   (_winner, bid_id))
                 if miles:
                     # PHOTO_OCR_MAX_WINS_2026_05_15: take MAX across all
                     # photo-OCR mileages for this bid. Odometers monotonically

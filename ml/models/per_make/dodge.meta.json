@@ -1,9 +1,9 @@
 {
   "make_name": "DODGE",
-  "trained_at": "2026-05-15T08:31:18.807257Z",
-  "n_total": 753,
+  "trained_at": "2026-05-16T08:32:19.718501Z",
+  "n_total": 754,
   "n_train": 715,
-  "n_test": 38,
+  "n_test": 39,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -223,15 +223,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1878.0,
-    "mape_pct": 7.37,
-    "r2": 0.98,
-    "within_5pct": 57.9,
-    "within_10pct": 76.3
+    "mae_dollars": 1937.0,
+    "mape_pct": 7.76,
+    "r2": 0.979,
+    "within_5pct": 56.4,
+    "within_10pct": 74.4
   },
   "baseline_metrics": {
-    "mae_dollars": 2760.0,
-    "mape_pct": 12.33,
+    "mae_dollars": 2731.0,
+    "mape_pct": 12.24,
     "ratio": 1.0608
   },
   "top_features": [

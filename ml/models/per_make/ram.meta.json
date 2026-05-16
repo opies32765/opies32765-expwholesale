@@ -1,9 +1,9 @@
 {
   "make_name": "RAM",
-  "trained_at": "2026-05-15T08:31:23.020094Z",
-  "n_total": 724,
+  "trained_at": "2026-05-16T08:32:40.313335Z",
+  "n_total": 729,
   "n_train": 688,
-  "n_test": 36,
+  "n_test": 41,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -217,49 +217,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2780.0,
-    "mape_pct": 9.08,
-    "r2": 0.9463,
-    "within_5pct": 44.4,
-    "within_10pct": 66.7
+    "mae_dollars": 2680.0,
+    "mape_pct": 7.84,
+    "r2": 0.9599,
+    "within_5pct": 48.8,
+    "within_10pct": 70.7
   },
   "baseline_metrics": {
-    "mae_dollars": 3081.0,
-    "mape_pct": 10.4,
+    "mae_dollars": 3471.0,
+    "mape_pct": 11.91,
     "ratio": 1.013
   },
   "top_features": [
     {
       "name": "base_appraised_value",
-      "importance": 0.3621920049190521
+      "importance": 0.3707738518714905
     },
     {
       "name": "market_asking_price",
-      "importance": 0.29356077313423157
+      "importance": 0.3089669644832611
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.23101630806922913
+      "importance": 0.21108026802539825
     },
     {
       "name": "supplier_name_Rick Hendrick Chrysler Dodge Jeep Ram Duluth",
-      "importance": 0.008372412994503975
-    },
-    {
-      "name": "supplier_name_Crown Euro Cars Inc.",
-      "importance": 0.005095748230814934
-    },
-    {
-      "name": "model_name_1500 TRX SB Pickup Truck",
-      "importance": 0.00468711880967021
+      "importance": 0.009279518388211727
     },
     {
       "name": "supplier_name_Alpha One Motors Llc",
-      "importance": 0.0044848197139799595
+      "importance": 0.0060700601898133755
+    },
+    {
+      "name": "supplier_name_Crown Euro Cars Inc.",
+      "importance": 0.0051375641487538815
     },
     {
       "name": "supplier_name_Lifted Trucks",
-      "importance": 0.004266718402504921
+      "importance": 0.004772333428263664
+    },
+    {
+      "name": "model_name_1500 TRX SB Pickup Truck",
+      "importance": 0.004222303628921509
     }
   ]
 }
