@@ -2947,8 +2947,95 @@ def twilio_webhook():
                             SET bid_id = EXCLUDED.bid_id,
                                 expires_at = EXCLUDED.expires_at,
                                 set_at = NOW()""", (from_phone, _hb_bid_id))
+            # HASHBID_RESIDUAL_2026_05_16: also parse VIN/miles from the
+            # text content AFTER stripping the "#NNNN" prefix. Lets a
+            # single message like "#1504 1504" set miles=1504 on bid 1504
+            # in one shot, instead of forcing the customer to send two
+            # separate messages.
+            _hb_residual = _HB_RE.sub("", body, count=1).strip() if body else ""
+            _hb_resid_vin = None
+            _hb_resid_miles = None
+            if _hb_residual:
+                _hb_resid_vin = extract_vin_from_text(_hb_residual)
+                _hb_resid_miles = extract_miles_from_text(_hb_residual,
+                                                          has_vin=bool(_hb_resid_vin))
+                if not _hb_resid_miles:
+                    import re as _re_resid
+                    _bm = _re_resid.search(r"\b(\d{3,6})\b", _hb_residual)
+                    if _bm:
+                        _n = int(_bm.group(1))
+                        if 100 <= _n <= 999999:
+                            _hb_resid_miles = _n
+            _hb_resid_applied = []
+            if _hb_resid_vin:
+                cur.execute(
+                    "UPDATE bids SET vin=%s, updated_at=NOW() "
+                    "WHERE id=%s AND (vin IS NULL OR vin='')",
+                    (_hb_resid_vin, _hb_bid_id))
+                if cur.rowcount > 0:
+                    _hb_resid_applied.append(f"vin={_hb_resid_vin}")
+            if _hb_resid_miles:
+                cur.execute(
+                    "UPDATE bids SET mileage=%s, updated_at=NOW() "
+                    "WHERE id=%s AND (mileage IS NULL OR mileage < %s)",
+                    (_hb_resid_miles, _hb_bid_id, _hb_resid_miles))
+                if cur.rowcount > 0:
+                    _hb_resid_applied.append(f"miles={_hb_resid_miles}")
+            # If we just filled a piece of data that had a verification
+            # flag open, clear it + force-reprocess (same logic that the
+            # SMS stitch + photo OCR paths use).
+            if _hb_resid_applied:
+                cur.execute("""SELECT needs_verification_at,
+                                       needs_verification_cleared_at,
+                                       needs_verification_reason
+                                  FROM bids WHERE id=%s""", (_hb_bid_id,))
+                _hb_vrow = cur.fetchone()
+                _hb_vreason = (_hb_vrow.get('needs_verification_reason') or '').lower() if _hb_vrow else ''
+                _hb_needs_clear = False
+                if _hb_resid_miles and 'missing_miles' in _hb_vreason:
+                    _hb_needs_clear = True
+                if _hb_resid_vin and any(k in _hb_vreason for k in (
+                        'missing_vin', 'vin_invalid', 'invalid_vin',
+                        'vin_not_found')):
+                    _hb_needs_clear = True
+                if (_hb_needs_clear and _hb_vrow.get('needs_verification_at')
+                        and not _hb_vrow.get('needs_verification_cleared_at')):
+                    cur.execute("""UPDATE bids
+                                       SET needs_verification_cleared_at = NOW(),
+                                           needs_verification_cleared_by = 'auto:hashbid_residual'
+                                     WHERE id = %s""", (_hb_bid_id,))
+                    cur.execute(
+                        "DELETE FROM ipacket_lookups WHERE bid_id=%s AND "
+                        "(looked_up_at IS NULL OR looked_up_at < NOW() - INTERVAL '5 minutes' "
+                        "OR not_available=true)", (_hb_bid_id,))
+                    cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s",
+                                (_hb_bid_id,))
+                    cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s",
+                                (_hb_bid_id,))
+                    cur.execute(
+                        "UPDATE bids SET vauto_claimed_by=NULL, "
+                        "vauto_claimed_at=NULL, ai_assessed_at=NULL, "
+                        "ai_price=NULL, ai_assessment=NULL, "
+                        "miles_audit_at=NULL WHERE id=%s",
+                        (_hb_bid_id,))
+                    print(f'[hashbid-residual] bid={_hb_bid_id} '
+                          f'applied={",".join(_hb_resid_applied)} '
+                          f'cleared verification + force-reprocess fired',
+                          flush=True)
+                else:
+                    print(f'[hashbid-residual] bid={_hb_bid_id} '
+                          f'applied={",".join(_hb_resid_applied)}', flush=True)
+
+            # Compose reply
+            _hb_extras = []
             if _hb_ingested:
-                _hb_reply = f"✓ {_hb_ingested} photo(s) attached to bid #{_hb_bid_id} ({_hb_ymm}). Window open 2 min for more."
+                _hb_extras.append(f"{_hb_ingested} photo(s)")
+            if _hb_resid_vin:
+                _hb_extras.append(f"VIN {_hb_resid_vin}")
+            if _hb_resid_miles:
+                _hb_extras.append(f"{_hb_resid_miles:,} miles")
+            if _hb_extras:
+                _hb_reply = f"✓ Got {', '.join(_hb_extras)} on bid #{_hb_bid_id} ({_hb_ymm}). Window open 2 min for more."
             else:
                 _hb_reply = f"📎 Ready — photos for next 2 min attach to bid #{_hb_bid_id} ({_hb_ymm})."
             _finalize_sms_intake(cur, intake_log_id, "hashbid_attach",
