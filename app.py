@@ -597,6 +597,74 @@ def _resize_image_for_gemini(image_bytes, max_dim=1536, quality=85):
         return image_bytes, 'image/jpeg'
 
 
+# SONNET_MILES_OCR_2026_05_15: Claude Sonnet 4.6 vision call helper.
+# Used as the high-quality fallback for extract_mileage_from_file (Gemini
+# Flash hallucinated mileage from non-odometer photos on bid 1501 —
+# Sonnet returned NONE correctly on all 5 non-odometer photos and the
+# correct integer on the 1 dash photo).
+_sonnet_client = None
+
+
+def _sonnet():
+    global _sonnet_client
+    if _sonnet_client is None:
+        try:
+            import anthropic
+            _key = os.environ.get('ANTHROPIC_API_KEY', '').strip()
+            if not _key:
+                print('[sonnet] ANTHROPIC_API_KEY not set', flush=True)
+                _sonnet_client = False
+                return None
+            _sonnet_client = anthropic.Anthropic(api_key=_key)
+        except Exception as e:
+            print(f'[sonnet] init failed: {e}', flush=True)
+            _sonnet_client = False
+    return _sonnet_client if _sonnet_client else None
+
+
+def sonnet_vision_call(prompt, image_bytes, mime='image/jpeg', max_tokens=64,
+                      timeout=15.0):
+    """One-shot Claude Sonnet 4.6 vision call. Returns response text or None.
+    Use this for OCR tasks where Gemini's hallucination cost > 4-5x token cost.
+    """
+    client = _sonnet()
+    if not client:
+        return None
+    try:
+        import base64 as _b64
+        img_b64 = _b64.standard_b64encode(image_bytes).decode('utf-8')
+        # Run in a thread so we can enforce a hard timeout
+        import threading as _th
+        _result = {'text': None}
+        def _runner():
+            try:
+                resp = client.messages.create(
+                    model='claude-sonnet-4-6',
+                    max_tokens=max_tokens,
+                    messages=[{
+                        'role': 'user',
+                        'content': [
+                            {'type': 'image',
+                             'source': {'type': 'base64',
+                                        'media_type': mime,
+                                        'data': img_b64}},
+                            {'type': 'text', 'text': prompt},
+                        ]
+                    }]
+                )
+                if resp.content:
+                    _result['text'] = resp.content[0].text.strip()
+            except Exception as _e:
+                print(f'[sonnet] call error: {_e}', flush=True)
+        t = _th.Thread(target=_runner, daemon=True)
+        t.start()
+        t.join(timeout)
+        return _result['text']
+    except Exception as e:
+        print(f'[sonnet] outer error: {e}', flush=True)
+        return None
+
+
 def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-flash',
                 max_tokens=1024, temperature=0.4):
     """One-shot Gemini call. Returns text response or None on failure.
@@ -1339,19 +1407,31 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
             result = max(candidates)
             print(f'[OCR] Mileage via Google Vision: {result}', flush=True)
             return result
-    print('[OCR] Google Vision missed mileage, falling back to Claude', flush=True)
+    print('[OCR] Google Vision missed mileage, falling back to Sonnet', flush=True)
 
-    # Fallback to Gemini Flash
-    result = gemini_call(ODO_PROMPT, image_bytes=file_bytes, mime=media_type,
-                         model='gemini-2.5-flash', max_tokens=50)
-    if result:
-        result = result.strip().upper()
-        if result != 'NONE':
-            digits = re.sub(r'[^\d]', '', result)
+    # SONNET_MILES_OCR_2026_05_15: Claude Sonnet 4.6 fallback.
+    # Benchmark on bid 1501 (6 photos): Sonnet 0 hallucinations vs Gemini 3.
+    # Cost ~$0.003/photo, fired only when Google Vision misses (~10-20% of
+    # photos in practice), so absolute spend stays small.
+    _sonnet_prompt = (
+        "Look at this image. Is there a vehicle odometer reading visible? "
+        "An odometer is a digital or analog display on the vehicle's "
+        "instrument cluster showing total lifetime mileage. NOT a trip "
+        "meter, NOT a range estimate, NOT a sticker price, NOT a license "
+        "plate, NOT a sale price, NOT a tire spec, NOT an MSRP number. "
+        "If you see a CLEAR odometer reading, reply with ONLY the integer "
+        "(no commas, no units). If not, reply with the single word NONE."
+    )
+    sresult = sonnet_vision_call(_sonnet_prompt, file_bytes, mime=media_type,
+                                  max_tokens=64)
+    if sresult:
+        up = sresult.strip().upper()
+        if up != 'NONE':
+            digits = re.sub(r'[^\d]', '', up)
             if digits:
                 n = int(digits)
                 if 100 <= n <= 999999:
-                    print(f'[OCR] Mileage via Gemini Flash: {n}', flush=True)
+                    print(f'[OCR] Mileage via Sonnet 4.6: {n}', flush=True)
                     return n
     return None
 
@@ -2572,9 +2652,50 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                                       WHERE id=%s AND (vin IS NULL OR vin='')""",
                                    (vin, bid_id))
                 if miles:
+                    # PHOTO_OCR_MAX_WINS_2026_05_15: take MAX across all
+                    # photo-OCR mileages for this bid. Odometers monotonically
+                    # increase, so the largest plausible OCR value across
+                    # multiple photos is most likely the real odometer (the
+                    # smaller hits are usually trim badges / sale prices /
+                    # climate displays that Gemini fell back to).
                     bg_cur.execute("""UPDATE bids SET mileage=%s, updated_at=NOW()
-                                      WHERE id=%s AND mileage IS NULL""",
-                                   (miles, bid_id))
+                                      WHERE id=%s AND (mileage IS NULL OR mileage < %s)""",
+                                   (miles, bid_id, miles))
+                    if bg_cur.rowcount > 0:
+                        # Miles just landed (or got larger). If the bid had
+                        # an open missing_miles verification flag, clear it
+                        # + force-reprocess so workers pick it up.
+                        bg_cur.execute("""
+                            SELECT needs_verification_at,
+                                   needs_verification_cleared_at,
+                                   needs_verification_reason
+                              FROM bids WHERE id = %s
+                        """, (bid_id,))
+                        _vrow = bg_cur.fetchone()
+                        if (_vrow and _vrow.get('needs_verification_at')
+                                and not _vrow.get('needs_verification_cleared_at')
+                                and 'missing_miles' in (_vrow.get('needs_verification_reason') or '')):
+                            bg_cur.execute("""
+                                UPDATE bids
+                                   SET needs_verification_cleared_at = NOW(),
+                                       needs_verification_cleared_by = 'auto:photo_ocr_miles'
+                                 WHERE id = %s
+                            """, (bid_id,))
+                            bg_cur.execute(
+                                "DELETE FROM ipacket_lookups WHERE bid_id=%s "
+                                "AND (looked_up_at IS NULL OR looked_up_at < NOW() - INTERVAL '5 minutes' OR not_available=true)",
+                                (bid_id,))
+                            bg_cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s", (bid_id,))
+                            bg_cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+                            bg_cur.execute(
+                                "UPDATE bids SET vauto_claimed_by=NULL, "
+                                "vauto_claimed_at=NULL, ai_assessed_at=NULL, "
+                                "ai_price=NULL, ai_assessment=NULL, "
+                                "miles_audit_at=NULL WHERE id=%s",
+                                (bid_id,))
+                            print(f'[photo-ocr-miles] bid={bid_id} miles={miles} '
+                                  f'cleared missing_miles flag + force-reprocess fired',
+                                  flush=True)
             conn.commit()
     except Exception as _e:
         print(f'[sms-photo-bg] error bid={bid_id} photo={photo_id}: {_e}', flush=True)

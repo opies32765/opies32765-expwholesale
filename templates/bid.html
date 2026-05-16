@@ -1787,6 +1787,17 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         {% endif %}
 
         {% elif accutrade_data %}
+        {# ACCUTRADE_2026MY_NOTE_2026_05_15: surface AccuTrade's current-model-year
+           indexing gap. When only market_avg lands (the other 3 are NULL), AccuTrade
+           doesn't yet have Instant Offer / Target pricing for that MY — typical
+           3-6mo indexing lag after a new MY enters the market. Don't read this as
+           a worker bug; the AT pricing is genuinely not available server-side. #}
+        {% set _at_partial = (accutrade_data.market_avg and not accutrade_data.guaranteed_offer and not accutrade_data.trade_in and not accutrade_data.trade_market) %}
+        {% if _at_partial and bid.year and bid.year >= 2026 %}
+        <div style="margin-bottom:10px;padding:8px 11px;background:rgba(148,163,184,.08);border:1px solid rgba(148,163,184,.25);border-radius:6px;color:#cbd5e1;font-size:11px;line-height:1.5">
+          <span style="font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:#94a3b8;font-size:10px">Note</span> &middot; AccuTrade has limited pricing for {{ bid.year }} model year vehicles &mdash; only Wholesale/Avg available. Instant Offer / Target Auction / Target Retail typically index 3-6 months after a new MY enters the market.
+        </div>
+        {% endif %}
         <div style="display:flex;flex-direction:column;gap:6px">
           {% set at_books = [
             ('Instant Offer', accutrade_data.guaranteed_offer),

@@ -385,6 +385,14 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
         last_post = post_values
         time.sleep(0.4)
 
+    # ACCUTRADE_SETTLE_DELAY_2026_05_15: bid 1503 case — once we detect ANY
+    # value change, the other 3 panels may still be rendering. Wait 2.5s
+    # for everything to settle before reading final values. Without this,
+    # Instant Offer / Target Auction / Target Retail can come back NULL
+    # while only market_avg (which lands earlier) gets captured.
+    if mileage_committed:
+        time.sleep(2.5)
+
     # Refuse to store if commit never happened. This is intentionally strict —
     # the alternative (soft pass) is what stored bid 1466 wrong.
     if not mileage_committed:

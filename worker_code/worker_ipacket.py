@@ -223,11 +223,18 @@ def lookup(page, ctx, vin, t):
     # original Submit flow for fresh VINs OR if V9 doesn't actually render.
     try:
         cached_clicked = page.evaluate(r"""(v) => {
+            // IPACKET_SELECTOR_BROAD_2026_05_15: match any anchor whose
+            // href ends with /<VIN>, not just the class-based selector
+            // (iPacket renamed/dropped .pull-history-table-download).
             const V = (v||'').toUpperCase();
-            const anchors = document.querySelectorAll('.pull-history-table-download[href]');
-            for (const a of anchors) {
+            const all = document.querySelectorAll('a[href]');
+            for (const a of all) {
                 const h = (a.getAttribute('href') || '').toUpperCase();
-                if (h.endsWith('/' + V)) { a.click(); return true; }
+                if (h.endsWith('/' + V) && (
+                    h.indexOf('STICKER') >= 0 ||
+                    h.indexOf('DOWNLOAD') >= 0 ||
+                    h.indexOf('PULL') >= 0
+                )) { a.click(); return true; }
             }
             return false;
         }""", vin)
@@ -440,11 +447,16 @@ def lookup(page, ctx, vin, t):
                     return {state: 'ready', size: 'iframe-' + v};
                 }
             }
-            // SECONDARY: pull-history-table-download with our VIN's download URL
-            //   (download URLs end in /<VIN>)
-            const dl = document.querySelectorAll('.pull-history-table-download[href]');
+            // IPACKET_SELECTOR_BROAD_2026_05_15: any anchor href ending in /<VIN>
+            //   with sticker/download/pull keywords in the URL.
+            const dl = document.querySelectorAll('a[href]');
             for (const a of dl) {
-                if ((a.getAttribute('href') || '').toUpperCase().endsWith('/' + v)) {
+                const h = (a.getAttribute('href') || '').toUpperCase();
+                if (h.endsWith('/' + v) && (
+                    h.indexOf('STICKER') >= 0 ||
+                    h.indexOf('DOWNLOAD') >= 0 ||
+                    h.indexOf('PULL') >= 0
+                )) {
                     return {state: 'ready'};
                 }
             }
@@ -480,11 +492,18 @@ def lookup(page, ctx, vin, t):
         recovered = False
         try:
             recent_url = page.evaluate(r"""(v) => {
+                // IPACKET_SELECTOR_BROAD_2026_05_15: any anchor whose href
+                // ends with /<VIN> + has sticker/download/pull in URL.
                 const V = (v||'').toUpperCase();
-                const rows = document.querySelectorAll('.pull-history-table-download[href]');
+                const rows = document.querySelectorAll('a[href]');
                 for (const a of rows) {
-                    const h = a.getAttribute('href') || '';
-                    if (h.toUpperCase().endsWith('/' + V)) return h;
+                    const h = (a.getAttribute('href') || '');
+                    const HU = h.toUpperCase();
+                    if (HU.endsWith('/' + V) && (
+                        HU.indexOf('STICKER') >= 0 ||
+                        HU.indexOf('DOWNLOAD') >= 0 ||
+                        HU.indexOf('PULL') >= 0
+                    )) return h;
                 }
                 return null;
             }""", vin)

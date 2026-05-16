@@ -414,6 +414,69 @@ def claim_missing_miles(conn):
         return cur.fetchone()
 
 
+def claim_missing_vin(conn):
+    """Bid created without a VIN at all (customer texted miles or notes but
+    didn't include a 17-char VIN). Different from vin_invalid (had a VIN
+    that failed structural check) — here we have nothing to validate."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT id, vin, phone, bidder_name, year, make, model, mileage
+              FROM bids
+             WHERE (vin IS NULL OR vin = '' OR length(vin) <> 17)
+               AND vin_invalid_reason IS NULL
+               AND vin_verify_sms_sent_at IS NULL
+               AND phone IS NOT NULL AND phone <> ''
+               AND phone NOT LIKE 'field:%%'
+               AND phone NOT LIKE 'sys:%%'
+               AND phone NOT LIKE 'thalist:%%'
+               AND phone NOT LIKE 'dealerclub:%%'
+               AND created_at BETWEEN NOW() - INTERVAL '12 hours'
+                                  AND NOW() - INTERVAL '30 seconds'
+             ORDER BY id DESC
+             LIMIT 1
+        """)
+        return cur.fetchone()
+
+
+def process_missing_vin(conn, row):
+    bid_id = row['id']
+    phone = (row.get('phone') or '').strip()
+    name_raw = (row.get('bidder_name') or '').strip()
+    first = name_raw.split()[0] if name_raw else 'there'
+    miles_ctx = ''
+    if row.get('mileage'):
+        miles_ctx = f' (we have {int(row["mileage"]):,} miles noted)'
+    body = (
+        f"Hey, its the EW Bot. Got your message{miles_ctx} but I didn't "
+        f"catch a VIN — can you text me the 17-character VIN from the dash, "
+        f"door jamb, or windshield sticker? Or send a clear photo and we'll "
+        f"pull it from there. Thanks!"
+    )
+    sent = _twilio_send(phone, body)
+    if not sent:
+        print(f'[missing-vin-sms] bid={bid_id} send failed', flush=True)
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE bids
+               SET vin_verify_sms_sent_at = NOW(),
+                   vin_verify_sms_reason = 'missing_vin_at_intake',
+                   needs_verification_at = COALESCE(needs_verification_at, NOW()),
+                   needs_verification_reason = CASE
+                      WHEN needs_verification_reason IS NULL
+                           THEN 'missing_vin'
+                      WHEN position('missing_vin' IN needs_verification_reason) > 0
+                           THEN needs_verification_reason
+                      ELSE needs_verification_reason || ',missing_vin'
+                   END
+             WHERE id = %s
+               AND needs_verification_cleared_at IS NULL
+        """, (bid_id,))
+    conn.commit()
+    print(f'[missing-vin-sms] bid={bid_id} sent to {phone}', flush=True)
+    return True
+
+
 def claim_invalid_vin(conn):
     """Find next bid with vin_invalid_reason set (ISO-3779 check digit fail
     OR length != 17) where we haven't yet asked the customer to verify.
@@ -663,6 +726,12 @@ def main():
                 bad_vin = claim_invalid_vin(conn)
                 if bad_vin:
                     process_invalid_vin(conn, bad_vin)
+                    continue
+
+                # Missing-VIN SMS (no VIN at all, not just malformed)
+                no_vin = claim_missing_vin(conn)
+                if no_vin:
+                    process_missing_vin(conn, no_vin)
                     continue
 
                 # Background backlog scans (slower, can wait):
