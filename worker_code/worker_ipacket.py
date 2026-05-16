@@ -223,18 +223,40 @@ def lookup(page, ctx, vin, t):
     # original Submit flow for fresh VINs OR if V9 doesn't actually render.
     try:
         cached_clicked = page.evaluate(r"""(v) => {
-            // IPACKET_SELECTOR_BROAD_2026_05_15: match any anchor whose
-            // href ends with /<VIN>, not just the class-based selector
-            // (iPacket renamed/dropped .pull-history-table-download).
+            // IPACKET_TEXT_MATCH_2026_05_15: text-content row matching.
+            // "View Sticker" link in Recent Pulls is a React handler — not
+            // an <a href>. Find TR whose innerText contains the VIN,
+            // then click any clickable element in it (or the "View
+            // Sticker"-labeled cell).
             const V = (v||'').toUpperCase();
-            const all = document.querySelectorAll('a[href]');
-            for (const a of all) {
+            // Try anchor href first (legacy path, in case iPacket reverts)
+            const anchors = document.querySelectorAll('a[href]');
+            for (const a of anchors) {
                 const h = (a.getAttribute('href') || '').toUpperCase();
                 if (h.endsWith('/' + V) && (
                     h.indexOf('STICKER') >= 0 ||
                     h.indexOf('DOWNLOAD') >= 0 ||
                     h.indexOf('PULL') >= 0
                 )) { a.click(); return true; }
+            }
+            // Row-text match
+            const rows = document.querySelectorAll('tr');
+            for (const tr of rows) {
+                const txt = (tr.innerText || '').toUpperCase();
+                if (!txt.includes(V)) continue;
+                // Prefer explicit "View Sticker" cell click
+                const cells = tr.querySelectorAll('td, th, span, div, button, a');
+                for (const c of cells) {
+                    const ctext = (c.innerText || c.textContent || '').trim();
+                    if (/^(view\s*sticker|submit)$/i.test(ctext)) {
+                        c.click(); return true;
+                    }
+                }
+                // Fall back: click the first clickable element in this row
+                const clickable = tr.querySelector(
+                    'a, button, [role="button"], [onclick], .clickable, .link'
+                );
+                if (clickable) { clickable.click(); return true; }
             }
             return false;
         }""", vin)
@@ -417,7 +439,12 @@ def lookup(page, ctx, vin, t):
             const view = document.querySelector('.stickerpull-view-container');
             if (view && view.offsetParent !== null) {
                 const canvas = view.querySelector('.react-pdf__Page__canvas');
-                if (canvas && canvas.width > 500 && canvas.height > 500) {
+                // IPACKET_CANVAS_THRESHOLD_2026_05_15: was 500x500. Real
+                //   completed renders observed at 752x486 for Lexus stickers
+                //   (bid 1503), so height < 500 was a false negative. 200x200
+                //   floors out the early PDF.js paint frames (<50px) without
+                //   excluding legitimate completed canvases.
+                if (canvas && canvas.width > 200 && canvas.height > 200) {
                     const sig = canvas.width + 'x' + canvas.height;
                     const presub = window.__ipk_pre_submit_size;
                     if (presub && presub === sig) {
@@ -447,8 +474,28 @@ def lookup(page, ctx, vin, t):
                     return {state: 'ready', size: 'iframe-' + v};
                 }
             }
-            // IPACKET_SELECTOR_BROAD_2026_05_15: any anchor href ending in /<VIN>
-            //   with sticker/download/pull keywords in the URL.
+            // IPACKET_IFRAME_RELAXED_2026_05_15: any visible iframe with
+            //   non-empty src — captures iPacket URL-pattern drift. Only
+            //   trusted after 5s post-submit (Python enforces grace below).
+            const allIframes = document.querySelectorAll('iframe');
+            for (const f of allIframes) {
+                if (f.offsetParent === null) continue;
+                const r = f.getBoundingClientRect();
+                if (r.width < 400 || r.height < 400) continue;
+                const fsrc = (f.getAttribute('src') || '');
+                if (!fsrc || fsrc === 'about:blank') continue;
+                return {state: 'ready_iframe_relaxed', size: 'iframe-vis-' + Math.round(r.width) + 'x' + Math.round(r.height)};
+            }
+            // IPACKET_IFRAME_RELAXED_2026_05_15: sticker watermark text fallback
+            //   ("Not Original - Copy" appears on every iPacket dealer-side render).
+            const bodyTxt = (document.body && document.body.innerText) || '';
+            if (/not\s*original\s*-?\s*copy/i.test(bodyTxt)
+                || /vehicle\s*price/i.test(bodyTxt)
+                || /total\s*price/i.test(bodyTxt)
+                || /as\s*delivered\s*price/i.test(bodyTxt)) {
+                return {state: 'ready_watermark', size: 'watermark-' + bodyTxt.length};
+            }
+            // IPACKET_TEXT_MATCH_2026_05_15: also accept row-text-match readiness.
             const dl = document.querySelectorAll('a[href]');
             for (const a of dl) {
                 const h = (a.getAttribute('href') || '').toUpperCase();
@@ -457,6 +504,13 @@ def lookup(page, ctx, vin, t):
                     h.indexOf('DOWNLOAD') >= 0 ||
                     h.indexOf('PULL') >= 0
                 )) {
+                    return {state: 'ready'};
+                }
+            }
+            const rows2 = document.querySelectorAll('tr');
+            for (const tr of rows2) {
+                const txt = (tr.innerText || '').toUpperCase();
+                if (txt.includes(v) && /(view\s*sticker|submit)/i.test(txt)) {
                     return {state: 'ready'};
                 }
             }
@@ -477,6 +531,15 @@ def lookup(page, ctx, vin, t):
         }""", vin) or {}
         state = st.get("state", "waiting"); msg = st.get("msg", "")
         if st.get("size"): canvas_size = st.get("size")
+        # IPACKET_IFRAME_RELAXED_2026_05_15: relaxed iframe / watermark
+        #   detection requires 5s post-submit grace to avoid catching
+        #   pre-existing chrome iframes or stale watermark text from the
+        #   prior lookup.
+        if state in ("ready_iframe_relaxed", "ready_watermark"):
+            if (time.time() - submit_ts) >= 5.0:
+                state = "ready"
+            else:
+                state = "waiting"  # wait for grace to pass; re-poll
         # Within the grace window, ignore "unavailable" — it's almost always
         # a stale element from the previous lookup or a permanent UI banner.
         if state == "unavailable" and (time.time() - submit_ts) < UNAVAIL_GRACE_SEC:
@@ -559,6 +622,14 @@ def lookup(page, ctx, vin, t):
             try: ss_bytes = screenshot_path.stat().st_size if screenshot_path.exists() else 0
             except Exception: ss_bytes = 0
             print(f"[ipacket] DIAG bid={vin} canvas={canvas_str} text_chars={len(diag.get('text') or '')} markers={found} iframe_src={iframe_str} screenshot_bytes={ss_bytes}")
+            # IPACKET_HTML_DUMP_2026_05_15: dump full page HTML on failure
+            try:
+                _html = page.content()
+                _hp = REPORTS_DIR / f"debug_html_{vin}_{int(time.time())}.html"
+                _hp.write_text(_html, encoding="utf-8")
+                print(f"[ipacket] HTML dumped: {_hp.name} ({len(_html)} chars)")
+            except Exception as _he:
+                print(f"[ipacket] HTML dump failed: {_he}")
             return {
                 "not_available": True,
                 "reason": msg or "viewer_did_not_render",
