@@ -2671,25 +2671,28 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     bg_cur.execute("""UPDATE bids SET vin=%s, updated_at=NOW()
                                       WHERE id=%s AND (vin IS NULL OR vin='')""",
                                    (_winner, bid_id))
-                    # VIN_FILL_CLEARS_VERIFY_2026_05_16: mirror the miles
-                    # path below — if a VIN-related verification flag was
-                    # open, clear it now that we have a VIN, then nuke
-                    # vauto/accutrade/ipacket lookups so workers re-claim.
-                    if bg_cur.rowcount > 0:
-                        bg_cur.execute("""
-                            SELECT needs_verification_at,
-                                   needs_verification_cleared_at,
-                                   needs_verification_reason
-                              FROM bids WHERE id = %s
-                        """, (bid_id,))
-                        _vrow = bg_cur.fetchone()
-                        _vreason = (_vrow.get('needs_verification_reason') or '').lower() if _vrow else ''
-                        _vin_related = any(k in _vreason for k in (
-                            'missing_vin', 'vin_invalid', 'invalid_vin',
-                            'vin_not_found'))
-                        if (_vrow and _vrow.get('needs_verification_at')
-                                and not _vrow.get('needs_verification_cleared_at')
-                                and _vin_related):
+                    # CLEAR_VERIFY_STATE_BASED_2026_05_16: gate on current
+                    # bid state (does it have a vin now? is the flag open
+                    # with a vin-related reason?) rather than on whether
+                    # this UPDATE moved anything. The voter is no-op when
+                    # vin was already set by an earlier photo's OCR, but
+                    # we still want to clear the flag in that case.
+                    bg_cur.execute("""
+                        SELECT vin,
+                               needs_verification_at,
+                               needs_verification_cleared_at,
+                               needs_verification_reason
+                          FROM bids WHERE id = %s
+                    """, (bid_id,))
+                    _vrow = bg_cur.fetchone()
+                    _vreason = (_vrow.get('needs_verification_reason') or '').lower() if _vrow else ''
+                    _vin_related = any(k in _vreason for k in (
+                        'missing_vin', 'vin_invalid', 'invalid_vin',
+                        'vin_not_found'))
+                    if (_vrow and _vrow.get('vin')
+                            and _vrow.get('needs_verification_at')
+                            and not _vrow.get('needs_verification_cleared_at')
+                            and _vin_related):
                             bg_cur.execute("""
                                 UPDATE bids
                                    SET needs_verification_cleared_at = NOW(),
@@ -2721,20 +2724,23 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     bg_cur.execute("""UPDATE bids SET mileage=%s, updated_at=NOW()
                                       WHERE id=%s AND (mileage IS NULL OR mileage < %s)""",
                                    (miles, bid_id, miles))
-                    if bg_cur.rowcount > 0:
-                        # Miles just landed (or got larger). If the bid had
-                        # an open missing_miles verification flag, clear it
-                        # + force-reprocess so workers pick it up.
-                        bg_cur.execute("""
-                            SELECT needs_verification_at,
-                                   needs_verification_cleared_at,
-                                   needs_verification_reason
-                              FROM bids WHERE id = %s
-                        """, (bid_id,))
-                        _vrow = bg_cur.fetchone()
-                        if (_vrow and _vrow.get('needs_verification_at')
-                                and not _vrow.get('needs_verification_cleared_at')
-                                and 'missing_miles' in (_vrow.get('needs_verification_reason') or '')):
+                    # CLEAR_VERIFY_STATE_BASED_2026_05_16: state-based gate.
+                    # If the bid has miles now (set by us or an earlier
+                    # photo's OCR) AND the flag is open AND reason is
+                    # missing_miles, clear it — regardless of whether
+                    # *this* UPDATE moved the value.
+                    bg_cur.execute("""
+                        SELECT mileage,
+                               needs_verification_at,
+                               needs_verification_cleared_at,
+                               needs_verification_reason
+                          FROM bids WHERE id = %s
+                    """, (bid_id,))
+                    _vrow = bg_cur.fetchone()
+                    if (_vrow and _vrow.get('mileage')
+                            and _vrow.get('needs_verification_at')
+                            and not _vrow.get('needs_verification_cleared_at')
+                            and 'missing_miles' in (_vrow.get('needs_verification_reason') or '')):
                             bg_cur.execute("""
                                 UPDATE bids
                                    SET needs_verification_cleared_at = NOW(),
