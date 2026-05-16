@@ -451,6 +451,8 @@ def process_missing_vin(conn, row):
         f"catch a VIN — can you text me the 17-character VIN from the dash, "
         f"door jamb, or windshield sticker? Or send a clear photo and we'll "
         f"pull it from there. Thanks!"
+        # VERIFY_SMS_HASHBID_HINT_2026_05_16
+        f"\n\nReply with #{bid_id} before the VIN or photo so we attach it to this bid."
     )
     sent = _twilio_send(phone, body)
     if not sent:
@@ -512,6 +514,8 @@ def process_invalid_vin(conn, row):
         f"characters and pass the standard VIN check. Could you re-type the "
         f"VIN from the dash, door jamb, or windshield sticker, or send a "
         f"clearer photo? Thanks!"
+        # VERIFY_SMS_HASHBID_HINT_2026_05_16
+        f"\n\nReply with #{bid_id} before the VIN or photo so we attach it to this bid."
     )
     sent = _twilio_send(phone, body)
     if not sent:
@@ -555,6 +559,8 @@ def process_missing_miles(conn, row):
         f"looks like a {vehicle}. To finalize the value I need the odometer "
         f"reading too. Reply with the mileage or send a clear photo of the "
         f"dash. Thanks!"
+        # VERIFY_SMS_HASHBID_HINT_2026_05_16
+        f"\n\nReply with #{bid_id} before the mileage or photo so we attach it to this bid."
     )
 
     sent = _twilio_send(phone, body)

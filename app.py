@@ -2671,6 +2671,46 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     bg_cur.execute("""UPDATE bids SET vin=%s, updated_at=NOW()
                                       WHERE id=%s AND (vin IS NULL OR vin='')""",
                                    (_winner, bid_id))
+                    # VIN_FILL_CLEARS_VERIFY_2026_05_16: mirror the miles
+                    # path below — if a VIN-related verification flag was
+                    # open, clear it now that we have a VIN, then nuke
+                    # vauto/accutrade/ipacket lookups so workers re-claim.
+                    if bg_cur.rowcount > 0:
+                        bg_cur.execute("""
+                            SELECT needs_verification_at,
+                                   needs_verification_cleared_at,
+                                   needs_verification_reason
+                              FROM bids WHERE id = %s
+                        """, (bid_id,))
+                        _vrow = bg_cur.fetchone()
+                        _vreason = (_vrow.get('needs_verification_reason') or '').lower() if _vrow else ''
+                        _vin_related = any(k in _vreason for k in (
+                            'missing_vin', 'vin_invalid', 'invalid_vin',
+                            'vin_not_found'))
+                        if (_vrow and _vrow.get('needs_verification_at')
+                                and not _vrow.get('needs_verification_cleared_at')
+                                and _vin_related):
+                            bg_cur.execute("""
+                                UPDATE bids
+                                   SET needs_verification_cleared_at = NOW(),
+                                       needs_verification_cleared_by = 'auto:photo_ocr_vin'
+                                 WHERE id = %s
+                            """, (bid_id,))
+                            bg_cur.execute(
+                                "DELETE FROM ipacket_lookups WHERE bid_id=%s "
+                                "AND (looked_up_at IS NULL OR looked_up_at < NOW() - INTERVAL '5 minutes' OR not_available=true)",
+                                (bid_id,))
+                            bg_cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s", (bid_id,))
+                            bg_cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+                            bg_cur.execute(
+                                "UPDATE bids SET vauto_claimed_by=NULL, "
+                                "vauto_claimed_at=NULL, ai_assessed_at=NULL, "
+                                "ai_price=NULL, ai_assessment=NULL, "
+                                "miles_audit_at=NULL WHERE id=%s",
+                                (bid_id,))
+                            print(f'[photo-ocr-vin] bid={bid_id} vin={_winner} '
+                                  f'cleared vin verification flag + force-reprocess fired',
+                                  flush=True)
                 if miles:
                     # PHOTO_OCR_MAX_WINS_2026_05_15: take MAX across all
                     # photo-OCR mileages for this bid. Odometers monotonically
@@ -2880,7 +2920,21 @@ def twilio_webhook():
                 200, {'Content-Type': 'application/xml'})
 
     # 1) Explicit "#1394" in body
-    if _hb_match and _hb_whitelisted:
+    # HASHBID_OWNER_UNLOCK_2026_05_16: also allow non-whitelisted phones
+    # to use #bid for their OWN bid (bids.phone = from_phone). Customers
+    # who reply to a verify SMS with "#1504 <photo>" should reach this
+    # path even though they're not in the operator contacts table.
+    _hb_is_owner = False
+    if _hb_match and not _hb_whitelisted:
+        try:
+            cur.execute("SELECT 1 FROM bids WHERE id=%s AND phone=%s LIMIT 1",
+                        (int(_hb_match.group(1)), from_phone))
+            _hb_is_owner = cur.fetchone() is not None
+        except Exception:
+            try: db.rollback()
+            except Exception: pass
+            _hb_is_owner = False
+    if _hb_match and (_hb_whitelisted or _hb_is_owner):
         _hb_bid_id = int(_hb_match.group(1))
         cur.execute("SELECT id, year, make, model FROM bids WHERE id = %s", (_hb_bid_id,))
         _hb_bid = cur.fetchone()
@@ -2913,7 +2967,10 @@ def twilio_webhook():
             return _hb_xml_reply(f"Bid #{_hb_bid_id} not found.")
 
     # 2) MMS with no #bid prefix but active context for this phone
-    if num_media > 0 and _hb_whitelisted and not _hb_match:
+    # HASHBID_OWNER_UNLOCK_2026_05_16: also honor active context for any
+    # phone (the context is keyed by phone in sms_attach_context; if a
+    # row exists, this phone earned it by sending #bid earlier).
+    if num_media > 0 and not _hb_match:
         try:
             cur.execute("""SELECT bid_id FROM sms_attach_context
                             WHERE from_phone = %s AND expires_at > NOW()
@@ -3306,16 +3363,33 @@ def twilio_webhook():
                           and (miles or _bare_miles)
                           and not _vpend.get('mileage'))
             _can_vin = (('vin_invalid' in _vreason
-                         or 'vin_not_found' in _vreason)
+                         or 'vin_not_found' in _vreason
+                         or 'invalid_vin' in _vreason
+                         or 'missing_vin' in _vreason)
                         and vin)
-            if _can_miles or _can_vin:
+            # VERIFY_PHOTO_STITCH_2026_05_16: photo-only reply (no text
+            # VIN/miles parsed) routes to verify-pending bid. Customer
+            # sends photo as the answer — OCR fills the missing data and
+            # the VIN_FILL_CLEARS_VERIFY hook downstream kicks off
+            # workers. Without this, the photo creates a brand-new bid
+            # (observed on bid 1504 → 1505 split).
+            _can_photo = (
+                num_media > 0
+                and not vin and not miles and not _bare_miles
+                and any(k in _vreason for k in (
+                    'missing_miles', 'missing_vin', 'invalid_vin',
+                    'vin_invalid', 'vin_not_found'))
+            )
+            if _can_miles or _can_vin or _can_photo:
                 recent = _vpend
                 if _can_miles and not miles:
                     miles = _bare_miles
                 _verify_stitched = True
                 print(f'[stitch] verify-pending bid={_vpend["id"]} '
                       f'reason={_vreason} miles_added={bool(_can_miles)} '
-                      f'vin_added={bool(_can_vin)}', flush=True)
+                      f'vin_added={bool(_can_vin)} '
+                      f'photos_only={_can_photo} num_media={num_media}',
+                      flush=True)
 
     can_stitch = False
     if recent:
@@ -12410,6 +12484,10 @@ def _maybe_send_vin_verify_sms(bid_id, reason='accutrade_vin_not_found'):
         _alt_row = _cur.fetchone()
         _alt_vin = (_alt_row.get('vin_extracted') or '').strip().upper() if _alt_row else ''
 
+        # VERIFY_SMS_HASHBID_HINT_2026_05_16: include "#<bid_id>" routing
+        # hint so customer replies attach to the right bid even if the
+        # 60s/24h stitch window misses.
+        _hb_hint = f"\n\nReply with #{bid_id} before the VIN or photo so we attach it to this bid."
         if _alt_vin:
             _body = (
                 f"Hey, its the EW Bot. "  # EW_BOT_WORDING_2026_05_15
@@ -12418,7 +12496,7 @@ def _maybe_send_vin_verify_sms(bid_id, reason='accutrade_vin_not_found'):
                 f"We also see {_alt_vin} on the photos you sent — is that the right one? "
                 f"If not, please re-type the VIN from the dash, door jamb, or "
                 f"windshield sticker, or send a clearer photo and we'll pull it from there. "
-                f"Thanks!")
+                f"Thanks!{_hb_hint}")
         else:
             _body = (
                 f"Hey, its the EW Bot. "  # EW_BOT_WORDING_2026_05_15
@@ -12426,7 +12504,7 @@ def _maybe_send_vin_verify_sms(bid_id, reason='accutrade_vin_not_found'):
                 f"in the AccuTrade database, which usually means a 1-character typo. "
                 f"Could you re-type the VIN from the dash, door jamb, or windshield "
                 f"sticker, or send a clearer photo and we'll grab it from there? "
-                f"Thanks!")
+                f"Thanks!{_hb_hint}")
 
         _sent = send_sms(_phone, _body)
         if not _sent:
