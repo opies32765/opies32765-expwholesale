@@ -666,7 +666,12 @@ def sonnet_vision_call(prompt, image_bytes, mime='image/jpeg', max_tokens=64,
 
 
 def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-flash',
-                max_tokens=1024, temperature=0.4):
+                max_tokens=1024, temperature=0.4, disable_thinking=False):
+    # GEMINI_FLASH_MILES_OCR_2026_05_17 (param): pass disable_thinking=True for
+    # terse-output OCR tasks (single number, 17-char VIN). With thinking enabled
+    # the model can burn most of max_tokens on internal reasoning, leaving
+    # truncated or empty text in resp.text — that's how Flash "hallucinated"
+    # on bid 1501 (it didn't; it just got cut off mid-token).
     """One-shot Gemini call. Returns text response or None on failure.
     Pass image_bytes for vision tasks. Defaults to Flash (cheap).
     Use model='gemini-2.5-pro' for high-quality reasoning (assessments).
@@ -694,10 +699,13 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-f
         ]
     else:
         contents = prompt
-    cfg = types.GenerateContentConfig(
+    _cfg_kwargs = dict(
         max_output_tokens=max_tokens,
         temperature=temperature,
     )
+    if disable_thinking:
+        _cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    cfg = types.GenerateContentConfig(**_cfg_kwargs)
 
     last_err = None
     for attempt in range(3):
@@ -1407,13 +1415,15 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
             result = max(candidates)
             print(f'[OCR] Mileage via Google Vision: {result}', flush=True)
             return result
-    print('[OCR] Google Vision missed mileage, falling back to Sonnet', flush=True)
+    print('[OCR] Google Vision missed mileage, falling back to Gemini Flash', flush=True)
 
-    # SONNET_MILES_OCR_2026_05_15: Claude Sonnet 4.6 fallback.
-    # Benchmark on bid 1501 (6 photos): Sonnet 0 hallucinations vs Gemini 3.
-    # Cost ~$0.003/photo, fired only when Google Vision misses (~10-20% of
-    # photos in practice), so absolute spend stays small.
-    _sonnet_prompt = (
+    # GEMINI_FLASH_MILES_OCR_2026_05_17: Gemini 2.5 Flash with thinking
+    # disabled. Overnight bench on 72 odometer photos:
+    #   Sonnet 4.6                : 29.2%  3.3s/call  ~$10/1000
+    #   Gemini Flash (no-think)   : 94.4%  1.9s/call  ~$1/1000
+    # Same prompt; the only meaningful difference is the model + disabled
+    # thinking. 3x more accurate, 1.7x faster, 10x cheaper.
+    _odo_prompt = (
         "Look at this image. Is there a vehicle odometer reading visible? "
         "An odometer is a digital or analog display on the vehicle's "
         "instrument cluster showing total lifetime mileage. NOT a trip "
@@ -1422,16 +1432,18 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
         "If you see a CLEAR odometer reading, reply with ONLY the integer "
         "(no commas, no units). If not, reply with the single word NONE."
     )
-    sresult = sonnet_vision_call(_sonnet_prompt, file_bytes, mime=media_type,
-                                  max_tokens=64)
-    if sresult:
-        up = sresult.strip().upper()
+    gresult = gemini_call(_odo_prompt, image_bytes=file_bytes, mime=media_type,
+                          model='gemini-2.5-flash', max_tokens=64,
+                          temperature=0, disable_thinking=True)
+    if gresult:
+        up = gresult.strip().upper()
         if up != 'NONE':
             digits = re.sub(r'[^\d]', '', up)
             if digits:
                 n = int(digits)
                 if 100 <= n <= 999999:
-                    print(f'[OCR] Mileage via Sonnet 4.6: {n}', flush=True)
+                    print(f'[OCR] Mileage via Gemini Flash (no-think): {n}',
+                          flush=True)
                     return n
     return None
 

@@ -1,6 +1,6 @@
 {
   "make_name": "TESLA",
-  "trained_at": "2026-05-16T08:32:30.059888Z",
+  "trained_at": "2026-05-17T08:32:25.455604Z",
   "n_total": 737,
   "n_train": 698,
   "n_test": 39,
@@ -221,9 +221,9 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2430.0,
-    "mape_pct": 8.28,
-    "r2": 0.9817,
+    "mae_dollars": 2419.0,
+    "mape_pct": 8.23,
+    "r2": 0.9818,
     "within_5pct": 43.6,
     "within_10pct": 84.6
   },
