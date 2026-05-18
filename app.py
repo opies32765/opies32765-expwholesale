@@ -8608,6 +8608,44 @@ def api_thalist_post():
 # end_time / bid_count / status for the live dashboard tiles.
 # ─────────────────────────────────────────────────────────────────────────
 
+# DEALERCLUB_NONAUTO_FILTER_2026_05_18: filter non-automobile makes (RV,
+# trailer, motorhome, dedicated motorcycle brands) at intake. Bid 1721
+# (2019 Forest River Viking 17BHS travel trailer) was the trigger: vm-
+# worker-12 held the claim for 18 hours trying to score it through
+# AccuTrade / vAuto / iPacket. Conservative list — excludes dual-purpose
+# makers like Kawasaki/Yamaha/Suzuki/Honda that build both motorcycles and
+# legitimate passenger autos. Match is case-insensitive substring on make
+# (so "Forest River, LLC" still matches).
+DEALERCLUB_NONAUTO_MAKES = (
+    # RV / motorhome / travel-trailer / 5th-wheel brands
+    'forest river', 'jayco', 'keystone', 'heartland', 'coachmen',
+    'winnebago', 'thor motor coach', 'thor industries', 'tiffin',
+    'newmar', 'grand design', 'airstream', 'fleetwood', 'crossroads',
+    'dutchmen', 'kz rv', 'open range', 'palomino', 'riverside rv',
+    'shasta', 'salem', 'wildwood', 'cherokee rv', 'rockwood',
+    'flagstaff', 'sunset', 'starcraft rv', 'gulf stream', 'cruiser rv',
+    'highland ridge', 'lance', 'northwood', 'oliver',
+    'roadtrek', 'leisure travel', 'pleasure-way', 'pleasure way',
+    'entegra coach', 'fleetwood rv', 'monaco',
+    # Dedicated motorcycle / off-road brands
+    'harley-davidson', 'harley davidson', 'indian motorcycle',
+    'ducati', 'aprilia', 'mv agusta', 'triumph motorcycle',
+    'royal enfield', 'husqvarna',
+    # ATV / UTV / personal watercraft
+    'polaris', 'can-am', 'arctic cat',
+)
+
+
+def _is_nonauto_make(make):
+    if not make:
+        return None
+    m = make.strip().lower()
+    for needle in DEALERCLUB_NONAUTO_MAKES:
+        if needle in m:
+            return needle
+    return None
+
+
 DEALERCLUB_SECRET = os.environ.get(
     'EW_DEALERCLUB_SECRET',
     'Uu11t87Ki1nrvMEddMX2kHOrfkd_bI4o-iGa5Jsu6yg')  # default for first deploy
@@ -8707,6 +8745,11 @@ def api_dealerclub_lot():
     transport_eta_max  = data.get('transport_eta_max')
     transport_enclosed = data.get('transport_enclosed')
 
+    # DEALERCLUB_NONAUTO_FILTER_2026_05_18: early exit for known non-auto
+    # makes. We still want to UPSERT the lot ledger (so DealerClub stops
+    # re-sending it every poll cycle); we just skip bid creation.
+    _nonauto_match = _is_nonauto_make(make)
+
     db = get_db()
     cur = db.cursor()
     try:
@@ -8785,6 +8828,21 @@ def api_dealerclub_lot():
         lot_id = row['id']
         existing_bid_id = row['bid_id']
         is_insert = bool(row['is_insert'])
+
+
+        # DEALERCLUB_NONAUTO_FILTER_2026_05_18: now that the lot is
+        # ledgered, bail before bid creation if the make is a known
+        # non-auto brand (RV / trailer / motorcycle).
+        if _nonauto_match:
+            db.commit()
+            db.close()
+            print(f'[dealerclub-filter] skipped non-auto lot '
+                  f'external_id={external_id} make={make!r} '
+                  f'match={_nonauto_match!r}', flush=True)
+            return jsonify({
+                'ok': True, 'status': 'skipped_nonauto',
+                'lot_id': lot_id, 'make': make, 'reason': _nonauto_match,
+            })
 
         if not is_insert:
             db.commit()
