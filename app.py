@@ -8162,18 +8162,21 @@ def decode_vin_precise_wrapper(vin):
             # "Lariat" into downstream UIs that parse the trim as a single
             # token. Wipe ambiguous trims here so AccuTrade/vAuto Phase 1
             # fills in the real trim from the window sticker.
-            _trim_out = _vds.get('trim')
-            if _trim_out and '/' in _trim_out:
-                _trim_out = None
-                trim_conf = 'medium'  # YMM solid, trim unknown
+            # 2026-05-18: intake NEVER writes a trim. Every source (VDS,
+            # Claude, NHTSA) discarded — Phase 1 enrichment (iPacket OCR +
+            # vAuto canonical + Carfax/AutoCheck + AccuTrade overseer) is
+            # the only authoritative trim source. Eliminates the entire
+            # class of intake-trim hallucinations (bid 1782 Bronco "Base",
+            # bid 1785 Cayenne "Turbo GT", bid 1761 F-150 slash-trim leak,
+            # bid 1746 Roma decoded as "296 GTB"). YMM still flows.
             return {
                 'vin': vin,
                 'year': _vds.get('year'),
                 'make': (_vds.get('make') or '').upper() or None,
                 'model': _vds.get('model'),
-                'trim': _trim_out,
+                'trim': None,
                 'style': _vds.get('body'),
-                'trim_confidence': trim_conf,
+                'trim_confidence': 'deferred_to_phase1',
                 'source': _vds.get('source') or 'vds_table',
             }
     except Exception as e:
@@ -8181,10 +8184,8 @@ def decode_vin_precise_wrapper(vin):
         # fall through
 
     # ── Secondary path: Claude Sonnet 4.6 via decode_vin_smart ──
-    # Threshold RAISED from 0.5 -> 0.9 because Claude hallucinations come in
-    # at 0.7-0.85 (see bid 1746 Roma misread as 296 GTB). VDS tables above
-    # already handle high-confidence cases, so Claude is now last-resort for
-    # VINs no module knows about.
+    # Only for YMM disambiguation when VDS has no module for the WMI.
+    # Trim is still discarded — Phase 1 fills it in.
     try:
         from claude_vin_decoder import decode_vin_smart
         _db_c = get_db()
@@ -8193,16 +8194,14 @@ def decode_vin_precise_wrapper(vin):
         finally:
             _db_c.close()
         if result and float(result.get('confidence') or 0) >= 0.9:
-            conf = float(result.get('confidence') or 0)
-            trim_conf = 'high' if conf >= 0.95 else 'medium'
             return {
                 'vin': vin,
                 'year': result.get('year'),
                 'make': (result.get('make') or '').upper() or None,
                 'model': result.get('model'),
-                'trim': result.get('trim'),
+                'trim': None,
                 'style': result.get('body_style'),
-                'trim_confidence': trim_conf,
+                'trim_confidence': 'deferred_to_phase1',
                 'source': result.get('source') or 'claude_sonnet_4_6',
             }
     except Exception as e:
@@ -8210,29 +8209,34 @@ def decode_vin_precise_wrapper(vin):
         # fall through to legacy cascade
 
     # ── Legacy fallback: existing VDS+NHTSA cascade ──
+    # Last-resort YMM only. Trim also discarded.
     try:
         from vin_precise import decode_vin_precise
     except Exception as e:
         print(f'vin_precise import failed: {e}', flush=True)
         b = decode_vin(vin) or {}
-        t = b.get('trim')
         return {
             'vin': vin, 'year': b.get('year'), 'make': b.get('make'),
-            'model': b.get('model'), 'trim': t, 'style': None,
-            'trim_confidence': 'medium' if t else 'low', 'source': 'nhtsa',
+            'model': b.get('model'), 'trim': None, 'style': None,
+            'trim_confidence': 'deferred_to_phase1', 'source': 'nhtsa',
         }
     try:
         _db = get_db()
         r = decode_vin_precise(vin, nhtsa_decoder=decode_vin, db_conn=_db)
         _db.close()
+        # 2026-05-18: strip trim from legacy result too. YMM only.
+        if isinstance(r, dict):
+            r = dict(r)
+            r['trim'] = None
+            r['trim_confidence'] = 'deferred_to_phase1'
         return r
     except Exception as e:
         print(f'decode_vin_precise_wrapper legacy error: {e}', flush=True)
         b = decode_vin(vin) or {}
         return {
             'vin': vin, 'year': b.get('year'), 'make': b.get('make'),
-            'model': b.get('model'), 'trim': b.get('trim'), 'style': None,
-            'trim_confidence': 'low', 'source': 'error',
+            'model': b.get('model'), 'trim': None, 'style': None,
+            'trim_confidence': 'deferred_to_phase1', 'source': 'error',
         }
 
 
