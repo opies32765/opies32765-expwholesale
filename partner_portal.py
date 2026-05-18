@@ -279,8 +279,11 @@ def _dealer_by_slug(cur, slug: str):
     d = cur.fetchone()
     if d:
         return d
-    # Fallback: name-derived slug for dealers without an explicit one
-    cur.execute("SELECT id, name, salesperson, salesperson_phone, "
+    # Fallback: name-derived slug for dealers without an explicit one.
+    # Must include portal_slug so downstream gates (e.g. COMPS_ENABLED_SLUGS)
+    # work whether the route was hit via /partner/<portal_slug> or via the
+    # name-derived alias (e.g. /partner/encoremotorcarsofsarasota for Encore).
+    cur.execute("SELECT id, name, portal_slug, salesperson, salesperson_phone, "
                 "mobile_token, dashboard_token, brand, portal_mode "
                 "FROM dealers WHERE active = TRUE")
     for d in cur.fetchall():
