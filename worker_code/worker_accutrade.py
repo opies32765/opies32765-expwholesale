@@ -401,6 +401,49 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     if mileage_committed:
         time.sleep(2.5)
 
+    # MILEAGE_COMMIT_FIX_V3_2026_05_18 (bid 1779, McLaren GT):
+    # The v2 value-change detector fires a false-FAIL when AccuTrade had a
+    # PRIOR appraisal at the same (or numerically-near) mileage — recalc
+    # produces no value delta because the cached values are already correct.
+    # Symptom: pre==post but the mileage IS in the input and the page has
+    # real non-null values to read.
+    #
+    # Degrade as the v2 docstring promised: if pre==post AFTER the 12s
+    # timeout, confirm that (a) the typed mileage actually landed in an
+    # input field, AND (b) the page has at least one non-null dollar value.
+    # Both conditions = AccuTrade has the right state, just no recalc fired.
+    # Treat as committed. False-positive risk (v1's bid 1466 case) is
+    # mitigated because v1 fired on the badge alone before typing was
+    # confirmed; here we require BOTH typed-value-in-input AND non-null
+    # dollar values to be already present.
+    if not mileage_committed:
+        try:
+            _typed_str = f"{int(miles):,}"
+            _input_has_typed = page.evaluate(
+                r"""(want) => {
+                    const ins = []; function gather(root) {
+                        try { root.querySelectorAll('input').forEach(el => ins.push(el));
+                              root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) gather(el.shadowRoot); });
+                        } catch(e) {} }
+                    gather(document);
+                    for (const i of ins) {
+                        const v = (i.value || '').replace(/[,\s]/g, '');
+                        if (v && v === want) return true;
+                    }
+                    return false;
+                }""",
+                str(int(miles))
+            )
+            _has_values = any(v for v in last_post.values() if v)
+            if _input_has_typed and _has_values:
+                mileage_committed = True
+                print(f"[+{time.time()-t:5.1f}s] [accutrade] commit-via-degrade: "
+                      f"typed miles in input + page has values "
+                      f"(pre==post — AccuTrade had prior appraisal at same miles)")
+                time.sleep(2.5)
+        except Exception as _deg_err:
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] degrade check err: {_deg_err}")
+
     # Refuse to store if commit never happened. This is intentionally strict —
     # the alternative (soft pass) is what stored bid 1466 wrong.
     if not mileage_committed:
