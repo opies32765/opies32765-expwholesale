@@ -8145,7 +8145,12 @@ def decode_vin_precise_wrapper(vin):
             _sys.path.insert(0, _vds_path)
         from vds_dispatcher import decode as _vds_decode
         _vds = _vds_decode(vin)
-        if _vds and float(_vds.get('confidence') or 0) >= 0.9:
+        # 2026-05-18 bid 1785: lowered threshold 0.9 -> 0.8 so the slash-trim
+        # guard below catches 0.85-confidence VDS results. Otherwise they
+        # fall through to legacy NHTSA which hallucinated "Cayenne Turbo GT"
+        # for a 2019 Cayenne (trim launched in 2022). Slash-trim guard wipes
+        # the ambiguous trim to None; YMM stays solid.
+        if _vds and float(_vds.get('confidence') or 0) >= 0.8:
             conf = float(_vds.get('confidence') or 0)
             trim_conf = 'high' if conf >= 0.95 else 'medium'
             # ── Ambiguous-trim guard (2026-05-18 bid 1761) ──
