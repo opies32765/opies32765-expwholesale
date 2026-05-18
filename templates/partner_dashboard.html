@@ -1099,16 +1099,23 @@
           {% set _ask = v.price %}
           {% set _mmr_w = _c.mmr_wholesale_avg or _c.mmr_comp_value %}
           {% set _retail = _c.mmr_retail_avg %}
+          {% set _retail_low = _c.mmr_retail_below %}
           {% set _p25 = _c.rbook_p25 %}
           {% set _p50 = _c.rbook_p50 %}
           {% set _pct_under_mmr = ((_mmr_w - _ask) / _mmr_w * 100) if (_mmr_w and _ask and _mmr_w > 0) else none %}
-          {% set _retail_headroom = (_p50 - _ask) if (_p50 and _ask) else ((_retail - _ask) if (_retail and _ask) else none) %}
+          {% set _mmr_retail_headroom = (_retail - _ask) if (_retail and _ask) else none %}
+          {% set _rbook_headroom = (_p50 - _ask) if (_p50 and _ask) else none %}
           {% set _rb_raw = _c.comps_raw or {} %}
           {% set _rb_avg_dol = _rb_raw.get('rbook_avg_dol') %}
           {% set _rb_p75 = _rb_raw.get('rbook_p75') %}
-          {% set _dol = _c.market_median_days_on_lot %}
+          {% set _mtx_count = _rb_raw.get('mtx_count') %}
+          {% set _mtx_window = _rb_raw.get('mtx_window_days') %}
+          {% set _last_close = _rb_raw.get('last_mmr_sale_close_miles') %}
+          {% set _last_latest = _rb_raw.get('last_mmr_sale_latest') %}
+          {% set _last_sale = _last_close or _last_latest %}
+          {% set _mkt_dol = _c.market_median_days_on_lot %}
           {% set _grade = _c.mmr_grade %}
-          {% set _mmr_n = _c.mmr_sample_size %}
+          {% set _mmr_n = _mtx_count or _c.mmr_sample_size %}
           <tr class="comps-row" style="background:#0f172a">
             <td colspan="9" style="padding:10px 14px 12px 14px;border-top:1px solid #1e293b">
 
@@ -1119,70 +1126,82 @@
                 <div style="flex:1;font-size:12px;color:#fcd34d">
                   <b style="color:#fef3c7">EW buyer interest</b> on this YMM:
                   {% for m in _wm[:3] %}
-                    <div style="margin-top:3px"><b style="color:#fde68a">{{ m.customer_name }}</b> · asked {{ m.days_old }}d ago · <span style="color:#fbbf24">{{ m.phone or '—' }}</span></div>
+                    <div style="margin-top:3px"><b style="color:#fde68a">{{ m.customer_name }}</b> &middot; asked {{ m.days_old }}d ago &middot; <span style="color:#fbbf24">{{ m.phone or '—' }}</span></div>
                   {% endfor %}
                   {% if _wm|length > 3 %}<div style="margin-top:3px;opacity:.7">+{{ _wm|length - 3 }} more</div>{% endif %}
                 </div>
               </div>
               {% endif %}
 
-              {# Pricing 4-col grid (matches opportunities .pricing-grid pattern). #}
-              <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:8px;margin-bottom:8px">
+              {# ── Top-line ask + headroom strip ── #}
+              <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:8px;margin-bottom:10px">
                 <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
-                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">Asking</div>
+                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">Your asking</div>
                   <div style="font-size:15px;color:#fbbf24;font-weight:700;font-family:ui-monospace,monospace">{% if _ask %}${{ '{:,.0f}'.format(_ask) }}{% else %}&mdash;{% endif %}</div>
                   {% if v.price_drop_amount %}
                     <div style="font-size:10px;color:#a78bfa">&#8595; ${{ '{:,.0f}'.format(v.price_drop_amount) }} drop</div>
                   {% endif %}
                 </div>
                 <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
-                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">MMR Wholesale</div>
-                  <div style="font-size:15px;color:#c4b5fd;font-weight:700;font-family:ui-monospace,monospace">{% if _mmr_w %}${{ '{:,.0f}'.format(_mmr_w) }}{% else %}&mdash;{% endif %}</div>
-                  {% if _pct_under_mmr is not none %}
-                    <div style="font-size:10px;color:{% if _pct_under_mmr > 0 %}#34d399{% else %}#f87171{% endif %}">{{ '%.1f'|format(_pct_under_mmr|abs) }}% {% if _pct_under_mmr >= 0 %}under{% else %}over{% endif %}</div>
+                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">vs MMR Wholesale</div>
+                  <div style="font-size:15px;color:{% if _pct_under_mmr is none %}#94a3b8{% elif _pct_under_mmr >= 0 %}#34d399{% else %}#f87171{% endif %};font-weight:700;font-family:ui-monospace,monospace">{% if _pct_under_mmr is not none %}{{ '%.1f'|format(_pct_under_mmr|abs) }}% {% if _pct_under_mmr >= 0 %}under{% else %}over{% endif %}{% else %}&mdash;{% endif %}</div>
+                  <div style="font-size:10px;color:#64748b">MMR ${{ '{:,.0f}'.format(_mmr_w) if _mmr_w else '—' }}</div>
+                </div>
+                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
+                  {% if _rbook_headroom is not none %}
+                    <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">vs rBook P50</div>
+                    <div style="font-size:15px;color:{% if _rbook_headroom >= 0 %}#34d399{% else %}#f87171{% endif %};font-weight:700;font-family:ui-monospace,monospace">{% if _rbook_headroom >= 0 %}+${{ '{:,.0f}'.format(_rbook_headroom) }}{% else %}-${{ '{:,.0f}'.format(_rbook_headroom|abs) }}{% endif %}</div>
+                    <div style="font-size:10px;color:#64748b">{% if _rbook_headroom >= 0 %}headroom{% else %}over retail{% endif %} &middot; P50 ${{ '{:,.0f}'.format(_p50) }}</div>
+                  {% elif _mmr_retail_headroom is not none %}
+                    <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">vs MMR Retail</div>
+                    <div style="font-size:15px;color:{% if _mmr_retail_headroom >= 0 %}#34d399{% else %}#f87171{% endif %};font-weight:700;font-family:ui-monospace,monospace">{% if _mmr_retail_headroom >= 0 %}+${{ '{:,.0f}'.format(_mmr_retail_headroom) }}{% else %}-${{ '{:,.0f}'.format(_mmr_retail_headroom|abs) }}{% endif %}</div>
+                    <div style="font-size:10px;color:#64748b">{% if _mmr_retail_headroom >= 0 %}headroom{% else %}over retail{% endif %} &middot; Retail ${{ '{:,.0f}'.format(_retail) }}</div>
+                  {% else %}
+                    <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">vs Retail</div>
+                    <div style="font-size:15px;color:#94a3b8;font-family:ui-monospace,monospace">&mdash;</div>
+                    <div style="font-size:10px;color:#64748b">no comps yet</div>
                   {% endif %}
                 </div>
-                {% if _p25 %}
-                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
-                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">rBook P25</div>
-                  <div style="font-size:15px;color:#93c5fd;font-weight:700;font-family:ui-monospace,monospace">${{ '{:,.0f}'.format(_p25) }}</div>
-                  <div style="font-size:10px;color:#64748b">cheap end</div>
-                </div>
-                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
-                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">rBook P50{% if _rb_p75 %} / P75{% endif %}</div>
-                  <div style="font-size:15px;color:#93c5fd;font-weight:700;font-family:ui-monospace,monospace">${{ '{:,.0f}'.format(_p50) }}{% if _rb_p75 %} <span style="opacity:.6">/ ${{ '{:,.0f}'.format(_rb_p75) }}</span>{% endif %}</div>
-                  {% if _retail_headroom is not none %}
-                    <div style="font-size:10px;color:{% if _retail_headroom > 0 %}#34d399{% else %}#f87171{% endif %}">{% if _retail_headroom > 0 %}+${{ '{:,.0f}'.format(_retail_headroom) }} headroom{% else %}${{ '{:,.0f}'.format(_retail_headroom|abs) }} over retail{% endif %}</div>
-                  {% endif %}
-                </div>
-                {% else %}
-                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
-                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">Manheim Retail Low</div>
-                  <div style="font-size:15px;color:#93c5fd;font-weight:700;font-family:ui-monospace,monospace">{% if _c.mmr_retail_below %}${{ '{:,.0f}'.format(_c.mmr_retail_below) }}{% else %}&mdash;{% endif %}</div>
-                  <div style="font-size:10px;color:#64748b">no rBook comps yet</div>
-                </div>
-                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
-                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">Manheim Retail Avg</div>
-                  <div style="font-size:15px;color:#93c5fd;font-weight:700;font-family:ui-monospace,monospace">{% if _retail %}${{ '{:,.0f}'.format(_retail) }}{% else %}&mdash;{% endif %}</div>
-                  {% if _retail_headroom is not none %}
-                    <div style="font-size:10px;color:{% if _retail_headroom > 0 %}#34d399{% else %}#f87171{% endif %}">{% if _retail_headroom > 0 %}+${{ '{:,.0f}'.format(_retail_headroom) }} headroom{% else %}${{ '{:,.0f}'.format(_retail_headroom|abs) }} over retail{% endif %}</div>
-                  {% endif %}
+              </div>
+
+              {# ── MMR section ── #}
+              <div style="display:flex;flex-wrap:wrap;gap:14px;padding:8px 10px;margin-bottom:8px;background:#0b1220;border:1px solid #1e293b;border-left:3px solid #a78bfa;border-radius:6px;font-size:12px;align-items:center">
+                <div style="font-size:10px;color:#a78bfa;font-weight:700;letter-spacing:.5px;text-transform:uppercase;flex:0 0 50px">MMR</div>
+                <div><span style="color:#64748b">Wholesale</span> <b style="color:#e5e7eb">{% if _mmr_w %}${{ '{:,.0f}'.format(_mmr_w) }}{% else %}&mdash;{% endif %}</b></div>
+                <div><span style="color:#64748b">Retail Avg</span> <b style="color:#e5e7eb">{% if _retail %}${{ '{:,.0f}'.format(_retail) }}{% else %}&mdash;{% endif %}</b></div>
+                <div><span style="color:#64748b">Retail Low</span> <b style="color:#e5e7eb">{% if _retail_low %}${{ '{:,.0f}'.format(_retail_low) }}{% else %}&mdash;{% endif %}</b></div>
+                {% if _grade %}<div><span style="color:#64748b">Grade</span> <b style="color:#c4b5fd">{{ _grade }}</b></div>{% endif %}
+                {% if _mmr_n %}<div><span style="color:#64748b">Recent sales</span> <b style="color:#e5e7eb">{{ _mmr_n }}</b>{% if _mtx_window %}<span style="color:#475569"> over {{ _mtx_window }}d</span>{% endif %}</div>{% endif %}
+                {% if _last_sale %}
+                <div style="flex-basis:100%;margin-top:4px;padding-top:6px;border-top:1px dashed #1e293b">
+                  <span style="color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Last MMR sale{% if _last_close %} (similar miles){% endif %}</span>
+                  <b style="color:#fef3c7;margin-left:6px">${{ '{:,.0f}'.format(_last_sale.sale_price) }}</b>
+                  {% if _last_sale.odometer %}<span style="color:#94a3b8"> &middot; {{ '{:,.0f}'.format(_last_sale.odometer) }} mi</span>{% endif %}
+                  <span style="color:#94a3b8"> &middot; {{ _last_sale.date_sold[:10] if _last_sale.date_sold else '—' }}</span>
+                  {% if _last_sale.region %}<span style="color:#475569"> &middot; {{ _last_sale.region }}</span>{% endif %}
+                  {% if _last_sale.condition %}<span style="color:#475569"> &middot; grade {{ _last_sale.condition }}</span>{% endif %}
                 </div>
                 {% endif %}
               </div>
 
-              {# Signal chip strip — MMR metadata, rBook comp count, market DOL, dealer DOL aging cue, price-drop. #}
-              <div style="display:flex;flex-wrap:wrap;align-items:center;margin-bottom:6px">
-                {% if _grade %}{{ _sigchip('grade', _grade, '#a78bfa') }}{% endif %}
-                {% if _mmr_n %}{{ _sigchip('MMR n', _mmr_n, '#475569') }}{% endif %}
-                {% if _c.rbook_comp_count %}{{ _sigchip('rBook comps', _c.rbook_comp_count, '#3b82f6', sub=(' &middot; avg DOL ' ~ ('%.0f' | format(_rb_avg_dol)) ~ 'd') if _rb_avg_dol else none) }}{% endif %}
-                {% if _dol is not none %}{{ _sigchip('mkt DOL', _dol ~ 'd', '#0ea5e9') }}{% endif %}
-                {% if v.price_drop_amount %}{{ _sigchip('price drop', '&#8595; $' ~ '{:,.0f}'.format(v.price_drop_amount), '#a78bfa') }}{% endif %}
-                {% if _wm %}{{ _sigchip('buyer match', (_wm|length) ~ '', '#f59e0b') }}{% endif %}
+              {# ── rBook section ── #}
+              <div style="display:flex;flex-wrap:wrap;gap:14px;padding:8px 10px;margin-bottom:8px;background:#0b1220;border:1px solid #1e293b;border-left:3px solid #3b82f6;border-radius:6px;font-size:12px;align-items:center">
+                <div style="font-size:10px;color:#3b82f6;font-weight:700;letter-spacing:.5px;text-transform:uppercase;flex:0 0 50px">rBook</div>
+                {% if _p25 or _p50 or _rb_p75 %}
+                  <div><span style="color:#64748b">P25</span> <b style="color:#e5e7eb">{% if _p25 %}${{ '{:,.0f}'.format(_p25) }}{% else %}&mdash;{% endif %}</b></div>
+                  <div><span style="color:#64748b">P50</span> <b style="color:#e5e7eb">{% if _p50 %}${{ '{:,.0f}'.format(_p50) }}{% else %}&mdash;{% endif %}</b></div>
+                  <div><span style="color:#64748b">P75</span> <b style="color:#e5e7eb">{% if _rb_p75 %}${{ '{:,.0f}'.format(_rb_p75) }}{% else %}&mdash;{% endif %}</b></div>
+                  {% if _c.rbook_comp_count %}<div><span style="color:#64748b">Comps</span> <b style="color:#e5e7eb">{{ _c.rbook_comp_count }}</b></div>{% endif %}
+                  {% if _mkt_dol is not none %}<div><span style="color:#64748b">Median DOL</span> <b style="color:#0ea5e9">{{ _mkt_dol }}d</b></div>{% endif %}
+                  {% if _rb_avg_dol %}<div><span style="color:#64748b">Avg DOL</span> <b style="color:#0ea5e9">{{ '%.0f'|format(_rb_avg_dol) }}d</b></div>{% endif %}
+                {% else %}
+                  <div style="color:#64748b;font-style:italic">No retail comps yet &middot; fills at next 10:30 ET refresh.</div>
+                {% endif %}
               </div>
 
-              {# Trend chip strip — 7/14/30/60d. #}
-              <div style="display:flex;flex-wrap:wrap;align-items:center">
+              {# ── Trends: price (own asking vs MMR) ── #}
+              <div style="display:flex;flex-wrap:wrap;align-items:center;margin-bottom:4px">
+                <span style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-right:8px">Price trend</span>
                 {{ _trendchip('7d',  _c.price_trend_7d) }}
                 {{ _trendchip('14d', _c.price_trend_14d) }}
                 {{ _trendchip('30d', _c.price_trend_30d) }}
@@ -1506,10 +1525,13 @@ setInterval(() => {
 // star. The chime + gold star are reserved exclusively for real EW
 // responses (fired from the 15s /poll handler above), so the dealer
 // only gets an alert when there's actually something new from EW.
-// Skips when:
-//   • Any form field is focused (don't blow away a half-typed counter
-//     or Quick Drop submission)
-//   • The Quick Drop card is currently expanded (likely composing)
+//
+// State preservation: before each reload we snapshot which <details>
+// elements (buckets, inbound card, mobile card) are currently open into
+// sessionStorage so the post-reload render can restore them. Without this
+// the dealer's "open the 60-90d bucket and read" UX gets nuked every 30s.
+// Form fields and the Quick Drop composer still block reload outright
+// (don't blow away half-typed input).
 function _safeToReload() {
   const a = document.activeElement;
   if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' ||
@@ -1518,7 +1540,37 @@ function _safeToReload() {
   if (qd && qd.open) return false;
   return true;
 }
-setInterval(() => { if (_safeToReload()) location.reload(); }, 30 * 1000);
+function _snapshotDetailsState() {
+  try {
+    const open = [];
+    document.querySelectorAll('details[id]').forEach(d => {
+      if (d.open) open.push(d.id);
+    });
+    sessionStorage.setItem('partner_open_details', JSON.stringify(open));
+  } catch (e) {}
+}
+function _restoreDetailsState() {
+  try {
+    const raw = sessionStorage.getItem('partner_open_details');
+    if (!raw) return;
+    const open = JSON.parse(raw);
+    open.forEach(id => {
+      const d = document.getElementById(id);
+      if (d) d.open = true;
+    });
+  } catch (e) {}
+}
+// Restore on initial paint (also re-applies after the 30s auto-reload).
+_restoreDetailsState();
+// Track toggles so the snapshot is always current when reload fires.
+document.querySelectorAll('details[id]').forEach(d => {
+  d.addEventListener('toggle', _snapshotDetailsState);
+});
+setInterval(() => {
+  if (!_safeToReload()) return;
+  _snapshotDetailsState();
+  location.reload();
+}, 30 * 1000);
 </script>
 </body>
 </html>

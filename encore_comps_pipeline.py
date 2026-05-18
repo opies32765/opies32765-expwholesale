@@ -269,6 +269,39 @@ def _mtx_window_days(tx):
         return None
 
 
+def _pick_last_mmr_sales(tx, subject_mileage):
+    """From a ManheimTransactions list, return:
+        - latest: most-recent sale (any mileage)
+        - close_mileage: most-recent sale within +/- 25% of subject_mileage
+    Each is {sale_price, odometer, date_sold, condition, region} or None."""
+    if not tx:
+        return None, None
+    rows = []
+    for t in tx:
+        ds = t.get('date_sold')
+        sp = t.get('sale_price')
+        if not ds or not sp:
+            continue
+        try:
+            d = datetime.fromisoformat(ds[:10])
+        except Exception:
+            continue
+        rows.append((d, t))
+    if not rows:
+        return None, None
+    rows.sort(key=lambda x: x[0], reverse=True)
+    latest = rows[0][1]
+    close = None
+    if subject_mileage and subject_mileage > 0:
+        lo, hi = subject_mileage * 0.75, subject_mileage * 1.25
+        for _, t in rows:
+            odo = t.get('odometer')
+            if odo and lo <= odo <= hi:
+                close = t
+                break
+    return latest, close
+
+
 def write_today_comps(today, mmr_by_inv, rbook_by_inv, mtx_by_inv):
     """UPSERT one row per (inv_id, today) into dealer_inventory_comps."""
     n = 0
@@ -282,6 +315,8 @@ def write_today_comps(today, mmr_by_inv, rbook_by_inv, mtx_by_inv):
             mtx_body = (mt.get('mtx') or {})
             tx = (mtx_body.get('transactions') or [])
             window_days = _mtx_window_days(tx)
+            subject_mileage = (mmr.get('inv') or {}).get('mileage')
+            latest_sale, close_sale = _pick_last_mmr_sales(tx, subject_mileage)
             comps_raw = {
                 'rbook_used': rb.get('used'),
                 'manheim_id': mtx_body.get('manheim_id'),
@@ -289,6 +324,9 @@ def write_today_comps(today, mmr_by_inv, rbook_by_inv, mtx_by_inv):
                 'mtx_window_days': window_days,
                 'rbook_p75': rb.get('p75'),
                 'rbook_avg_dol': rb.get('avg_dol'),
+                'last_mmr_sale_latest': latest_sale,
+                'last_mmr_sale_close_miles': close_sale,
+                'subject_mileage': subject_mileage,
             }
             cur.execute("""
                 INSERT INTO dealer_inventory_comps
