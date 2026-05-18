@@ -49,7 +49,11 @@ where ambiguous, trim is left None and the caller should fall back to
 title/build sheet data.
 """
 
-WMI = ['SCB']
+WMI = ['SCB', 'SJA']
+# SCB = Crewe-built Bentley (Continental GT/Flying Spur/Mulsanne)
+# SJA = Bratislava-built Bentayga (VW Group SUV plant). Added 2026-05-18
+# after bid 1769 (VIN SJAAF2ZV2TC032532, 2026 Bentayga Speed) returned None.
+# Only Bentayga uses SJA — Bentley's other models all stay on SCB.
 
 YEAR_CODES = {
     'A': 2010, 'B': 2011, 'C': 2012, 'D': 2013, 'E': 2014,
@@ -213,7 +217,25 @@ VDS = {
         'notes': 'Third-gen Flying Spur (2020+). MSB platform.',
     },
 
-    # ===== Bentayga SUV =====
+    # ===== Bentayga SUV (Bratislava plant, SJA WMI) =====
+    # 2026-05-18 bid 1769: SJA + AF = current-gen Bentayga (2022+). Trim
+    # (Speed / V8 / Mulliner / Azure / Hybrid / EWB) varies by option-pack
+    # not VIN — leave trim None, let AccuTrade / sticker fill it in.
+    'AF': {
+        'model': 'Bentayga',
+        'trim': None,
+        'engine': '4.0L V8 TT or 6.0L W12 TT or 3.0L V6 PHEV',
+        'body': 'SUV',
+        'confidence': 0.95,
+        'sample_vins': [
+            'SJAAF2ZV2TC032532',  # 2026 Bentayga Speed (bid 1769)
+        ],
+        'notes': 'Bentayga on SJA WMI (Bratislava). 2022+ facelift / EWB / S '
+                 'all share this code. Trim is option-pack distinct, not '
+                 'VIN-encoded.',
+    },
+
+    # ===== Bentayga SUV (older SCB WMI variants) =====
     'EK': {
         'model': 'Bentayga',
         'trim': None,

@@ -366,7 +366,13 @@ _TRIM_MAP_911 = {
     ('AA', '992.1'): 'Carrera',
     ('AB', '992.1'): 'Carrera S',
     ('AC', '992.1'): 'GT3',
-    ('AD', '992.1'): 'GT3 RS',
+    # 2026-05-18 bid 1770 (VIN WP0AD2A94RS252014): Porsche WP0AD on the 992
+    # platform encodes Turbo / Turbo S Coupe (same VIN structure, option-pack
+    # distinguishes Turbo vs Turbo S). Was wrongly mapped to "GT3 RS" — the
+    # GT3 RS code is actually shared with WP0AC on 992. Slash-trim form
+    # triggers the wrapper guard so trim returns None and AccuTrade Phase 1
+    # fills in the real variant from the window sticker / dropdown.
+    ('AD', '992.1'): 'Turbo / Turbo S',
     ('AJ', '992.1'): 'Targa 4 / Targa 4 GTS',
     ('AK', '992.1'): 'Targa 4',
     ('AL', '992.1'): 'Targa 4S',
@@ -376,7 +382,7 @@ _TRIM_MAP_911 = {
     ('AA', '992.2'): 'Carrera',
     ('AB', '992.2'): 'Carrera GTS T-Hybrid',
     ('AC', '992.2'): 'GT3',
-    ('AD', '992.2'): 'GT3 RS',
+    ('AD', '992.2'): 'Turbo / Turbo S',
     ('CB', '992.2'): 'Carrera Cabriolet',
 }
 

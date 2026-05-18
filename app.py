@@ -6288,13 +6288,14 @@ def _notify_driver_if_pending(bid_id):
     no-ops for them so we don't double-message.
     """
     try:
+        import time as _t_dn
         db = get_db()
         cur = db.cursor()
         cur.execute("""
             SELECT id, driver_token, driver_phone, driver_notified_at,
                    year, make, model,
                    needs_verification_at, needs_verification_cleared_at,
-                   needs_verification_reason
+                   needs_verification_reason, miles_audit_at
             FROM bids WHERE id=%s
         """, (bid_id,))
         bid = cur.fetchone()
@@ -6304,6 +6305,35 @@ def _notify_driver_if_pending(bid_id):
         if bid['driver_notified_at'] is not None:
             db.close()
             return
+
+        # 2026-05-18 bid 1772 race fix — wait for miles_audit_worker to
+        # finish its pass on this bid before deciding to send. Without this,
+        # the audit can stamp needs_verification AFTER our gate check but
+        # BEFORE send_sms returns, leaking the Phase 1 SMS while a
+        # discrepancy was actually flagged. Audit polls every ~3-5s; wait
+        # up to 20s for miles_audit_at to be stamped.
+        if bid['miles_audit_at'] is None:
+            _wait_deadline = _t_dn.time() + 20
+            while _t_dn.time() < _wait_deadline:
+                cur.execute("SELECT miles_audit_at FROM bids WHERE id=%s",
+                            (bid_id,))
+                _ma = cur.fetchone()
+                if _ma and _ma['miles_audit_at']:
+                    break
+                _t_dn.sleep(1)
+            # Re-fetch freshest state so the gate sees post-audit values.
+            cur.execute("""
+                SELECT id, driver_token, driver_phone, driver_notified_at,
+                       year, make, model,
+                       needs_verification_at, needs_verification_cleared_at,
+                       needs_verification_reason, miles_audit_at
+                FROM bids WHERE id=%s
+            """, (bid_id,))
+            bid = cur.fetchone()
+            if bid and bid['driver_notified_at'] is not None:
+                db.close()
+                return
+
         # Verification gate (2026-05-18 bid 1764) — if the bid is awaiting
         # customer-side data clarification (miles discrepancy, VIN mismatch,
         # etc), hold the Phase 1 mini-page link SMS until verification clears.
