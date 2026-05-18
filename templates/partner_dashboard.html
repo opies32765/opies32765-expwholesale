@@ -1166,22 +1166,25 @@
 
               {# ── MMR section ── #}
               <div style="display:flex;flex-wrap:wrap;gap:14px;padding:8px 10px;margin-bottom:8px;background:#0b1220;border:1px solid #1e293b;border-left:3px solid #a78bfa;border-radius:6px;font-size:12px;align-items:center">
-                <div style="font-size:10px;color:#a78bfa;font-weight:700;letter-spacing:.5px;text-transform:uppercase;flex:0 0 50px">MMR</div>
-                <div><span style="color:#64748b">Wholesale</span> <b style="color:#e5e7eb">{% if _mmr_w %}${{ '{:,.0f}'.format(_mmr_w) }}{% else %}&mdash;{% endif %}</b></div>
-                <div><span style="color:#64748b">Retail Avg</span> <b style="color:#e5e7eb">{% if _retail %}${{ '{:,.0f}'.format(_retail) }}{% else %}&mdash;{% endif %}</b></div>
+                <div style="font-size:10px;color:#a78bfa;font-weight:700;letter-spacing:.5px;text-transform:uppercase;flex:0 0 50px" title="Manheim Market Report — auction-based valuations">MMR</div>
+                <div><span style="color:#64748b">Wholesale Avg</span> <b style="color:#e5e7eb">{% if _mmr_w %}${{ '{:,.0f}'.format(_mmr_w) }}{% else %}&mdash;{% endif %}</b></div>
+                <div title="Manheim's modeled retail estimate (algorithmic, not real listings — see rBook below for live retail asks)"><span style="color:#64748b">Retail Avg</span> <b style="color:#e5e7eb">{% if _retail %}${{ '{:,.0f}'.format(_retail) }}{% else %}&mdash;{% endif %}</b></div>
                 <div><span style="color:#64748b">Retail Low</span> <b style="color:#e5e7eb">{% if _retail_low %}${{ '{:,.0f}'.format(_retail_low) }}{% else %}&mdash;{% endif %}</b></div>
-                {% if _grade %}<div><span style="color:#64748b">Grade</span> <b style="color:#c4b5fd">{{ _grade }}</b></div>{% endif %}
-                {% if _mmr_n %}<div><span style="color:#64748b">Recent sales</span> <b style="color:#e5e7eb">{{ _mmr_n }}</b>{% if _mtx_window %}<span style="color:#475569"> over {{ _mtx_window }}d</span>{% endif %}</div>{% endif %}
-                {% if _last_sale %}
+                <div title="Average condition grade of the units in MMR's comp set (1=worst, 5=best)"><span style="color:#64748b">Grade</span> <b style="color:#c4b5fd">{% if _grade %}{{ _grade }}{% else %}&mdash;{% endif %}</b></div>
+                <div title="Count of comparable auction sales returned in the most recent MMR pull for this VIN"><span style="color:#64748b">Comp units</span> <b style="color:#e5e7eb">{% if _mmr_n %}{{ _mmr_n }}{% else %}&mdash;{% endif %}</b>{% if _mtx_window %}<span style="color:#475569"> &middot; {{ _mtx_window }}d window</span>{% endif %}</div>
+                {% if _c.mmr_fetched_at %}<div style="color:#475569;font-size:10px" title="When this MMR value was last pulled from Manheim">pulled {{ _c.mmr_fetched_at.strftime('%b %d') if _c.mmr_fetched_at.strftime is defined else _c.mmr_fetched_at }}</div>{% endif %}
                 <div style="flex-basis:100%;margin-top:4px;padding-top:6px;border-top:1px dashed #1e293b">
                   <span style="color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Last MMR sale{% if _last_close %} (similar miles){% endif %}</span>
-                  <b style="color:#fef3c7;margin-left:6px">${{ '{:,.0f}'.format(_last_sale.sale_price) }}</b>
-                  {% if _last_sale.odometer %}<span style="color:#94a3b8"> &middot; {{ '{:,.0f}'.format(_last_sale.odometer) }} mi</span>{% endif %}
-                  <span style="color:#94a3b8"> &middot; {{ _last_sale.date_sold[:10] if _last_sale.date_sold else '—' }}</span>
-                  {% if _last_sale.region %}<span style="color:#475569"> &middot; {{ _last_sale.region }}</span>{% endif %}
-                  {% if _last_sale.condition %}<span style="color:#475569"> &middot; grade {{ _last_sale.condition }}</span>{% endif %}
+                  {% if _last_sale %}
+                    <b style="color:#fef3c7;margin-left:6px">${{ '{:,.0f}'.format(_last_sale.sale_price) }}</b>
+                    {% if _last_sale.odometer %}<span style="color:#94a3b8"> &middot; {{ '{:,.0f}'.format(_last_sale.odometer) }} mi</span>{% endif %}
+                    <span style="color:#94a3b8"> &middot; {{ _last_sale.date_sold[:10] if _last_sale.date_sold else '—' }}</span>
+                    {% if _last_sale.region %}<span style="color:#475569"> &middot; {{ _last_sale.region }}</span>{% endif %}
+                    {% if _last_sale.condition %}<span style="color:#475569"> &middot; grade {{ _last_sale.condition }}</span>{% endif %}
+                  {% else %}
+                    <span style="color:#475569;margin-left:6px;font-style:italic">&mdash; populates after next live MMR pull</span>
+                  {% endif %}
                 </div>
-                {% endif %}
               </div>
 
               {# ── rBook section ── #}
