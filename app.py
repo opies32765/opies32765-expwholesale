@@ -16291,107 +16291,136 @@ def _bp_tier(score):
 
 @app.route('/admin/buy-profiles')
 def admin_buy_profiles():
-    """Index — all 14 partner buy profiles side-by-side."""
+    # BUY_PROFILES_CONSOLIDATED_2026_05_18: single-page rewrite. Combines
+    # the old index + per-dealer detail + match-routing preview. Reads
+    # optional bid params from query string; if any are present, scores
+    # each dealer with _bp_score and sorts by score desc.
+    bid = {
+        'year':  request.args.get('year', type=int),
+        'make':  (request.args.get('make') or '').strip(),
+        'model': (request.args.get('model') or '').strip(),
+        'miles': request.args.get('miles', type=int),
+        'price': request.args.get('price', type=int),
+    }
+    scored = bool(bid.get('make'))
+
     db = get_db()
     cur = db.cursor()
+    # 1. All routable partner dealers
     cur.execute("""
         SELECT id, name, portal_slug, buy_profile, buy_profile_built_at,
-               receive_inbound_pushes
+               receive_inbound_pushes, salesperson
           FROM dealers
          WHERE portal_slug IS NOT NULL
          ORDER BY id
     """)
-    dealers = []
-    for r in cur.fetchall():
-        r = dict(r)
-        p = r.get('buy_profile') or {}
-        sample = p.get('sample') or {}
-        bands = p.get('bands') or {}
+    dealers = [dict(r) for r in cur.fetchall()]
+
+    # 2. Per-dealer 30d push + win counts (single query, then merge)
+    dealer_ids = [d['id'] for d in dealers]
+    engage_by_id = {did: {'pushes_30d': 0, 'won_30d': 0} for did in dealer_ids}
+    if dealer_ids:
+        cur.execute("""
+            SELECT dealer_id,
+                   count(*)                                            AS pushes_30d,
+                   count(*) FILTER (WHERE sold_confirmed_at IS NOT NULL
+                                      AND claimed_at IS NOT NULL)      AS won_30d
+              FROM bid_pushes
+             WHERE dealer_id = ANY(%s::int[])
+               AND sms_sent_at > NOW() - INTERVAL '30 days'
+             GROUP BY dealer_id
+        """, (dealer_ids,))
+        for r in cur.fetchall():
+            engage_by_id[r['dealer_id']] = {
+                'pushes_30d': r['pushes_30d'] or 0,
+                'won_30d':    r['won_30d'] or 0,
+            }
+    db.close()
+
+    # 3. Hydrate per-dealer view model
+    for d in dealers:
+        p = d.get('buy_profile') or {}
         makes = p.get('makes') or {}
+        bands = p.get('bands') or {}
+        sample = p.get('sample') or {}
+        behavioral = p.get('behavioral') or {}
+        overrides = p.get('overrides') or {}
         top_makes = sorted(
             [(k, v.get('share') or 0) for k, v in makes.items()],
             key=lambda x: -x[1]
         )[:5]
-        r['_summary'] = {
-            'active': sample.get('active_n'),
-            'sold_180d': sample.get('sold_n_180d'),
+        d['_summary'] = {
+            'active':       sample.get('active_n'),
+            'sold_180d':    sample.get('sold_n_180d'),
             'days_scanned': sample.get('days_scanned'),
-            'year_min': bands.get('year_min'),
-            'year_max': bands.get('year_max'),
-            'price_p10': bands.get('price_p10'),
-            'price_p90': bands.get('price_p90'),
-            'top_makes': top_makes,
-            'makes_count': len(makes),
+            'year_min':     bands.get('year_min'),
+            'year_max':     bands.get('year_max'),
+            'price_p10':    bands.get('price_p10'),
+            'price_p90':    bands.get('price_p90'),
+            'top_makes':    top_makes,
+            'makes_count':  len(makes),
         }
-        dealers.append(r)
-    db.close()
-    return render_template('admin_buy_profiles.html', dealers=dealers)
+        d['_bands'] = bands
+        d['_makes'] = sorted(
+            [(k, v) for k, v in makes.items()],
+            key=lambda x: -(x[1].get('share') or 0)
+        )
+        d['_behavioral'] = behavioral
+        d['_overrides'] = overrides
+        d['_engage'] = engage_by_id.get(d['id'], {'pushes_30d': 0, 'won_30d': 0})
+
+        # Per-dealer score against the hypothetical bid (if supplied)
+        if scored:
+            s, why = _bp_score(bid, d['id'], p)
+            d['score'] = s
+            d['tier'] = _bp_tier(s)
+            d['why'] = why
+        else:
+            d['score'] = None
+            d['tier'] = None
+            d['why'] = None
+
+    # 4. Sort: by score desc if bid supplied, else by name asc
+    if scored:
+        dealers.sort(key=lambda x: (-(x['score'] if x['score'] is not None else -9999),
+                                    (x['name'] or '').lower()))
+    else:
+        dealers.sort(key=lambda x: (x['name'] or '').lower())
+
+    return render_template('admin_buy_profiles.html',
+                           dealers=dealers, bid=bid, scored=scored)
 
 
 @app.route('/admin/dealer/<int:dealer_id>/buy-profile')
 def admin_dealer_buy_profile(dealer_id):
-    """Detail — single dealer profile with full makes table + overrides."""
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("""
-        SELECT id, name, portal_slug, buy_profile, buy_profile_built_at,
-               receive_inbound_pushes, salesperson
-          FROM dealers WHERE id = %s
-    """, (dealer_id,))
-    row = cur.fetchone()
-    db.close()
-    if not row:
-        return "Not found", 404
-    d = dict(row)
-    p = d.get('buy_profile') or {}
-    makes = p.get('makes') or {}
-    makes_sorted = sorted(
-        [(k, v) for k, v in makes.items()],
-        key=lambda x: -(x[1].get('share') or 0)
-    )
-    return render_template(
-        'admin_dealer_buy_profile.html',
-        d=d, profile=p, makes=makes_sorted,
-        sample=p.get('sample') or {}, bands=p.get('bands') or {},
-        behavioral=p.get('behavioral') or {}, overrides=p.get('overrides') or {}
-    )
+    # BUY_PROFILES_CONSOLIDATED_2026_05_18: was a standalone page; now an
+    # anchor on the consolidated page that auto-expands that dealer's row.
+    return redirect(f'/admin/buy-profiles#dealer-{dealer_id}')
 
 
 @app.route('/admin/buy-profiles/preview', methods=['GET', 'POST'])
 def admin_buy_profile_preview():
-    """Match-routing preview — enter a hypothetical bid, see which dealers fire."""
-    bid = {'year': None, 'make': '', 'model': '', 'miles': None, 'price': None}
-    routing = None
+    # BUY_PROFILES_CONSOLIDATED_2026_05_18: was a standalone match-routing
+    # simulator; the consolidated page now does the same scoring inline
+    # when bid params are in the query string.
+    qs = {}
     if request.method == 'POST':
-        try:
-            bid['year'] = int(request.form.get('year') or 0) or None
-            bid['make'] = (request.form.get('make') or '').strip()
-            bid['model'] = (request.form.get('model') or '').strip()
-            bid['miles'] = int(request.form.get('miles') or 0) or None
-            bid['price'] = int(request.form.get('price') or 0) or None
-        except (TypeError, ValueError):
-            pass
-        if bid['make']:
-            db = get_db()
-            cur = db.cursor()
-            cur.execute("""
-                SELECT id, name, buy_profile
-                  FROM dealers
-                 WHERE portal_slug IS NOT NULL AND buy_profile IS NOT NULL
-                 ORDER BY id
-            """)
-            routing = []
-            for r in cur.fetchall():
-                r = dict(r)
-                s, why = _bp_score(bid, r['id'], r['buy_profile'] or {})
-                routing.append({
-                    'id': r['id'], 'name': r['name'],
-                    'score': s, 'tier': _bp_tier(s), 'why': why,
-                })
-            db.close()
-            routing.sort(key=lambda x: (x['score'] if x['score'] is not None else -9999), reverse=True)
-    return render_template('admin_buy_profile_preview.html', bid=bid, routing=routing)
+        for k in ('year', 'make', 'model', 'miles', 'price'):
+            v = (request.form.get(k) or '').strip()
+            if v:
+                qs[k] = v
+    else:
+        for k in ('year', 'make', 'model', 'miles', 'price'):
+            v = (request.args.get(k) or '').strip()
+            if v:
+                qs[k] = v
+    if qs:
+        from urllib.parse import urlencode
+        return redirect('/admin/buy-profiles?' + urlencode(qs))
+    return redirect('/admin/buy-profiles')
 
+
+# BUY_PROFILES_ORPHAN_CLEAN_2026_05_18: orphaned preview function body removed; route redirects already handle the URL.
 
 @app.route('/api/admin/buy-profile/rebuild', methods=['POST'])
 def api_admin_buy_profile_rebuild():

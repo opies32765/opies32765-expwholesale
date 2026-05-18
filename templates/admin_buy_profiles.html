@@ -5,75 +5,299 @@
 * { box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
        margin: 0; background: #f5f7fa; color: #1a1a1a; line-height: 1.5; }
-.wrap { max-width: 1280px; margin: 0 auto; padding: 32px 28px 80px; }
+.wrap { max-width: 1280px; margin: 0 auto; padding: 28px 28px 80px; }
 h1 { font-size: 24px; margin: 0 0 4px; color: #0d2240; }
-.sub { color: #5a6878; margin: 0 0 24px; font-size: 14px; }
-.tools { display: flex; gap: 10px; margin-bottom: 22px; }
+.sub { color: #5a6878; margin: 0 0 18px; font-size: 14px; }
+.tools { display: flex; gap: 10px; margin-bottom: 18px; }
 .btn { background: #0d2240; color: white; padding: 7px 14px; border-radius: 6px;
        text-decoration: none; font-size: 13px; font-weight: 500; border: none; cursor: pointer; }
 .btn.alt { background: #16a34a; }
+.btn.ghost { background: white; color: #5a6878; border: 1px solid #d4dae3; }
 .btn:hover { opacity: 0.9; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 14px; }
-.card { background: white; border-radius: 10px; padding: 16px 18px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.06); border-left: 4px solid #0d2240; }
-.card.live { border-left-color: #16a34a; }
-.card-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
-.card-name { font-weight: 600; font-size: 15px; color: #0d2240; }
-.card-name a { color: #0d2240; text-decoration: none; }
-.card-name a:hover { text-decoration: underline; }
-.live-pill { background: #16a34a; color: white; font-size: 10px; padding: 2px 7px;
-             border-radius: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-.stats-line { display: flex; gap: 14px; font-size: 12px; color: #5a6878; margin-bottom: 10px; }
-.stats-line b { color: #0d2240; font-size: 13px; }
-.makes-mini { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
-.make-pill { background: #f0f4f8; border-radius: 12px; padding: 2px 8px; font-size: 11px; }
+
+/* Bid scorer */
+.scorer { background: white; padding: 14px 18px; border-radius: 10px; margin-bottom: 14px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+.scorer h2 { margin: 0 0 10px; font-size: 14px; color: #0d2240; }
+.scorer-form { display: grid; grid-template-columns: repeat(5, 1fr) auto auto; gap: 10px; align-items: end; }
+.scorer-form label { font-size: 10px; color: #5a6878; text-transform: uppercase; letter-spacing: 0.5px;
+                     display: block; margin-bottom: 3px; font-weight: 600; }
+.scorer-form input { width: 100%; padding: 6px 9px; border: 1px solid #d4dae3; border-radius: 5px; font-size: 13px; }
+.scorer-form button { background: #0d2240; color: white; padding: 7px 14px; border: none; border-radius: 5px;
+                      font-weight: 600; font-size: 13px; cursor: pointer; height: 32px; }
+.scorer-form button.clear { background: white; color: #5a6878; border: 1px solid #d4dae3; }
+.examples { font-size: 11px; color: #5a6878; margin-top: 10px; }
+.examples a { color: #0d2240; margin: 0 4px; text-decoration: none; border-bottom: 1px dotted; }
+
+/* Dealer list — table-like rows */
+.dealers { display: flex; flex-direction: column; gap: 8px; }
+.dealer { background: white; border-radius: 9px; box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+          border-left: 4px solid #d4dae3; overflow: hidden; transition: border-color 0.15s; }
+.dealer.live { border-left-color: #16a34a; }
+.dealer.t1 { border-left-color: #16a34a; }
+.dealer.t2 { border-left-color: #fbbf24; }
+.dealer.skip { border-left-color: #d4dae3; opacity: 0.78; }
+
+.row-head { display: grid;
+            grid-template-columns: 28px 220px 90px 1fr 240px 200px 80px;
+            align-items: center; padding: 11px 14px; gap: 10px;
+            cursor: pointer; }
+.row-head:hover { background: #f9fafc; }
+.chev { font-size: 12px; color: #5a6878; transition: transform 0.15s; user-select: none; }
+.row-open .chev { transform: rotate(90deg); }
+.name { font-weight: 600; font-size: 14px; color: #0d2240; }
+.name .pushpill { background: #16a34a; color: white; font-size: 9px; padding: 1px 6px; border-radius: 8px;
+                  font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; margin-left: 6px; }
+.tier-badge { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 10px; text-align: center;
+              text-transform: uppercase; letter-spacing: 0.4px; }
+.tier-T1 { background: #dcfce7; color: #166534; }
+.tier-T2 { background: #fef3c7; color: #92400e; }
+.tier-skip { background: #f1f5f9; color: #64748b; }
+.tier-na { background: #f1f5f9; color: #94a3b8; }
+.makes-mini { display: flex; flex-wrap: wrap; gap: 3px; }
+.make-pill { background: #f0f4f8; border-radius: 10px; padding: 1px 7px; font-size: 11px; }
 .make-pill b { color: #0d2240; }
-.bands { font-size: 11px; color: #5a6878; margin-top: 8px; border-top: 1px solid #eef1f5; padding-top: 8px; }
-.bands b { color: #0d2240; }
-.built { font-size: 10px; color: #9aa6b3; margin-top: 6px; }
+.bands-mini { font-size: 11px; color: #5a6878; }
+.bands-mini b { color: #0d2240; }
+.engagement { font-size: 11px; color: #5a6878; text-align: right; }
+.engagement b { color: #0d2240; font-size: 13px; }
+.cold { color: #b45309; font-weight: 600; }
+
+.detail { display: none; padding: 16px 18px 20px; border-top: 1px solid #eef1f5; background: #fbfcfd; }
+.row-open .detail { display: block; }
+
+.detail h3 { margin: 14px 0 8px; font-size: 12px; color: #5a6878;
+             text-transform: uppercase; letter-spacing: 0.6px; }
+.detail h3:first-child { margin-top: 0; }
+
+.stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 6px; }
+.stat { background: white; padding: 10px; border-radius: 6px; text-align: center; border: 1px solid #eef1f5; }
+.stat-num { font-size: 18px; font-weight: 700; color: #0d2240; line-height: 1.1; }
+.stat-lbl { font-size: 10px; color: #5a6878; margin-top: 2px; text-transform: uppercase; }
+
+.bands-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.band-card { background: white; padding: 10px 12px; border-radius: 6px; border: 1px solid #eef1f5; }
+.band-card h4 { margin: 0 0 6px; font-size: 11px; color: #5a6878; text-transform: uppercase; letter-spacing: 0.4px; }
+.band-row { display: flex; justify-content: space-between; font-size: 12px; margin: 3px 0; }
+.band-row b { color: #0d2240; }
+
+table.makes { width: 100%; border-collapse: collapse; background: white; border: 1px solid #eef1f5;
+              border-radius: 6px; overflow: hidden; font-size: 12px; }
+table.makes th, table.makes td { padding: 7px 10px; text-align: left; border-bottom: 1px solid #eef1f5; }
+table.makes th { background: #0d2240; color: white; font-weight: 600; font-size: 10px;
+                 text-transform: uppercase; letter-spacing: 0.4px; }
+table.makes td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.fast { color: #16a34a; font-weight: 600; }
+.slow { color: #b45309; }
+.share-bar { display: inline-block; height: 8px; background: #0d2240; border-radius: 2px;
+             vertical-align: middle; margin-left: 6px; }
+
+.empty { color: #aaa; font-style: italic; font-size: 12px; padding: 10px;
+         background: white; border-radius: 6px; border: 1px solid #eef1f5; }
+
+.built { font-size: 11px; color: #9aa6b3; }
+.score-pill { background: #0d2240; color: white; padding: 2px 8px; border-radius: 9px; font-size: 11px;
+              font-weight: 600; font-variant-numeric: tabular-nums; }
+.why { color: #9aa6b3; font-style: italic; font-size: 11px; }
 </style></head>
 <body><div class="wrap">
 
 <h1>Dealer Buy Profiles</h1>
-<p class="sub">Auto-derived from <code>dealer_inventory</code> daily scan. Rebuilt nightly at 08:30 ET. Drives match-routing for inbound bids.</p>
+<p class="sub">Auto-derived from <code>dealer_inventory</code> daily scan. Rebuilt nightly at 08:30 ET.
+   Drives match-routing for inbound bids.</p>
 
 <div class="tools">
-  <a class="btn" href="/admin/buy-profiles/preview">→ Try a hypothetical bid</a>
   <button class="btn alt" onclick="rebuild()">↻ Rebuild all now</button>
+  <a class="btn ghost" href="/admin/buy-profiles">Clear sort</a>
 </div>
 
-<div class="grid">
+<!-- BID SCORER -->
+<div class="scorer">
+  <h2>Score a hypothetical bid against every partner</h2>
+  <form class="scorer-form" method="GET" action="/admin/buy-profiles">
+    <div><label>Year</label><input name="year" type="number" value="{{ bid.year or '' }}" placeholder="2024"></div>
+    <div><label>Make</label><input name="make" value="{{ bid.make or '' }}" placeholder="Porsche"></div>
+    <div><label>Model</label><input name="model" value="{{ bid.model or '' }}" placeholder="911"></div>
+    <div><label>Miles</label><input name="miles" type="number" value="{{ bid.miles or '' }}" placeholder="15000"></div>
+    <div><label>Asking $</label><input name="price" type="number" value="{{ bid.price or '' }}" placeholder="125000"></div>
+    <div><button type="submit">Score</button></div>
+    <div><a class="btn ghost" href="/admin/buy-profiles">Clear</a></div>
+  </form>
+  <div class="examples">Try:
+    <a href="?year=2024&make=Porsche&model=911&miles=15000&price=135000">2024 Porsche 911 $135K</a> ·
+    <a href="?year=2014&make=Chevrolet&model=Corvette+Z06&miles=18000&price=70000">2014 Corvette Z06 $70K</a> ·
+    <a href="?year=2024&make=Chevrolet&model=Tahoe&miles=30000&price=41500">2024 Tahoe $41K</a> ·
+    <a href="?year=2024&make=Lamborghini&model=Urus&miles=8000&price=325000">2024 Urus $325K</a>
+  </div>
+</div>
+
+{% if scored %}
+<p class="sub" style="margin: 4px 0 14px">
+  Scoring against
+  <b>{{ bid.year or '—' }} {{ bid.make }} {{ bid.model or '' }}</b>
+  {% if bid.miles %} · {{ '{:,}'.format(bid.miles) }} mi{% endif %}
+  {% if bid.price %} · ${{ '{:,}'.format(bid.price) }}{% endif %}
+  · Sorted by score (T1 ≥80, T2 ≥60, otherwise skip)
+</p>
+{% endif %}
+
+<!-- DEALER LIST -->
+<div class="dealers">
 {% for d in dealers %}
-  <div class="card {% if d.receive_inbound_pushes %}live{% endif %}">
-    <div class="card-head">
-      <div class="card-name"><a href="/admin/dealer/{{ d.id }}/buy-profile">{{ d.name }}</a></div>
-      {% if d.receive_inbound_pushes %}<span class="live-pill">PUSH ON</span>{% endif %}
+  <div class="dealer
+              {% if d.tier == 'T1' %}t1
+              {% elif d.tier == 'T2' %}t2
+              {% elif d.tier == 'skip' %}skip
+              {% elif d.receive_inbound_pushes %}live
+              {% endif %}"
+       id="dealer-{{ d.id }}">
+
+    <div class="row-head" onclick="toggleRow(this.parentElement)">
+      <div class="chev">▶</div>
+
+      <div class="name">{{ d.name }}{% if d.receive_inbound_pushes %}<span class="pushpill">PUSH ON</span>{% endif %}</div>
+
+      {% if scored %}
+        <div class="tier-badge tier-{{ d.tier or 'na' }}">
+          {{ d.tier or '—' }}{% if d.score is not none %} · {{ d.score }}{% endif %}
+        </div>
+      {% else %}
+        <div class="tier-badge tier-na">—</div>
+      {% endif %}
+
+      <div class="makes-mini">
+        {% for make, share in d._summary.top_makes %}
+          <span class="make-pill">{{ make.title() }} <b>{{ share }}%</b></span>
+        {% endfor %}
+      </div>
+
+      <div class="bands-mini">
+        <b>Year</b> {{ d._summary.year_min or '—' }}-{{ d._summary.year_max or '—' }}
+        · <b>$</b> {{ '{:,.0f}'.format(d._summary.price_p10 or 0) }}-{{ '{:,.0f}'.format(d._summary.price_p90 or 0) }}
+        · <b>{{ d._summary.makes_count }}</b> makes
+      </div>
+
+      <div class="engagement">
+        {% if d._engage.pushes_30d %}
+          <b>{{ d._engage.pushes_30d }}</b> pushes / <b>{{ d._engage.won_30d }}</b> won (30d)
+        {% else %}
+          <span class="cold">0 pushes 30d</span>
+        {% endif %}
+      </div>
+
+      <div>
+        {% if scored and d.why %}<span class="why">{{ d.why }}</span>{% endif %}
+      </div>
     </div>
-    <div class="stats-line">
-      <span><b>{{ d._summary.active or 0 }}</b> active</span>
-      <span><b>{{ d._summary.sold_180d or 0 }}</b> sold/180d</span>
-      <span><b>{{ d._summary.makes_count }}</b> makes</span>
+
+    <!-- Expanded detail -->
+    <div class="detail">
+      <div class="stats">
+        <div class="stat"><div class="stat-num">{{ d._summary.active or 0 }}</div><div class="stat-lbl">Active inv</div></div>
+        <div class="stat"><div class="stat-num">{{ d._summary.sold_180d or 0 }}</div><div class="stat-lbl">Sold 180d</div></div>
+        <div class="stat"><div class="stat-num">{{ d._summary.makes_count }}</div><div class="stat-lbl">Makes</div></div>
+        <div class="stat"><div class="stat-num">{{ d._engage.pushes_30d or 0 }}</div><div class="stat-lbl">Pushes 30d</div></div>
+        <div class="stat"><div class="stat-num">{{ d._engage.won_30d or 0 }}</div><div class="stat-lbl">Won 30d</div></div>
+      </div>
+
+      <h3>Bands</h3>
+      <div class="bands-grid">
+        <div class="band-card">
+          <h4>Year</h4>
+          <div class="band-row"><span>Range</span><b>{{ d._bands.year_min or '—' }} – {{ d._bands.year_max or '—' }}</b></div>
+          <div class="band-row"><span>P10 – P90</span><b>{{ d._bands.year_p10 or '—' }} – {{ d._bands.year_p90 or '—' }}</b></div>
+        </div>
+        <div class="band-card">
+          <h4>Price</h4>
+          <div class="band-row"><span>P10</span><b>${{ '{:,.0f}'.format(d._bands.price_p10 or 0) }}</b></div>
+          <div class="band-row"><span>P90</span><b>${{ '{:,.0f}'.format(d._bands.price_p90 or 0) }}</b></div>
+        </div>
+        <div class="band-card">
+          <h4>Mileage</h4>
+          <div class="band-row"><span>P10</span><b>{{ '{:,.0f}'.format(d._bands.miles_p10 or 0) }} mi</b></div>
+          <div class="band-row"><span>P90</span><b>{{ '{:,.0f}'.format(d._bands.miles_p90 or 0) }} mi</b></div>
+        </div>
+      </div>
+
+      <h3>Makes — distribution + velocity</h3>
+      <table class="makes">
+        <thead><tr>
+          <th>Make</th><th>Share</th><th>Avg Yr</th><th>Avg $</th><th>Avg Miles</th>
+          <th>Sold</th><th>Days on lot</th><th>Last seen</th>
+        </tr></thead>
+        <tbody>
+        {% for make, m in d._makes %}
+          <tr>
+            <td><b>{{ make.title() }}</b></td>
+            <td class="num">{{ m.share }}%
+              <span class="share-bar" style="width: {{ (m.share or 0) * 1.2 }}px"></span>
+            </td>
+            <td class="num">{{ m.avg_year or '—' }}</td>
+            <td class="num">{{ '${:,.0f}'.format(m.avg_price) if m.avg_price else '—' }}</td>
+            <td class="num">{{ '{:,.0f}'.format(m.avg_miles) if m.avg_miles else '—' }}</td>
+            <td class="num">{{ m.sold_n or 0 }}</td>
+            <td class="num
+              {% if m.avg_days_on_lot and m.avg_days_on_lot < 15 %}fast
+              {% elif m.avg_days_on_lot and m.avg_days_on_lot > 45 %}slow{% endif %}">
+              {{ m.avg_days_on_lot ~ 'd' if m.avg_days_on_lot else '—' }}
+            </td>
+            <td class="num">{{ m.last_seen or '—' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+
+      <h3>Push behavior (lifetime)</h3>
+      {% if d._behavioral and d._behavioral.pushes %}
+        <div class="bands-grid">
+          <div class="band-card">
+            <div class="band-row"><span>Pushes received</span><b>{{ d._behavioral.pushes }}</b></div>
+            <div class="band-row"><span>Opened</span><b>{{ d._behavioral.opened or 0 }}</b></div>
+            <div class="band-row"><span>Accepted</span><b>{{ d._behavioral.accepted or 0 }}</b></div>
+          </div>
+        </div>
+      {% else %}
+        <div class="empty">No push history yet for this dealer.</div>
+      {% endif %}
+
+      <h3>Manual overrides</h3>
+      {% if d._overrides and (d._overrides.always or d._overrides.never) %}
+        <pre style="background: white; padding: 12px; border-radius: 6px; border: 1px solid #eef1f5;
+                    font-size: 11px; overflow-x: auto;">{{ d._overrides | tojson(indent=2) }}</pre>
+      {% else %}
+        <div class="empty">No manual overrides set.</div>
+      {% endif %}
+
+      <div class="built" style="margin-top: 14px">
+        Slug <code>{{ d.portal_slug }}</code> ·
+        Salesperson {{ d.salesperson or '—' }} ·
+        Profile built {{ d.buy_profile_built_at.strftime('%Y-%m-%d %H:%M') if d.buy_profile_built_at else '—' }}
+      </div>
     </div>
-    <div class="makes-mini">
-      {% for make, share in d._summary.top_makes %}
-        <span class="make-pill">{{ make.title() }} <b>{{ share }}%</b></span>
-      {% endfor %}
-    </div>
-    <div class="bands">
-      <b>Year:</b> {{ d._summary.year_min }}–{{ d._summary.year_max }} ·
-      <b>Price:</b> ${{ '{:,.0f}'.format(d._summary.price_p10 or 0) }}–${{ '{:,.0f}'.format(d._summary.price_p90 or 0) }}
-    </div>
-    <div class="built">Built {{ d.buy_profile_built_at.strftime('%Y-%m-%d %H:%M') if d.buy_profile_built_at else '—' }}</div>
   </div>
 {% endfor %}
 </div>
 
 <script>
+function toggleRow(el) { el.classList.toggle('row-open'); }
+
+// Auto-expand if URL has #dealer-N (from old detail-page redirect)
+window.addEventListener('DOMContentLoaded', () => {
+  if (location.hash && location.hash.startsWith('#dealer-')) {
+    const el = document.querySelector(location.hash);
+    if (el) { el.classList.add('row-open'); el.scrollIntoView({ behavior:'smooth', block:'start' }); }
+  }
+});
+
 async function rebuild() {
-  const r = await fetch('/api/admin/buy-profile/rebuild', { method: 'POST' });
-  const j = await r.json();
-  alert('Rebuilt ' + j.rebuilt + ' profiles. Reloading.');
-  location.reload();
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = '↻ Rebuilding...';
+  try {
+    const r = await fetch('/api/admin/buy-profile/rebuild', { method: 'POST' });
+    const j = await r.json();
+    alert('Rebuilt ' + j.rebuilt + ' profiles. Reloading.');
+    location.reload();
+  } catch (e) { alert('Rebuild failed: ' + e); btn.disabled = false; btn.textContent = '↻ Rebuild all now'; }
 }
 </script>
 
