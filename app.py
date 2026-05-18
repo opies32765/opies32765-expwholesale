@@ -1208,7 +1208,10 @@ def filter_rbook_to_strict_peers(subject_vin, rows, min_kept=5):
 # so bare "15k" works without commas. Decimal-k is converted in the
 # parser body (see extract_miles_from_text below).
 _MILES_RE_LABELED = re.compile(
-    r'(\d{1,3}\.\d{1,2}|\d{1,3}(?:[,. ]\d{3})+|\d{2,6})\s*(?:k\b|mi\b|miles?\b|mileage\b)',
+    # 2026-05-18 bid 1784: extended \d{2,6} -> \d{1,6} so single-digit-k
+    # ("4k") parses as 4000. Customer's reply of just "4k" was returning
+    # None and looping the verify-needs-miles SMS.
+    r'(\d{1,3}\.\d{1,2}|\d{1,3}(?:[,. ]\d{3})+|\d{1,6})\s*(?:k\b|mi\b|miles?\b|mileage\b)',
     re.IGNORECASE)
 _MILES_RE_KSHORT = re.compile(r'\b(\d{2,3})\s*[kK]\b')
 # Bare comma-grouped numbers like "47,000" or "120,500" — used only when a VIN
@@ -1339,6 +1342,14 @@ def extract_miles_from_text(text, has_vin=False):
     in the valid range."""
     if not text:
         return None
+    # 2026-05-18 bid 1784 (Aston Martin DBX VIN SD7VUJDW6STV13589, customer
+    # wrote "Miles 4k"): the labeled regex matched the last 5 digits of the
+    # VIN (13589) followed by the newline before "Miles" — `13589\nMiles`
+    # matches `(\d{2,6})\s*miles?\b` because \s* eats the newline. Strip the
+    # 17-char VIN out of `text` first when has_vin=True (mirrors what the
+    # bare-digit branch at the bottom of this function already does).
+    if has_vin:
+        text = re.sub(r'[A-HJ-NPR-Z0-9]{17}', ' ', text)
     for m in _MILES_RE_LABELED.finditer(text):
         raw = m.group(1)
         # Suffix is the LAST char of the full match — k / i / s / e
