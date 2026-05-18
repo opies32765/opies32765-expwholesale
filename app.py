@@ -114,6 +114,316 @@ _PUBLIC_PREFIXES = (
 )
 
 
+# PENDING_ATTACH_LAYER2_2026_05_18 — helpers ────────────────────────────
+# Layer 2 "always ask first" confirmation flow. See migration
+# 2026-05-18_pending_attach.sql for the schema.
+
+import json as _pa_json
+
+
+def _pa_find_pending_verify_bids(cur, phone, hours=24):
+    """Return list of dicts for verify-pending bids in last N hours."""
+    cur.execute("""
+        SELECT id, year, make, model, vin, mileage,
+               needs_verification_reason AS reason,
+               needs_verification_at,
+               COALESCE(asking_price, 0) AS asking_price
+          FROM bids
+         WHERE phone = %s
+           AND needs_verification_at IS NOT NULL
+           AND needs_verification_cleared_at IS NULL
+           AND needs_verification_at > NOW() - (INTERVAL '1 hour' * %s)
+         ORDER BY id DESC
+    """, (phone, hours))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def _pa_format_ymm(b):
+    """Format a bid row as a customer-friendly YMM string."""
+    parts = []
+    if b.get('year'): parts.append(str(b['year']))
+    if b.get('make'): parts.append(str(b['make']).title())
+    if b.get('model'): parts.append(str(b['model']))
+    s = ' '.join(parts).strip()
+    return s or 'your vehicle'
+
+
+def _pa_load_open(cur, phone):
+    """Return the most recent OPEN pending_attach for phone, asked within 24h."""
+    cur.execute("""
+        SELECT id, phone, body, num_media, media_urls, media_types,
+               parsed_vin, parsed_miles, candidates,
+               asked_at, expires_at
+          FROM pending_attach
+         WHERE phone = %s
+           AND resolved_at IS NULL
+           AND asked_at > NOW() - INTERVAL '24 hours'
+         ORDER BY asked_at DESC
+         LIMIT 1
+    """, (phone,))
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+_PA_YES_RE = re.compile(r"^(yes|y|yeah|yep|yup|correct|right|that.?s\s*it|confirmed?|ok|okay|sure)\b",
+                              re.IGNORECASE)
+_PA_NO_RE  = re.compile(r"^(no|n|nope|not|wrong|nah|incorrect|different)\b",
+                              re.IGNORECASE)
+_PA_NEW_RE = re.compile(r"^(new|another|different|other)\b",
+                              re.IGNORECASE)
+_PA_LETTER_RE = re.compile(r"^([a-z])(?:\b|[\s\.,!])",
+                                 re.IGNORECASE)
+
+
+def _pa_parse_reply(body):
+    """Classify a body as a confirmation reply. Returns one of:
+        ('yes', None)
+        ('no', None)
+        ('new', None)
+        ('choice', 'A')   # letter A-Z chosen
+        (None, None)      # not a confirmation reply
+    """
+    if not body:
+        return None, None
+    b = body.strip()
+    if not b:
+        return None, None
+    # Long replies (>40 chars) almost never confirmation answers — likely
+    # actual data inbound. Skip.
+    if len(b) > 40:
+        return None, None
+    if _PA_NEW_RE.match(b):
+        return 'new', None
+    if _PA_YES_RE.match(b):
+        return 'yes', None
+    if _PA_NO_RE.match(b):
+        return 'no', None
+    m = _PA_LETTER_RE.match(b)
+    if m:
+        return 'choice', m.group(1).upper()
+    return None, None
+
+
+def _pa_resolve_to_bid(cur, pa_id, target_bid_id, resolved_by, note=None):
+    """Attach the staged inbound from pending_attach to target_bid_id, then
+    mark the pending_attach resolved. Triggers the same clear-verify +
+    force-reprocess logic as the existing stitch path."""
+    # Mark resolved first so a concurrent reply can't double-attach
+    cur.execute("""
+        UPDATE pending_attach
+           SET resolved_at     = NOW(),
+               resolved_bid_id = %s,
+               resolved_by     = %s,
+               resolved_note   = %s
+         WHERE id = %s AND resolved_at IS NULL
+         RETURNING body, num_media, media_urls, media_types,
+                   parsed_vin, parsed_miles, candidates
+    """, (target_bid_id, resolved_by, note, pa_id))
+    pa = cur.fetchone()
+    if not pa:
+        return False  # already resolved
+    pa = dict(pa)
+
+    # Apply staged data to target bid
+    if pa.get('parsed_vin'):
+        cur.execute(
+            "UPDATE bids SET vin=%s, updated_at=NOW() "
+            "WHERE id=%s AND (vin IS NULL OR vin='')",
+            (pa['parsed_vin'], target_bid_id))
+    if pa.get('parsed_miles'):
+        cur.execute(
+            "UPDATE bids SET mileage=%s, updated_at=NOW() "
+            "WHERE id=%s AND (mileage IS NULL OR mileage < %s)",
+            (pa['parsed_miles'], target_bid_id, pa['parsed_miles']))
+
+    # Attach photos (call _ingest_sms_photo for each)
+    media_urls = pa.get('media_urls') or []
+    media_types = pa.get('media_types') or []
+    if isinstance(media_urls, str):
+        try: media_urls = _pa_json.loads(media_urls)
+        except Exception: media_urls = []
+    if isinstance(media_types, str):
+        try: media_types = _pa_json.loads(media_types)
+        except Exception: media_types = []
+    if media_urls:
+        for i, url in enumerate(media_urls):
+            mt = media_types[i] if i < len(media_types) else 'image/jpeg'
+            try:
+                _ingest_sms_photo(cur, target_bid_id, url, mt, from_phone=None)
+            except Exception as _e:
+                print(f'[pa-resolve] photo ingest err bid={target_bid_id}: {_e}',
+                      flush=True)
+
+    # Always clear verification + force-reprocess (same pattern as
+    # STITCH_VERIFY_UNIFIED_2026_05_15)
+    cur.execute("""
+        SELECT vin, mileage, needs_verification_at,
+               needs_verification_cleared_at,
+               needs_verification_reason
+          FROM bids WHERE id = %s
+    """, (target_bid_id,))
+    _b = cur.fetchone()
+    if (_b and _b.get('needs_verification_at')
+            and not _b.get('needs_verification_cleared_at')):
+        cur.execute("""
+            UPDATE bids
+               SET needs_verification_cleared_at = NOW(),
+                   needs_verification_cleared_by = %s,
+                   updated_at = NOW()
+             WHERE id = %s
+        """, (f'auto:pa_resolve_{resolved_by}', target_bid_id))
+        cur.execute(
+            "DELETE FROM ipacket_lookups WHERE bid_id=%s AND "
+            "(looked_up_at IS NULL OR looked_up_at < NOW() - INTERVAL '5 minutes' "
+            "OR not_available=true)", (target_bid_id,))
+        cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s",
+                    (target_bid_id,))
+        cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s",
+                    (target_bid_id,))
+        cur.execute(
+            "UPDATE bids SET vauto_claimed_by=NULL, vauto_claimed_at=NULL, "
+            "ai_assessed_at=NULL, ai_price=NULL, ai_assessment=NULL, "
+            "miles_audit_at=NULL WHERE id=%s",
+            (target_bid_id,))
+    print(f'[pa-resolve] pa={pa_id} -> bid={target_bid_id} by={resolved_by}',
+          flush=True)
+    return True
+
+
+def _pa_handle_reply(cur, phone, body, intake_log_id):
+    """Check for an open pending_attach for this phone; if body parses as a
+    confirmation reply, resolve it. Returns a TwiML response tuple or None
+    if this wasn't a reply we handled."""
+    pa = _pa_load_open(cur, phone)
+    if not pa:
+        return None
+    verdict, choice = _pa_parse_reply(body)
+    if not verdict:
+        return None
+    cands = pa.get('candidates') or []
+    if isinstance(cands, str):
+        try: cands = _pa_json.loads(cands)
+        except Exception: cands = []
+
+    def _xml(text):
+        from html import escape as _esc
+        return ('<?xml version="1.0" encoding="UTF-8"?><Response><Message>' +
+                _esc(text) +
+                '</Message></Response>',
+                200, {'Content-Type': 'application/xml'})
+
+    if verdict == 'yes' and len(cands) == 1:
+        target = cands[0]
+        ok = _pa_resolve_to_bid(cur, pa['id'], target['bid_id'],
+                                'user_yes', f'YMM={target.get("ymm")}')
+        _finalize_sms_intake(cur, intake_log_id, 'pa_resolved',
+                             bid_id=target['bid_id'],
+                             reason=f'pending_attach #{pa["id"]} resolved YES to bid {target["bid_id"]}')
+        return _xml(f"Got it — attached to your {target.get('ymm')}. Thanks!")
+    if verdict == 'choice':
+        # Letter -> index
+        idx = ord(choice) - ord('A')
+        if 0 <= idx < len(cands):
+            target = cands[idx]
+            _pa_resolve_to_bid(cur, pa['id'], target['bid_id'],
+                               'user_choice',
+                               f'letter={choice} YMM={target.get("ymm")}')
+            _finalize_sms_intake(cur, intake_log_id, 'pa_resolved',
+                                 bid_id=target['bid_id'],
+                                 reason=f'pending_attach #{pa["id"]} resolved {choice} to bid {target["bid_id"]}')
+            return _xml(f"Got it — attached to your {target.get('ymm')}. Thanks!")
+        return _xml(f"Hmm, '{choice}' isn't one of the options. "
+                    f"Reply with one of: " +
+                    ', '.join(f"{c.get('letter')}={c.get('ymm')}"
+                              for c in cands))
+    if verdict in ('no', 'new'):
+        # User says it's something else. Mark resolved as 'user_new' and
+        # tell them to send fresh.
+        cur.execute("""UPDATE pending_attach
+                          SET resolved_at = NOW(),
+                              resolved_by = %s,
+                              resolved_note = 'user said no/new'
+                        WHERE id = %s AND resolved_at IS NULL""",
+                    ('user_new', pa['id']))
+        _finalize_sms_intake(cur, intake_log_id, 'pa_user_no',
+                             reason=f'pending_attach #{pa["id"]} answered NO/NEW')
+        return _xml("No problem — please re-send the VIN, miles, "
+                    "or photo for the correct vehicle and we'll set it "
+                    "up. If it's for an existing bid, prefix with the "
+                    "bid number like #1234.")
+    return None
+
+
+def _pa_create_and_ask(cur, phone, body, num_media, media_urls,
+                       media_types, parsed_vin, parsed_miles,
+                       verify_pending_bids, intake_log_id):
+    """Create a pending_attach row + send confirmation SMS. Returns
+    TwiML response tuple."""
+    # Build candidates list with letters A, B, C...
+    cands = []
+    for i, b in enumerate(verify_pending_bids[:8]):  # cap at 8
+        cands.append({
+            'bid_id': b['id'],
+            'letter': chr(ord('A') + i),
+            'year':   b.get('year'),
+            'make':   b.get('make'),
+            'model':  b.get('model'),
+            'ymm':    _pa_format_ymm(b),
+            'reason': b.get('reason'),
+        })
+
+    # Build the question SMS
+    n = len(cands)
+    got_what = []
+    if parsed_vin:       got_what.append(f"the VIN ({parsed_vin})")
+    if parsed_miles:     got_what.append(f"{parsed_miles:,} miles")
+    if num_media:        got_what.append(f"{num_media} photo{'s' if num_media!=1 else ''}")
+    got_str = " and ".join(got_what) if got_what else "your message"
+
+    if n == 1:
+        c = cands[0]
+        q = (f"Hey, its the EW Bot. Got {got_str}. "
+             f"Confirming this is for the {c['ymm']} we got from you "
+             f"earlier — reply YES or NO.")
+    else:
+        opts = '\n'.join(f"{c['letter']} = {c['ymm']}" for c in cands)
+        q = (f"Hey, its the EW Bot. Got {got_str}. "
+             f"Which vehicle is this for?\n{opts}\n"
+             f"Reply with the letter.")
+
+    # Insert pending_attach row FIRST so concurrent reply finds it
+    cur.execute("""
+        INSERT INTO pending_attach
+            (phone, body, num_media, media_urls, media_types,
+             parsed_vin, parsed_miles, candidates, asked_body)
+        VALUES (%s, %s, %s, %s::jsonb, %s::jsonb,
+                %s, %s, %s::jsonb, %s)
+        RETURNING id
+    """, (phone, body or None, num_media,
+          _pa_json.dumps(media_urls or []),
+          _pa_json.dumps(media_types or []),
+          parsed_vin, parsed_miles, _pa_json.dumps(cands), q))
+    pa_id = cur.fetchone()['id']
+
+    # Send the question
+    try:
+        send_sms(phone, q)
+    except Exception as _e:
+        print(f'[pa-create] send_sms err pa={pa_id}: {_e}', flush=True)
+
+    _finalize_sms_intake(cur, intake_log_id, 'pa_asked',
+                         reason=f'pending_attach #{pa_id} created, '
+                                f'{n} candidate(s)',
+                         parsed_vin=parsed_vin, parsed_miles=parsed_miles)
+    print(f'[pa-create] pa={pa_id} phone={phone} candidates={n} '
+          f'data=vin:{bool(parsed_vin)},miles:{bool(parsed_miles)},'
+          f'photos:{num_media}', flush=True)
+
+    from html import escape as _esc
+    return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+            200, {'Content-Type': 'application/xml'})
+
+
 @app.route('/.well-known/appspecific/<path:filename>')
 def well_known(filename):
     return send_from_directory(
@@ -2898,6 +3208,19 @@ def twilio_webhook():
         except Exception:
             pass
 
+    # PENDING_ATTACH_LAYER2_2026_05_18: reply handler for our YMM
+    # confirmation SMS. Runs early so YES/NO/A/B supersede normal
+    # routing for this phone if we asked them a question.
+    try:
+        _pa_reply = _pa_handle_reply(cur, from_phone, body, intake_log_id)
+        if _pa_reply:
+            db.commit(); db.close()
+            return _pa_reply
+    except Exception as _pa_e:
+        print(f'[pa-reply] handler error: {_pa_e}', flush=True)
+        try: db.rollback()
+        except Exception: pass
+
     # ── 2026-05-12 Network claim reply (YES) — intercept first ──
     try:
         from partner_portal import try_handle_network_claim
@@ -3524,6 +3847,28 @@ def twilio_webhook():
                     'vin_invalid', 'vin_not_found'))
             )
             if _can_miles or _can_vin or _can_photo:
+                # PENDING_ATTACH_LAYER2_2026_05_18: do NOT silently stitch.
+                # Build the full list of verify-pending bids (not just the
+                # most-recent) and ask the customer which one this is for.
+                # Operator force-resolve still available via admin API.
+                _pa_pending = _pa_find_pending_verify_bids(cur, from_phone,
+                                                          hours=24)
+                if _pa_pending:
+                    _pa_miles_to_stage = miles or (_bare_miles if _can_miles else None)
+                    _pa_media_urls = [request.form.get(f'MediaUrl{i}')
+                                       for i in range(num_media)]
+                    _pa_media_urls = [u for u in _pa_media_urls if u]
+                    _pa_media_types = [request.form.get(f'MediaContentType{i}', 'image/jpeg')
+                                        for i in range(num_media)]
+                    _resp = _pa_create_and_ask(
+                        cur, from_phone, body, num_media,
+                        _pa_media_urls, _pa_media_types,
+                        vin, _pa_miles_to_stage,
+                        _pa_pending, intake_log_id)
+                    db.commit(); db.close()
+                    return _resp
+                # Fall through to old behavior only if NO candidates found
+                # (shouldn't happen given _vpend was set, but defensive).
                 recent = _vpend
                 if _can_miles and not miles:
                     miles = _bare_miles
@@ -16655,6 +17000,47 @@ def admin_buy_profile_preview():
 
 
 # BUY_PROFILES_ORPHAN_CLEAN_2026_05_18: orphaned preview function body removed; route redirects already handle the URL.
+
+@app.route('/admin/api/pending-attach/<int:pa_id>/resolve', methods=['POST'])
+def admin_pa_resolve(pa_id):
+    """Operator force-resolves a pending_attach by attaching the staged
+    data to a specific bid. PENDING_ATTACH_LAYER2_2026_05_18.
+
+    Body: {bid_id: <int>, note?: <str>}
+    """
+    data = request.get_json(silent=True) or {}
+    target = data.get('bid_id')
+    try: target = int(target)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'bid_id required (int)'}), 400
+    note = (data.get('note') or '')[:200] or None
+    actor = session.get('username') or 'admin'
+
+    db = get_db(); cur = db.cursor()
+    ok = _pa_resolve_to_bid(cur, pa_id, target,
+                            f'op_force:{actor}', note)
+    db.commit(); db.close()
+    return jsonify({'ok': bool(ok), 'pa_id': pa_id, 'bid_id': target})
+
+
+@app.route('/admin/api/pending-attach/open', methods=['GET'])
+def admin_pa_list_open():
+    """List all open pending_attach rows (for operator review).
+    PENDING_ATTACH_LAYER2_2026_05_18."""
+    db = get_db(); cur = db.cursor()
+    cur.execute("""
+        SELECT id, phone, body, num_media, parsed_vin, parsed_miles,
+               candidates, asked_at::text, expires_at::text
+          FROM pending_attach
+         WHERE resolved_at IS NULL
+           AND expires_at > NOW()
+         ORDER BY asked_at DESC
+         LIMIT 100
+    """)
+    rows = [dict(r) for r in cur.fetchall()]
+    db.close()
+    return jsonify({'rows': rows, 'count': len(rows)})
+
 
 @app.route('/api/admin/buy-profile/rebuild', methods=['POST'])
 def api_admin_buy_profile_rebuild():
