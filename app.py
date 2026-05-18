@@ -8013,12 +8013,25 @@ def decode_vin_precise_wrapper(vin):
         if _vds and float(_vds.get('confidence') or 0) >= 0.9:
             conf = float(_vds.get('confidence') or 0)
             trim_conf = 'high' if conf >= 0.95 else 'medium'
+            # ── Ambiguous-trim guard (2026-05-18 bid 1761) ──
+            # Some VINs (Ford F-150, Super Duty, etc.) genuinely can't
+            # disambiguate trim from VDS alone — Ford encodes XLT/Lariat/
+            # King Ranch identically in positions 4-8; only option packages
+            # differ. VDS modules return slash-separated strings like
+            # "XLT/Lariat/King Ranch SuperCrew" for these. That leaks
+            # "Lariat" into downstream UIs that parse the trim as a single
+            # token. Wipe ambiguous trims here so AccuTrade/vAuto Phase 1
+            # fills in the real trim from the window sticker.
+            _trim_out = _vds.get('trim')
+            if _trim_out and '/' in _trim_out:
+                _trim_out = None
+                trim_conf = 'medium'  # YMM solid, trim unknown
             return {
                 'vin': vin,
                 'year': _vds.get('year'),
                 'make': (_vds.get('make') or '').upper() or None,
                 'model': _vds.get('model'),
-                'trim': _vds.get('trim'),
+                'trim': _trim_out,
                 'style': _vds.get('body'),
                 'trim_confidence': trim_conf,
                 'source': _vds.get('source') or 'vds_table',
