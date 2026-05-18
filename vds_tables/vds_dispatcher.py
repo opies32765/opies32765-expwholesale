@@ -33,6 +33,41 @@ MODULES = [
     'vds_maserati',
     'vds_lexus',
     'vds_lotus',
+    # EV-native brands (2026-05-18)
+    'vds_tesla',
+    'vds_rivian',
+    'vds_lucid',
+    'vds_polestar',
+    # Ford Motor Company brands (2026-05-18)
+    'vds_ford',
+    'vds_lincoln',
+    'vds_mercury',
+    # Stellantis brands (2026-05-18). Multiple brands share WMIs 1C3/2C3/3C3/
+    # 1C4/1C6/3C6/ZAR. Dispatcher tries each in module order until one returns
+    # a non-None decode (see decode() logic with shared-WMI fallback).
+    'vds_chrysler',
+    'vds_dodge',
+    'vds_jeep',
+    'vds_ram',
+    'vds_fiat',
+    'vds_alfaromeo',
+    # Mainstream Japanese / Korean (deployed 2026-05-18 afternoon)
+    'vds_toyota',
+    'vds_honda',
+    'vds_acura',
+    'vds_nissan',
+    'vds_hyundai',
+    'vds_kia',
+    'vds_genesis',
+    'vds_mazda',
+    # vds_infiniti held back: 7 cases return wrong model (G37↔Q40/Q60/M56 rebrand)
+    # GM domestic (deployed 2026-05-18 afternoon)
+    'vds_chevrolet',
+    'vds_gmc',
+    # European mainstream (deployed 2026-05-18 afternoon)
+    'vds_volkswagen',
+    'vds_volvo',
+    'vds_mini',
 ]
 
 # Lazy-loaded WMI -> (module, decode_fn) lookup.
@@ -40,6 +75,11 @@ _WMI_INDEX: dict | None = None
 
 
 def _build_index() -> dict:
+    """Builds a WMI -> list of (mod_name, decode_fn) lookup. Multiple modules
+    can claim the same WMI (e.g., Stellantis 1C3/2C3/3C3 shared by Chrysler+
+    Dodge); the decode() function will try each in order and return the
+    first non-None result.
+    """
     global _WMI_INDEX
     if _WMI_INDEX is not None:
         return _WMI_INDEX
@@ -54,7 +94,12 @@ def _build_index() -> dict:
         if not decode_fn:
             continue
         for wmi in wmi_list:
-            idx[wmi.upper()] = (mod_name, decode_fn)
+            key = wmi.upper()
+            existing = idx.get(key)
+            if existing is None:
+                idx[key] = [(mod_name, decode_fn)]
+            else:
+                existing.append((mod_name, decode_fn))
     _WMI_INDEX = idx
     return idx
 
@@ -74,26 +119,36 @@ def decode(vin: str) -> dict | None:
           'source': 'vds_table:<make>',
           # plus any extra keys the per-make module returns (chassis, drive, etc)
         }
+
+    For WMIs shared by multiple manufacturers (e.g., Stellantis 1C3 shared
+    by Chrysler + Dodge), tries each module in turn until one returns a
+    non-None result. Order in MODULES determines priority.
     """
     if not vin or not isinstance(vin, str) or len(vin) != 17:
         return None
     vin = vin.upper().strip()
     idx = _build_index()
-    entry = idx.get(vin[:3])
-    if not entry:
+    candidates = idx.get(vin[:3])
+    if not candidates:
         return None
-    _mod_name, fn = entry
-    try:
-        return fn(vin)
-    except Exception:
-        return None
+    for _mod_name, fn in candidates:
+        try:
+            result = fn(vin)
+            if result is not None:
+                return result
+        except Exception:
+            continue
+    return None
 
 
 def supported_makes() -> list[str]:
     """Returns the list of make names currently dispatchable."""
     idx = _build_index()
-    return sorted({fn(None) or '' for _, fn in idx.values() if False}) or \
-           sorted({mn.replace('vds_', '') for mn, _ in idx.values()})
+    makes = set()
+    for candidates in idx.values():
+        for mn, _ in candidates:
+            makes.add(mn.replace('vds_', ''))
+    return sorted(makes)
 
 
 if __name__ == '__main__':
