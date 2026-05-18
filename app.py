@@ -1655,122 +1655,24 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
 
 
 def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
-    """Extract odometer mileage. Google Vision first, Claude fallback."""
+    """Extract odometer mileage from an image.
+
+    MILES_GEMINI_ONLY_2026_05_18: Gemini Flash 2.5 only (thinking_budget=0).
+    Google Vision was removed because its label-regex matches non-odometer
+    text (license plates, parking signs, background ' NN mi' patterns)
+    and triggered phantom miles on photos that don't show a dashboard.
+    Flash with the strict prompt returns NONE on non-odometer photos
+    (verified on the bid 1501 benchmark — 0 hallucinations on 5 non-odo
+    photos).
+    """
     # v4 routing: same rule as VIN — only the test user routes to home v4.
     if should_use_v4():
         v4_miles = v4_extract(file_bytes, task='odometer')
         if v4_miles and v4_miles.isdigit() and 100 <= int(v4_miles) <= 999999:
             print(f'[OCR] miles via v4 (test user): {v4_miles}', flush=True)
             return v4_miles
-        print('[OCR] v4 odo missed/skipped, falling back', flush=True)
-    text = _google_vision_ocr(file_bytes)
-    if text:
-        up = text.upper()
-        # Hard stop: VIN plates / weight stickers are NOT odometer photos
-        # If we see clear VIN-plate indicators, don't guess a mileage
-        plate_indicators = ['GVWR', 'GAWR', 'LBS', 'MFD BY', 'DATE OF MANUFACTURE',
-                           'VEHICLE SAFETY', 'BUMPER, AND THEFT', 'FEDERAL MOTOR']
-        if sum(1 for ind in plate_indicators if ind in up) >= 2:
-            print('[OCR] Google Vision: detected VIN plate (not odometer), returning None', flush=True)
-            return None
+        print('[OCR] v4 odo missed/skipped, going to Gemini Flash', flush=True)
 
-        # First: "Mileage NNN" / "Odometer: NNN" / "ODO NNN" — label BEFORE number.
-        # Common in VIN-scanner app screenshots (Carbly, vAuto, Carfax, AutoCheck).
-        # Without this, a Carbly screenshot with "In ZIP Code 33426\nMileage 23,576"
-        # gets the 23,576 candidate rejected because "ZIP" appears in the 50-char
-        # context window of the unlabeled fallback.
-        labeled_before = re.findall(
-            r'\b(?:MILEAGE|ODOMETER|ODO|MILES)\b[\s:\*\-\.#\(\)]+(\d{1,3}(?:,\d{3})+|\d{3,7})\b',
-            up)
-        if labeled_before:
-            for c in labeled_before:
-                n = int(c.replace(',', ''))
-                if 100 <= n <= 999999:
-                    print(f'[OCR] Mileage via Google Vision (label-before): {n}', flush=True)
-                    return n
-
-        # MILES_OCR_DECIMAL_K_2026_05_15: K-suffix shorthand like "47K",
-        # "15.6K", "100.5K". Rare on physical dashboards but appears in
-        # mobile-app summary screens and typed-note photos. Convert via
-        # float * 1000.
-        for _cm in re.finditer(r'(\d{1,3}(?:\.\d{1,2})?)\s*K\b', up):
-            try:
-                _n = int(round(float(_cm.group(1)) * 1000))
-            except ValueError:
-                continue
-            if 100 <= _n <= 999999:
-                print(f'[OCR] Mileage via Google Vision (K-suffix): {_n}',
-                      flush=True)
-                return _n
-
-        # Then: numbers explicitly labeled "mi" / "miles" / "km" — label AFTER number.
-        # TESLA_DASH_FIX_2026_05_15: Tesla displays many "mi"-suffixed values
-        # (range, trip, battery-to-empty, status-bar range). The literal
-        # odometer reading is the LARGEST plausible number on screen — an
-        # odometer can't legally go down, so any same-photo competitor like
-        # "234 mi range remaining" will be smaller than the real reading.
-        # Old code returned the FIRST match, which always picked the
-        # status-bar range on Tesla dashes. Fix: collect all, filter Tesla
-        # noise contexts, return max.
-        _labeled_noise = (
-            'RANGE', 'TRIP', 'MI/KWH', 'MIKWH', 'REMAINING', 'REMAIN',
-            'BATTERY', 'TO EMPTY', 'UNTIL EMPTY', 'CHARGE',
-            'AVERAGE', 'EST. MI', 'EST MI', 'KWH', 'TO GO',
-            'EFFICIENCY', 'CONSUMPTION',
-        )
-        _mi_candidates = []
-        for _mm in re.finditer(
-                r'(\d{1,3}(?:,\d{3})+|\d{3,7})\s*(?:MI|MILES|KM)\b', up):
-            _ns = _mm.group(1)
-            _n = int(_ns.replace(',', ''))
-            if not (100 <= _n <= 999999):
-                continue
-            _cs = max(0, _mm.start() - 60)
-            _ctx = up[_cs:_mm.end() + 10]
-            if any(_noise in _ctx for _noise in _labeled_noise):
-                continue
-            _mi_candidates.append(_n)
-        if _mi_candidates:
-            _result = max(_mi_candidates)
-            print(f'[OCR] Mileage via Google Vision (labeled, max of '
-                  f'{len(_mi_candidates)}): {_result}', flush=True)
-            return _result
-
-        # Fallback: any 4-7 digit number but avoid obvious false positives
-        # (skip numbers immediately followed/preceded by LBS, KG, $, year contexts)
-        candidates = []
-        for m in re.finditer(r'\b(\d{1,3}(?:,\d{3})+|\d{3,7})\b', up):
-            num_str = m.group(1)
-            n = int(num_str.replace(',', ''))
-            if not (100 <= n <= 999999):
-                continue
-            # Check surrounding context (50 chars before, 20 after)
-            ctx_start = max(0, m.start() - 50)
-            ctx_end = min(len(up), m.end() + 20)
-            ctx = up[ctx_start:ctx_end]
-            # Skip if near weight / price / year indicators
-            bad = ['LBS', 'KG', 'GVWR', 'GAWR', '$', 'MSRP', 'PRICE', 'PROD',
-                   'YEAR', 'MODEL YEAR', 'ZIP', 'PHONE', 'STOCK']
-            if any(b in ctx for b in bad):
-                continue
-            # Reject obvious year values (1990-2030)
-            if 1990 <= n <= 2030:
-                continue
-            candidates.append(n)
-
-        if candidates:
-            # Prefer the largest (odometers are usually prominent)
-            result = max(candidates)
-            print(f'[OCR] Mileage via Google Vision: {result}', flush=True)
-            return result
-    print('[OCR] Google Vision missed mileage, falling back to Gemini Flash', flush=True)
-
-    # GEMINI_FLASH_MILES_OCR_2026_05_17: Gemini 2.5 Flash with thinking
-    # disabled. Overnight bench on 72 odometer photos:
-    #   Sonnet 4.6                : 29.2%  3.3s/call  ~$10/1000
-    #   Gemini Flash (no-think)   : 94.4%  1.9s/call  ~$1/1000
-    # Same prompt; the only meaningful difference is the model + disabled
-    # thinking. 3x more accurate, 1.7x faster, 10x cheaper.
     _odo_prompt = (
         "Look at this image. Is there a vehicle odometer reading visible? "
         "An odometer is a digital or analog display on the vehicle's "
@@ -1790,7 +1692,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
             if digits:
                 n = int(digits)
                 if 100 <= n <= 999999:
-                    print(f'[OCR] Mileage via Gemini Flash (no-think): {n}',
+                    print(f'[OCR] miles via Gemini Flash (no-think): {n}',
                           flush=True)
                     return n
     return None
