@@ -745,8 +745,31 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-f
 # ── VIN extraction ───────────────────────────────────────────────────────────
 
 def extract_vin_from_text(text):
-    match = VIN_RE.search(text.upper())
-    return match.group(0) if match else None
+    if not text:
+        return None
+    up = text.upper()
+    # Strict match first — covers ~99% of cases
+    match = VIN_RE.search(up)
+    if match:
+        return match.group(0)
+    # IOQ_SALVAGE_TEXT_2026_05_18: customer typo recovery.
+    # Substitute O->0, I->1, Q->0 on any 17-char alphanumeric run.
+    # Accept only if the salvaged candidate passes the strict VIN regex
+    # AND its check digit. Mirrors the Google Vision OCR salvage path
+    # in extract_vin_from_file. Real-world trigger: customer typed
+    # WPOAF2A9XSS279394 (letter O at pos 3) for a 2025 Porsche 911 —
+    # without salvage their reply spawned a duplicate bid (1730)
+    # instead of stitching to the original verify-pending bid (1729).
+    for m in re.finditer(r'\b[A-Z0-9]{17}\b', up):
+        cand = (m.group(0)
+                .replace('O', '0')
+                .replace('I', '1')
+                .replace('Q', '0'))
+        if VIN_RE.match(cand) and vin_check_digit_valid(cand):
+            print(f'[vin-extract] I/O/Q salvaged {m.group(0)} -> {cand}',
+                  flush=True)
+            return cand
+    return None
 
 
 _MAT_ICON_RE = re.compile(
