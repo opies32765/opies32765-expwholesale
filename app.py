@@ -555,6 +555,57 @@ def thumb_url_filter(src, size='strip'):
     from urllib.parse import urlencode
     return '/thumb?' + urlencode({'url': src, 'size': size})
 
+
+# 2026-05-18 — Clean ugly AccuTrade canonical trim strings for display.
+# AccuTrade overseer writes raw labels like "LARIAT 4 DOOR P/UP 5.0L V8"
+# to bids.canon_trim. The UI should show just "Lariat". This filter strips
+# body/engine/drivetrain suffixes and title-cases the remainder while
+# preserving common short-uppercase trim names (XLT, GT, SE, etc).
+import re as _re
+_TRIM_STOP_RE = _re.compile(
+    r'\s+('
+    r'\d\s*DOOR|'
+    r'P/UP|PICKUP|TRUCK|VAN|MINIVAN|'
+    r'SUV|WAGON|SEDAN|COUPE|HATCHBACK|HATCH|CONVERTIBLE|CABRIOLET|ROADSTER|TARGA|SPYDER|SPIDER|'
+    r'CREW\s*CAB|EXT\s*CAB|SUPERCREW|SUPERCAB|REGULAR\s*CAB|REG\s*CAB|MEGA\s*CAB|QUAD\s*CAB|DOUBLE\s*CAB|'
+    r'\d+\.\d+L|\d+\.\d+\s*L\b|'
+    r'V\d+|I\d+|H\d+|'
+    r'DIESEL|GAS(?:OLINE)?|HYBRID|ELECTRIC|EV|PHEV|BEV|MILD\s*HYBRID|PLUG-?IN|'
+    r'ECOBOOST|TURBO|SUPERCHARGED|TWIN\s*TURBO|TT|'
+    r'AWD|FWD|RWD|4WD|4X4|4X2|2WD|XDRIVE|QUATTRO|4MATIC'
+    r')\b',
+    _re.IGNORECASE,
+)
+_TRIM_KEEP_UPPER = {
+    'XL','XLT','XS','XSE','LX','EX','EXL','LE','SE','SR','SR5','SL','SV','SX','SR-5',
+    'GT','GTS','GTI','GTR','GTC','GTX','RS','SS','ST','RT','SRT','SHO',
+    'AMG','M','M2','M3','M4','M5','M6','M8','S','RS','GT3','GT4','GT2',
+    'EX-L','EX-T','LX-V6','LX-S','SE-L','SE-R','SI','TYPE-R','TYPE-S',
+}
+
+@app.template_filter('clean_trim')
+def clean_trim_filter(s):
+    """Strip body/engine/drivetrain suffix from an AccuTrade-style trim
+    string and title-case the result. Preserves short uppercase trim
+    acronyms (XLT, GT, SE, etc). Safe on None/empty."""
+    if not s:
+        return s
+    s = str(s).strip()
+    m = _TRIM_STOP_RE.search(s)
+    if m:
+        s = s[:m.start()].strip()
+    if not s:
+        return None
+    out = []
+    for w in s.split():
+        if w.upper() in _TRIM_KEEP_UPPER:
+            out.append(w.upper())
+        elif len(w) <= 3 and w.isupper():
+            out.append(w)  # preserve short acronyms (GT, RS, SE, etc.)
+        else:
+            out.append(w.capitalize())
+    return ' '.join(out)
+
 DB_URL = os.environ.get('DATABASE_URL', 'postgresql://expuser:ExpWholesale2026!@localhost/expwholesale')
 DIA_DB_URL = 'postgresql://scraper@127.0.0.1/dealer_intelligence'
 TWILIO_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
