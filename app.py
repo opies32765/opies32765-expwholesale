@@ -12848,6 +12848,132 @@ def _normalize_accutrade_url(url):
         return url
 
 
+# ── Canary allowlist for evidence-first AccuTrade trim selection (2026-05-18) ──
+# When a bid_id is in this set, the trim_select endpoint:
+#   1. Blocks until vauto + iPacket complete (or 60s timeout, or iPacket marks not_available)
+#   2. Reads iPacket OCR text + vauto canonical decode + seller hint as evidence
+#   3. Matches AccuTrade dropdown choices against the evidence by substring
+#   4. Returns the matched index with source='evidence_match'
+#   5. If no evidence at all → returns alphabetically-lowest index with source='alpha_fallback'
+#   6. NEVER calls the LLM blindly (the bid-1761 Lariat hallucination class of bug is structurally eliminated)
+# Empty by default → no canary bids → existing LLM behavior preserved fleet-wide.
+# Add a bid_id here to test the new flow for that specific bid.
+ACCUTRADE_WAIT_FOR_EVIDENCE_ALLOWLIST: set[int] = set()
+ACCUTRADE_EVIDENCE_WAIT_SECONDS = 55  # less than worker timeout 65s so worker doesn't drop the call
+
+
+def _evidence_first_trim_pick(db, vin, bid_id, choices):
+    """Canary path: wait for vauto+iPacket evidence, then deterministically
+    match a trim choice against that evidence. Returns the JSON-response dict
+    the endpoint should return (with index/source/reason set)."""
+    import time as _t
+    import re as _re_local
+    deadline = _t.time() + ACCUTRADE_EVIDENCE_WAIT_SECONDS
+    vauto_ready = ipacket_ready = False
+    while _t.time() < deadline and not (vauto_ready and ipacket_ready):
+        with db.cursor() as _wcur:
+            _wcur.execute("""
+                SELECT
+                  EXISTS(SELECT 1 FROM vauto_lookups WHERE bid_id=%s AND raw_json IS NOT NULL) AS v,
+                  EXISTS(SELECT 1 FROM ipacket_lookups WHERE bid_id=%s
+                          AND (not_available=TRUE OR screenshot IS NOT NULL)) AS i
+            """, (bid_id, bid_id))
+            r = _wcur.fetchone()
+            vauto_ready = bool(r.get('v') if hasattr(r, 'get') else r[0])
+            ipacket_ready = bool(r.get('i') if hasattr(r, 'get') else r[1])
+        if vauto_ready and ipacket_ready:
+            break
+        _t.sleep(1)
+
+    # Read evidence — iPacket OCR text + vauto canonical + seller hint
+    evidence_sources: list[tuple[str, str]] = []
+    try:
+        with db.cursor() as _ecur:
+            # Seller hint (from intake — may be just YMM or include trim word)
+            _ecur.execute("SELECT trim, canon_trim, raw_message FROM bids WHERE id=%s", (bid_id,))
+            _b = _ecur.fetchone()
+            if _b:
+                _seller_trim = (_b.get('canon_trim') or _b.get('trim') or '').strip()
+                if _seller_trim:
+                    evidence_sources.append(('seller_hint', _seller_trim))
+                _raw = (_b.get('raw_message') or '').strip()
+                if _raw:
+                    evidence_sources.append(('raw_message', _raw))
+            # vAuto canonical decode (may contain trim/series)
+            _ecur.execute("""SELECT raw_json FROM vauto_lookups WHERE bid_id=%s
+                              AND raw_json IS NOT NULL ORDER BY id DESC LIMIT 1""", (bid_id,))
+            _vrow = _ecur.fetchone()
+            if _vrow:
+                _vj = _vrow.get('raw_json') if hasattr(_vrow, 'get') else _vrow[0]
+                if isinstance(_vj, str):
+                    try: _vj = json.loads(_vj)
+                    except Exception: _vj = None
+                if isinstance(_vj, dict):
+                    for _k in ('trim', 'series', 'model_series', 'canonical_trim'):
+                        _v = _vj.get(_k)
+                        if _v and isinstance(_v, str) and _v.strip():
+                            evidence_sources.append((f'vauto_{_k}', _v.strip()))
+            # iPacket OCR text (full sticker text)
+            _ecur.execute("""SELECT raw_json, screenshot FROM ipacket_lookups
+                              WHERE bid_id=%s ORDER BY looked_up_at DESC LIMIT 1""", (bid_id,))
+            _irow = _ecur.fetchone()
+            if _irow:
+                _ij = _irow.get('raw_json') if hasattr(_irow, 'get') else _irow[0]
+                if isinstance(_ij, str):
+                    try: _ij = json.loads(_ij)
+                    except Exception: _ij = None
+                if isinstance(_ij, dict):
+                    _txt = _ij.get('_ocr_text')
+                    if _txt and isinstance(_txt, str):
+                        evidence_sources.append(('ipacket_ocr', _txt))
+    except Exception as _e:
+        print(f'[trim_select/canary] evidence fetch err bid={bid_id}: {_e}', flush=True)
+
+    # Match choice → evidence (longest choice-text wins on substring hit)
+    sorted_choices = sorted(
+        [c for c in choices if isinstance(c, dict) and c.get('text')],
+        key=lambda c: -len((c.get('text') or '').strip())
+    )
+    _evidence_blob = ' \n '.join(s[1].upper() for s in evidence_sources)
+    best = None
+    for c in sorted_choices:
+        choice_text = (c.get('text') or '').strip().upper()
+        if not choice_text:
+            continue
+        # Extract the "trim word" tokens from the choice (e.g. "LARIAT 4 DOOR P/UP 5.0L V8" -> "LARIAT")
+        choice_first_token = _re_local.split(r'\s+(?:\d\s*DOOR|P/UP|PICKUP|SUV|WAGON|SEDAN|COUPE|CREW|EXT|REG|\d+\.\d+L)\b', choice_text)[0].strip()
+        if choice_first_token and choice_first_token in _evidence_blob:
+            best = c
+            break
+
+    if best is not None:
+        return {
+            'index': int(best.get('index') or sorted_choices.index(best)),
+            'text': best.get('text'),
+            'source': 'evidence_match',
+            'evidence_sources': [s[0] for s in evidence_sources],
+            'reason': f'matched on choice token vs evidence',
+            'vauto_ready': vauto_ready, 'ipacket_ready': ipacket_ready,
+        }
+
+    # No evidence match → alphabetically lowest = "safe" base trim (XL/XLT/Base ranks above Lariat/Limited/Platinum)
+    by_alpha = sorted(
+        [c for c in choices if isinstance(c, dict) and c.get('text')],
+        key=lambda c: (c.get('text') or '').strip().upper()
+    )
+    if by_alpha:
+        pick = by_alpha[0]
+        return {
+            'index': int(pick.get('index') or choices.index(pick)),
+            'text': pick.get('text'),
+            'source': 'alpha_fallback',
+            'evidence_sources': [s[0] for s in evidence_sources] or [],
+            'reason': 'no evidence matched any choice — picking alphabetically lowest (safe base trim)',
+            'vauto_ready': vauto_ready, 'ipacket_ready': ipacket_ready,
+        }
+    return {'index': None, 'source': 'alpha_fallback', 'reason': 'no choices'}
+
+
 @app.route('/api/accutrade/trim_select', methods=['POST'])
 def api_trim_select():
     """AI overseer: pick the correct trim from AccuTrade's modal choices.
@@ -12855,6 +12981,12 @@ def api_trim_select():
     Worker POSTs {vin, bid_id, choices: [{index, text}]}. We cache the result
     by VIN forever — same VIN never re-asks the LLM. On any failure, we tell
     the worker to fall back to its existing fuzzy-match (returns index=null).
+
+    Canary path (2026-05-18): when bid_id is in ACCUTRADE_WAIT_FOR_EVIDENCE_ALLOWLIST,
+    the endpoint waits for vauto+iPacket evidence (~30-60s), reads the iPacket
+    OCR text + vauto canonical decode + seller hint, and picks the trim by
+    deterministic substring match. Falls back to alphabetically-lowest choice
+    when no evidence matches. Never calls the LLM in this mode.
     """
     data = request.json or {}
     vin = (data.get('vin') or '').strip().upper()
@@ -12869,6 +13001,19 @@ def api_trim_select():
     for c in choices:
         if isinstance(c, dict) and c.get('text'):
             c['text'] = normalize_trim_text(c['text'])
+
+    # ── Canary: evidence-first path (allowlisted bids only) ──
+    if bid_id is not None and int(bid_id) in ACCUTRADE_WAIT_FOR_EVIDENCE_ALLOWLIST:
+        _canary_db = get_db()
+        try:
+            result = _evidence_first_trim_pick(_canary_db, vin, int(bid_id), choices)
+            print(f'[trim_select/canary] bid={bid_id} vin={vin} -> '
+                  f'index={result.get("index")} source={result.get("source")} '
+                  f'reason={result.get("reason")}', flush=True)
+            return jsonify(result), 200
+        finally:
+            try: _canary_db.close()
+            except Exception: pass
 
     db = get_db()
     cur = db.cursor()
@@ -13535,6 +13680,20 @@ def api_ipacket_submit():
         data.get('unavailable_reason'),
     ))
     db.commit()
+
+    # ── Ensure OCR text is cached (always, even when canon_trim already set) ──
+    # The AccuTrade evidence-first overseer (2026-05-18) reads the iPacket OCR
+    # text to disambiguate the trim dropdown. Without unconditional caching,
+    # canon_trim-already-set bids skip OCR and the overseer is blind. Cheap:
+    # Google Vision ~$0.0015 per call, one call per bid.
+    try:
+        from ipacket_trim import ensure_ipacket_ocr_cached as _ipt_ocr_cache
+        _ipt_ocr_cache(bid_id, {
+            'screenshot': data.get('screenshot'),
+            'raw_json':   data.get('raw') or {},
+        }, db)
+    except Exception as _ocr_err:
+        print(f'[ipacket-submit] OCR cache err bid={bid_id}: {_ocr_err}', flush=True)
 
     # ── Extract canon_trim NOW (not later at assessment time) ──────────────
     # The iPacket sticker we just saved has authoritative trim/edition info

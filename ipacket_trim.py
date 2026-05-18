@@ -30,6 +30,45 @@ def _get_ocr_text(ipacket: dict) -> Optional[str]:
     return raw.get('_ocr_text')
 
 
+def ensure_ipacket_ocr_cached(bid_id: int, ipacket: dict, conn) -> Optional[str]:
+    """Idempotently ensure OCR text is cached for this iPacket sticker.
+
+    Returns the OCR text (cached or freshly extracted) or None when no
+    sticker exists. Always persists to ipacket_lookups.raw_json._ocr_text
+    when freshly OCR'd. Safe to call from any path (ipacket submit,
+    accutrade overseer, assessment, etc) — only does work when needed.
+
+    Added 2026-05-18 to support evidence-first AccuTrade trim selection.
+    """
+    if not ipacket:
+        return None
+    text = _get_ocr_text(ipacket)
+    if text:
+        return text
+    ss = ipacket.get('screenshot')
+    if not ss:
+        return None
+    path = ss
+    if path.startswith('/ipacket_reports/'):
+        path = '/opt/expwholesale' + path
+    text = _ocr_screenshot(path)
+    if not text:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE ipacket_lookups
+               SET raw_json = COALESCE(raw_json, '{}'::jsonb) || %s::jsonb
+             WHERE bid_id = %s
+        """, (json.dumps({'_ocr_text': text[:8000]}), bid_id))
+        conn.commit()
+    except Exception as e:
+        print(f'[ensure_ipacket_ocr_cached] persist err bid={bid_id}: {e}', flush=True)
+        try: conn.rollback()
+        except Exception: pass
+    return text
+
+
 def _ocr_screenshot(screenshot_path: str) -> Optional[str]:
     """Force-OCR an iPacket screenshot via Google Vision."""
     if not screenshot_path or not os.path.exists(screenshot_path):

@@ -18,8 +18,16 @@ LOGIN_MARKERS = ("auth0.accu-trade.com", "/u/login", "/auth/login")
 SUCCESS_PATHS = ("/dashboard", "/appraisal", "/vehicle", "/home", "/index", "/performance-center")
 
 
-def _ask_overseer(vin, bid_id, choices, timeout=15):
-    """Ask EW's AI overseer which trim choice to click. Returns dict or None."""
+def _ask_overseer(vin, bid_id, choices, timeout=65):
+    """Ask EW's AI overseer which trim choice to click. Returns dict or None.
+
+    timeout bumped 15 -> 65 (2026-05-18) so the worker doesn't drop the
+    HTTP call before C1's evidence-first overseer (allowlisted canary
+    bids) finishes waiting for vauto + iPacket to complete. Server-side
+    cap is ~55s; this gives the HTTP round-trip 10s of headroom.
+
+    Non-canary bids get an instant response (LLM cache hit or LLM call
+    in <1s) — the bump has zero behavior change on the common path."""
     if not http_requests or not choices:
         return None
     try:
