@@ -516,29 +516,96 @@ def dashboard(slug):
         # 2026-05-18: Per-unit market comps (MMR / rBook / trends).
         # Gated to dealers explicitly opted-in via portal_slug whitelist —
         # rolled out to Encore first; other partners get nothing until the
-        # comps cron is widened. Latest snapshot per inv_id is keyed in
-        # dealer_inventory_comps; the per-unit card on the dashboard
-        # reads from this dict via comps_by_inv_id.get(v.id).
+        # comps cron is widened. The card mirrors the visual density of the
+        # internal /opportunities scout view (pricing-grid + signal chips +
+        # trend chips) using:
+        #   - dealer_inventory_comps:  daily comps snapshot, trends, market DOL
+        #   - dealer_mmr (joined):     retail avg/above/below, grade, sample size
+        #   - sourcing_requests:       active wishlist matches per YMM
         comps_by_inv_id = {}
+        wishlists_by_inv_id = {}
         if dealer.get('portal_slug') in COMPS_ENABLED_SLUGS and not wholesaler_mode:
             cur.execute("""
-                SELECT DISTINCT ON (dealer_inventory_id)
-                       dealer_inventory_id,
-                       snapshot_date,
-                       mmr_comp_value, mmr_comp_count,
-                       rbook_p25, rbook_p50, rbook_comp_count,
-                       market_median_days_on_lot, market_median_source,
-                       price_trend_7d, price_trend_14d,
-                       price_trend_30d, price_trend_60d,
-                       comps_raw
-                  FROM dealer_inventory_comps
-                 WHERE dealer_inventory_id IN (
-                     SELECT id FROM dealer_inventory WHERE dealer_id = %s AND status='active'
-                 )
-                 ORDER BY dealer_inventory_id, snapshot_date DESC
+                SELECT DISTINCT ON (di.id)
+                       di.id          AS dealer_inventory_id,
+                       dic.snapshot_date,
+                       dic.mmr_comp_value, dic.mmr_comp_count,
+                       dic.rbook_p25, dic.rbook_p50, dic.rbook_comp_count,
+                       dic.market_median_days_on_lot, dic.market_median_source,
+                       dic.price_trend_7d, dic.price_trend_14d,
+                       dic.price_trend_30d, dic.price_trend_60d,
+                       dic.comps_raw,
+                       dm.wholesale_avg     AS mmr_wholesale_avg,
+                       dm.wholesale_above   AS mmr_wholesale_above,
+                       dm.wholesale_below   AS mmr_wholesale_below,
+                       dm.retail_avg        AS mmr_retail_avg,
+                       dm.retail_above      AS mmr_retail_above,
+                       dm.retail_below      AS mmr_retail_below,
+                       dm.grade             AS mmr_grade,
+                       dm.sample_size       AS mmr_sample_size,
+                       dm.fetched_at        AS mmr_fetched_at
+                  FROM dealer_inventory di
+                  LEFT JOIN dealer_inventory_comps dic
+                         ON dic.dealer_inventory_id = di.id
+                  LEFT JOIN dealer_mmr dm ON dm.vin = di.vin
+                 WHERE di.dealer_id = %s AND di.status='active'
+                 ORDER BY di.id, dic.snapshot_date DESC NULLS LAST
             """, (dealer['id'],))
             for r in cur.fetchall():
+                # Skip when neither comps nor MMR cache exists for this inv row.
+                if r['snapshot_date'] is None and r['mmr_wholesale_avg'] is None:
+                    continue
                 comps_by_inv_id[r['dealer_inventory_id']] = dict(r)
+
+            # Wishlist matches: active sourcing_requests whose YMM matches
+            # any Encore inventory row. One query, grouped client-side by
+            # inv_id (cross-joined on the YMM match in Python because the
+            # sourcing model relaxations make pure-SQL matching ugly).
+            cur.execute("""
+                SELECT id AS sourcing_id, phone, customer_name, status,
+                       year_min, year_max, make, model, trim, ext_color,
+                       miles_max, narrative_brief, last_msg_at,
+                       relaxations
+                  FROM sourcing_requests
+                 WHERE archived_at IS NULL
+                   AND status IN ('wishlist','gathering','searching','presented')
+                   AND make IS NOT NULL AND model IS NOT NULL
+            """)
+            wishlists = cur.fetchall()
+            from datetime import datetime as _dt, timezone as _tz
+            now_utc = _dt.now(_tz.utc)
+            for v in rows or []:
+                v_make = (v.get('make') or '').lower()
+                v_model = (v.get('model') or '').lower()
+                if not (v_make and v_model):
+                    continue
+                matches = []
+                for w in wishlists:
+                    if (w['make'] or '').lower() != v_make:
+                        continue
+                    wm = (w['model'] or '').lower()
+                    if not (wm == v_model or wm in v_model or v_model in wm):
+                        continue
+                    relax = w['relaxations'] or []
+                    if w['year_min'] and v.get('year') and v['year'] < w['year_min'] and 'year' not in relax:
+                        continue
+                    if w['year_max'] and v.get('year') and v['year'] > w['year_max'] and 'year' not in relax:
+                        continue
+                    if (w['miles_max'] and (v.get('mileage') or 0) > w['miles_max']
+                            and 'miles' not in relax):
+                        continue
+                    days_old = 0
+                    if w['last_msg_at']:
+                        days_old = int((now_utc - w['last_msg_at']).total_seconds() / 86400)
+                    matches.append({
+                        'sourcing_id': w['sourcing_id'],
+                        'customer_name': w['customer_name'] or 'unknown buyer',
+                        'phone': w['phone'],
+                        'status': w['status'],
+                        'days_old': days_old,
+                    })
+                if matches:
+                    wishlists_by_inv_id[v['id']] = matches
 
     return render_template('partner_dashboard.html',
                            user=user, dealer=dealer, slug=slug,
@@ -552,6 +619,7 @@ def dashboard(slug):
                            inbound_unread=inbound_unread,
                            wholesaler_mode=wholesaler_mode,
                            comps_by_inv_id=comps_by_inv_id,
+                           wishlists_by_inv_id=wishlists_by_inv_id,
                            viewing_as_admin=session.get('partner_viewing_as_admin', False),
                            BUCKETS=BUCKETS)
 

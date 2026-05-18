@@ -1054,8 +1054,11 @@
               {% endif %}
             </td>
           </tr>
-          {# ── Per-unit market comps band (Encore opt-in via partner_portal.COMPS_ENABLED_SLUGS) #}
-          {% set _c = (comps_by_inv_id or {}).get(v.id) %}
+          {# ── Per-unit market comps band (Encore opt-in via partner_portal.COMPS_ENABLED_SLUGS).
+               Visual density mirrors the internal /opportunities scout card:
+               pricing-grid + signal chip strip + trend chip strip. #}
+          {% set _c  = (comps_by_inv_id or {}).get(v.id) %}
+          {% set _wm = (wishlists_by_inv_id or {}).get(v.id) %}
           {% if _c %}
           {% macro _trendchip(label, td) %}
             {% set _own  = (td.get('own')    if td else none) %}
@@ -1076,39 +1079,116 @@
                 'no_own_data':    '#475569'
               }.get(_verdict, '#64748b') -%}
               {%- set _ownpct_or_zero = _own_pct if _own_pct is not none else 0 -%}
-              {%- set _arrow = '&#8595;' if _ownpct_or_zero < -0.5 else ('&#8593;' if _ownpct_or_zero > 0.5 else '&ndash;') -%}
+              {%- set _arrow = '&#8595;' if _ownpct_or_zero < -0.5 else ('&#8593;' if _ownpct_or_zero > 0.5 else '&middot;') -%}
               <span title="own {{ '%+.1f'|format(_ownpct_or_zero) }}% vs market {{ '%+.1f'|format(_mkt_pct if _mkt_pct is not none else 0) }}% ({{ _verdict }})"
-                    style="display:inline-block;padding:3px 8px;margin-right:4px;background:#0b1220;border:1px solid {{ _color }};border-radius:12px;font-size:11px;color:{{ _color }};font-weight:600;white-space:nowrap">
-                {{ label }} {{ _arrow|safe }}{% if _own_pct is not none %}{{ '%+.1f'|format(_own_pct) }}%{% else %}&mdash;{% endif %}{% if _mkt_pct is not none %}<span style="opacity:.65;font-weight:500"> &middot; mkt {{ '%+.1f'|format(_mkt_pct) }}%</span>{% endif %}
+                    style="display:inline-flex;align-items:center;padding:3px 9px;margin:2px 4px 2px 0;background:#0b1220;border:1px solid {{ _color }};border-radius:14px;font-size:11px;color:{{ _color }};font-weight:700;white-space:nowrap">
+                <span style="color:#64748b;font-weight:600;margin-right:5px">{{ label }}</span>{{ _arrow|safe }}{% if _own_pct is not none %}{{ '%+.1f'|format(_own_pct) }}%{% else %}&mdash;{% endif %}{% if _mkt_pct is not none %}<span style="opacity:.65;font-weight:500;margin-left:4px">/ mkt {{ '%+.1f'|format(_mkt_pct) }}%</span>{% endif %}
               </span>
             {% else %}
-              <span style="display:inline-block;padding:3px 8px;margin-right:4px;background:#0b1220;border:1px solid #334155;border-radius:12px;font-size:11px;color:#64748b;font-weight:500;white-space:nowrap">{{ label }} &mdash;</span>
+              <span style="display:inline-flex;align-items:center;padding:3px 9px;margin:2px 4px 2px 0;background:#0b1220;border:1px solid #334155;border-radius:14px;font-size:11px;color:#64748b;font-weight:500;white-space:nowrap">
+                <span style="margin-right:5px">{{ label }}</span>&mdash;
+              </span>
             {% endif %}
           {% endmacro %}
+          {% macro _sigchip(label, value, color, sub=none) %}
+            <span style="display:inline-flex;align-items:center;padding:3px 9px;margin:2px 4px 2px 0;background:#0b1220;border:1px solid {{ color }};border-radius:14px;font-size:11px;color:{{ color }};font-weight:600;white-space:nowrap">
+              <span style="color:#64748b;font-weight:500;margin-right:5px">{{ label }}</span>
+              <b style="color:{{ color }}">{{ value }}</b>{% if sub %}<span style="opacity:.65;font-weight:500;margin-left:4px">{{ sub }}</span>{% endif %}
+            </span>
+          {% endmacro %}
+          {% set _ask = v.price %}
+          {% set _mmr_w = _c.mmr_wholesale_avg or _c.mmr_comp_value %}
+          {% set _retail = _c.mmr_retail_avg %}
+          {% set _p25 = _c.rbook_p25 %}
+          {% set _p50 = _c.rbook_p50 %}
+          {% set _pct_under_mmr = ((_mmr_w - _ask) / _mmr_w * 100) if (_mmr_w and _ask and _mmr_w > 0) else none %}
+          {% set _retail_headroom = (_p50 - _ask) if (_p50 and _ask) else ((_retail - _ask) if (_retail and _ask) else none) %}
+          {% set _rb_raw = _c.comps_raw or {} %}
+          {% set _rb_avg_dol = _rb_raw.get('rbook_avg_dol') %}
+          {% set _rb_p75 = _rb_raw.get('rbook_p75') %}
+          {% set _dol = _c.market_median_days_on_lot %}
+          {% set _grade = _c.mmr_grade %}
+          {% set _mmr_n = _c.mmr_sample_size %}
           <tr class="comps-row" style="background:#0f172a">
-            <td colspan="9" style="padding:8px 14px;border-top:1px solid #1e293b">
-              <div style="display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:#94a3b8;align-items:center">
-                <div>
-                  <span style="color:#64748b">MMR comp</span>
-                  <b style="color:#e5e7eb;font-size:13px">{% if _c.mmr_comp_value %}${{ '{:,.0f}'.format(_c.mmr_comp_value) }}{% else %}—{% endif %}</b>
-                  {% if _c.mmr_comp_count %}<span style="color:#475569"> · n={{ _c.mmr_comp_count }}</span>{% endif %}
-                </div>
-                <div>
-                  <span style="color:#64748b">rBook P25/P50</span>
-                  <b style="color:#e5e7eb;font-size:13px">{% if _c.rbook_p25 %}${{ '{:,.0f}'.format(_c.rbook_p25) }}{% else %}—{% endif %} / {% if _c.rbook_p50 %}${{ '{:,.0f}'.format(_c.rbook_p50) }}{% else %}—{% endif %}</b>
-                  {% if _c.rbook_comp_count %}<span style="color:#475569"> · n={{ _c.rbook_comp_count }}</span>{% endif %}
-                </div>
-                <div>
-                  <span style="color:#64748b">Market DOL</span>
-                  <b style="color:#e5e7eb;font-size:13px">{% if _c.market_median_days_on_lot is not none %}{{ _c.market_median_days_on_lot }}d{% else %}—{% endif %}</b>
-                </div>
-                <div style="margin-left:auto">
-                  {{ _trendchip('7d', _c.price_trend_7d) }}
-                  {{ _trendchip('14d', _c.price_trend_14d) }}
-                  {{ _trendchip('30d', _c.price_trend_30d) }}
-                  {{ _trendchip('60d', _c.price_trend_60d) }}
+            <td colspan="9" style="padding:10px 14px 12px 14px;border-top:1px solid #1e293b">
+
+              {# Wishlist banner — EW has an active buyer matching this car's YMM. #}
+              {% if _wm %}
+              <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 12px;margin-bottom:10px;background:#422006;border:1px solid #d97706;border-radius:8px">
+                <div style="font-size:18px;line-height:1">&#128227;</div>
+                <div style="flex:1;font-size:12px;color:#fcd34d">
+                  <b style="color:#fef3c7">EW buyer interest</b> on this YMM:
+                  {% for m in _wm[:3] %}
+                    <div style="margin-top:3px"><b style="color:#fde68a">{{ m.customer_name }}</b> · asked {{ m.days_old }}d ago · <span style="color:#fbbf24">{{ m.phone or '—' }}</span></div>
+                  {% endfor %}
+                  {% if _wm|length > 3 %}<div style="margin-top:3px;opacity:.7">+{{ _wm|length - 3 }} more</div>{% endif %}
                 </div>
               </div>
+              {% endif %}
+
+              {# Pricing 4-col grid (matches opportunities .pricing-grid pattern). #}
+              <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:8px;margin-bottom:8px">
+                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
+                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">Asking</div>
+                  <div style="font-size:15px;color:#fbbf24;font-weight:700;font-family:ui-monospace,monospace">{% if _ask %}${{ '{:,.0f}'.format(_ask) }}{% else %}&mdash;{% endif %}</div>
+                  {% if v.price_drop_amount %}
+                    <div style="font-size:10px;color:#a78bfa">&#8595; ${{ '{:,.0f}'.format(v.price_drop_amount) }} drop</div>
+                  {% endif %}
+                </div>
+                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
+                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">MMR Wholesale</div>
+                  <div style="font-size:15px;color:#c4b5fd;font-weight:700;font-family:ui-monospace,monospace">{% if _mmr_w %}${{ '{:,.0f}'.format(_mmr_w) }}{% else %}&mdash;{% endif %}</div>
+                  {% if _pct_under_mmr is not none %}
+                    <div style="font-size:10px;color:{% if _pct_under_mmr > 0 %}#34d399{% else %}#f87171{% endif %}">{{ '%.1f'|format(_pct_under_mmr|abs) }}% {% if _pct_under_mmr >= 0 %}under{% else %}over{% endif %}</div>
+                  {% endif %}
+                </div>
+                {% if _p25 %}
+                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
+                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">rBook P25</div>
+                  <div style="font-size:15px;color:#93c5fd;font-weight:700;font-family:ui-monospace,monospace">${{ '{:,.0f}'.format(_p25) }}</div>
+                  <div style="font-size:10px;color:#64748b">cheap end</div>
+                </div>
+                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
+                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">rBook P50{% if _rb_p75 %} / P75{% endif %}</div>
+                  <div style="font-size:15px;color:#93c5fd;font-weight:700;font-family:ui-monospace,monospace">${{ '{:,.0f}'.format(_p50) }}{% if _rb_p75 %} <span style="opacity:.6">/ ${{ '{:,.0f}'.format(_rb_p75) }}</span>{% endif %}</div>
+                  {% if _retail_headroom is not none %}
+                    <div style="font-size:10px;color:{% if _retail_headroom > 0 %}#34d399{% else %}#f87171{% endif %}">{% if _retail_headroom > 0 %}+${{ '{:,.0f}'.format(_retail_headroom) }} headroom{% else %}${{ '{:,.0f}'.format(_retail_headroom|abs) }} over retail{% endif %}</div>
+                  {% endif %}
+                </div>
+                {% else %}
+                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
+                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">Manheim Retail Low</div>
+                  <div style="font-size:15px;color:#93c5fd;font-weight:700;font-family:ui-monospace,monospace">{% if _c.mmr_retail_below %}${{ '{:,.0f}'.format(_c.mmr_retail_below) }}{% else %}&mdash;{% endif %}</div>
+                  <div style="font-size:10px;color:#64748b">no rBook comps yet</div>
+                </div>
+                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
+                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">Manheim Retail Avg</div>
+                  <div style="font-size:15px;color:#93c5fd;font-weight:700;font-family:ui-monospace,monospace">{% if _retail %}${{ '{:,.0f}'.format(_retail) }}{% else %}&mdash;{% endif %}</div>
+                  {% if _retail_headroom is not none %}
+                    <div style="font-size:10px;color:{% if _retail_headroom > 0 %}#34d399{% else %}#f87171{% endif %}">{% if _retail_headroom > 0 %}+${{ '{:,.0f}'.format(_retail_headroom) }} headroom{% else %}${{ '{:,.0f}'.format(_retail_headroom|abs) }} over retail{% endif %}</div>
+                  {% endif %}
+                </div>
+                {% endif %}
+              </div>
+
+              {# Signal chip strip — MMR metadata, rBook comp count, market DOL, dealer DOL aging cue, price-drop. #}
+              <div style="display:flex;flex-wrap:wrap;align-items:center;margin-bottom:6px">
+                {% if _grade %}{{ _sigchip('grade', _grade, '#a78bfa') }}{% endif %}
+                {% if _mmr_n %}{{ _sigchip('MMR n', _mmr_n, '#475569') }}{% endif %}
+                {% if _c.rbook_comp_count %}{{ _sigchip('rBook comps', _c.rbook_comp_count, '#3b82f6', sub=(' &middot; avg DOL ' ~ ('%.0f' | format(_rb_avg_dol)) ~ 'd') if _rb_avg_dol else none) }}{% endif %}
+                {% if _dol is not none %}{{ _sigchip('mkt DOL', _dol ~ 'd', '#0ea5e9') }}{% endif %}
+                {% if v.price_drop_amount %}{{ _sigchip('price drop', '&#8595; $' ~ '{:,.0f}'.format(v.price_drop_amount), '#a78bfa') }}{% endif %}
+                {% if _wm %}{{ _sigchip('buyer match', (_wm|length) ~ '', '#f59e0b') }}{% endif %}
+              </div>
+
+              {# Trend chip strip — 7/14/30/60d. #}
+              <div style="display:flex;flex-wrap:wrap;align-items:center">
+                {{ _trendchip('7d',  _c.price_trend_7d) }}
+                {{ _trendchip('14d', _c.price_trend_14d) }}
+                {{ _trendchip('30d', _c.price_trend_30d) }}
+                {{ _trendchip('60d', _c.price_trend_60d) }}
+              </div>
+
             </td>
           </tr>
           {% endif %}
