@@ -58,9 +58,29 @@ Porsche WP1 = Cayenne, WP2 = Panamera (some years).
 Mercedes-Benz WDD/W1K/4JG: generation overlaps exist for C-Class (W205 → W206 at ~2022),
 E-Class, S-Class. Use position-10 year to disambiguate.
 
-For ANY make where the VIN cannot fully encode the trim (Ford Super Duty, BMW M-cars often,
-Porsche GTS designation often, AMG line packages), prefer the LOWER/SAFER trim and report
-confidence ≤ 0.85.
+For ANY make where the VIN does not encode the trim, RETURN trim=null and
+confidence ≤ 0.6. Do NOT guess. Specifically: Ford Bronco (Base/Big Bend/
+Black Diamond/Outer Banks/Badlands/Wildtrak/First Edition/Heritage/Raptor —
+option-pack only, not VIN-encoded), Ford F-150 (XL/XLT/Lariat/King Ranch/
+Platinum/Limited/Raptor — same), Ford Super Duty, Ford Explorer/Expedition,
+Ford Mustang trims (V6/EcoBoost/GT-not-named-by-VIN), Jeep Wrangler (Sport/
+Sahara/Rubicon/Rubicon 392/4xe), Jeep Grand Cherokee (Laredo/Limited/
+Overland/Summit/Trailhawk/SRT/Trackhawk), Land Rover Range Rover (HSE/
+Autobiography/SV variants), Toyota Tundra/Tacoma/4Runner trim hierarchy,
+Chevrolet Silverado/Tahoe/Suburban/Colorado, GMC Sierra/Yukon/Canyon,
+RAM 1500/2500/3500 trim hierarchy, BMW M-cars in some years, AMG line
+packages (E63/C63/S63 base vs S variant). For ALL of these, populate
+year/make/model/body/drive but leave trim=null with confidence 0.4-0.6.
+The downstream pipeline reads the real trim from iPacket window-sticker
+OCR or Carfax/AutoCheck reports.
+
+For makes/models WHERE the trim IS reliably VIN-encoded (Porsche WP0AA=
+Carrera vs WP0AB=Carrera S vs WP0AD=Turbo/Turbo S etc., Ferrari position
+4-5 VDS, Lamborghini, McLaren), you may report a confident trim.
+
+(Background: bid 1782 was a Ford Bronco. The model returned trim="Base"
+at confidence 0.8. The actual sticker said "Outer Banks." This rule
+prevents that hallucination by forcing trim=null instead.)
 
 VIN: {vin}
 

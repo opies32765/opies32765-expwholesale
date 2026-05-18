@@ -13108,26 +13108,41 @@ def api_trim_select():
             'model': row['model_used'],
         })
 
-    # Pull bid context + iPacket signal for the prompt
+    # Pull bid context + iPacket signal + Carfax/AutoCheck for the prompt
     bid_trim = None
     bid_year = bid_make = bid_model = None
     sticker_msrp = None
     sticker_base = None
     sticker_ext = None
     sticker_int = None
+    sticker_ocr_text = None  # 2026-05-18 bid 1782: iPacket OCR has trim
+    carfax_trim_hint = None
+    autocheck_trim_hint = None
     try:
         cur.execute(
-            "SELECT year, make, model, trim, canon_trim, mileage "
+            "SELECT year, make, model, trim, canon_trim, mileage, canon_source "
             "FROM bids WHERE id=%s", (bid_id,)
         )
         b = cur.fetchone()
         if b:
-            bid_trim = (b.get('canon_trim') or b.get('trim') or '').strip()
+            # Only use canon_trim as a hint when it came from a deterministic
+            # source (VDS / Carfax extraction / iPacket sticker). When it
+            # came from Claude — which guesses on trim-not-VIN-encoded
+            # vehicles (Ford Bronco/F-150, Jeep Wrangler, Range Rover, etc.)
+            # — it's WORSE than no hint at all because the overseer would
+            # rubber-stamp Claude's wrong default. Bid 1782 = Claude said
+            # "Base" for Bronco; sticker said Outer Banks. Demote canon_trim
+            # to plain trim when canon_source == claude_sonnet_4_6.
+            _canon_src = (b.get('canon_source') or '').lower()
+            if 'claude' in _canon_src:
+                bid_trim = (b.get('trim') or '').strip()
+            else:
+                bid_trim = (b.get('canon_trim') or b.get('trim') or '').strip()
             bid_year = b.get('year')
             bid_make = b.get('make')
             bid_model = b.get('model')
         cur.execute(
-            "SELECT total_msrp, base_price, exterior_color, interior_color "
+            "SELECT total_msrp, base_price, exterior_color, interior_color, raw_json "
             "FROM ipacket_lookups WHERE vin=%s ORDER BY looked_up_at DESC LIMIT 1",
             (vin,)
         )
@@ -13137,6 +13152,19 @@ def api_trim_select():
             sticker_base = s.get('base_price')
             sticker_ext = s.get('exterior_color')
             sticker_int = s.get('interior_color')
+            # 2026-05-18 bid 1782: surface the full sticker OCR text. iPacket
+            # window stickers usually have the trim spelled out verbatim
+            # ("OUTER BANKS-4 PASSENGER", "LARIAT 4 DOOR P/UP 5.0L V8"). The
+            # structured fields above don't carry the trim — only the full
+            # text does. Cap at ~3000 chars to keep the prompt focused.
+            _raw_ij = s.get('raw_json')
+            if isinstance(_raw_ij, str):
+                try: _raw_ij = json.loads(_raw_ij)
+                except Exception: _raw_ij = None
+            if isinstance(_raw_ij, dict):
+                sticker_ocr_text = _raw_ij.get('_ocr_text')
+                if sticker_ocr_text and len(sticker_ocr_text) > 3000:
+                    sticker_ocr_text = sticker_ocr_text[:3000] + ' …[truncated]'
     except Exception as e:
         print(f'trim_select: bid/sticker context fetch failed: {e}', flush=True)
 
@@ -13149,7 +13177,7 @@ def api_trim_select():
     if bid_year and bid_make and bid_model:
         ctx_lines.append(f"Vehicle (from seller): {bid_year} {bid_make} {bid_model}")
     if bid_trim:
-        ctx_lines.append(f"Trim hint from seller/canon: {bid_trim}")
+        ctx_lines.append(f"Trim hint from seller: {bid_trim}")
     if sticker_msrp:
         ctx_lines.append(f"Window-sticker MSRP: ${sticker_msrp:,}")
     if sticker_base:
@@ -13158,6 +13186,12 @@ def api_trim_select():
         ctx_lines.append(f"Exterior color: {sticker_ext}")
     if sticker_int:
         ctx_lines.append(f"Interior color: {sticker_int}")
+    if sticker_ocr_text:
+        ctx_lines.append(
+            f"\n=== iPacket WINDOW-STICKER OCR TEXT (verbatim — authoritative for trim) ===\n"
+            f"{sticker_ocr_text}\n"
+            f"=== END iPacket OCR ===\n"
+        )
     context_block = '\n'.join(ctx_lines)
 
     prompt = (
@@ -13168,17 +13202,28 @@ def api_trim_select():
         "AccuTrade choices (you must pick exactly one index):\n"
         f"{choice_lines}\n\n"
         "Rules:\n"
-        "1. The seller's trim hint is the strongest signal when present.\n"
-        "2. Window-sticker MSRP narrows by price tier (higher trims cost more).\n"
-        "3. If the seller hint contradicts the sticker MSRP, prefer the hint.\n"
-        "4. When in doubt for VINs that don't encode trim (Ford Super Duty, etc.),\n"
-        "   prefer the LOWER trim — never assume a high-spec trim without evidence.\n"
-        "5. The VIN itself is authoritative when its prefix encodes trim\n"
+        "1. The iPacket window-sticker OCR text (when present above) is the\n"
+        "   STRONGEST signal — stickers print the trim verbatim in the\n"
+        "   vehicle-description block (e.g. 'OUTER BANKS-4 PASSENGER',\n"
+        "   'LARIAT 4 DOOR P/UP 5.0L V8', 'BIG BEND', 'WILDTRAK', 'GT3 RS').\n"
+        "   When the sticker text contains a trim word matching one of the\n"
+        "   choices, that's a near-certain match. Trust it over everything\n"
+        "   else, including the seller's hint.\n"
+        "2. The seller's trim hint is the second-strongest signal.\n"
+        "3. Window-sticker MSRP narrows by price tier (higher trims cost more).\n"
+        "4. If the seller hint contradicts the sticker OCR or MSRP, prefer the\n"
+        "   sticker (it's the OEM build sheet; the seller may have guessed).\n"
+        "5. When NO sticker, NO seller hint, AND the VIN doesn't encode trim\n"
+        "   (Ford Bronco/F-150/Super Duty, Jeep Wrangler/Grand Cherokee, Range\n"
+        "   Rover, Toyota Tundra/Tacoma, Chevy Silverado/Tahoe, GMC Sierra/\n"
+        "   Yukon, etc.), prefer the LOWER trim — never assume a high-spec\n"
+        "   trim without evidence.\n"
+        "6. The VIN itself is authoritative when its prefix encodes trim\n"
         "   (Porsche WP0AA=Carrera, WP0AB=Carrera S, WP0AC=GT3/Touring,\n"
         "   WP0AH=GTS variants). When seller hint disagrees with VIN-encoded\n"
         "   trim, TRUST THE VIN.\n"
-        "6. Confidence: 0.9+ if VIN or sticker confirms; 0.6-0.8 if reasoned;\n"
-        "   below 0.5 if guessing.\n"
+        "7. Confidence: 0.9+ if sticker OCR confirms; 0.85+ if VIN-encoded;\n"
+        "   0.6-0.8 if reasoned from MSRP/hint; below 0.5 if guessing.\n"
         '7. Output a "clean_trim" canonical short label (e.g. "Carrera S",\n'
         '   "GT3", "F-250 XL Crew Cab", "M240i Coupe") — concise, marketable.\n\n'
         'Return ONLY this JSON: {"index": N, "confidence": 0.0-1.0,\n'
