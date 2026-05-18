@@ -1054,6 +1054,64 @@
               {% endif %}
             </td>
           </tr>
+          {# ── Per-unit market comps band (Encore opt-in via partner_portal.COMPS_ENABLED_SLUGS) #}
+          {% set _c = (comps_by_inv_id or {}).get(v.id) %}
+          {% if _c %}
+          {% macro _trendchip(label, td) %}
+            {% set _own  = (td.get('own')    if td else none) %}
+            {% set _mkt  = (td.get('market') if td else none) %}
+            {% set _own_pct = (_own.get('pct') if _own else none) %}
+            {% set _mkt_pct = (_mkt.get('pct') if _mkt else none) %}
+            {% set _verdict = (td.get('verdict') if td else 'flat') or 'flat' %}
+            {% if td and (_own or _mkt) %}
+              {%- set _color = {
+                'outpacing_drop': '#dc2626',
+                'matching_drop':  '#a78bfa',
+                'fighting_drop':  '#16a34a',
+                'outpacing_rise': '#16a34a',
+                'matching_rise':  '#a78bfa',
+                'fighting_rise':  '#dc2626',
+                'flat':           '#64748b',
+                'no_market_data': '#475569',
+                'no_own_data':    '#475569'
+              }.get(_verdict, '#64748b') -%}
+              {%- set _ownpct_or_zero = _own_pct if _own_pct is not none else 0 -%}
+              {%- set _arrow = '&#8595;' if _ownpct_or_zero < -0.5 else ('&#8593;' if _ownpct_or_zero > 0.5 else '&ndash;') -%}
+              <span title="own {{ '%+.1f'|format(_ownpct_or_zero) }}% vs market {{ '%+.1f'|format(_mkt_pct if _mkt_pct is not none else 0) }}% ({{ _verdict }})"
+                    style="display:inline-block;padding:3px 8px;margin-right:4px;background:#0b1220;border:1px solid {{ _color }};border-radius:12px;font-size:11px;color:{{ _color }};font-weight:600;white-space:nowrap">
+                {{ label }} {{ _arrow|safe }}{% if _own_pct is not none %}{{ '%+.1f'|format(_own_pct) }}%{% else %}&mdash;{% endif %}{% if _mkt_pct is not none %}<span style="opacity:.65;font-weight:500"> &middot; mkt {{ '%+.1f'|format(_mkt_pct) }}%</span>{% endif %}
+              </span>
+            {% else %}
+              <span style="display:inline-block;padding:3px 8px;margin-right:4px;background:#0b1220;border:1px solid #334155;border-radius:12px;font-size:11px;color:#64748b;font-weight:500;white-space:nowrap">{{ label }} &mdash;</span>
+            {% endif %}
+          {% endmacro %}
+          <tr class="comps-row" style="background:#0f172a">
+            <td colspan="9" style="padding:8px 14px;border-top:1px solid #1e293b">
+              <div style="display:flex;flex-wrap:wrap;gap:14px;font-size:12px;color:#94a3b8;align-items:center">
+                <div>
+                  <span style="color:#64748b">MMR comp</span>
+                  <b style="color:#e5e7eb;font-size:13px">{% if _c.mmr_comp_value %}${{ '{:,.0f}'.format(_c.mmr_comp_value) }}{% else %}—{% endif %}</b>
+                  {% if _c.mmr_comp_count %}<span style="color:#475569"> · n={{ _c.mmr_comp_count }}</span>{% endif %}
+                </div>
+                <div>
+                  <span style="color:#64748b">rBook P25/P50</span>
+                  <b style="color:#e5e7eb;font-size:13px">{% if _c.rbook_p25 %}${{ '{:,.0f}'.format(_c.rbook_p25) }}{% else %}—{% endif %} / {% if _c.rbook_p50 %}${{ '{:,.0f}'.format(_c.rbook_p50) }}{% else %}—{% endif %}</b>
+                  {% if _c.rbook_comp_count %}<span style="color:#475569"> · n={{ _c.rbook_comp_count }}</span>{% endif %}
+                </div>
+                <div>
+                  <span style="color:#64748b">Market DOL</span>
+                  <b style="color:#e5e7eb;font-size:13px">{% if _c.market_median_days_on_lot is not none %}{{ _c.market_median_days_on_lot }}d{% else %}—{% endif %}</b>
+                </div>
+                <div style="margin-left:auto">
+                  {{ _trendchip('7d', _c.price_trend_7d) }}
+                  {{ _trendchip('14d', _c.price_trend_14d) }}
+                  {{ _trendchip('30d', _c.price_trend_30d) }}
+                  {{ _trendchip('60d', _c.price_trend_60d) }}
+                </div>
+              </div>
+            </td>
+          </tr>
+          {% endif %}
         {% endfor %}
           </tbody>
         </table>

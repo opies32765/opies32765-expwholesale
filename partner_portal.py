@@ -38,6 +38,13 @@ from flask import (Blueprint, current_app, flash, g, jsonify, redirect,
 bp = Blueprint('partner', __name__)
 
 
+# Dealers opted in to per-unit market-comps card on the partner dashboard.
+# Populated nightly by /opt/expwholesale/encore_comps_pipeline.py
+# (cron /etc/cron.d/encore_comps). Add a slug here and schedule a comps
+# cron for that dealer to roll out to additional partners.
+COMPS_ENABLED_SLUGS = {'encore'}
+
+
 @bp.after_request
 def _no_cache(resp):
     """Partner portal pages must never be cached by the browser. Dashboard
@@ -503,6 +510,33 @@ def dashboard(slug):
         _row = cur.fetchone()
         inbound_unread = int((_row.get('n') if hasattr(_row, 'get') else _row[0]) or 0)
 
+        # 2026-05-18: Per-unit market comps (MMR / rBook / trends).
+        # Gated to dealers explicitly opted-in via portal_slug whitelist —
+        # rolled out to Encore first; other partners get nothing until the
+        # comps cron is widened. Latest snapshot per inv_id is keyed in
+        # dealer_inventory_comps; the per-unit card on the dashboard
+        # reads from this dict via comps_by_inv_id.get(v.id).
+        comps_by_inv_id = {}
+        if dealer.get('portal_slug') in COMPS_ENABLED_SLUGS and not wholesaler_mode:
+            cur.execute("""
+                SELECT DISTINCT ON (dealer_inventory_id)
+                       dealer_inventory_id,
+                       snapshot_date,
+                       mmr_comp_value, mmr_comp_count,
+                       rbook_p25, rbook_p50, rbook_comp_count,
+                       market_median_days_on_lot, market_median_source,
+                       price_trend_7d, price_trend_14d,
+                       price_trend_30d, price_trend_60d,
+                       comps_raw
+                  FROM dealer_inventory_comps
+                 WHERE dealer_inventory_id IN (
+                     SELECT id FROM dealer_inventory WHERE dealer_id = %s AND status='active'
+                 )
+                 ORDER BY dealer_inventory_id, snapshot_date DESC
+            """, (dealer['id'],))
+            for r in cur.fetchall():
+                comps_by_inv_id[r['dealer_inventory_id']] = dict(r)
+
     return render_template('partner_dashboard.html',
                            user=user, dealer=dealer, slug=slug,
                            rows=rows, enabled_buckets=enabled_buckets,
@@ -514,6 +548,7 @@ def dashboard(slug):
                            inbound_pushes=inbound_pushes,
                            inbound_unread=inbound_unread,
                            wholesaler_mode=wholesaler_mode,
+                           comps_by_inv_id=comps_by_inv_id,
                            viewing_as_admin=session.get('partner_viewing_as_admin', False),
                            BUCKETS=BUCKETS)
 
