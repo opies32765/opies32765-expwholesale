@@ -57,6 +57,13 @@ tr:hover td { background:#fafcff; }
          opacity:0; transition:opacity .2s; pointer-events:none; z-index:50; }
 .flash.show { opacity:1; }
 .flash.err { background:#dc2626; }
+.name-edit { width:100%; padding:4px 8px; border:1px solid transparent;
+              border-radius:4px; font-size:13px; font-family:inherit;
+              background:transparent; color:#0d2240; }
+.name-edit:hover { border-color:#e0e6ed; background:#f9fbfd; }
+.name-edit:focus { border-color:#0d2240; background:white; outline:none; }
+.name-edit.saving { background:#fef3c7; }
+.name-edit.saved { background:#dcfce7; }
 </style>
 </head>
 <body>
@@ -84,7 +91,7 @@ Changes apply within 30s — no restart.
     <button class="btn-add" type="submit">+ Add to Full Broker</button>
   </form>
   <table>
-    <thead><tr><th>Phone</th><th>Label</th><th>Source</th><th>Added</th><th></th></tr></thead>
+    <thead><tr><th>Phone</th><th>Name</th><th>Source</th><th>Added</th><th></th></tr></thead>{# GATE_PHONE_NAMES_2026_05_18 #}
     <tbody>
     {% for e in env_full_broker %}
       <tr>
@@ -98,7 +105,12 @@ Changes apply within 30s — no restart.
     {% for r in fb_active %}
       <tr id="row-{{ r.id }}">
         <td class="phone">{{ r.phone_pretty }}</td>
-        <td class="label-cell {% if not r.label %}empty{% endif %}">{{ r.label or '—' }}</td>
+        <td class="label-cell">
+          <input type="text" class="name-edit" data-id="{{ r.id }}"
+                 value="{{ r.label or '' }}" placeholder="(add name)"
+                 onblur="saveName(this)"
+                 onkeydown="if(event.key==='Enter'){this.blur();}">
+        </td>
         <td><span class="db-pill">db</span></td>
         <td class="meta">{{ r.added_at.strftime('%Y-%m-%d %H:%M') if r.added_at else '—' }}{% if r.added_by %} · {{ r.added_by }}{% endif %}</td>
         <td><button class="btn-remove" onclick="removeGate({{ r.id }})">remove</button></td>
@@ -119,7 +131,7 @@ Changes apply within 30s — no restart.
     <button class="btn-add" type="submit">+ Add to Sourcing</button>
   </form>
   <table>
-    <thead><tr><th>Phone</th><th>Label</th><th>Source</th><th>Added</th><th></th></tr></thead>
+    <thead><tr><th>Phone</th><th>Name</th><th>Source</th><th>Added</th><th></th></tr></thead>{# GATE_PHONE_NAMES_2026_05_18 #}
     <tbody>
     {% for e in env_sourcing %}
       <tr>
@@ -133,7 +145,12 @@ Changes apply within 30s — no restart.
     {% for r in sc_active %}
       <tr id="row-{{ r.id }}">
         <td class="phone">{{ r.phone_pretty }}</td>
-        <td class="label-cell {% if not r.label %}empty{% endif %}">{{ r.label or '—' }}</td>
+        <td class="label-cell">
+          <input type="text" class="name-edit" data-id="{{ r.id }}"
+                 value="{{ r.label or '' }}" placeholder="(add name)"
+                 onblur="saveName(this)"
+                 onkeydown="if(event.key==='Enter'){this.blur();}">
+        </td>
         <td><span class="db-pill">db</span></td>
         <td class="meta">{{ r.added_at.strftime('%Y-%m-%d %H:%M') if r.added_at else '—' }}{% if r.added_by %} · {{ r.added_by }}{% endif %}</td>
         <td><button class="btn-remove" onclick="removeGate({{ r.id }})">remove</button></td>
@@ -169,6 +186,32 @@ Changes apply within 30s — no restart.
 <div id="flash" class="flash"></div>
 
 <script>
+
+async function saveName(input) {
+  var newName = input.value.trim();
+  var rowId = input.dataset.id;
+  if (input.dataset.last === newName) return;
+  input.classList.add('saving');
+  try {
+    var fd = new FormData();
+    fd.append('name', newName);
+    var r = await fetch('/admin/phone-gates/' + rowId + '/set-name', {method:'POST', body: fd});
+    var j = await r.json();
+    input.classList.remove('saving');
+    if (j.ok) {
+      input.classList.add('saved');
+      input.dataset.last = newName;
+      setTimeout(function(){ input.classList.remove('saved'); }, 1200);
+      flash('Saved' + (newName ? (' "' + newName + '"') : ''));
+    } else {
+      flash(j.error || 'save failed', true);
+    }
+  } catch(e) {
+    input.classList.remove('saving');
+    flash('save error: ' + e, true);
+  }
+}
+
 function flash(msg, isErr) {
   var el = document.getElementById('flash');
   el.textContent = msg;

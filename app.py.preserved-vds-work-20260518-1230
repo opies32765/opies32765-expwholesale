@@ -114,316 +114,6 @@ _PUBLIC_PREFIXES = (
 )
 
 
-# PENDING_ATTACH_LAYER2_2026_05_18 — helpers ────────────────────────────
-# Layer 2 "always ask first" confirmation flow. See migration
-# 2026-05-18_pending_attach.sql for the schema.
-
-import json as _pa_json
-
-
-def _pa_find_pending_verify_bids(cur, phone, hours=24):
-    """Return list of dicts for verify-pending bids in last N hours."""
-    cur.execute("""
-        SELECT id, year, make, model, vin, mileage,
-               needs_verification_reason AS reason,
-               needs_verification_at,
-               COALESCE(asking_price, 0) AS asking_price
-          FROM bids
-         WHERE phone = %s
-           AND needs_verification_at IS NOT NULL
-           AND needs_verification_cleared_at IS NULL
-           AND needs_verification_at > NOW() - (INTERVAL '1 hour' * %s)
-         ORDER BY id DESC
-    """, (phone, hours))
-    return [dict(r) for r in cur.fetchall()]
-
-
-def _pa_format_ymm(b):
-    """Format a bid row as a customer-friendly YMM string."""
-    parts = []
-    if b.get('year'): parts.append(str(b['year']))
-    if b.get('make'): parts.append(str(b['make']).title())
-    if b.get('model'): parts.append(str(b['model']))
-    s = ' '.join(parts).strip()
-    return s or 'your vehicle'
-
-
-def _pa_load_open(cur, phone):
-    """Return the most recent OPEN pending_attach for phone, asked within 24h."""
-    cur.execute("""
-        SELECT id, phone, body, num_media, media_urls, media_types,
-               parsed_vin, parsed_miles, candidates,
-               asked_at, expires_at
-          FROM pending_attach
-         WHERE phone = %s
-           AND resolved_at IS NULL
-           AND asked_at > NOW() - INTERVAL '24 hours'
-         ORDER BY asked_at DESC
-         LIMIT 1
-    """, (phone,))
-    row = cur.fetchone()
-    return dict(row) if row else None
-
-
-_PA_YES_RE = re.compile(r"^(yes|y|yeah|yep|yup|correct|right|that.?s\s*it|confirmed?|ok|okay|sure)\b",
-                              re.IGNORECASE)
-_PA_NO_RE  = re.compile(r"^(no|n|nope|not|wrong|nah|incorrect|different)\b",
-                              re.IGNORECASE)
-_PA_NEW_RE = re.compile(r"^(new|another|different|other)\b",
-                              re.IGNORECASE)
-_PA_LETTER_RE = re.compile(r"^([a-z])(?:\b|[\s\.,!])",
-                                 re.IGNORECASE)
-
-
-def _pa_parse_reply(body):
-    """Classify a body as a confirmation reply. Returns one of:
-        ('yes', None)
-        ('no', None)
-        ('new', None)
-        ('choice', 'A')   # letter A-Z chosen
-        (None, None)      # not a confirmation reply
-    """
-    if not body:
-        return None, None
-    b = body.strip()
-    if not b:
-        return None, None
-    # Long replies (>40 chars) almost never confirmation answers — likely
-    # actual data inbound. Skip.
-    if len(b) > 40:
-        return None, None
-    if _PA_NEW_RE.match(b):
-        return 'new', None
-    if _PA_YES_RE.match(b):
-        return 'yes', None
-    if _PA_NO_RE.match(b):
-        return 'no', None
-    m = _PA_LETTER_RE.match(b)
-    if m:
-        return 'choice', m.group(1).upper()
-    return None, None
-
-
-def _pa_resolve_to_bid(cur, pa_id, target_bid_id, resolved_by, note=None):
-    """Attach the staged inbound from pending_attach to target_bid_id, then
-    mark the pending_attach resolved. Triggers the same clear-verify +
-    force-reprocess logic as the existing stitch path."""
-    # Mark resolved first so a concurrent reply can't double-attach
-    cur.execute("""
-        UPDATE pending_attach
-           SET resolved_at     = NOW(),
-               resolved_bid_id = %s,
-               resolved_by     = %s,
-               resolved_note   = %s
-         WHERE id = %s AND resolved_at IS NULL
-         RETURNING body, num_media, media_urls, media_types,
-                   parsed_vin, parsed_miles, candidates
-    """, (target_bid_id, resolved_by, note, pa_id))
-    pa = cur.fetchone()
-    if not pa:
-        return False  # already resolved
-    pa = dict(pa)
-
-    # Apply staged data to target bid
-    if pa.get('parsed_vin'):
-        cur.execute(
-            "UPDATE bids SET vin=%s, updated_at=NOW() "
-            "WHERE id=%s AND (vin IS NULL OR vin='')",
-            (pa['parsed_vin'], target_bid_id))
-    if pa.get('parsed_miles'):
-        cur.execute(
-            "UPDATE bids SET mileage=%s, updated_at=NOW() "
-            "WHERE id=%s AND (mileage IS NULL OR mileage < %s)",
-            (pa['parsed_miles'], target_bid_id, pa['parsed_miles']))
-
-    # Attach photos (call _ingest_sms_photo for each)
-    media_urls = pa.get('media_urls') or []
-    media_types = pa.get('media_types') or []
-    if isinstance(media_urls, str):
-        try: media_urls = _pa_json.loads(media_urls)
-        except Exception: media_urls = []
-    if isinstance(media_types, str):
-        try: media_types = _pa_json.loads(media_types)
-        except Exception: media_types = []
-    if media_urls:
-        for i, url in enumerate(media_urls):
-            mt = media_types[i] if i < len(media_types) else 'image/jpeg'
-            try:
-                _ingest_sms_photo(cur, target_bid_id, url, mt, from_phone=None)
-            except Exception as _e:
-                print(f'[pa-resolve] photo ingest err bid={target_bid_id}: {_e}',
-                      flush=True)
-
-    # Always clear verification + force-reprocess (same pattern as
-    # STITCH_VERIFY_UNIFIED_2026_05_15)
-    cur.execute("""
-        SELECT vin, mileage, needs_verification_at,
-               needs_verification_cleared_at,
-               needs_verification_reason
-          FROM bids WHERE id = %s
-    """, (target_bid_id,))
-    _b = cur.fetchone()
-    if (_b and _b.get('needs_verification_at')
-            and not _b.get('needs_verification_cleared_at')):
-        cur.execute("""
-            UPDATE bids
-               SET needs_verification_cleared_at = NOW(),
-                   needs_verification_cleared_by = %s,
-                   updated_at = NOW()
-             WHERE id = %s
-        """, (f'auto:pa_resolve_{resolved_by}', target_bid_id))
-        cur.execute(
-            "DELETE FROM ipacket_lookups WHERE bid_id=%s AND "
-            "(looked_up_at IS NULL OR looked_up_at < NOW() - INTERVAL '5 minutes' "
-            "OR not_available=true)", (target_bid_id,))
-        cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s",
-                    (target_bid_id,))
-        cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s",
-                    (target_bid_id,))
-        cur.execute(
-            "UPDATE bids SET vauto_claimed_by=NULL, vauto_claimed_at=NULL, "
-            "ai_assessed_at=NULL, ai_price=NULL, ai_assessment=NULL, "
-            "miles_audit_at=NULL WHERE id=%s",
-            (target_bid_id,))
-    print(f'[pa-resolve] pa={pa_id} -> bid={target_bid_id} by={resolved_by}',
-          flush=True)
-    return True
-
-
-def _pa_handle_reply(cur, phone, body, intake_log_id):
-    """Check for an open pending_attach for this phone; if body parses as a
-    confirmation reply, resolve it. Returns a TwiML response tuple or None
-    if this wasn't a reply we handled."""
-    pa = _pa_load_open(cur, phone)
-    if not pa:
-        return None
-    verdict, choice = _pa_parse_reply(body)
-    if not verdict:
-        return None
-    cands = pa.get('candidates') or []
-    if isinstance(cands, str):
-        try: cands = _pa_json.loads(cands)
-        except Exception: cands = []
-
-    def _xml(text):
-        from html import escape as _esc
-        return ('<?xml version="1.0" encoding="UTF-8"?><Response><Message>' +
-                _esc(text) +
-                '</Message></Response>',
-                200, {'Content-Type': 'application/xml'})
-
-    if verdict == 'yes' and len(cands) == 1:
-        target = cands[0]
-        ok = _pa_resolve_to_bid(cur, pa['id'], target['bid_id'],
-                                'user_yes', f'YMM={target.get("ymm")}')
-        _finalize_sms_intake(cur, intake_log_id, 'pa_resolved',
-                             bid_id=target['bid_id'],
-                             reason=f'pending_attach #{pa["id"]} resolved YES to bid {target["bid_id"]}')
-        return _xml(f"Got it — attached to your {target.get('ymm')}. Thanks!")
-    if verdict == 'choice':
-        # Letter -> index
-        idx = ord(choice) - ord('A')
-        if 0 <= idx < len(cands):
-            target = cands[idx]
-            _pa_resolve_to_bid(cur, pa['id'], target['bid_id'],
-                               'user_choice',
-                               f'letter={choice} YMM={target.get("ymm")}')
-            _finalize_sms_intake(cur, intake_log_id, 'pa_resolved',
-                                 bid_id=target['bid_id'],
-                                 reason=f'pending_attach #{pa["id"]} resolved {choice} to bid {target["bid_id"]}')
-            return _xml(f"Got it — attached to your {target.get('ymm')}. Thanks!")
-        return _xml(f"Hmm, '{choice}' isn't one of the options. "
-                    f"Reply with one of: " +
-                    ', '.join(f"{c.get('letter')}={c.get('ymm')}"
-                              for c in cands))
-    if verdict in ('no', 'new'):
-        # User says it's something else. Mark resolved as 'user_new' and
-        # tell them to send fresh.
-        cur.execute("""UPDATE pending_attach
-                          SET resolved_at = NOW(),
-                              resolved_by = %s,
-                              resolved_note = 'user said no/new'
-                        WHERE id = %s AND resolved_at IS NULL""",
-                    ('user_new', pa['id']))
-        _finalize_sms_intake(cur, intake_log_id, 'pa_user_no',
-                             reason=f'pending_attach #{pa["id"]} answered NO/NEW')
-        return _xml("No problem — please re-send the VIN, miles, "
-                    "or photo for the correct vehicle and we'll set it "
-                    "up. If it's for an existing bid, prefix with the "
-                    "bid number like #1234.")
-    return None
-
-
-def _pa_create_and_ask(cur, phone, body, num_media, media_urls,
-                       media_types, parsed_vin, parsed_miles,
-                       verify_pending_bids, intake_log_id):
-    """Create a pending_attach row + send confirmation SMS. Returns
-    TwiML response tuple."""
-    # Build candidates list with letters A, B, C...
-    cands = []
-    for i, b in enumerate(verify_pending_bids[:8]):  # cap at 8
-        cands.append({
-            'bid_id': b['id'],
-            'letter': chr(ord('A') + i),
-            'year':   b.get('year'),
-            'make':   b.get('make'),
-            'model':  b.get('model'),
-            'ymm':    _pa_format_ymm(b),
-            'reason': b.get('reason'),
-        })
-
-    # Build the question SMS
-    n = len(cands)
-    got_what = []
-    if parsed_vin:       got_what.append(f"the VIN ({parsed_vin})")
-    if parsed_miles:     got_what.append(f"{parsed_miles:,} miles")
-    if num_media:        got_what.append(f"{num_media} photo{'s' if num_media!=1 else ''}")
-    got_str = " and ".join(got_what) if got_what else "your message"
-
-    if n == 1:
-        c = cands[0]
-        q = (f"Hey, its the EW Bot. Got {got_str}. "
-             f"Confirming this is for the {c['ymm']} we got from you "
-             f"earlier — reply YES or NO.")
-    else:
-        opts = '\n'.join(f"{c['letter']} = {c['ymm']}" for c in cands)
-        q = (f"Hey, its the EW Bot. Got {got_str}. "
-             f"Which vehicle is this for?\n{opts}\n"
-             f"Reply with the letter.")
-
-    # Insert pending_attach row FIRST so concurrent reply finds it
-    cur.execute("""
-        INSERT INTO pending_attach
-            (phone, body, num_media, media_urls, media_types,
-             parsed_vin, parsed_miles, candidates, asked_body)
-        VALUES (%s, %s, %s, %s::jsonb, %s::jsonb,
-                %s, %s, %s::jsonb, %s)
-        RETURNING id
-    """, (phone, body or None, num_media,
-          _pa_json.dumps(media_urls or []),
-          _pa_json.dumps(media_types or []),
-          parsed_vin, parsed_miles, _pa_json.dumps(cands), q))
-    pa_id = cur.fetchone()['id']
-
-    # Send the question
-    try:
-        send_sms(phone, q)
-    except Exception as _e:
-        print(f'[pa-create] send_sms err pa={pa_id}: {_e}', flush=True)
-
-    _finalize_sms_intake(cur, intake_log_id, 'pa_asked',
-                         reason=f'pending_attach #{pa_id} created, '
-                                f'{n} candidate(s)',
-                         parsed_vin=parsed_vin, parsed_miles=parsed_miles)
-    print(f'[pa-create] pa={pa_id} phone={phone} candidates={n} '
-          f'data=vin:{bool(parsed_vin)},miles:{bool(parsed_miles)},'
-          f'photos:{num_media}', flush=True)
-
-    from html import escape as _esc
-    return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
-            200, {'Content-Type': 'application/xml'})
-
-
 @app.route('/.well-known/appspecific/<path:filename>')
 def well_known(filename):
     return send_from_directory(
@@ -524,21 +214,6 @@ def logout():
 
 
 _FIELD_PREFIXES = ('Rep:', 'VIN:', 'Mileage:', 'Asking:')
-
-# ESTIMATE_TZ_FIX_2026_05_18: bid.html compares client_estimate_at
-# (timestamptz) to ai_assessed_at (timestamp without tz) — Python raises
-# TypeError on offset-naive vs aware datetime comparison and the bid
-# page 500s. Filter normalizes any datetime to naive so the template
-# can compare cleanly.
-@app.template_filter('naive_dt')
-def _jinja_naive_dt(dt):
-    if dt is None:
-        return None
-    try:
-        return dt.replace(tzinfo=None)
-    except (AttributeError, TypeError):
-        return dt
-
 
 @app.template_filter('msg_display')
 def msg_display_filter(raw):
@@ -1055,31 +730,8 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-f
 # ── VIN extraction ───────────────────────────────────────────────────────────
 
 def extract_vin_from_text(text):
-    if not text:
-        return None
-    up = text.upper()
-    # Strict match first — covers ~99% of cases
-    match = VIN_RE.search(up)
-    if match:
-        return match.group(0)
-    # IOQ_SALVAGE_TEXT_2026_05_18: customer typo recovery.
-    # Substitute O->0, I->1, Q->0 on any 17-char alphanumeric run.
-    # Accept only if the salvaged candidate passes the strict VIN regex
-    # AND its check digit. Mirrors the Google Vision OCR salvage path
-    # in extract_vin_from_file. Real-world trigger: customer typed
-    # WPOAF2A9XSS279394 (letter O at pos 3) for a 2025 Porsche 911 —
-    # without salvage their reply spawned a duplicate bid (1730)
-    # instead of stitching to the original verify-pending bid (1729).
-    for m in re.finditer(r'\b[A-Z0-9]{17}\b', up):
-        cand = (m.group(0)
-                .replace('O', '0')
-                .replace('I', '1')
-                .replace('Q', '0'))
-        if VIN_RE.match(cand) and vin_check_digit_valid(cand):
-            print(f'[vin-extract] I/O/Q salvaged {m.group(0)} -> {cand}',
-                  flush=True)
-            return cand
-    return None
+    match = VIN_RE.search(text.upper())
+    return match.group(0) if match else None
 
 
 _MAT_ICON_RE = re.compile(
@@ -1655,24 +1307,122 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
 
 
 def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
-    """Extract odometer mileage from an image.
-
-    MILES_GEMINI_ONLY_2026_05_18: Gemini Flash 2.5 only (thinking_budget=0).
-    Google Vision was removed because its label-regex matches non-odometer
-    text (license plates, parking signs, background ' NN mi' patterns)
-    and triggered phantom miles on photos that don't show a dashboard.
-    Flash with the strict prompt returns NONE on non-odometer photos
-    (verified on the bid 1501 benchmark — 0 hallucinations on 5 non-odo
-    photos).
-    """
+    """Extract odometer mileage. Google Vision first, Claude fallback."""
     # v4 routing: same rule as VIN — only the test user routes to home v4.
     if should_use_v4():
         v4_miles = v4_extract(file_bytes, task='odometer')
         if v4_miles and v4_miles.isdigit() and 100 <= int(v4_miles) <= 999999:
             print(f'[OCR] miles via v4 (test user): {v4_miles}', flush=True)
             return v4_miles
-        print('[OCR] v4 odo missed/skipped, going to Gemini Flash', flush=True)
+        print('[OCR] v4 odo missed/skipped, falling back', flush=True)
+    text = _google_vision_ocr(file_bytes)
+    if text:
+        up = text.upper()
+        # Hard stop: VIN plates / weight stickers are NOT odometer photos
+        # If we see clear VIN-plate indicators, don't guess a mileage
+        plate_indicators = ['GVWR', 'GAWR', 'LBS', 'MFD BY', 'DATE OF MANUFACTURE',
+                           'VEHICLE SAFETY', 'BUMPER, AND THEFT', 'FEDERAL MOTOR']
+        if sum(1 for ind in plate_indicators if ind in up) >= 2:
+            print('[OCR] Google Vision: detected VIN plate (not odometer), returning None', flush=True)
+            return None
 
+        # First: "Mileage NNN" / "Odometer: NNN" / "ODO NNN" — label BEFORE number.
+        # Common in VIN-scanner app screenshots (Carbly, vAuto, Carfax, AutoCheck).
+        # Without this, a Carbly screenshot with "In ZIP Code 33426\nMileage 23,576"
+        # gets the 23,576 candidate rejected because "ZIP" appears in the 50-char
+        # context window of the unlabeled fallback.
+        labeled_before = re.findall(
+            r'\b(?:MILEAGE|ODOMETER|ODO|MILES)\b[\s:\*\-\.#\(\)]+(\d{1,3}(?:,\d{3})+|\d{3,7})\b',
+            up)
+        if labeled_before:
+            for c in labeled_before:
+                n = int(c.replace(',', ''))
+                if 100 <= n <= 999999:
+                    print(f'[OCR] Mileage via Google Vision (label-before): {n}', flush=True)
+                    return n
+
+        # MILES_OCR_DECIMAL_K_2026_05_15: K-suffix shorthand like "47K",
+        # "15.6K", "100.5K". Rare on physical dashboards but appears in
+        # mobile-app summary screens and typed-note photos. Convert via
+        # float * 1000.
+        for _cm in re.finditer(r'(\d{1,3}(?:\.\d{1,2})?)\s*K\b', up):
+            try:
+                _n = int(round(float(_cm.group(1)) * 1000))
+            except ValueError:
+                continue
+            if 100 <= _n <= 999999:
+                print(f'[OCR] Mileage via Google Vision (K-suffix): {_n}',
+                      flush=True)
+                return _n
+
+        # Then: numbers explicitly labeled "mi" / "miles" / "km" — label AFTER number.
+        # TESLA_DASH_FIX_2026_05_15: Tesla displays many "mi"-suffixed values
+        # (range, trip, battery-to-empty, status-bar range). The literal
+        # odometer reading is the LARGEST plausible number on screen — an
+        # odometer can't legally go down, so any same-photo competitor like
+        # "234 mi range remaining" will be smaller than the real reading.
+        # Old code returned the FIRST match, which always picked the
+        # status-bar range on Tesla dashes. Fix: collect all, filter Tesla
+        # noise contexts, return max.
+        _labeled_noise = (
+            'RANGE', 'TRIP', 'MI/KWH', 'MIKWH', 'REMAINING', 'REMAIN',
+            'BATTERY', 'TO EMPTY', 'UNTIL EMPTY', 'CHARGE',
+            'AVERAGE', 'EST. MI', 'EST MI', 'KWH', 'TO GO',
+            'EFFICIENCY', 'CONSUMPTION',
+        )
+        _mi_candidates = []
+        for _mm in re.finditer(
+                r'(\d{1,3}(?:,\d{3})+|\d{3,7})\s*(?:MI|MILES|KM)\b', up):
+            _ns = _mm.group(1)
+            _n = int(_ns.replace(',', ''))
+            if not (100 <= _n <= 999999):
+                continue
+            _cs = max(0, _mm.start() - 60)
+            _ctx = up[_cs:_mm.end() + 10]
+            if any(_noise in _ctx for _noise in _labeled_noise):
+                continue
+            _mi_candidates.append(_n)
+        if _mi_candidates:
+            _result = max(_mi_candidates)
+            print(f'[OCR] Mileage via Google Vision (labeled, max of '
+                  f'{len(_mi_candidates)}): {_result}', flush=True)
+            return _result
+
+        # Fallback: any 4-7 digit number but avoid obvious false positives
+        # (skip numbers immediately followed/preceded by LBS, KG, $, year contexts)
+        candidates = []
+        for m in re.finditer(r'\b(\d{1,3}(?:,\d{3})+|\d{3,7})\b', up):
+            num_str = m.group(1)
+            n = int(num_str.replace(',', ''))
+            if not (100 <= n <= 999999):
+                continue
+            # Check surrounding context (50 chars before, 20 after)
+            ctx_start = max(0, m.start() - 50)
+            ctx_end = min(len(up), m.end() + 20)
+            ctx = up[ctx_start:ctx_end]
+            # Skip if near weight / price / year indicators
+            bad = ['LBS', 'KG', 'GVWR', 'GAWR', '$', 'MSRP', 'PRICE', 'PROD',
+                   'YEAR', 'MODEL YEAR', 'ZIP', 'PHONE', 'STOCK']
+            if any(b in ctx for b in bad):
+                continue
+            # Reject obvious year values (1990-2030)
+            if 1990 <= n <= 2030:
+                continue
+            candidates.append(n)
+
+        if candidates:
+            # Prefer the largest (odometers are usually prominent)
+            result = max(candidates)
+            print(f'[OCR] Mileage via Google Vision: {result}', flush=True)
+            return result
+    print('[OCR] Google Vision missed mileage, falling back to Gemini Flash', flush=True)
+
+    # GEMINI_FLASH_MILES_OCR_2026_05_17: Gemini 2.5 Flash with thinking
+    # disabled. Overnight bench on 72 odometer photos:
+    #   Sonnet 4.6                : 29.2%  3.3s/call  ~$10/1000
+    #   Gemini Flash (no-think)   : 94.4%  1.9s/call  ~$1/1000
+    # Same prompt; the only meaningful difference is the model + disabled
+    # thinking. 3x more accurate, 1.7x faster, 10x cheaper.
     _odo_prompt = (
         "Look at this image. Is there a vehicle odometer reading visible? "
         "An odometer is a digital or analog display on the vehicle's "
@@ -1692,7 +1442,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
             if digits:
                 n = int(digits)
                 if 100 <= n <= 999999:
-                    print(f'[OCR] miles via Gemini Flash (no-think): {n}',
+                    print(f'[OCR] Mileage via Gemini Flash (no-think): {n}',
                           flush=True)
                     return n
     return None
@@ -3110,19 +2860,6 @@ def twilio_webhook():
         except Exception:
             pass
 
-    # PENDING_ATTACH_LAYER2_2026_05_18: reply handler for our YMM
-    # confirmation SMS. Runs early so YES/NO/A/B supersede normal
-    # routing for this phone if we asked them a question.
-    try:
-        _pa_reply = _pa_handle_reply(cur, from_phone, body, intake_log_id)
-        if _pa_reply:
-            db.commit(); db.close()
-            return _pa_reply
-    except Exception as _pa_e:
-        print(f'[pa-reply] handler error: {_pa_e}', flush=True)
-        try: db.rollback()
-        except Exception: pass
-
     # ── 2026-05-12 Network claim reply (YES) — intercept first ──
     try:
         from partner_portal import try_handle_network_claim
@@ -3749,28 +3486,6 @@ def twilio_webhook():
                     'vin_invalid', 'vin_not_found'))
             )
             if _can_miles or _can_vin or _can_photo:
-                # PENDING_ATTACH_LAYER2_2026_05_18: do NOT silently stitch.
-                # Build the full list of verify-pending bids (not just the
-                # most-recent) and ask the customer which one this is for.
-                # Operator force-resolve still available via admin API.
-                _pa_pending = _pa_find_pending_verify_bids(cur, from_phone,
-                                                          hours=24)
-                if _pa_pending:
-                    _pa_miles_to_stage = miles or (_bare_miles if _can_miles else None)
-                    _pa_media_urls = [request.form.get(f'MediaUrl{i}')
-                                       for i in range(num_media)]
-                    _pa_media_urls = [u for u in _pa_media_urls if u]
-                    _pa_media_types = [request.form.get(f'MediaContentType{i}', 'image/jpeg')
-                                        for i in range(num_media)]
-                    _resp = _pa_create_and_ask(
-                        cur, from_phone, body, num_media,
-                        _pa_media_urls, _pa_media_types,
-                        vin, _pa_miles_to_stage,
-                        _pa_pending, intake_log_id)
-                    db.commit(); db.close()
-                    return _resp
-                # Fall through to old behavior only if NO candidates found
-                # (shouldn't happen given _vpend was set, but defensive).
                 recent = _vpend
                 if _can_miles and not miles:
                     miles = _bare_miles
@@ -7986,8 +7701,8 @@ _ensure_vds_unknown_table()
 # ── Precise VIN decoder wrapper — wraps decode_vin with VDS tables + auto.dev
 def decode_vin_precise_wrapper(vin):
     """vds_first_cascade_20260518 — Deterministic VDS tables FIRST (no LLM),
-    then Claude Sonnet 4.6 via decode_vin_smart (gated to >=0.9 confidence
-    instead of 0.5 — Claude hallucinated 2022 Ferrari Roma as "296 GTB" at
+    then Claude Sonnet 4.6 via decode_vin_smart (now gated to >=0.9 confidence
+    instead of 0.7 — Claude hallucinated 2022 Ferrari Roma as "296 GTB" at
     confidence 0.75, see bid 1746), then NHTSA. VDS tables live at
     /opt/expwholesale/vds_tables/ — one Python module per manufacturer with
     a `decode(vin)` function dispatched by WMI prefix.
@@ -8001,8 +7716,8 @@ def decode_vin_precise_wrapper(vin):
     # ── Primary path: deterministic VDS tables ──
     # Per-manufacturer modules under /opt/expwholesale/vds_tables/ keyed by
     # WMI prefix. When the VIN's WMI is owned by a module AND the module's
-    # decode returns confidence >= 0.9, accept it without invoking Claude.
-    # This eliminates the LLM-hallucination class of bug.
+    # decode returns confidence >= 0.9, we accept it without invoking Claude
+    # at all. This eliminates the LLM-hallucination class of bug.
     try:
         import sys as _sys
         _vds_path = '/opt/expwholesale/vds_tables'
@@ -8030,8 +7745,8 @@ def decode_vin_precise_wrapper(vin):
     # ── Secondary path: Claude Sonnet 4.6 via decode_vin_smart ──
     # Threshold RAISED from 0.5 -> 0.9 because Claude hallucinations come in
     # at 0.7-0.85 (see bid 1746 Roma misread as 296 GTB). VDS tables above
-    # already handle high-confidence cases, so Claude is now last-resort for
-    # VINs no module knows about.
+    # already handle the high-confidence cases, so Claude is now last-resort
+    # for VINs no module knows about.
     try:
         from claude_vin_decoder import decode_vin_smart
         _db_c = get_db()
@@ -16939,47 +16654,6 @@ def admin_buy_profile_preview():
 
 # BUY_PROFILES_ORPHAN_CLEAN_2026_05_18: orphaned preview function body removed; route redirects already handle the URL.
 
-@app.route('/admin/api/pending-attach/<int:pa_id>/resolve', methods=['POST'])
-def admin_pa_resolve(pa_id):
-    """Operator force-resolves a pending_attach by attaching the staged
-    data to a specific bid. PENDING_ATTACH_LAYER2_2026_05_18.
-
-    Body: {bid_id: <int>, note?: <str>}
-    """
-    data = request.get_json(silent=True) or {}
-    target = data.get('bid_id')
-    try: target = int(target)
-    except (TypeError, ValueError):
-        return jsonify({'error': 'bid_id required (int)'}), 400
-    note = (data.get('note') or '')[:200] or None
-    actor = session.get('username') or 'admin'
-
-    db = get_db(); cur = db.cursor()
-    ok = _pa_resolve_to_bid(cur, pa_id, target,
-                            f'op_force:{actor}', note)
-    db.commit(); db.close()
-    return jsonify({'ok': bool(ok), 'pa_id': pa_id, 'bid_id': target})
-
-
-@app.route('/admin/api/pending-attach/open', methods=['GET'])
-def admin_pa_list_open():
-    """List all open pending_attach rows (for operator review).
-    PENDING_ATTACH_LAYER2_2026_05_18."""
-    db = get_db(); cur = db.cursor()
-    cur.execute("""
-        SELECT id, phone, body, num_media, parsed_vin, parsed_miles,
-               candidates, asked_at::text, expires_at::text
-          FROM pending_attach
-         WHERE resolved_at IS NULL
-           AND expires_at > NOW()
-         ORDER BY asked_at DESC
-         LIMIT 100
-    """)
-    rows = [dict(r) for r in cur.fetchall()]
-    db.close()
-    return jsonify({'rows': rows, 'count': len(rows)})
-
-
 @app.route('/api/admin/buy-profile/rebuild', methods=['POST'])
 def api_admin_buy_profile_rebuild():
     """Manual rebuild trigger — handy during the meeting."""
@@ -17717,70 +17391,11 @@ def admin_phone_gates_add():
             db.rollback()
             db.close()
             return jsonify({'ok': False, 'error': 'already active for this gate'}), 409
-    # GATE_PHONE_NAMES_2026_05_18: if a label/name was provided, mirror it
-    # into bidder_contacts so the next bid from this phone shows it on the
-    # dashboard. Also retroactively fills currently-open bids.
-    if label:
-        _gate_name_sync(cur, digits, label)
     db.commit()
     db.close()
     gate_helpers.bust_gate_cache()
     return jsonify({'ok': True, 'action': action, 'id': row_id,
                     'phone_digits': digits, 'gate_type': gate_type, 'label': label})
-
-
-# GATE_PHONE_NAMES_2026_05_18: helper that mirrors a gated-phones label
-# into bidder_contacts (where bid intake looks up bidder_name) AND
-# retroactively fills any open bids from that phone whose bidder_name
-# is still empty. Called from admin_phone_gates_add and the new
-# set-name endpoint below.
-def _gate_name_sync(cur, phone_digits, name):
-    if not (phone_digits and len(phone_digits) == 10 and name):
-        return
-    name = (name or '').strip()[:100]
-    if not name:
-        return
-    e164 = '+1' + phone_digits
-    # Upsert bidder_contacts — bumps name even if row exists, preserves
-    # first_bid_at / bid_count.
-    cur.execute("""
-        INSERT INTO bidder_contacts (phone, name, first_bid_at, last_bid_at, bid_count)
-        VALUES (%s, %s, NOW(), NOW(), 0)
-        ON CONFLICT (phone) DO UPDATE
-           SET name = EXCLUDED.name
-    """, (e164, name))
-    # Retroactively fill bids that came from this phone but never got a name
-    cur.execute("""
-        UPDATE bids
-           SET bidder_name = %s,
-               awaiting_name = FALSE,
-               updated_at = NOW()
-         WHERE phone = %s
-           AND (bidder_name IS NULL OR bidder_name = '')
-    """, (name, e164))
-
-
-@app.route('/admin/phone-gates/<int:row_id>/set-name', methods=['POST'])
-def admin_phone_gates_set_name(row_id):
-    """GATE_PHONE_NAMES_2026_05_18: edit the name/label on a gated_phones
-    row. Mirrors the value into bidder_contacts so future + existing bids
-    from that phone show the name on the dashboard."""
-    name = (request.form.get('name') or request.form.get('label') or '').strip()[:100] or None
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("""UPDATE gated_phones
-                      SET label = %s
-                    WHERE id = %s
-                    RETURNING phone_digits""", (name, row_id))
-    row = cur.fetchone()
-    if not row:
-        db.close()
-        return jsonify({'ok': False, 'error': 'row not found'}), 404
-    if name:
-        _gate_name_sync(cur, row['phone_digits'], name)
-    db.commit()
-    db.close()
-    return jsonify({'ok': True, 'id': row_id, 'name': name})
 
 
 @app.route('/admin/phone-gates/<int:row_id>/remove', methods=['POST'])
