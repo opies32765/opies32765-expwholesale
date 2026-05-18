@@ -3050,10 +3050,17 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                           FROM bids WHERE id = %s
                     """, (bid_id,))
                     _vrow = bg_cur.fetchone()
+                    # MILES_DISCREPANCY_CLEAR_2026_05_18: also clear when the
+                    # original reason was a miles discrepancy (customer typed
+                    # value disagreed with Carfax) and a fresh photo OCR
+                    # delivered a value the MAX-wins UPDATE accepted.
+                    _vreason_m = (_vrow.get('needs_verification_reason') or '').lower() if _vrow else ''
+                    _miles_clearable = any(k in _vreason_m for k in (
+                        'missing_miles', 'miles_discrepancy', 'miles_mismatch'))
                     if (_vrow and _vrow.get('mileage')
                             and _vrow.get('needs_verification_at')
                             and not _vrow.get('needs_verification_cleared_at')
-                            and 'missing_miles' in (_vrow.get('needs_verification_reason') or '')):
+                            and _miles_clearable):
                             bg_cur.execute("""
                                 UPDATE bids
                                    SET needs_verification_cleared_at = NOW(),
@@ -3739,6 +3746,9 @@ def twilio_webhook():
     # Partners often split a forward into VIN-text-then-miles or photo-then-text.
     # If the same phone has a bid <60s old AND the new VIN doesn't conflict
     # with the existing one, merge into that bid instead of creating new.
+    # NOTE: do NOT widen this window for verify-pending bids — those need to
+    # go through VERIFY_STITCH → PENDING_ATTACH_LAYER2 below (ask-first
+    # confirmation flow, not silent merge).
     cur.execute("""
         SELECT id, vin, mileage FROM bids
         WHERE phone = %s
@@ -3778,9 +3788,22 @@ def twilio_webhook():
         _vpend = cur.fetchone()
         if _vpend:
             _vreason = (_vpend.get('needs_verification_reason') or '').lower()
-            _can_miles = ('missing_miles' in _vreason
+            # MILES_DISCREPANCY_STITCH_2026_05_18 (bid 1764 → 1765 split):
+            # Original gate only handled missing_miles + null bids.mileage.
+            # The miles-audit worker flags bids whose customer-typed miles
+            # disagree with Carfax/AutoCheck as 'miles_discrepancy' — but
+            # bids.mileage is already non-null (the customer's value), so
+            # neither condition matched. Customer's corrected-miles reply
+            # then fell through to new-bid creation. Fix: accept any
+            # discrepancy-class reason and let the corrected value through.
+            _miles_reason = ('missing_miles' in _vreason
+                             or 'miles_discrepancy' in _vreason
+                             or 'miles_mismatch' in _vreason)
+            _can_miles = (_miles_reason
                           and (miles or _bare_miles)
-                          and not _vpend.get('mileage'))
+                          and (not _vpend.get('mileage')
+                               or 'discrepancy' in _vreason
+                               or 'mismatch' in _vreason))
             _can_vin = (('vin_invalid' in _vreason
                          or 'vin_not_found' in _vreason
                          or 'invalid_vin' in _vreason
@@ -3792,12 +3815,15 @@ def twilio_webhook():
             # the VIN_FILL_CLEARS_VERIFY hook downstream kicks off
             # workers. Without this, the photo creates a brand-new bid
             # (observed on bid 1504 → 1505 split).
+            # 2026-05-18: extended to miles_discrepancy + miles_mismatch
+            # so a photo of the dash also resolves the verification.
             _can_photo = (
                 num_media > 0
                 and not vin and not miles and not _bare_miles
                 and any(k in _vreason for k in (
                     'missing_miles', 'missing_vin', 'invalid_vin',
-                    'vin_invalid', 'vin_not_found'))
+                    'vin_invalid', 'vin_not_found',
+                    'miles_discrepancy', 'miles_mismatch'))
             )
             if _can_miles or _can_vin or _can_photo:
                 # PENDING_ATTACH_LAYER2_2026_05_18: do NOT silently stitch.
@@ -6266,7 +6292,9 @@ def _notify_driver_if_pending(bid_id):
         cur = db.cursor()
         cur.execute("""
             SELECT id, driver_token, driver_phone, driver_notified_at,
-                   year, make, model
+                   year, make, model,
+                   needs_verification_at, needs_verification_cleared_at,
+                   needs_verification_reason
             FROM bids WHERE id=%s
         """, (bid_id,))
         bid = cur.fetchone()
@@ -6274,6 +6302,21 @@ def _notify_driver_if_pending(bid_id):
             db.close()
             return
         if bid['driver_notified_at'] is not None:
+            db.close()
+            return
+        # Verification gate (2026-05-18 bid 1764) — if the bid is awaiting
+        # customer-side data clarification (miles discrepancy, VIN mismatch,
+        # etc), hold the Phase 1 mini-page link SMS until verification clears.
+        # Otherwise the customer gets the discrepancy SMS AND the "here are
+        # your results" SMS in the same minute, treats the deal as closed,
+        # and any subsequent reply spawns a duplicate bid.
+        # Released by STITCH_VERIFY_UNIFIED on verify clear (calls back into
+        # this function once needs_verification_cleared_at is set).
+        if (bid['needs_verification_at'] is not None
+                and bid['needs_verification_cleared_at'] is None):
+            print(f'[driver-notify] HELD — bid={bid_id} '
+                  f'needs_verification={bid["needs_verification_reason"]} '
+                  f'(will fire after customer clarifies)', flush=True)
             db.close()
             return
         # Phase 1 gate — only the 4-number full-broker whitelist gets the
@@ -12858,7 +12901,7 @@ def _normalize_accutrade_url(url):
 #   6. NEVER calls the LLM blindly (the bid-1761 Lariat hallucination class of bug is structurally eliminated)
 # Empty by default → no canary bids → existing LLM behavior preserved fleet-wide.
 # Add a bid_id here to test the new flow for that specific bid.
-ACCUTRADE_WAIT_FOR_EVIDENCE_ALLOWLIST: set[int] = set()
+ACCUTRADE_WAIT_FOR_EVIDENCE_ALLOWLIST: set[int] = {1764}
 ACCUTRADE_EVIDENCE_WAIT_SECONDS = 55  # less than worker timeout 65s so worker doesn't drop the call
 
 
@@ -16233,7 +16276,9 @@ def _notify_driver_phase2(bid_id):
         cur = db.cursor()
         cur.execute("""
             SELECT id, driver_token, driver_phone, phase2_notified_at,
-                   year, make, model, ai_price
+                   year, make, model, ai_price,
+                   needs_verification_at, needs_verification_cleared_at,
+                   needs_verification_reason
               FROM bids WHERE id = %s
         """, (bid_id,))
         bid = cur.fetchone()
@@ -16243,6 +16288,20 @@ def _notify_driver_phase2(bid_id):
         if bid['phase2_notified_at'] is not None:
             db.close()
             return False  # already sent
+
+        # Verification gate (2026-05-18) — defense in depth alongside Phase 1.
+        # _maybe_fire_assessment already gates AI assessment on
+        # needs_verification, so this is normally unreachable while pending,
+        # but if any future code path calls _notify_driver_phase2 directly
+        # (bypassing _maybe_fire_assessment), this guard ensures we don't
+        # double-text the customer.
+        if (bid['needs_verification_at'] is not None
+                and bid['needs_verification_cleared_at'] is None):
+            print(f'[phase2-notify] HELD — bid={bid_id} '
+                  f'needs_verification={bid["needs_verification_reason"]} '
+                  f'(will fire after customer clarifies)', flush=True)
+            db.close()
+            return False
 
         # Phase 2 phone whitelist gate. PHASE2_PHONE_GATE accepts a comma- or
         # whitespace-separated list of phones; only sellers whose driver_phone
