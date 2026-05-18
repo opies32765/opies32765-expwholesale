@@ -215,6 +215,21 @@ def logout():
 
 _FIELD_PREFIXES = ('Rep:', 'VIN:', 'Mileage:', 'Asking:')
 
+# ESTIMATE_TZ_FIX_2026_05_18: bid.html compares client_estimate_at
+# (timestamptz) to ai_assessed_at (timestamp without tz) — Python raises
+# TypeError on offset-naive vs aware datetime comparison and the bid
+# page 500s. Filter normalizes any datetime to naive so the template
+# can compare cleanly.
+@app.template_filter('naive_dt')
+def _jinja_naive_dt(dt):
+    if dt is None:
+        return None
+    try:
+        return dt.replace(tzinfo=None)
+    except (AttributeError, TypeError):
+        return dt
+
+
 @app.template_filter('msg_display')
 def msg_display_filter(raw):
     """Strip field rep metadata tokens from raw_message for clean display."""
@@ -9685,6 +9700,85 @@ def api_ipacket_refresh_token():
     return jsonify({'ok': True, 'jwt_length': len(jwt)})
 
 
+# ── Cookie-push liveness gate (2026-05-18) ────────────────────────────────
+# Both /api/vauto/refresh_cookies and /api/vauto/refresh_session previously
+# accepted any push that contained a `vAutoAuth` cookie *name*, without
+# checking the *value* worked. Result: a verifier whose Cox session expired
+# could keep POSTing dead cookies every 60s, poisoning the pool that the
+# direct-BFF (opportunity_pipeline, encore_comps_pipeline, etc) consumes.
+# This probe does a single cheap call against Cox/vAuto BFF to confirm the
+# cookies actually authenticate. Result is cached per-cookie-hash for 60s
+# so a flood of identical pushes only probes once. Network/timeout errors
+# fall through as 'accept optimistically' — we only reject on definite 401.
+import hashlib as _ew_hashlib
+import time as _ew_time
+import requests as _ew_requests
+_VAUTO_PROBE_URL = (
+    'https://bff.vaweb.vauto.app.coxautoinc.com/api/PricingData/Manheim'
+)
+# A real appraisalId from the captured prod session. priceGuides/Manheim
+# 500 on bogus values, but accept any valid user-owned id. This one is
+# stable per cookie_jar docstring.
+_VAUTO_PROBE_APPRAISAL_ID = 'qWNKSOaUPCW6x4lPKnM8iojBTMhHy415I2iIv9GiCZ4='
+_VAUTO_PROBE_VEHICLE = {
+    'Vin': 'WBA4Z3C51KEN89661',  # known-decodable BMW 4 Series
+    'Odometer': 70000, 'ModelYear': 2019,
+    'Make': 'BMW', 'Model': '4 Series', 'Series': '',
+}
+_vauto_probe_cache: dict = {}  # cookie_hash -> (verdict_str, expires_ts)
+_VAUTO_PROBE_TTL = 60  # seconds
+
+
+def _vauto_probe_cookies(cookies_dict, headers_dict, label_for_log='?'):
+    """Return one of: 'alive' | 'dead' | 'unknown'. Dead = definite 401
+    against Cox BFF (cookies don't authenticate). Unknown = probe couldn't
+    decide (network blip, 500, timeout) — callers should accept optimistically
+    rather than reject legit pushes during transient errors."""
+    try:
+        h_items = sorted((k, v) for k, v in cookies_dict.items())
+        h_input = repr(h_items) + '|' + repr(sorted(headers_dict.items()))
+        ch = _ew_hashlib.sha256(h_input.encode()).hexdigest()
+    except Exception:
+        ch = None
+
+    now = _ew_time.time()
+    if ch and ch in _vauto_probe_cache:
+        verdict, exp = _vauto_probe_cache[ch]
+        if exp > now:
+            return verdict
+
+    try:
+        body = {
+            'AppraisalId': _VAUTO_PROBE_APPRAISAL_ID,
+            'Vehicle': _VAUTO_PROBE_VEHICLE,
+            'PriceGuide': 12, 'PostalCode': None,
+            'AddDeducts': None, 'OwningEntityId': None,
+        }
+        r = _ew_requests.post(_VAUTO_PROBE_URL, json=body,
+                              cookies=cookies_dict, headers=headers_dict,
+                              timeout=8)
+        if r.status_code == 401:
+            verdict = 'dead'
+        elif 200 <= r.status_code < 300:
+            verdict = 'alive'
+        else:
+            # 403/500/etc — treat as unknown rather than blocking
+            verdict = 'unknown'
+    except _ew_requests.RequestException:
+        verdict = 'unknown'
+    except Exception:
+        verdict = 'unknown'
+
+    if ch:
+        _vauto_probe_cache[ch] = (verdict, now + _VAUTO_PROBE_TTL)
+        # Cap cache growth to ~1000 entries.
+        if len(_vauto_probe_cache) > 1000:
+            cutoff = now - 1
+            for k in [k for k, (_, e) in _vauto_probe_cache.items() if e < cutoff]:
+                _vauto_probe_cache.pop(k, None)
+    return verdict
+
+
 @app.route('/api/vauto/refresh_cookies', methods=['POST'])
 def api_vauto_refresh_cookies():
     """Cookie keeper endpoint. Beelink-115 + EW workers POST their freshest
@@ -9710,6 +9804,30 @@ def api_vauto_refresh_cookies():
     if 'vAutoAuth' not in cookies:
         return jsonify({'ok': False, 'error': 'vAutoAuth cookie missing'}), 400
 
+    # Liveness gate (2026-05-18): reject pushes whose cookies don't actually
+    # authenticate against Cox. Lets verifier/worker code keep pushing
+    # whenever they think they're fresh; server now decides.
+    _probe_headers = {
+        'platformuserid': platform_user_id,
+        'appraisalentityid': entity_id,
+        'currententityid': entity_id,
+        'accept': 'application/json',
+        'content-type': 'application/json',
+        'referer': 'https://provision.vauto.app.coxautoinc.com/',
+        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) ew-refresh-probe',
+    }
+    _verdict = _vauto_probe_cookies(cookies, _probe_headers, label_for_log=label)
+    if _verdict == 'dead':
+        try:
+            print(f'[refresh_cookies] REJECTED dead cookies '
+                  f'label={label} from={request.remote_addr} '
+                  f'pid={platform_user_id[:30] if platform_user_id else "?"}',
+                  flush=True)
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': 'cookies failed liveness probe (401)',
+                        'verdict': 'dead'}), 400
+
     db = get_db()
     cur = db.cursor()
     cur.execute("""
@@ -9723,7 +9841,8 @@ def api_vauto_refresh_cookies():
     """, (label, json.dumps(cookies), entity_id, platform_user_id))
     db.commit()
     db.close()
-    return jsonify({'ok': True, 'cookies': len(cookies), 'label': label})
+    return jsonify({'ok': True, 'cookies': len(cookies), 'label': label,
+                    'probe_verdict': _verdict})
 
 
 @app.route('/api/vauto/refresh_session', methods=['POST'])
@@ -9782,6 +9901,35 @@ def api_vauto_refresh_session():
     cookie_names = {(c.get('name') or '') for c in cookies if isinstance(c, dict)}
     if 'vAutoAuth' not in cookie_names:
         return jsonify({'ok': False, 'error': 'vAutoAuth cookie missing — pre-login junk rejected'}), 400
+
+    # Liveness gate (2026-05-18): build cookies dict + headers and probe Cox
+    # BFF. Reject pushes whose cookies don't authenticate. Lets workers /
+    # verifier keep pushing whenever they think they're fresh; server now
+    # decides whether to accept. See _vauto_probe_cookies docstring above.
+    _cookies_dict_for_probe = {c['name']: c['value'] for c in cookies
+                               if isinstance(c, dict) and c.get('name') and c.get('value') is not None}
+    _probe_headers = {
+        'platformuserid': headers.get('platformuserid') or '',
+        'appraisalentityid': headers.get('appraisalentityid') or headers.get('currententityid') or '',
+        'currententityid': headers.get('currententityid') or headers.get('appraisalentityid') or '',
+        'accept': 'application/json',
+        'content-type': 'application/json',
+        'referer': headers.get('referer') or 'https://provision.vauto.app.coxautoinc.com/',
+        'user-agent': headers.get('user-agent') or 'Mozilla/5.0 ew-refresh-probe',
+    }
+    _label_for_log = (request.headers.get('X-Worker-Id') or data.get('label') or 'worker_pool')[:64]
+    _verdict = _vauto_probe_cookies(_cookies_dict_for_probe, _probe_headers,
+                                    label_for_log=_label_for_log)
+    if _verdict == 'dead':
+        try:
+            print(f'[refresh_session] REJECTED dead cookies '
+                  f'label={_label_for_log} from={request.remote_addr} '
+                  f'pid={(_probe_headers["platformuserid"] or "?")[:30]}',
+                  flush=True)
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': 'cookies failed liveness probe (401)',
+                        'verdict': 'dead'}), 400
 
     target = '/opt/expwholesale/state/vauto_session.json'
     try:
@@ -9845,7 +9993,8 @@ def api_vauto_refresh_session():
                     'header_count': len(headers),
                     'captured_at': data.get('captured_at'),
                     'written_to': target,
-                    'db_upsert_ok': db_upsert_ok})
+                    'db_upsert_ok': db_upsert_ok,
+                    'probe_verdict': _verdict})
 
 
 @app.route('/api/vauto/get_current_cookies', methods=['GET'])

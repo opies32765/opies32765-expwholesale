@@ -663,11 +663,11 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           </div>
           {% if bid.client_estimate %}
           <span id="est-status" style="font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;padding:3px 8px;border-radius:5px;
-            {% if bid.ai_assessed_at and bid.client_estimate_at and bid.client_estimate_at < bid.ai_assessed_at %}background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.3)
+            {% if bid.ai_assessed_at and bid.client_estimate_at and (bid.client_estimate_at|naive_dt) < bid.ai_assessed_at %}{#- ESTIMATE_TZ_FIX_2026_05_18 -#}background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.3)
             {% elif bid.ai_assessed_at %}background:rgba(245,158,11,.12);color:#fbbf24;border:1px solid rgba(245,158,11,.25)
             {% else %}background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.3)
             {% endif %}">
-            {% if bid.ai_assessed_at and bid.client_estimate_at and bid.client_estimate_at < bid.ai_assessed_at %}before AI &middot; clean signal
+            {% if bid.ai_assessed_at and bid.client_estimate_at and (bid.client_estimate_at|naive_dt) < bid.ai_assessed_at %}{#- ESTIMATE_TZ_FIX_2026_05_18 -#}before AI &middot; clean signal
             {% elif bid.ai_assessed_at %}after AI &middot; weaker signal
             {% else %}before AI &middot; clean signal
             {% endif %}
