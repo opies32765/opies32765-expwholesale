@@ -8010,10 +8010,14 @@ def api_admin_bulk_upload_commit():
         created = []
         for r in keep:
             year     = r.get('year')
-            make     = (r.get('make') or '').strip()[:60]
-            model    = (r.get('model') or '').strip()[:80]
-            trim     = (r.get('trim') or '').strip()[:120]
-            color    = (r.get('color') or '').strip()[:80]
+            # BULK_UPLOAD_TRUNCATION_FIX_2026_05_18 (B): slice to MATCH
+            # the DB column limits, not exceed them. Previous values
+            # ([:60]/[:80]/[:120]/[:80]) overflowed VARCHAR(50/50/100/50)
+            # and aborted the entire transaction on first overflow.
+            make     = (r.get('make') or '').strip()[:50]
+            model    = (r.get('model') or '').strip()[:50]
+            trim     = (r.get('trim') or '').strip()[:100]
+            color    = (r.get('color') or '').strip()[:50]
             body     = (r.get('body') or '').strip()[:80]
             mileage  = r.get('mileage')
             asking   = r.get('asking_price')

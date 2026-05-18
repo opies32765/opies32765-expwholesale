@@ -31,6 +31,16 @@ _HEADER_MAP = {
     'vehicle': 'raw_vehicle',
     'description': 'raw_vehicle',
     'year/make/model': 'raw_vehicle',
+    # BULK_UPLOAD_HEADER_ALIASES_2026_05_18: additional YMM variants seen
+    # on dealer printed-report exports.
+    'year make model': 'raw_vehicle',
+    'year, make, model': 'raw_vehicle',
+    'year - make - model': 'raw_vehicle',
+    'year-make-model': 'raw_vehicle',
+    'yr/make/model': 'raw_vehicle',
+    'yr make model': 'raw_vehicle',
+    'yr/mk/md': 'raw_vehicle',
+    'vehicle description': 'raw_vehicle',
     'ymm': 'raw_vehicle',
     'year': 'year_col',
     'make': 'make_col',
@@ -196,9 +206,21 @@ def split_vehicle_string(s: str) -> tuple[int | None, str, str, str]:
 def _normalize_headers(headers: list) -> list[str | None]:
     """Map a header row to canonical field names. Unrecognized cols → None."""
     out: list[str | None] = []
+    # BULK_UPLOAD_DEMOTE_DUP_2026_05_18: when a sheet has TWO columns that
+    # both map to 'raw_vehicle' (most common pattern: "YEAR MAKE MODEL" +
+    # "DESCRIPTION"), keep the first as the YMM source and demote the
+    # second to 'notes' so dealer comments are preserved instead of
+    # silently dropped by setdefault.
+    seen_raw_vehicle = False
     for h in headers:
         key = _clean(h).lower()
-        out.append(_HEADER_MAP.get(key))
+        canon = _HEADER_MAP.get(key)
+        if canon == 'raw_vehicle':
+            if seen_raw_vehicle:
+                canon = 'notes'
+            else:
+                seen_raw_vehicle = True
+        out.append(canon)
     return out
 
 
@@ -214,15 +236,32 @@ def _row_to_record(headers: list[str | None], row: tuple) -> dict | None:
     """Build a record dict from a single sheet row. Returns None if blank."""
     rec: dict = {}
     seen_any = False
+    # BULK_UPLOAD_TRUNCATION_FIX_2026_05_18 (C): track any unmapped
+    # column whose value is a 2-digit integer 0..99 — likely a year
+    # shorthand column with a blank header (common in printed dealer
+    # report exports). Used by _finalize_record as a year fallback.
+    two_digit_year_hint = None
     for i, col in enumerate(headers):
-        if i >= len(row) or not col:
+        if i >= len(row):
             continue
         val = row[i]
         if val not in (None, ''):
             seen_any = True
-        rec.setdefault(col, val)  # keep first hit if dup header
+        if col:
+            rec.setdefault(col, val)  # keep first hit if dup header
+        else:
+            # Unmapped column — check for 2-digit year hint
+            if two_digit_year_hint is None:
+                try:
+                    n = int(val) if val is not None else None
+                    if n is not None and 0 <= n <= 99:
+                        two_digit_year_hint = n
+                except (ValueError, TypeError):
+                    pass
     if not seen_any:
         return None
+    if two_digit_year_hint is not None:
+        rec.setdefault('_year_hint_2digit', two_digit_year_hint)
     return rec
 
 
@@ -232,6 +271,38 @@ def _finalize_record(rec: dict) -> dict:
     raw_vehicle = _clean(rec.get('raw_vehicle'))
     year, make, model, trim = split_vehicle_string(raw_vehicle)
 
+    # BULK_UPLOAD_TRUNCATION_FIX_2026_05_18 (A): detect notes-leak.
+    # If raw_vehicle came from a DESCRIPTION column that's actually
+    # free-text notes (no year prefix, contains noise tokens, or just
+    # too long for a real YMM string), reroute it to notes BEFORE the
+    # downstream model field gets stuffed with 50+ chars of options
+    # text. Sample offender: "COGNITO LIFT FOX SHOCKS COLOR MATCH
+    # BUMPERS WOW FACTO!!!! ASK FOR PICS" (70 chars).
+    if raw_vehicle and not year:
+        rv_upper = raw_vehicle.upper()
+        looks_like_notes = (
+            '!' in raw_vehicle
+            or '$' in raw_vehicle
+            or ' PKG' in rv_upper
+            or ' WPKG' in rv_upper
+            or ' PACKAGE' in rv_upper
+            or ' PKG.' in rv_upper
+            or ' LIFTED' in rv_upper
+            or ' SHOCKS' in rv_upper
+            or ' LEATHER' in rv_upper
+            or len(raw_vehicle) > 40
+            or len(raw_vehicle.split()) > 6
+        )
+        if looks_like_notes:
+            existing_notes = _clean(rec.get('notes'))
+            rec['notes'] = (existing_notes + ' | ' if existing_notes
+                            else '') + raw_vehicle
+            raw_vehicle = ''
+            year = None
+            make = ''
+            model = ''
+            trim = ''
+
     # Split-column overrides: if year/make/model came as separate columns,
     # prefer those and rebuild raw_vehicle for display.
     if not year and rec.get('year_col'):
@@ -239,6 +310,17 @@ def _finalize_record(rec: dict) -> dict:
             year = int(_clean(rec['year_col']).split('.')[0])
         except (ValueError, AttributeError):
             year = None
+    # BULK_UPLOAD_TRUNCATION_FIX_2026_05_18 (C): 2-digit year shorthand
+    # from a blank-header sibling column. 0..49 -> 2000+, 50..99 -> 1900+.
+    if not year and rec.get('_year_hint_2digit') is not None:
+        try:
+            yy = int(rec['_year_hint_2digit'])
+            if 0 <= yy <= 49:
+                year = 2000 + yy
+            elif 50 <= yy <= 99:
+                year = 1900 + yy
+        except (ValueError, TypeError):
+            pass
     if not make and rec.get('make_col'):
         make = _clean(rec['make_col'])
     if not model and rec.get('model_col'):
