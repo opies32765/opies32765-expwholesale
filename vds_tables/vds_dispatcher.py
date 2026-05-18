@@ -64,10 +64,19 @@ MODULES = [
     # GM domestic (deployed 2026-05-18 afternoon)
     'vds_chevrolet',
     'vds_gmc',
+    'vds_cadillac',
+    'vds_buick',
+    'vds_pontiac',   # legacy — brand ended 2010
+    'vds_saturn',    # legacy — brand ended 2010
+    'vds_hummer',    # legacy H2/H3; modern Hummer EV is under vds_gmc
+    'vds_saab',      # legacy — GM-era ended 2011
     # European mainstream (deployed 2026-05-18 afternoon)
     'vds_volkswagen',
     'vds_volvo',
     'vds_mini',
+    # Japanese mainstream additions (deployed 2026-05-18 afternoon)
+    'vds_subaru',
+    'vds_mitsubishi',
 ]
 
 # Lazy-loaded WMI -> (module, decode_fn) lookup.
