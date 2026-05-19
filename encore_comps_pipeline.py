@@ -93,7 +93,7 @@ def load_dealer_inventory(slug: str, limit: int | None = None):
              WHERE dealer_id = %s
                AND status = 'active'
                AND vin IS NOT NULL AND length(vin) = 17
-               AND year IS NOT NULL AND year >= 2010
+               AND year IS NOT NULL
                AND make IS NOT NULL AND model IS NOT NULL
                AND COALESCE(price, 0) > 0
              ORDER BY id
@@ -173,7 +173,7 @@ def mmr_one(inv, cookies, headers, appraisal_id):
         return base
 
 
-def mtx_one(inv, cookies, headers):
+def mtx_one(inv, cookies, headers, appraisal_id):
     """ManheimTransactions backfill — ~5wk of auction sales per VIN."""
     if _auth_failed.is_set():
         return None
@@ -185,7 +185,8 @@ def mtx_one(inv, cookies, headers):
         'trim': inv.get('trim'),
     }
     try:
-        body = fetch_manheim_transactions(veh, cookies, headers, timeout=25)
+        body = fetch_manheim_transactions(veh, cookies, headers,
+                                          appraisal_id=appraisal_id, timeout=25)
         return {'inv': inv, 'mtx': body, 'err': None}
     except RBVAutoAuthError as e:
         _auth_failed.set()
@@ -597,7 +598,7 @@ def main():
         log.info('phase 2: ManheimTransactions sweep, concurrency=%d', args.mmr_concurrency)
         t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=args.mmr_concurrency) as pool:
-            futs = {pool.submit(mtx_one, inv, cookies, headers): inv for inv in inv_list}
+            futs = {pool.submit(mtx_one, inv, cookies, headers, appraisal_id): inv for inv in inv_list}
             for fut in as_completed(futs):
                 r = fut.result()
                 if r is None:

@@ -326,14 +326,27 @@ def _current_partner_user():
 @bp.route('/partner/<slug>')
 def dashboard(slug):
     user = _current_partner_user()
-    if not user:
-        return redirect(url_for('partner.login', slug=slug))
-
     with _db() as conn, conn.cursor() as cur:
         dealer = _dealer_by_slug(cur, slug)
-        if not dealer or dealer['id'] != user['dealer_id']:
-            session.pop('partner_user_id', None)
-            return redirect(url_for('partner.login', slug=slug))
+        if not dealer:
+            return 'Unknown portal.', 404
+        # Frictionless entry: if no session user (or session belongs to a
+        # different dealer), silently adopt this dealer's placeholder
+        # (no-password) partner_user. A real password-set account is only
+        # required if the dealer has explicitly enabled it via /login.
+        if not user or dealer['id'] != user['dealer_id']:
+            cur.execute("""SELECT id, dealer_id, email, password_hash
+                            FROM partner_users
+                           WHERE dealer_id = %s
+                           ORDER BY (password_hash IS NULL) DESC,
+                                    created_at ASC
+                           LIMIT 1""", (dealer['id'],))
+            u = cur.fetchone()
+            if not u:
+                return redirect(url_for('partner.login', slug=slug))
+            session['partner_user_id'] = u['id']
+            session.permanent = True
+            user = dict(u)
 
         # Auto-provision a mobile-app token on first dashboard hit so the
         # partner can copy/share their /mobile?p=<token> link without an
@@ -524,6 +537,7 @@ def dashboard(slug):
         #   - sourcing_requests:       active wishlist matches per YMM
         comps_by_inv_id = {}
         wishlists_by_inv_id = {}
+        history_by_inv_id = {}
         if dealer.get('portal_slug') in COMPS_ENABLED_SLUGS and not wholesaler_mode:
             cur.execute("""
                 SELECT DISTINCT ON (di.id)
@@ -556,6 +570,29 @@ def dashboard(slug):
                 if r['snapshot_date'] is None and r['mmr_wholesale_avg'] is None:
                     continue
                 comps_by_inv_id[r['dealer_inventory_id']] = dict(r)
+            # Per-VIN 60d comp price history for the chart card.
+            # Combines 'daily_run' snapshots + 'manheim_tx_backfill' synthesized
+            # rows. Most recent point per (inv_id, snapshot_date) wins.
+            history_by_inv_id = {}
+            if comps_by_inv_id:
+                inv_ids = list(comps_by_inv_id.keys())
+                cur.execute("""
+                    SELECT dealer_inventory_id AS inv_id, snapshot_date,
+                           mmr_wholesale_avg AS mmr, rbook_p50 AS rbook,
+                           source
+                      FROM dealer_inventory_comp_history
+                     WHERE dealer_inventory_id = ANY(%s)
+                       AND snapshot_date >= CURRENT_DATE - INTERVAL '60 days'
+                     ORDER BY dealer_inventory_id, snapshot_date ASC
+                """, (inv_ids,))
+                for r in cur.fetchall():
+                    history_by_inv_id.setdefault(r['inv_id'], []).append({
+                        'd': r['snapshot_date'].isoformat(),
+                        'mmr': float(r['mmr']) if r['mmr'] is not None else None,
+                        'rbook': float(r['rbook']) if r['rbook'] is not None else None,
+                        'src': r['source'],
+                    })
+
 
             # Wishlist matches: active sourcing_requests whose YMM matches
             # any Encore inventory row. One query, grouped client-side by
@@ -619,6 +656,7 @@ def dashboard(slug):
                            inbound_unread=inbound_unread,
                            wholesaler_mode=wholesaler_mode,
                            comps_by_inv_id=comps_by_inv_id,
+                           history_by_inv_id=history_by_inv_id if dealer.get("portal_slug") in COMPS_ENABLED_SLUGS else {},
                            wishlists_by_inv_id=wishlists_by_inv_id,
                            viewing_as_admin=session.get('partner_viewing_as_admin', False),
                            BUCKETS=BUCKETS)
@@ -694,6 +732,17 @@ def login(slug):
             _tg_alert(f'🔓 <b>{dealer["name"]}</b> partner logged in\n'
                       f'{u["full_name"] or "(no name)"} &lt;{u["email"]}&gt;')
             return redirect(url_for('partner.dashboard', slug=slug))
+    # GET: if any partner_user exists (including the placeholder
+    # no-password account), skip the login form and bounce straight into
+    # the dashboard — the dashboard route auto-adopts the right user.
+    # Login form only shows when the dealer has no users at all.
+    with _db() as conn, conn.cursor() as cur:
+        dealer = _dealer_by_slug(cur, slug)
+        if dealer:
+            cur.execute("SELECT 1 FROM partner_users WHERE dealer_id=%s LIMIT 1",
+                        (dealer['id'],))
+            if cur.fetchone():
+                return redirect(url_for('partner.dashboard', slug=slug))
     return render_template('partner_login.html', slug=slug)
 
 

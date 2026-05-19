@@ -1133,82 +1133,25 @@
               </div>
               {% endif %}
 
-              {# ── Top-line ask + headroom strip ── #}
-              <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:8px;margin-bottom:10px">
-                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
-                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">Your asking</div>
-                  <div style="font-size:15px;color:#fbbf24;font-weight:700;font-family:ui-monospace,monospace">{% if _ask %}${{ '{:,.0f}'.format(_ask) }}{% else %}&mdash;{% endif %}</div>
-                  {% if v.price_drop_amount %}
-                    <div style="font-size:10px;color:#a78bfa">&#8595; ${{ '{:,.0f}'.format(v.price_drop_amount) }} drop</div>
-                  {% endif %}
+              {# ── Comp price history chart (MMR + rBook) ── #}
+              {% set _hist = history_by_inv_id.get(v.id, []) %}
+              <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:10px 12px;margin-bottom:8px">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+                  <div style="display:flex;gap:14px;align-items:center;font-size:11px">
+                    <span style="color:#a78bfa;font-weight:700;letter-spacing:.5px">● MMR</span>
+                    <span style="color:#3b82f6;font-weight:700;letter-spacing:.5px">● rBook</span>
+                  </div>
+                  <div style="font-size:10px;color:#64748b;letter-spacing:.5px;text-transform:uppercase">Last 30 days</div>
                 </div>
-                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
-                  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">vs MMR Wholesale</div>
-                  <div style="font-size:15px;color:{% if _pct_under_mmr is none %}#94a3b8{% elif _pct_under_mmr >= 0 %}#34d399{% else %}#f87171{% endif %};font-weight:700;font-family:ui-monospace,monospace">{% if _pct_under_mmr is not none %}{{ '%.1f'|format(_pct_under_mmr|abs) }}% {% if _pct_under_mmr >= 0 %}under{% else %}over{% endif %}{% else %}&mdash;{% endif %}</div>
-                  <div style="font-size:10px;color:#64748b">MMR ${{ '{:,.0f}'.format(_mmr_w) if _mmr_w else '—' }}</div>
-                </div>
-                <div style="background:#0b1220;border:1px solid #1e293b;border-radius:8px;padding:6px 10px">
-                  {% if _rbook_headroom is not none %}
-                    <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">vs rBook P50</div>
-                    <div style="font-size:15px;color:{% if _rbook_headroom >= 0 %}#34d399{% else %}#f87171{% endif %};font-weight:700;font-family:ui-monospace,monospace">{% if _rbook_headroom >= 0 %}+${{ '{:,.0f}'.format(_rbook_headroom) }}{% else %}-${{ '{:,.0f}'.format(_rbook_headroom|abs) }}{% endif %}</div>
-                    <div style="font-size:10px;color:#64748b">{% if _rbook_headroom >= 0 %}headroom{% else %}over retail{% endif %} &middot; P50 ${{ '{:,.0f}'.format(_p50) }}</div>
-                  {% elif _mmr_retail_headroom is not none %}
-                    <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">vs MMR Retail</div>
-                    <div style="font-size:15px;color:{% if _mmr_retail_headroom >= 0 %}#34d399{% else %}#f87171{% endif %};font-weight:700;font-family:ui-monospace,monospace">{% if _mmr_retail_headroom >= 0 %}+${{ '{:,.0f}'.format(_mmr_retail_headroom) }}{% else %}-${{ '{:,.0f}'.format(_mmr_retail_headroom|abs) }}{% endif %}</div>
-                    <div style="font-size:10px;color:#64748b">{% if _mmr_retail_headroom >= 0 %}headroom{% else %}over retail{% endif %} &middot; Retail ${{ '{:,.0f}'.format(_retail) }}</div>
-                  {% else %}
-                    <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px">vs Retail</div>
-                    <div style="font-size:15px;color:#94a3b8;font-family:ui-monospace,monospace">&mdash;</div>
-                    <div style="font-size:10px;color:#64748b">no comps yet</div>
-                  {% endif %}
-                </div>
-              </div>
-
-              {# ── MMR section ── #}
-              <div style="display:flex;flex-wrap:wrap;gap:14px;padding:8px 10px;margin-bottom:8px;background:#0b1220;border:1px solid #1e293b;border-left:3px solid #a78bfa;border-radius:6px;font-size:12px;align-items:center">
-                <div style="font-size:10px;color:#a78bfa;font-weight:700;letter-spacing:.5px;text-transform:uppercase;flex:0 0 50px" title="Manheim Market Report — auction-based valuations">MMR</div>
-                <div><span style="color:#64748b">Wholesale Avg</span> <b style="color:#e5e7eb">{% if _mmr_w %}${{ '{:,.0f}'.format(_mmr_w) }}{% else %}&mdash;{% endif %}</b></div>
-                <div title="Manheim's modeled retail estimate (algorithmic, not real listings — see rBook below for live retail asks)"><span style="color:#64748b">Retail Avg</span> <b style="color:#e5e7eb">{% if _retail %}${{ '{:,.0f}'.format(_retail) }}{% else %}&mdash;{% endif %}</b></div>
-                <div><span style="color:#64748b">Retail Low</span> <b style="color:#e5e7eb">{% if _retail_low %}${{ '{:,.0f}'.format(_retail_low) }}{% else %}&mdash;{% endif %}</b></div>
-                <div title="Average condition grade of the units in MMR's comp set (1=worst, 5=best)"><span style="color:#64748b">Grade</span> <b style="color:#c4b5fd">{% if _grade %}{{ _grade }}{% else %}&mdash;{% endif %}</b></div>
-                <div title="Count of comparable auction sales returned in the most recent MMR pull for this VIN"><span style="color:#64748b">Comp units</span> <b style="color:#e5e7eb">{% if _mmr_n %}{{ _mmr_n }}{% else %}&mdash;{% endif %}</b>{% if _mtx_window %}<span style="color:#475569"> &middot; {{ _mtx_window }}d window</span>{% endif %}</div>
-                {% if _c.mmr_fetched_at %}<div style="color:#475569;font-size:10px" title="When this MMR value was last pulled from Manheim">pulled {{ _c.mmr_fetched_at.strftime('%b %d') if _c.mmr_fetched_at.strftime is defined else _c.mmr_fetched_at }}</div>{% endif %}
-                <div style="flex-basis:100%;margin-top:4px;padding-top:6px;border-top:1px dashed #1e293b">
-                  <span style="color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Last MMR sale{% if _last_close %} (similar miles){% endif %}</span>
-                  {% if _last_sale %}
-                    <b style="color:#fef3c7;margin-left:6px">${{ '{:,.0f}'.format(_last_sale.sale_price) }}</b>
-                    {% if _last_sale.odometer %}<span style="color:#94a3b8"> &middot; {{ '{:,.0f}'.format(_last_sale.odometer) }} mi</span>{% endif %}
-                    <span style="color:#94a3b8"> &middot; {{ _last_sale.date_sold[:10] if _last_sale.date_sold else '—' }}</span>
-                    {% if _last_sale.region %}<span style="color:#475569"> &middot; {{ _last_sale.region }}</span>{% endif %}
-                    {% if _last_sale.condition %}<span style="color:#475569"> &middot; grade {{ _last_sale.condition }}</span>{% endif %}
-                  {% else %}
-                    <span style="color:#475569;margin-left:6px;font-style:italic">&mdash; populates after next live MMR pull</span>
-                  {% endif %}
-                </div>
-              </div>
-
-              {# ── rBook section ── #}
-              <div style="display:flex;flex-wrap:wrap;gap:14px;padding:8px 10px;margin-bottom:8px;background:#0b1220;border:1px solid #1e293b;border-left:3px solid #3b82f6;border-radius:6px;font-size:12px;align-items:center">
-                <div style="font-size:10px;color:#3b82f6;font-weight:700;letter-spacing:.5px;text-transform:uppercase;flex:0 0 50px">rBook</div>
-                {% if _p25 or _p50 or _rb_p75 %}
-                  <div><span style="color:#64748b">P25</span> <b style="color:#e5e7eb">{% if _p25 %}${{ '{:,.0f}'.format(_p25) }}{% else %}&mdash;{% endif %}</b></div>
-                  <div><span style="color:#64748b">P50</span> <b style="color:#e5e7eb">{% if _p50 %}${{ '{:,.0f}'.format(_p50) }}{% else %}&mdash;{% endif %}</b></div>
-                  <div><span style="color:#64748b">P75</span> <b style="color:#e5e7eb">{% if _rb_p75 %}${{ '{:,.0f}'.format(_rb_p75) }}{% else %}&mdash;{% endif %}</b></div>
-                  {% if _c.rbook_comp_count %}<div><span style="color:#64748b">Comps</span> <b style="color:#e5e7eb">{{ _c.rbook_comp_count }}</b></div>{% endif %}
-                  {% if _mkt_dol is not none %}<div><span style="color:#64748b">Median DOL</span> <b style="color:#0ea5e9">{{ _mkt_dol }}d</b></div>{% endif %}
-                  {% if _rb_avg_dol %}<div><span style="color:#64748b">Avg DOL</span> <b style="color:#0ea5e9">{{ '%.0f'|format(_rb_avg_dol) }}d</b></div>{% endif %}
+                {% if _hist %}
+                  <div class="comp-chart" id="chart-{{ v.id }}"
+                       data-series='{{ _hist|tojson }}'
+                       style="height:120px;position:relative"></div>
                 {% else %}
-                  <div style="color:#64748b;font-style:italic">No retail comps yet &middot; fills at next 10:30 ET refresh.</div>
+                  <div style="height:120px;display:flex;align-items:center;justify-content:center;color:#475569;font-size:11px;font-style:italic">
+                    History accumulating &middot; chart fills as daily snapshots stack up
+                  </div>
                 {% endif %}
-              </div>
-
-              {# ── Trends: price (own asking vs MMR) ── #}
-              <div style="display:flex;flex-wrap:wrap;align-items:center;margin-bottom:4px">
-                <span style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-right:8px">Price trend</span>
-                {{ _trendchip('7d',  _c.price_trend_7d) }}
-                {{ _trendchip('14d', _c.price_trend_14d) }}
-                {{ _trendchip('30d', _c.price_trend_30d) }}
-                {{ _trendchip('60d', _c.price_trend_60d) }}
               </div>
 
             </td>
@@ -1574,6 +1517,127 @@ setInterval(() => {
   _snapshotDetailsState();
   location.reload();
 }, 30 * 1000);
+</script>
+<script>
+(function(){
+  function fmt(n){ return '$' + Math.round(n).toLocaleString(); }
+  function draw(container, series, windowDays){
+    var cutoff = new Date(); cutoff.setDate(cutoff.getDate() - windowDays);
+    var pts = series.filter(function(p){ return new Date(p.d) >= cutoff; });
+    var mmr   = pts.filter(function(p){ return p.mmr   != null; }).map(function(p){ return {x:new Date(p.d).getTime(), y:p.mmr}; });
+    var rbook = pts.filter(function(p){ return p.rbook != null; }).map(function(p){ return {x:new Date(p.d).getTime(), y:p.rbook}; });
+    var all = mmr.concat(rbook);
+    container.innerHTML = '';
+    if(!all.length){
+      container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#475569;font-size:11px;font-style:italic">No data in last ' + windowDays + ' days</div>';
+      return;
+    }
+    var W = container.clientWidth || 600, H = 120, padL=46, padR=8, padT=8, padB=18;
+    var xMin = Math.min.apply(null, all.map(function(p){return p.x;}));
+    var xMax = Math.max.apply(null, all.map(function(p){return p.x;}));
+    if(xMin === xMax){ xMin -= 86400000; xMax += 86400000; }
+    var yMin = Math.min.apply(null, all.map(function(p){return p.y;}));
+    var yMax = Math.max.apply(null, all.map(function(p){return p.y;}));
+    var yPad = (yMax - yMin) * 0.1 || yMax * 0.05 || 1000;
+    yMin -= yPad; yMax += yPad;
+    function sx(x){ return padL + (x - xMin)/(xMax-xMin) * (W - padL - padR); }
+    function sy(y){ return padT + (1 - (y - yMin)/(yMax-yMin)) * (H - padT - padB); }
+    function pathOf(arr){
+      if(!arr.length) return '';
+      return arr.map(function(p,i){ return (i?'L':'M') + sx(p.x).toFixed(1) + ',' + sy(p.y).toFixed(1); }).join(' ');
+    }
+    function dotsOf(arr, color, label){
+      return arr.map(function(p){ return '<circle class="comp-dot" cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) + '" r="4" fill="' + color + '" stroke="#0b1220" stroke-width="1" data-x="' + p.x + '" data-y="' + p.y + '" data-label="' + label + '" style="cursor:pointer"/>'; }).join('');
+    }
+    // y-axis ticks (3 lines)
+    var ticks = [yMin + (yMax-yMin)*0.15, (yMin+yMax)/2, yMin + (yMax-yMin)*0.85];
+    var grid = ticks.map(function(t){
+      var y = sy(t).toFixed(1);
+      return '<line x1="' + padL + '" y1="' + y + '" x2="' + (W-padR) + '" y2="' + y + '" stroke="#1e293b" stroke-dasharray="2,3"/>' +
+             '<text x="' + (padL-4) + '" y="' + (parseFloat(y)+3) + '" fill="#cbd5e1" font-size="10" text-anchor="end" font-family="ui-monospace,monospace">' + fmt(t) + '</text>';
+    }).join('');
+    // x-axis date labels (start + end)
+    var d0 = new Date(xMin), d1 = new Date(xMax);
+    function dlbl(d){ return (d.getMonth()+1) + '/' + d.getDate(); }
+    var svg = '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block;overflow:visible">' +
+              grid +
+              '<path d="' + pathOf(mmr)   + '" fill="none" stroke="#a78bfa" stroke-width="1.8" stroke-dasharray="5,3"/>' +
+              '<path d="' + pathOf(rbook) + '" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-dasharray="5,3"/>' +
+              dotsOf(mmr, '#a78bfa', 'MMR') + dotsOf(rbook, '#3b82f6', 'rBook') +
+              '<text x="' + padL + '" y="' + (H-4) + '" fill="#cbd5e1" font-size="10">' + dlbl(d0) + '</text>' +
+              '<text x="' + (W-padR) + '" y="' + (H-4) + '" fill="#cbd5e1" font-size="10" text-anchor="end">' + dlbl(d1) + '</text>' +
+              '</svg>';
+    container.innerHTML = svg;
+  }
+  function redraw(invId, w){
+    var el = document.getElementById('chart-' + invId);
+    if(!el) return;
+    var series;
+    try{ series = JSON.parse(el.getAttribute('data-series')); } catch(e){ return; }
+    draw(el, series, w);
+  }
+  function showDotTip(dot){
+    var host = dot.closest('.comp-chart');
+    if(!host) return;
+    var t = host.querySelector('.comp-tip');
+    if(!t){
+      t = document.createElement('div');
+      t.className = 'comp-tip';
+      t.style.cssText = 'position:absolute;padding:4px 8px;background:#0f172a;border:1px solid #334155;border-radius:4px;color:#e5e7eb;font-size:11px;font-family:ui-monospace,monospace;pointer-events:none;white-space:nowrap;z-index:20;box-shadow:0 2px 8px rgba(0,0,0,.5)';
+      host.appendChild(t);
+    }
+    var label = dot.getAttribute('data-label');
+    var price = parseFloat(dot.getAttribute('data-y'));
+    var d = new Date(parseInt(dot.getAttribute('data-x'),10));
+    t.innerHTML = '<span style="color:' + dot.getAttribute('fill') + '">●</span> ' + label + ' · <b>' + ('$' + Math.round(price).toLocaleString()) + '</b> · ' + (d.getMonth()+1) + '/' + d.getDate() + '/' + String(d.getFullYear()).slice(-2);
+    var hostRect = host.getBoundingClientRect();
+    var dotRect = dot.getBoundingClientRect();
+    var left = dotRect.left - hostRect.left + dotRect.width/2;
+    var top  = dotRect.top  - hostRect.top  - 26;
+    t.style.left = Math.max(4, Math.min(hostRect.width - 140, left - 60)) + 'px';
+    t.style.top  = Math.max(0, top) + 'px';
+    t.style.display = 'block';
+  }
+  function hideDotTip(dot){
+    var host = dot.closest('.comp-chart');
+    if(!host) return;
+    var t = host.querySelector('.comp-tip');
+    if(t) t.style.display = 'none';
+  }
+  document.addEventListener('mouseover', function(e){
+    var dot = e.target.closest && e.target.closest('.comp-dot');
+    if(dot) showDotTip(dot);
+  });
+  document.addEventListener('mouseout', function(e){
+    var dot = e.target.closest && e.target.closest('.comp-dot');
+    if(dot) hideDotTip(dot);
+  });
+  document.addEventListener('click', function(e){
+    var b = e.target.closest && e.target.closest('.chart-tabs button');
+    if(!b) return;
+    var tabs = b.parentElement;
+    var invId = tabs.getAttribute('data-inv');
+    tabs.querySelectorAll('button').forEach(function(x){
+      x.style.background = 'transparent'; x.style.color = '#64748b'; x.style.borderColor = '#1e293b';
+      x.removeAttribute('data-active');
+    });
+    b.style.background = '#1e293b'; b.style.color = '#cbd5e1'; b.style.borderColor = '#334155';
+    b.setAttribute('data-active','1');
+    redraw(invId, parseInt(b.getAttribute('data-w'),10));
+  });
+  function initAll(){
+    document.querySelectorAll('.comp-chart').forEach(function(el){
+      var invId = el.id.replace('chart-','');
+      redraw(invId, 30);
+    });
+  }
+  if(document.readyState !== 'loading') initAll();
+  else document.addEventListener('DOMContentLoaded', initAll);
+  // also re-init when <details> opens
+  document.addEventListener('toggle', function(e){
+    if(e.target && e.target.tagName === 'DETAILS' && e.target.open) initAll();
+  }, true);
+})();
 </script>
 </body>
 </html>

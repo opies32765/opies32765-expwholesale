@@ -122,7 +122,9 @@ import json as _pa_json
 
 
 def _pa_find_pending_verify_bids(cur, phone, hours=24):
-    """Return list of dicts for verify-pending bids in last N hours."""
+    """Return list of dicts for verify-pending bids in last N hours.
+    Kept for back-compat with legacy callers; new code should call
+    _pa_find_open_bids() below."""
     cur.execute("""
         SELECT id, year, make, model, vin, mileage,
                needs_verification_reason AS reason,
@@ -136,6 +138,62 @@ def _pa_find_pending_verify_bids(cur, phone, hours=24):
          ORDER BY id DESC
     """, (phone, hours))
     return [dict(r) for r in cur.fetchall()]
+
+
+def _pa_find_open_bids(cur, phone, hours=24):
+    """ASK_EVERY_TIME_2026_05_18: return all non-finalized bids for a phone
+    so the routing layer can ask the customer which one a new inbound is
+    for. A bid is "open" while phase2/phase3 acks have not been sent — once
+    finalized, the bid drops out of this list and future inbounds spawn a
+    fresh bid (FINALIZED = locked rule)."""
+    cur.execute("""
+        SELECT id, year, make, model, vin, mileage,
+               needs_verification_reason AS reason,
+               needs_verification_at,
+               needs_verification_cleared_at,
+               miles_carfax,
+               miles_discrepancy,
+               phase2_notified_at,
+               phase3_notified_at,
+               status,
+               COALESCE(asking_price, 0) AS asking_price,
+               created_at,
+               updated_at
+          FROM bids
+         WHERE phone = %s
+           AND phase2_notified_at IS NULL
+           AND phase3_notified_at IS NULL
+           AND COALESCE(status, '') NOT IN
+               ('cancelled', 'archived', 'dead', 'duplicate')
+           AND created_at > NOW() - (INTERVAL '1 hour' * %s)
+         ORDER BY id DESC
+    """, (phone, hours))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def _pa_outstanding_needs(bid_row):
+    """ASK_EVERY_TIME_2026_05_18: build the "still need" sentence used in
+    the YES-branch acknowledgement. Returns None if the bid has everything
+    it needs from the customer (workers will produce the offer)."""
+    needs = []
+    vin = (bid_row.get('vin') or '').strip()
+    if not vin or len(vin) != 17:
+        needs.append('the 17-character VIN')
+    if not bid_row.get('mileage'):
+        needs.append('the current mileage')
+    reason = (bid_row.get('needs_verification_reason') or '').lower()
+    cleared = bid_row.get('needs_verification_cleared_at') is not None
+    if not cleared and ('miles_discrepancy' in reason
+                        or 'miles_mismatch' in reason):
+        carfax = bid_row.get('miles_carfax')
+        if carfax:
+            needs.append(f'confirmation the odometer is around '
+                         f'{int(carfax):,} mi (what Carfax shows)')
+    if not needs:
+        return None
+    if len(needs) == 1:
+        return needs[0]
+    return ', '.join(needs[:-1]) + f', and {needs[-1]}'
 
 
 def _pa_format_ymm(b):
@@ -314,12 +372,30 @@ def _pa_handle_reply(cur, phone, body, intake_log_id):
 
     if verdict == 'yes' and len(cands) == 1:
         target = cands[0]
-        ok = _pa_resolve_to_bid(cur, pa['id'], target['bid_id'],
-                                'user_yes', f'YMM={target.get("ymm")}')
+        _pa_resolve_to_bid(cur, pa['id'], target['bid_id'],
+                           'user_yes', f'YMM={target.get("ymm")}')
         _finalize_sms_intake(cur, intake_log_id, 'pa_resolved',
                              bid_id=target['bid_id'],
                              reason=f'pending_attach #{pa["id"]} resolved YES to bid {target["bid_id"]}')
-        return _xml(f"Got it — attached to your {target.get('ymm')}. Thanks!")
+        # ASK_EVERY_TIME_2026_05_18: confirm stitch + tell customer what's
+        # still outstanding so they know what to send next.
+        cur.execute("""
+            SELECT vin, mileage, needs_verification_reason,
+                   needs_verification_cleared_at, miles_carfax,
+                   miles_discrepancy
+              FROM bids WHERE id = %s
+        """, (target['bid_id'],))
+        _bid_row = cur.fetchone()
+        _needs = _pa_outstanding_needs(_bid_row) if _bid_row else None
+        if _needs:
+            return _xml(
+                f"Got it on bid #{target['bid_id']} — {target.get('ymm')}. "
+                f"Still need {_needs}. Reply with the value or send a clear "
+                f"photo and we'll keep going.")
+        return _xml(
+            f"Got it on bid #{target['bid_id']}. "
+            f"We have everything we need at the moment. "
+            f"Please standby.")
     if verdict == 'choice':
         # Letter -> index
         idx = ord(choice) - ord('A')
@@ -337,21 +413,111 @@ def _pa_handle_reply(cur, phone, body, intake_log_id):
                     ', '.join(f"{c.get('letter')}={c.get('ymm')}"
                               for c in cands))
     if verdict in ('no', 'new'):
-        # User says it's something else. Mark resolved as 'user_new' and
-        # tell them to send fresh.
+        # ASK_EVERY_TIME_2026_05_18: customer said this inbound is for a
+        # NEW vehicle, not the open bid we asked about. Replay the staged
+        # data from the pending_attach (photos, VIN, miles, body) into a
+        # fresh bid so the customer doesn't have to re-send. Prevents the
+        # 1791 orphan-photo scenario where NO created no bid and the
+        # customer had to send everything again.
         cur.execute("""UPDATE pending_attach
                           SET resolved_at = NOW(),
                               resolved_by = %s,
-                              resolved_note = 'user said no/new'
+                              resolved_note = 'user said no/new — spawning new bid from staged data'
                         WHERE id = %s AND resolved_at IS NULL""",
                     ('user_new', pa['id']))
-        _finalize_sms_intake(cur, intake_log_id, 'pa_user_no',
-                             reason=f'pending_attach #{pa["id"]} answered NO/NEW')
-        return _xml("No problem — please re-send the VIN, miles, "
-                    "or photo for the correct vehicle and we'll set it "
-                    "up. If it's for an existing bid, prefix with the "
-                    "bid number like #1234.")
+        new_bid_id = None
+        try:
+            new_bid_id = _pa_spawn_bid_from_staged(cur, pa, phone,
+                                                    intake_log_id)
+        except Exception as _spe:
+            print(f'[pa-handle-no] spawn err pa={pa["id"]}: '
+                  f'{type(_spe).__name__}: {_spe}', flush=True)
+        if new_bid_id:
+            _finalize_sms_intake(
+                cur, intake_log_id, 'pa_user_no',
+                bid_id=new_bid_id,
+                reason=f'pending_attach #{pa["id"]} answered NO/NEW; '
+                       f'spawned bid #{new_bid_id} from staged data')
+            return _xml(
+                f"Got it — opening a new bid (#{new_bid_id}) from what you "
+                f"just sent. Working on it now. Standby!")
+        # Fallback if spawn failed for any reason — keep customer informed
+        # without telling them to re-send (they already sent everything).
+        _finalize_sms_intake(
+            cur, intake_log_id, 'pa_user_no',
+            reason=f'pending_attach #{pa["id"]} answered NO/NEW; '
+                   f'spawn failed, fallback ask')
+        return _xml(
+            "Got it — that's a new vehicle. Send me a VIN, miles, or a "
+            "clear photo when you can and we'll set it up.")
     return None
+
+
+def _pa_spawn_bid_from_staged(cur, pa, from_phone, intake_log_id):
+    """ASK_EVERY_TIME_2026_05_18: create a fresh bid from a pending_attach
+    that the customer answered NO/NEW to. Uses the staged media/VIN/miles
+    so the customer doesn't have to re-send. Returns new bid_id or None
+    on failure.
+
+    Mirrors the new-bid creation block in twilio_webhook() but is
+    self-contained — driven by pa staged data, not request.form."""
+    import secrets as _secrets
+    body = pa.get('body') or ''
+    parsed_vin = pa.get('parsed_vin')
+    parsed_miles = pa.get('parsed_miles')
+
+    media_urls = pa.get('media_urls') or []
+    media_types = pa.get('media_types') or []
+    if isinstance(media_urls, str):
+        try: media_urls = _pa_json.loads(media_urls)
+        except Exception: media_urls = []
+    if isinstance(media_types, str):
+        try: media_types = _pa_json.loads(media_types)
+        except Exception: media_types = []
+
+    bidder = _lookup_bidder(cur, from_phone)
+    is_unknown = (bidder['kind'] == 'unknown'
+                  and not _is_full_broker_phone(from_phone))
+    initial_status = 'awaiting_name' if is_unknown else 'new'
+    driver_token = _secrets.token_urlsafe(8)[:12]
+    contact_id = bidder.get('contact_id')
+
+    cur.execute("""
+        INSERT INTO bids (contact_id, phone, vin, mileage, raw_message,
+                          status, driver_token, driver_phone,
+                          bidder_name, partner_dealer_id,
+                          awaiting_name, name_asked_at,
+                          creation_source)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s,
+                CASE WHEN %s THEN NOW() ELSE NULL END,
+                'pa_no_spawn')
+        RETURNING id
+    """, (contact_id, from_phone, parsed_vin, parsed_miles, body,
+          initial_status, driver_token, from_phone,
+          bidder.get('name'), bidder.get('partner_dealer_id'),
+          is_unknown, is_unknown))
+    new_bid_id = cur.fetchone()['id']
+
+    if body:
+        cur.execute("""
+            INSERT INTO bid_messages (bid_id, direction, message, from_phone)
+            VALUES (%s, 'inbound', %s, %s)
+        """, (new_bid_id, body, from_phone))
+
+    for i, url in enumerate(media_urls):
+        mt = media_types[i] if i < len(media_types) else 'image/jpeg'
+        try:
+            _ingest_sms_photo(cur, new_bid_id, url, mt,
+                              from_phone=from_phone)
+        except Exception as _ie:
+            print(f'[pa-spawn] photo ingest err bid={new_bid_id}: {_ie}',
+                  flush=True)
+
+    print(f'[pa-spawn] pa={pa["id"]} -> new bid #{new_bid_id} '
+          f'(vin={parsed_vin!r} miles={parsed_miles} photos={len(media_urls)})',
+          flush=True)
+    return new_bid_id
 
 
 def _pa_create_and_ask(cur, phone, body, num_media, media_urls,
@@ -380,16 +546,21 @@ def _pa_create_and_ask(cur, phone, body, num_media, media_urls,
     if num_media:        got_what.append(f"{num_media} photo{'s' if num_media!=1 else ''}")
     got_str = " and ".join(got_what) if got_what else "your message"
 
+    # ASK_EVERY_TIME_2026_05_18: lead the prompt with the bid # so the
+    # customer has an explicit handle for the vehicle in question. We
+    # never ask them to TYPE "#1792" — that routing is removed — but the
+    # bid # is the clearest mental label when they have multiple in flight.
     if n == 1:
         c = cands[0]
         q = (f"Hey, its the EW Bot. Got {got_str}. "
-             f"Confirming this is for the {c['ymm']} we got from you "
-             f"earlier — reply YES or NO.")
+             f"Is this for bid #{c['bid_id']} on the {c['ymm']}? "
+             f"Reply YES or NO.")
     else:
-        opts = '\n'.join(f"{c['letter']} = {c['ymm']}" for c in cands)
+        opts = '\n'.join(f"{c['letter']} = bid #{c['bid_id']} {c['ymm']}"
+                         for c in cands)
         q = (f"Hey, its the EW Bot. Got {got_str}. "
              f"Which vehicle is this for?\n{opts}\n"
-             f"Reply with the letter.")
+             f"Reply with the letter (or NEW for a different vehicle).")
 
     # Insert pending_attach row FIRST so concurrent reply finds it
     cur.execute("""
@@ -3226,214 +3397,13 @@ def twilio_webhook():
         except Exception:
             pass
 
-    # ── #BIDNUMBER SMS attach (added 2026-05-14) ──
-    # Whitelisted operators (in `contacts` table) can text "#1394" to route
-    # photos to a specific bid. Opens a 2-minute sliding window that auto-
-    # refreshes on each new photo. Photos arriving with no #bid but an
-    # active context still route to that bid. Strictly additive to webhook
-    # entry; falls through to existing logic when not applicable.
-    import re as _re_hb
-    _HB_RE = _re_hb.compile(r"#\s*(\d{2,6})\b")
-    _hb_match = _HB_RE.search(body) if body else None
-    _hb_phone_norm = _re_hb.sub(r"[^0-9]", "", from_phone or "")
-    _hb_whitelisted = False
-    if _hb_phone_norm:
-        try:
-            cur.execute("""SELECT 1 FROM contacts
-                            WHERE regexp_replace(phone, '[^0-9]', '', 'g') = %s
-                            LIMIT 1""", (_hb_phone_norm,))
-            _hb_whitelisted = cur.fetchone() is not None
-        except Exception as _hb_e:
-            print(f"[#bid] whitelist check error: {_hb_e}", flush=True)
-            try: db.rollback()
-            except Exception: pass
-            _hb_whitelisted = False
-
-    def _hb_attach_photos(target_bid_id):
-        """Ingest all media_urls from this MMS into target_bid_id. Returns count."""
-        n = 0
-        for i, media_url in enumerate(_media_urls):
-            mt = request.form.get(f"MediaContentType{i}", "image/jpeg")
-            if not mt.startswith("image/"):
-                continue
-            try:
-                _ingest_sms_photo(cur, target_bid_id, media_url, mt, from_phone=from_phone)
-                n += 1
-            except Exception as _ie:
-                print(f"[#bid] photo ingest error bid={target_bid_id}: {_ie}", flush=True)
-        return n
-
-    def _hb_xml_reply(text):
-        from html import escape as _esc
-        return ('<?xml version="1.0" encoding="UTF-8"?><Response><Message>' +
-                _esc(text) + '</Message></Response>',
-                200, {'Content-Type': 'application/xml'})
-
-    # 1) Explicit "#1394" in body
-    # HASHBID_OWNER_UNLOCK_2026_05_16: also allow non-whitelisted phones
-    # to use #bid for their OWN bid (bids.phone = from_phone). Customers
-    # who reply to a verify SMS with "#1504 <photo>" should reach this
-    # path even though they're not in the operator contacts table.
-    _hb_is_owner = False
-    if _hb_match and not _hb_whitelisted:
-        try:
-            cur.execute("SELECT 1 FROM bids WHERE id=%s AND phone=%s LIMIT 1",
-                        (int(_hb_match.group(1)), from_phone))
-            _hb_is_owner = cur.fetchone() is not None
-        except Exception:
-            try: db.rollback()
-            except Exception: pass
-            _hb_is_owner = False
-    if _hb_match and (_hb_whitelisted or _hb_is_owner):
-        _hb_bid_id = int(_hb_match.group(1))
-        cur.execute("SELECT id, year, make, model FROM bids WHERE id = %s", (_hb_bid_id,))
-        _hb_bid = cur.fetchone()
-        if _hb_bid:
-            _hb_ymm = " ".join(str(x) for x in (_hb_bid.get("year"), _hb_bid.get("make"), _hb_bid.get("model")) if x).strip() or f"bid #{_hb_bid_id}"
-            _hb_ingested = _hb_attach_photos(_hb_bid_id)
-            cur.execute("""INSERT INTO sms_attach_context (from_phone, bid_id, expires_at)
-                            VALUES (%s, %s, NOW() + INTERVAL '2 minutes')
-                            ON CONFLICT (from_phone) DO UPDATE
-                            SET bid_id = EXCLUDED.bid_id,
-                                expires_at = EXCLUDED.expires_at,
-                                set_at = NOW()""", (from_phone, _hb_bid_id))
-            # HASHBID_RESIDUAL_2026_05_16: also parse VIN/miles from the
-            # text content AFTER stripping the "#NNNN" prefix. Lets a
-            # single message like "#1504 1504" set miles=1504 on bid 1504
-            # in one shot, instead of forcing the customer to send two
-            # separate messages.
-            _hb_residual = _HB_RE.sub("", body, count=1).strip() if body else ""
-            _hb_resid_vin = None
-            _hb_resid_miles = None
-            if _hb_residual:
-                _hb_resid_vin = extract_vin_from_text(_hb_residual)
-                _hb_resid_miles = extract_miles_from_text(_hb_residual,
-                                                          has_vin=bool(_hb_resid_vin))
-                if not _hb_resid_miles:
-                    import re as _re_resid
-                    _bm = _re_resid.search(r"\b(\d{3,6})\b", _hb_residual)
-                    if _bm:
-                        _n = int(_bm.group(1))
-                        if 100 <= _n <= 999999:
-                            _hb_resid_miles = _n
-            _hb_resid_applied = []
-            if _hb_resid_vin:
-                cur.execute(
-                    "UPDATE bids SET vin=%s, updated_at=NOW() "
-                    "WHERE id=%s AND (vin IS NULL OR vin='')",
-                    (_hb_resid_vin, _hb_bid_id))
-                if cur.rowcount > 0:
-                    _hb_resid_applied.append(f"vin={_hb_resid_vin}")
-            if _hb_resid_miles:
-                cur.execute(
-                    "UPDATE bids SET mileage=%s, updated_at=NOW() "
-                    "WHERE id=%s AND (mileage IS NULL OR mileage < %s)",
-                    (_hb_resid_miles, _hb_bid_id, _hb_resid_miles))
-                if cur.rowcount > 0:
-                    _hb_resid_applied.append(f"miles={_hb_resid_miles}")
-            # If we just filled a piece of data that had a verification
-            # flag open, clear it + force-reprocess (same logic that the
-            # SMS stitch + photo OCR paths use).
-            if _hb_resid_applied:
-                cur.execute("""SELECT needs_verification_at,
-                                       needs_verification_cleared_at,
-                                       needs_verification_reason
-                                  FROM bids WHERE id=%s""", (_hb_bid_id,))
-                _hb_vrow = cur.fetchone()
-                _hb_vreason = (_hb_vrow.get('needs_verification_reason') or '').lower() if _hb_vrow else ''
-                _hb_needs_clear = False
-                if _hb_resid_miles and 'missing_miles' in _hb_vreason:
-                    _hb_needs_clear = True
-                if _hb_resid_vin and any(k in _hb_vreason for k in (
-                        'missing_vin', 'vin_invalid', 'invalid_vin',
-                        'vin_not_found')):
-                    _hb_needs_clear = True
-                if (_hb_needs_clear and _hb_vrow.get('needs_verification_at')
-                        and not _hb_vrow.get('needs_verification_cleared_at')):
-                    cur.execute("""UPDATE bids
-                                       SET needs_verification_cleared_at = NOW(),
-                                           needs_verification_cleared_by = 'auto:hashbid_residual'
-                                     WHERE id = %s""", (_hb_bid_id,))
-                    cur.execute(
-                        "DELETE FROM ipacket_lookups WHERE bid_id=%s AND "
-                        "(looked_up_at IS NULL OR looked_up_at < NOW() - INTERVAL '5 minutes' "
-                        "OR not_available=true)", (_hb_bid_id,))
-                    cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s",
-                                (_hb_bid_id,))
-                    cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s",
-                                (_hb_bid_id,))
-                    cur.execute(
-                        "UPDATE bids SET vauto_claimed_by=NULL, "
-                        "vauto_claimed_at=NULL, ai_assessed_at=NULL, "
-                        "ai_price=NULL, ai_assessment=NULL, "
-                        "miles_audit_at=NULL WHERE id=%s",
-                        (_hb_bid_id,))
-                    print(f'[hashbid-residual] bid={_hb_bid_id} '
-                          f'applied={",".join(_hb_resid_applied)} '
-                          f'cleared verification + force-reprocess fired',
-                          flush=True)
-                else:
-                    print(f'[hashbid-residual] bid={_hb_bid_id} '
-                          f'applied={",".join(_hb_resid_applied)}', flush=True)
-
-            # Compose reply
-            _hb_extras = []
-            if _hb_ingested:
-                _hb_extras.append(f"{_hb_ingested} photo(s)")
-            if _hb_resid_vin:
-                _hb_extras.append(f"VIN {_hb_resid_vin}")
-            if _hb_resid_miles:
-                _hb_extras.append(f"{_hb_resid_miles:,} miles")
-            if _hb_extras:
-                _hb_reply = f"✓ Got {', '.join(_hb_extras)} on bid #{_hb_bid_id} ({_hb_ymm}). Window open 2 min for more."
-            else:
-                _hb_reply = f"📎 Ready — photos for next 2 min attach to bid #{_hb_bid_id} ({_hb_ymm})."
-            _finalize_sms_intake(cur, intake_log_id, "hashbid_attach",
-                                 bid_id=_hb_bid_id,
-                                 reason=f"#bid prefix matched bid {_hb_bid_id}; ingested {_hb_ingested} photos",
-                                 parsed_vin=None, parsed_miles=None)
-            db.commit()
-            db.close()
-            return _hb_xml_reply(_hb_reply)
-        else:
-            _finalize_sms_intake(cur, intake_log_id, "hashbid_not_found",
-                                 reason=f"#bid {_hb_bid_id} not found in bids table",
-                                 parsed_vin=None, parsed_miles=None)
-            db.commit()
-            db.close()
-            return _hb_xml_reply(f"Bid #{_hb_bid_id} not found.")
-
-    # 2) MMS with no #bid prefix but active context for this phone
-    # HASHBID_OWNER_UNLOCK_2026_05_16: also honor active context for any
-    # phone (the context is keyed by phone in sms_attach_context; if a
-    # row exists, this phone earned it by sending #bid earlier).
-    if num_media > 0 and not _hb_match:
-        try:
-            cur.execute("""SELECT bid_id FROM sms_attach_context
-                            WHERE from_phone = %s AND expires_at > NOW()
-                            LIMIT 1""", (from_phone,))
-            _hb_ctx = cur.fetchone()
-        except Exception:
-            _hb_ctx = None
-            try: db.rollback()
-            except Exception: pass
-        if _hb_ctx:
-            _hb_bid_id = _hb_ctx["bid_id"]
-            cur.execute("SELECT id, year, make, model FROM bids WHERE id = %s", (_hb_bid_id,))
-            _hb_bid = cur.fetchone()
-            if _hb_bid:
-                _hb_ymm = " ".join(str(x) for x in (_hb_bid.get("year"), _hb_bid.get("make"), _hb_bid.get("model")) if x).strip() or f"bid #{_hb_bid_id}"
-                _hb_ingested = _hb_attach_photos(_hb_bid_id)
-                cur.execute("""UPDATE sms_attach_context
-                                  SET expires_at = NOW() + INTERVAL '2 minutes'
-                                WHERE from_phone = %s""", (from_phone,))
-                _finalize_sms_intake(cur, intake_log_id, "hashbid_attach",
-                                     bid_id=_hb_bid_id,
-                                     reason=f"active #bid context routed {_hb_ingested} photos to bid {_hb_bid_id}",
-                                     parsed_vin=None, parsed_miles=None)
-                db.commit()
-                db.close()
-                return _hb_xml_reply(f"✓ {_hb_ingested} photo(s) attached to bid #{_hb_bid_id} ({_hb_ymm}).")
+    # ── #BIDNUMBER SMS attach REMOVED 2026-05-18 ──
+    # Per ASK_EVERY_TIME_2026_05_18 rule: customers and operators no longer
+    # prefix replies with "#1234" to route a photo or text to a specific
+    # bid. The ASK_EVERY_TIME flow (below) presents YES/NO confirmation
+    # for every inbound when an open bid exists, so the manual override is
+    # redundant. The sms_attach_context table is no longer written to.
+    # Removed code preserved in app.py.bak.20260518-pre-ask-every-time.
 
     # ── Name-reply routing (Phase 3 onboarding) ──
     # If this phone has one or more held bids (status='awaiting_name'),
@@ -3753,302 +3723,113 @@ def twilio_webhook():
         except (ValueError, TypeError):
             pass
 
-    # ── Stitching: merge into a recent bid from same phone ──
-    # Partners often split a forward into VIN-text-then-miles or photo-then-text.
-    # If the same phone has a bid <60s old AND the new VIN doesn't conflict
-    # with the existing one, merge into that bid instead of creating new.
-    # NOTE: do NOT widen this window for verify-pending bids — those need to
-    # go through VERIFY_STITCH → PENDING_ATTACH_LAYER2 below (ask-first
-    # confirmation flow, not silent merge).
-    cur.execute("""
-        SELECT id, vin, mileage FROM bids
-        WHERE phone = %s
-          AND created_at > NOW() - INTERVAL '60 seconds'
-          AND driver_token IS NOT NULL
-        ORDER BY id DESC LIMIT 1
-    """, (from_phone,))
-    recent = cur.fetchone()
+    # ── ASK_EVERY_TIME_2026_05_18 ─────────────────────────
+    # The new routing rule: every inbound from a phone with one or more
+    # OPEN (non-finalized) bids triggers a YES/NO confirmation. Silent
+    # stitch paths (60-second window + verify-pending heuristic) removed
+    # — the customer is always asked which bid an inbound is for. YES
+    # stitches the staged data onto that bid (_pa_resolve_to_bid) plus
+    # sends an outstanding-needs SMS. NO spawns a fresh bid from the
+    # staged data (_pa_spawn_bid_from_staged) so the customer never has
+    # to re-send. Falls through to normal new-bid creation only when no
+    # open bid exists for this phone.
+    #
+    # FINALIZED = locked: bids with phase2_notified_at or phase3_notified_at
+    # set are NOT returned by _pa_find_open_bids, so future inbounds from
+    # the customer create fresh bids automatically.
 
-    # VERIFY_STITCH_2026_05_15: when no rapid-stitch match, look for an
-    # OPEN needs_verification bid from this phone that the inbound text
-    # plausibly satisfies. Window: 24h (covers customer reply latency from
-    # busy partners). Match logic:
-    #   - inbound has bare miles AND bid has missing_miles flag -> stitch
-    #   - inbound has VIN AND bid awaiting VIN verification     -> stitch
-    _verify_stitched = False
-    if not recent:
-        # Re-derive a bare-number miles candidate even if extract_miles_from_text
-        # returned None (it requires "k" / "mi" / labels). Bare "12000" by
-        # itself doesn't trigger but in verification-reply context it should.
-        _bare_miles = None
-        if body and not miles:
-            _bm = __import__('re').search(r'\b(\d{3,6})\b', body.strip())
-            if _bm:
-                _n = int(_bm.group(1))
-                if 100 <= _n <= 999999:
-                    _bare_miles = _n
-        cur.execute("""
-            SELECT id, vin, mileage, needs_verification_reason
-              FROM bids
-             WHERE phone = %s
-               AND needs_verification_at IS NOT NULL
-               AND needs_verification_cleared_at IS NULL
-               AND created_at > NOW() - INTERVAL '24 hours'
-             ORDER BY id DESC LIMIT 1
-        """, (from_phone,))
-        _vpend = cur.fetchone()
-        if _vpend:
-            _vreason = (_vpend.get('needs_verification_reason') or '').lower()
-            # MILES_DISCREPANCY_STITCH_2026_05_18 (bid 1764 → 1765 split):
-            # Original gate only handled missing_miles + null bids.mileage.
-            # The miles-audit worker flags bids whose customer-typed miles
-            # disagree with Carfax/AutoCheck as 'miles_discrepancy' — but
-            # bids.mileage is already non-null (the customer's value), so
-            # neither condition matched. Customer's corrected-miles reply
-            # then fell through to new-bid creation. Fix: accept any
-            # discrepancy-class reason and let the corrected value through.
-            _miles_reason = ('missing_miles' in _vreason
-                             or 'miles_discrepancy' in _vreason
-                             or 'miles_mismatch' in _vreason)
-            _can_miles = (_miles_reason
-                          and (miles or _bare_miles)
-                          and (not _vpend.get('mileage')
-                               or 'discrepancy' in _vreason
-                               or 'mismatch' in _vreason))
-            _can_vin = (('vin_invalid' in _vreason
-                         or 'vin_not_found' in _vreason
-                         or 'invalid_vin' in _vreason
-                         or 'missing_vin' in _vreason)
-                        and vin)
-            # VERIFY_PHOTO_STITCH_2026_05_16: photo-only reply (no text
-            # VIN/miles parsed) routes to verify-pending bid. Customer
-            # sends photo as the answer — OCR fills the missing data and
-            # the VIN_FILL_CLEARS_VERIFY hook downstream kicks off
-            # workers. Without this, the photo creates a brand-new bid
-            # (observed on bid 1504 → 1505 split).
-            # 2026-05-18: extended to miles_discrepancy + miles_mismatch
-            # so a photo of the dash also resolves the verification.
-            _can_photo = (
-                num_media > 0
-                and not vin and not miles and not _bare_miles
-                and any(k in _vreason for k in (
-                    'missing_miles', 'missing_vin', 'invalid_vin',
-                    'vin_invalid', 'vin_not_found',
-                    'miles_discrepancy', 'miles_mismatch'))
-            )
-            if _can_miles or _can_vin or _can_photo:
-                # PENDING_ATTACH_LAYER2_2026_05_18: do NOT silently stitch.
-                # Build the full list of verify-pending bids (not just the
-                # most-recent) and ask the customer which one this is for.
-                # Operator force-resolve still available via admin API.
-                _pa_pending = _pa_find_pending_verify_bids(cur, from_phone,
-                                                          hours=24)
-                if _pa_pending:
-                    _pa_miles_to_stage = miles or (_bare_miles if _can_miles else None)
-                    _pa_media_urls = [request.form.get(f'MediaUrl{i}')
-                                       for i in range(num_media)]
-                    _pa_media_urls = [u for u in _pa_media_urls if u]
-                    _pa_media_types = [request.form.get(f'MediaContentType{i}', 'image/jpeg')
-                                        for i in range(num_media)]
-                    _resp = _pa_create_and_ask(
-                        cur, from_phone, body, num_media,
-                        _pa_media_urls, _pa_media_types,
-                        vin, _pa_miles_to_stage,
-                        _pa_pending, intake_log_id)
-                    db.commit(); db.close()
-                    return _resp
-                # Fall through to old behavior only if NO candidates found
-                # (shouldn't happen given _vpend was set, but defensive).
-                recent = _vpend
-                if _can_miles and not miles:
-                    miles = _bare_miles
-                _verify_stitched = True
-                print(f'[stitch] verify-pending bid={_vpend["id"]} '
-                      f'reason={_vreason} miles_added={bool(_can_miles)} '
-                      f'vin_added={bool(_can_vin)} '
-                      f'photos_only={_can_photo} num_media={num_media}',
-                      flush=True)
+    # Bare-number miles candidate stays computed here for the BARE_CONFIRM
+    # guard further down (it still needs to know whether "12000" is a
+    # plausible miles value before deciding the body is a bare confirm).
+    _bare_miles = None
+    if body and not miles:
+        _bm = re.search(r'(\d{3,6})', body.strip())
+        if _bm:
+            _n = int(_bm.group(1))
+            if 100 <= _n <= 999999:
+                _bare_miles = _n
 
-    can_stitch = False
-    if recent:
-        existing_vin = (recent['vin'] or '').strip().upper()
-        new_vin = (vin or '').strip().upper()
-        # Stitch when: new text has no VIN, OR new VIN matches existing,
-        # OR existing has no VIN yet (still being extracted async),
-        # OR this is a verification-pending stitch (different rules).
-        if (_verify_stitched
-                or not new_vin or not existing_vin
-                or new_vin == existing_vin):
-            can_stitch = True
+    _open_bids = _pa_find_open_bids(cur, from_phone, hours=24)
+    if _open_bids:
+        _pa_miles_to_stage = miles or _bare_miles
+        _pa_media_urls = [request.form.get(f'MediaUrl{i}')
+                          for i in range(num_media)]
+        _pa_media_urls = [u for u in _pa_media_urls if u]
+        _pa_media_types = [request.form.get(f'MediaContentType{i}',
+                                             'image/jpeg')
+                           for i in range(num_media)]
+        _resp = _pa_create_and_ask(
+            cur, from_phone, body, num_media,
+            _pa_media_urls, _pa_media_types,
+            vin, _pa_miles_to_stage,
+            _open_bids, intake_log_id)
+        db.commit(); db.close()
+        return _resp
+    # No open bid → falls through to new-bid creation below.
+    recent = None  # legacy variable kept None to keep downstream code happy
 
-    if can_stitch:
-        bid_id = recent['id']
-        # In stitch context, a bare 3-6 digit number is almost certainly miles —
-        # accept "53472" the same as "53472 miles". Only kick in if the labeled
-        # regex didn't already find one.
-        if not miles and body:
-            bare = re.search(r'\b(\d{3,6})\b', body.strip())
-            if bare:
-                n = int(bare.group(1))
-                if 100 <= n <= 999999:
-                    miles = n
-        # Fill VIN if existing didn't have one
-        if vin and not recent['vin']:
-            cur.execute("UPDATE bids SET vin=%s, vauto_priority=TRUE WHERE id=%s",
-                        (vin, bid_id))
-        # Miles: partner-typed text ALWAYS wins (Carfax history readings are
-        # often older than the actual current odometer; the typed value is
-        # the partner's explicit statement of fact).
-        if miles:
-            cur.execute("UPDATE bids SET mileage=%s WHERE id=%s", (miles, bid_id))
-
-        # AI-extracted fields fill NULLs only on stitch (don't overwrite values
-        # already set by the original bid or earlier follow-ups).
-        if text_ai:
-            cur.execute("""SELECT color, int_color, year, make, model, trim, asking_price
-                           FROM bids WHERE id=%s""", (bid_id,))
-            existing = cur.fetchone() or {}
-            _st_sets, _st_vals = [], []
-            for src_key, db_col, coerce in [
-                ('color',        'color',         lambda v: str(v).strip()[:64]),
-                ('int_color',    'int_color',     lambda v: str(v).strip()[:64]),
-                ('year',         'year',          lambda v: int(v) if 1900 <= int(v) <= 2100 else None),
-                ('make',         'make',          lambda v: str(v).strip()[:64]),
-                ('model',        'model',         lambda v: str(v).strip()[:64]),
-                ('trim',         'trim',          lambda v: str(v).strip()[:64]),
-                ('asking_price', 'asking_price',  lambda v: float(v) if 0 < float(v) < 10_000_000 else None),
-            ]:
-                if existing.get(db_col) not in (None, ''):
-                    continue
-                raw = text_ai.get(src_key)
-                if raw in (None, '', 'null'):
-                    continue
-                try:
-                    val = coerce(raw)
-                    if val is None:
-                        continue
-                except (ValueError, TypeError):
-                    continue
-                _st_sets.append(f'{db_col}=%s')
-                _st_vals.append(val)
-            if _st_sets:
-                _st_vals.append(bid_id)
-                cur.execute(f"UPDATE bids SET {', '.join(_st_sets)} WHERE id=%s", _st_vals)
-        # Append the new message body (summarized when long prose)
-        if body:
-            _thread_msg = _summarize_intake(body, vin, miles, text_ai)
+    # BARE_CONFIRM_GUARD_2026_05_18 (bid 1791 incident, 4074309675):
+    # User received a pending_attach YES/NO prompt at 17:10:17. Ops closed
+    # the prompt manually at 17:15:52 to break a loop. User then replied
+    # "Yes" 12 minutes after the close. _pa_handle_reply found no open pa,
+    # fell through here, and the bare "Yes" with no VIN/miles/photo was
+    # treated as a fresh bid intake — created empty bid #1791. Any other
+    # confirmation/short reply would have done the same.
+    #
+    # Guard: if the inbound has NO VIN, NO miles, NO photos, AND the body
+    # is a bare confirmation token, do not create a new bid. Instead, look
+    # for the most-recent (last 60 min) closed pending_attach for this
+    # phone and respond with a clarifying SMS so the customer understands
+    # the question is gone — not silently swallow it.
+    _CONFIRM_TOKENS = {
+        'yes', 'y', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay', 'k',
+        'no', 'n', 'nope', 'nah',
+        'thanks', 'thank you', 'thx', 'ty',
+        'got it', 'sounds good', 'cool',
+    }
+    _body_norm = (body or '').strip().lower().rstrip('.!?')
+    if (not vin and not miles and not _bare_miles and num_media == 0
+            and _body_norm in _CONFIRM_TOKENS):
+        # Look for a recently-resolved pending_attach so we can tell the
+        # customer what they were replying to.
+        _recent_pa = None
+        try:
             cur.execute("""
-                INSERT INTO bid_messages (bid_id, direction, message, from_phone)
-                VALUES (%s, 'inbound', %s, %s)
-            """, (bid_id, _thread_msg, from_phone))
-        # Attach photos + queue Carfax-async if any images. Centralized
-        # _ingest_sms_photo handles INSERT + download + local-disk persist;
-        # bytes are returned so Carfax can run without re-downloading.
-        photo_files = []
-        for i in range(num_media):
-            media_url = request.form.get(f'MediaUrl{i}')
-            media_type = request.form.get(f'MediaContentType{i}', '')
-            res = _ingest_sms_photo(cur, bid_id, media_url, media_type, from_phone=from_phone)
-            if res and res[1]:
-                photo_files.append((res[1], res[2]))
-        cur.execute("UPDATE bids SET updated_at=NOW() WHERE id=%s", (bid_id,))
-        # STITCH_VERIFY_UNIFIED_2026_05_15: clear verification + force-
-        # reprocess whenever a stitch satisfies an open verification flag,
-        # REGARDLESS of which stitch path matched (60s-window OR verify-
-        # pending). Without this, a customer reply that comes within 60s
-        # got correctly stitched but the verification flag stayed set
-        # forever — workers wouldn't claim and AI wouldn't fire.
-        # Check: did we just add miles or VIN to a bid that had an open
-        # verification flag? Then clear it.
-        _just_added_data = bool(miles or (vin and not recent.get('vin')))
-        if _just_added_data and not _verify_stitched:
-            try:
-                cur.execute(
-                    "SELECT id FROM bids WHERE id = %s "
-                    "AND needs_verification_at IS NOT NULL "
-                    "AND needs_verification_cleared_at IS NULL",
-                    (bid_id,))
-                if cur.fetchone():
-                    _verify_stitched = True  # trigger the block below
-                    print(f'[stitch] 60s-window stitch satisfied open '
-                          f'verification flag for bid {bid_id}', flush=True)
-            except Exception as _vcse:
-                print(f'[stitch] verify-check err bid={bid_id}: {_vcse}',
-                      flush=True)
-        if _verify_stitched:
-            try:
-                cur.execute("UPDATE bids SET needs_verification_cleared_at = NOW(), "
-                            "needs_verification_cleared_by = 'auto:sms_reply' "
-                            "WHERE id = %s", (bid_id,))
-                # iPacket: keep recent good capture (<5min). Same SQL as
-                # /api/admin/bid/<id>/force-reprocess preservation block.
-                cur.execute("""DELETE FROM ipacket_lookups
-                                  WHERE bid_id = %s
-                                    AND (looked_up_at IS NULL
-                                         OR looked_up_at < NOW() - INTERVAL '5 minutes'
-                                         OR not_available = true)""", (bid_id,))
-                cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s",
-                            (bid_id,))
-                cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s",
-                            (bid_id,))
-                cur.execute("UPDATE bids SET vauto_claimed_by=NULL, "
-                            "vauto_claimed_at=NULL, ai_assessed_at=NULL, "
-                            "ai_price=NULL, ai_assessment=NULL, "
-                            "miles_audit_at=NULL WHERE id=%s", (bid_id,))
-                cur.execute("UPDATE worker_jobs SET completed_at=NOW(), "
-                            "status='released_verify_sms_clear', "
-                            "duration_ms=EXTRACT(EPOCH FROM (NOW()-claimed_at))::int*1000 "
-                            "WHERE bid_id=%s AND completed_at IS NULL",
-                            (bid_id,))
-                try:
-                    _tg_worker_alert(
-                        f"\u2705 EW verify cleared by customer SMS reply\n"
-                        f"bid <b>#{bid_id}</b> \u00b7 phone {from_phone} \u00b7 force-reprocess fired")
-                except Exception:
-                    pass
-                # IMMEDIATE_RECEIPT_SMS_2026_05_15: instant ack so customer
-                # knows we got their reply (avoid 60-90s silence before AI fires).
-                try:
-                    _parts = []
-                    if miles:
-                        _parts.append(f"the {miles:,} miles")
-                    if vin and not recent.get("vin"):
-                        _parts.append(f"VIN {vin}")
-                    if _parts:
-                        _body = ("Got " + " and ".join(_parts)
-                                 + " - working on it now. Standby for the offer!")
-                        send_sms(from_phone, _body)
-                        print(f"[immediate-receipt-sms] bid={bid_id} sent",
-                              flush=True)
-                except Exception as _irse:
-                    print(f"[immediate-receipt-sms] err bid={bid_id}: {_irse}",
-                          flush=True)
-            except Exception as _vcse:
-                print(f'[verify-stitch-clear] err bid={bid_id}: '
-                      f'{type(_vcse).__name__}: {_vcse}', flush=True)
+                SELECT id, candidates, resolved_at, resolved_by
+                  FROM pending_attach
+                 WHERE phone = %s
+                   AND resolved_at IS NOT NULL
+                   AND resolved_at > NOW() - INTERVAL '60 minutes'
+                 ORDER BY resolved_at DESC
+                 LIMIT 1
+            """, (from_phone,))
+            _recent_pa = cur.fetchone()
+        except Exception as _bce:
+            print(f'[bare-confirm] lookup err: {_bce}', flush=True)
+
         _finalize_sms_intake(
-            cur, intake_log_id, 'stitched', bid_id=bid_id,
-            reason=(f"Stitched into bid #{bid_id} "
-                    f"({'verification_reply' if _verify_stitched else 'same phone, <60s old'}). "
-                    f"vin_added={bool(vin and not recent['vin'])} "
-                    f"miles_added={bool(miles and not recent['mileage'])} "
-                    f"photos_added={len(photo_files)}"),
-            parsed_vin=vin, parsed_miles=miles)
+            cur, intake_log_id, 'bare_confirm_dropped',
+            reason=f'Bare confirmation {_body_norm!r} with no payload; '
+                   f'recent_pa_id={(_recent_pa or {}).get("id")}')
         db.commit()
         db.close()
-        if photo_files:
-            threading.Thread(
-                target=_process_carfax_async,
-                args=(bid_id, photo_files),
-                daemon=True
-            ).start()
-        elif vin and not recent['vin']:
-            # We just learned the VIN — kick off market check now
-            try:
-                trigger_market_check(bid_id, vin)
-            except Exception:
-                pass
-        print(f'[stitch] merged into bid #{bid_id} (vin_added={bool(vin and not recent["vin"])} miles_added={bool(miles and not recent["mileage"])} photos={len(photo_files)})', flush=True)
+
+        if _recent_pa:
+            _msg = ("Got your reply, but I'd already closed that question "
+                    "on my end. If you wanted to add a new vehicle, "
+                    "please send the VIN, miles, or a clear photo of the "
+                    "VIN/odometer and I'll set it up.")
+        else:
+            _msg = ("Got your reply, but I don't have an open question for "
+                    "you right now. If you're starting a new bid, send the "
+                    "VIN, miles, or a clear photo and I'll take it from there.")
+        try:
+            send_sms(from_phone, _msg)
+        except Exception as _smse:
+            print(f'[bare-confirm] sms err: {_smse}', flush=True)
+        print(f'[bare-confirm] dropped {_body_norm!r} from {from_phone} '
+              f'(no payload, recent_pa={(_recent_pa or {}).get("id")})',
+              flush=True)
         return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 200, {'Content-Type': 'text/xml'})
 
@@ -6300,6 +6081,14 @@ def _notify_driver_if_pending(bid_id):
     """
     try:
         import time as _t_dn
+        import traceback as _tb_dn
+        # DIAG_2026_05_18: log entry + caller stack so we can see WHO calls
+        # this and WHEN, to understand why the verify gate keeps not firing.
+        _caller_frame = _tb_dn.extract_stack()[-2] if len(_tb_dn.extract_stack()) >= 2 else None
+        _caller_str = (f'{_caller_frame.filename}:{_caller_frame.lineno} '
+                       f'{_caller_frame.name}' if _caller_frame else '?')
+        print(f'[driver-notify] CALLED bid={bid_id} caller={_caller_str}',
+              flush=True)
         db = get_db()
         cur = db.cursor()
         cur.execute("""
@@ -6310,6 +6099,16 @@ def _notify_driver_if_pending(bid_id):
             FROM bids WHERE id=%s
         """, (bid_id,))
         bid = cur.fetchone()
+        # DIAG_2026_05_18: log the snapshot we saw at the gate so we can prove
+        # what the function actually observed at the moment of decision.
+        if bid:
+            print(f'[driver-notify] SNAPSHOT bid={bid_id} '
+                  f'verif_at={bid.get("needs_verification_at")} '
+                  f'verif_cleared={bid.get("needs_verification_cleared_at")} '
+                  f'verif_reason={bid.get("needs_verification_reason")} '
+                  f'audit_at={bid.get("miles_audit_at")} '
+                  f'driver_notified_at={bid.get("driver_notified_at")}',
+                  flush=True)
         if not bid or not bid['driver_phone'] or not bid['driver_token']:
             db.close()
             return
@@ -13111,22 +12910,46 @@ def api_trim_select():
     db = get_db()
     cur = db.cursor()
 
-    # Cache hit by VIN
-    cur.execute(
-        "SELECT selected_index, selected_text, confidence, model_used, clean_trim "
-        "FROM accutrade_trim_select_cache WHERE vin=%s", (vin,)
-    )
-    row = cur.fetchone()
-    if row:
-        db.close()
-        return jsonify({
-            'index': int(row['selected_index']),
-            'text': normalize_trim_text(row['selected_text']),
-            'clean_trim': row.get('clean_trim') if isinstance(row, dict) else None,
-            'confidence': float(row['confidence']) if row['confidence'] is not None else None,
-            'source': 'cache',
-            'model': row['model_used'],
-        })
+    # 2026-05-18 bid 1787: cache hits were serving stale picks made BEFORE
+    # the iPacket OCR text was wired into the overseer prompt. The cache
+    # entry for VIN 2T2BBMCA8SC068162 dates from 2026-05-15 (RX350H base —
+    # wrong; sticker shows Premium). Skip the cache when we have iPacket
+    # OCR text available for this VIN — call the LLM fresh with the sticker
+    # text in the prompt. Cache stays useful for VINs without OCR sticker.
+    _has_ocr = False
+    try:
+        with db.cursor() as _ocheck:
+            _ocheck.execute("""
+                SELECT 1 FROM ipacket_lookups
+                 WHERE vin = %s
+                   AND raw_json ? '_ocr_text'
+                   AND length(raw_json->>'_ocr_text') > 200
+                 LIMIT 1
+            """, (vin,))
+            _has_ocr = bool(_ocheck.fetchone())
+    except Exception as _oe:
+        print(f'[trim_select] OCR-check err vin={vin}: {_oe}', flush=True)
+
+    if not _has_ocr:
+        # Cache hit by VIN (only when no fresh OCR evidence to bring)
+        cur.execute(
+            "SELECT selected_index, selected_text, confidence, model_used, clean_trim "
+            "FROM accutrade_trim_select_cache WHERE vin=%s", (vin,)
+        )
+        row = cur.fetchone()
+        if row:
+            db.close()
+            return jsonify({
+                'index': int(row['selected_index']),
+                'text': normalize_trim_text(row['selected_text']),
+                'clean_trim': row.get('clean_trim') if isinstance(row, dict) else None,
+                'confidence': float(row['confidence']) if row['confidence'] is not None else None,
+                'source': 'cache',
+                'model': row['model_used'],
+            })
+    else:
+        print(f'[trim_select] cache bypassed for vin={vin} — '
+              f'iPacket OCR available, calling LLM fresh', flush=True)
 
     # Pull bid context + iPacket signal + Carfax/AutoCheck for the prompt
     bid_trim = None
@@ -13453,10 +13276,13 @@ def _maybe_send_vin_verify_sms(bid_id, reason='accutrade_vin_not_found'):
         _alt_row = _cur.fetchone()
         _alt_vin = (_alt_row.get('vin_extracted') or '').strip().upper() if _alt_row else ''
 
-        # VERIFY_SMS_HASHBID_HINT_2026_05_16: include "#<bid_id>" routing
-        # hint so customer replies attach to the right bid even if the
-        # 60s/24h stitch window misses.
-        _hb_hint = f"\n\nReply with #{bid_id} before the VIN or photo so we attach it to this bid."
+        # ASK_EVERY_TIME_2026_05_18 (was VERIFY_SMS_HASHBID_HINT_2026_05_16):
+        # No longer ask the customer to prefix replies with #<bid_id>. The
+        # ASK_EVERY_TIME routing presents YES/NO confirmation for every
+        # inbound from a phone with an open bid, so #bid prefixing is now
+        # redundant. Leaving _hb_hint as empty string keeps the f-string
+        # callers below intact without touching every site.
+        _hb_hint = ""
         if _alt_vin:
             _body = (
                 f"Hey, its the EW Bot. "  # EW_BOT_WORDING_2026_05_15

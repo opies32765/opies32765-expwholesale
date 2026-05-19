@@ -338,9 +338,26 @@ def process_one(conn, row):
               flag, bid_id))
 
         if flag:
+            # MILES_DISCREPANCY_REFLAG_2026_05_18 (bid 1787): the old
+            # WHERE clause "AND needs_verification_cleared_at IS NULL"
+            # refused to re-flag once a prior verification had been
+            # cleared. Real-world sequence that breaks it:
+            #   1. Bid arrives w/o miles -> needs_verification(missing_miles)
+            #   2. Customer texts a photo -> stitch CLEARS verification
+            #   3. Audit then OCRs Carfax/AutoCheck -> finds 4k+ discrepancy
+            #   4. Old UPDATE matched 0 rows because cleared_at was set
+            #   5. Phase 1 + Phase 2 SMSes fired wide-open
+            # Fix: always re-stamp needs_verification_at = NOW() and NULL
+            # out cleared_at + cleared_by when discrepancy is detected.
+            # The SMS-reply path (STITCH_VERIFY_UNIFIED) re-clears on the
+            # customer's corrected mileage, which forces a re-audit
+            # (sets miles_audit_at=NULL) — if the new mileage passes,
+            # flag=False and we don't re-stamp; if it fails, we hold again.
             cur.execute("""
                 UPDATE bids
-                   SET needs_verification_at = COALESCE(needs_verification_at, NOW()),
+                   SET needs_verification_at = NOW(),
+                       needs_verification_cleared_at = NULL,
+                       needs_verification_cleared_by = NULL,
                        needs_verification_reason = CASE
                           WHEN needs_verification_reason IS NULL
                                THEN 'miles_discrepancy'
@@ -350,7 +367,6 @@ def process_one(conn, row):
                           ELSE needs_verification_reason || ',miles_discrepancy'
                        END
                  WHERE id = %s
-                   AND needs_verification_cleared_at IS NULL
             """, (bid_id,))
 
     conn.commit()
@@ -446,24 +462,35 @@ def process_missing_vin(conn, row):
     miles_ctx = ''
     if row.get('mileage'):
         miles_ctx = f' (we have {int(row["mileage"]):,} miles noted)'
+    # ASK_EVERY_TIME_2026_05_18: dropped "#<bid_id> before…" hint — the
+    # webhook always asks YES/NO when an open bid exists for this phone.
     body = (
         f"Hey, its the EW Bot. Got your message{miles_ctx} but I didn't "
         f"catch a VIN — can you text me the 17-character VIN from the dash, "
         f"door jamb, or windshield sticker? Or send a clear photo and we'll "
         f"pull it from there. Thanks!"
-        # VERIFY_SMS_HASHBID_HINT_2026_05_16
-        f"\n\nReply with #{bid_id} before the VIN or photo so we attach it to this bid."
     )
     sent = _twilio_send(phone, body)
     if not sent:
         print(f'[missing-vin-sms] bid={bid_id} send failed', flush=True)
         return False
     with conn.cursor() as cur:
+        # SENT_STAMP_UNCONDITIONAL_2026_05_18 (bid 1791 spam fix):
+        # Stamp vin_verify_sms_sent_at ALWAYS — if it stays NULL because the
+        # WHERE rejects the row, the next claim picks the same bid and we
+        # fire the SMS again. 66x "missing-miles" loop on 1791 was caused
+        # by this exact bug in the sibling process_missing_miles.
         cur.execute("""
             UPDATE bids
                SET vin_verify_sms_sent_at = NOW(),
-                   vin_verify_sms_reason = 'missing_vin_at_intake',
-                   needs_verification_at = COALESCE(needs_verification_at, NOW()),
+                   vin_verify_sms_reason = 'missing_vin_at_intake'
+             WHERE id = %s
+        """, (bid_id,))
+        # needs_verification stamping stays gated on cleared_at so we don't
+        # re-open a verification the customer already resolved.
+        cur.execute("""
+            UPDATE bids
+               SET needs_verification_at = COALESCE(needs_verification_at, NOW()),
                    needs_verification_reason = CASE
                       WHEN needs_verification_reason IS NULL
                            THEN 'missing_vin'
@@ -508,14 +535,13 @@ def process_invalid_vin(conn, row):
     name_raw = (row.get('bidder_name') or '').strip()
     first = name_raw.split()[0] if name_raw else 'there'
     vin = (row.get('vin') or '').strip().upper()
+    # ASK_EVERY_TIME_2026_05_18: dropped "#<bid_id>" hint per new rule.
     body = (
         f"Hey, it's the EW Bot. The VIN we have "
         f"on file ({vin}) doesn't look right — it should be exactly 17 "
         f"characters and pass the standard VIN check. Could you re-type the "
         f"VIN from the dash, door jamb, or windshield sticker, or send a "
         f"clearer photo? Thanks!"
-        # VERIFY_SMS_HASHBID_HINT_2026_05_16
-        f"\n\nReply with #{bid_id} before the VIN or photo so we attach it to this bid."
     )
     sent = _twilio_send(phone, body)
     if not sent:
@@ -523,11 +549,16 @@ def process_invalid_vin(conn, row):
               flush=True)
         return False
     with conn.cursor() as cur:
+        # SENT_STAMP_UNCONDITIONAL_2026_05_18 — see process_missing_vin.
         cur.execute("""
             UPDATE bids
                SET vin_verify_sms_sent_at = NOW(),
-                   vin_verify_sms_reason = 'vin_invalid_structural',
-                   needs_verification_at = COALESCE(needs_verification_at, NOW()),
+                   vin_verify_sms_reason = 'vin_invalid_structural'
+             WHERE id = %s
+        """, (bid_id,))
+        cur.execute("""
+            UPDATE bids
+               SET needs_verification_at = COALESCE(needs_verification_at, NOW()),
                    needs_verification_reason = CASE
                       WHEN needs_verification_reason IS NULL
                            THEN 'vin_invalid'
@@ -554,13 +585,12 @@ def process_missing_miles(conn, row):
     md = row.get('model') or ''
     vehicle = (f"{y} {mk} {md}").strip() or "vehicle"
 
+    # ASK_EVERY_TIME_2026_05_18: dropped "#<bid_id>" hint per new rule.
     body = (
         f"Hey, it's the EW Bot. Got the VIN — "
         f"looks like a {vehicle}. To finalize the value I need the odometer "
         f"reading too. Reply with the mileage or send a clear photo of the "
         f"dash. Thanks!"
-        # VERIFY_SMS_HASHBID_HINT_2026_05_16
-        f"\n\nReply with #{bid_id} before the mileage or photo so we attach it to this bid."
     )
 
     sent = _twilio_send(phone, body)
@@ -569,11 +599,23 @@ def process_missing_miles(conn, row):
         return False
 
     with conn.cursor() as cur:
+        # SENT_STAMP_UNCONDITIONAL_2026_05_18 (bid 1791 spam fix):
+        # Stamp miles_request_sms_sent_at ALWAYS so the next claim cycle
+        # doesn't re-fire the same SMS. The previous combined UPDATE with
+        # "AND needs_verification_cleared_at IS NULL" matched 0 rows when
+        # the customer had already cleared verification (e.g. photo OCR
+        # filled VIN). That left sent_at NULL, so claim_missing_miles
+        # picked the same bid again on the next poll. 66x repeated SMS
+        # on bid 1791 traced to this exact loop.
         cur.execute("""
             UPDATE bids
                SET miles_request_sms_sent_at = NOW(),
-                   miles_request_sms_reason = 'missing_at_intake',
-                   needs_verification_at = COALESCE(needs_verification_at, NOW()),
+                   miles_request_sms_reason = 'missing_at_intake'
+             WHERE id = %s
+        """, (bid_id,))
+        cur.execute("""
+            UPDATE bids
+               SET needs_verification_at = COALESCE(needs_verification_at, NOW()),
                    needs_verification_reason = CASE
                       WHEN needs_verification_reason IS NULL
                            THEN 'missing_miles'
