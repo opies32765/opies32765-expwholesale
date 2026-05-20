@@ -5924,6 +5924,16 @@ def _run_assessment(bid_id):
                 ))
                 _db3.commit()
                 _db3.close()
+                # LAYER_2_WARM_2026_05_20: kick a daemon thread to warm
+                # this bid's PG pages immediately, so the operator's
+                # first click lands in PG RAM. ~50-100ms in background;
+                # doesn't block the worker that wrote the assessment.
+                try:
+                    import threading as _layer2_th
+                    _layer2_th.Thread(target=_warm_bid_cache, args=(bid_id,),
+                                      daemon=True, name=f'warm-{bid_id}').start()
+                except Exception as _l2_err:
+                    print(f'[warm-one] thread spawn err: {_l2_err}', flush=True)
                 # Audit log — every assessment that ran through correction
                 if _bias_result is not None:
                     try:
@@ -14370,6 +14380,57 @@ def _enqueue_comp_msrps_for_bid(bid_id, market_intel_obj):
             db.close()
     except Exception as e:
         print(f'[comp_msrp enqueue] bid={bid_id} err: {e}', flush=True)
+
+
+def _warm_bid_cache(bid_id):
+    """LAYER_2_WARM_2026_05_20: one-shot PG-page-cache warm for a single
+    bid. Fired in a daemon thread right after ai_assessment_log gets a
+    new row, so the brand-new bid is hot in PG by the time the operator
+    clicks it (instead of waiting up to 5 min for the next cron tick).
+
+    Mirrors the cron warmer's column choices — octet_length() on big JSONB
+    forces TOAST de-compression while returning tiny integers. Safe to
+    fail silently — this runs in a daemon thread, doesn't block writes.
+    """
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute(
+            "SELECT id, vin, year, make, model FROM bids WHERE id = %s",
+            (bid_id,))
+        cur.fetchone()
+        cur.execute("""
+            SELECT bid_id,
+                   COALESCE(octet_length(market_intel_cached::text), 0),
+                   COALESCE(octet_length(api_price_guides::text), 0),
+                   COALESCE(octet_length(api_carfax::text), 0)
+              FROM vauto_lookups WHERE bid_id = %s
+        """, (bid_id,))
+        cur.fetchone()
+        cur.execute("""
+            SELECT bid_id,
+                   COALESCE(octet_length(breakdown::text), 0),
+                   COALESCE(octet_length(dealer_intel::text), 0),
+                   COALESCE(octet_length(buyer_intel::text), 0)
+              FROM ai_assessment_log WHERE bid_id = %s
+        """, (bid_id,))
+        cur.fetchall()
+        cur.execute("SELECT bid_id FROM accutrade_lookups WHERE bid_id = %s", (bid_id,))
+        cur.fetchall()
+        cur.execute("SELECT bid_id FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
+        cur.fetchall()
+        cur.execute("SELECT bid_id, url, local_path FROM bid_photos WHERE bid_id = %s", (bid_id,))
+        cur.fetchall()
+        cur.execute("SELECT bid_id, message FROM bid_messages WHERE bid_id = %s", (bid_id,))
+        cur.fetchall()
+        cur.execute("SELECT bid_id FROM bid_partner_offers WHERE bid_id = %s", (bid_id,))
+        cur.fetchall()
+        cur.execute("SELECT bid_id FROM valuations WHERE bid_id = %s", (bid_id,))
+        cur.fetchall()
+        db.close()
+        print(f'[warm-one] bid={bid_id} pages warmed', flush=True)
+    except Exception as _wb_err:
+        print(f'[warm-one] bid={bid_id} err: {_wb_err}', flush=True)
 
 
 def _load_comp_msrps(vins):
