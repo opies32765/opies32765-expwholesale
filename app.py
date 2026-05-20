@@ -3896,6 +3896,31 @@ def twilio_webhook():
             _ai_vals.append(bid_id)
             cur.execute(f"UPDATE bids SET {', '.join(_ai_sets)} WHERE id=%s", _ai_vals)
 
+    # STITCH_WINDOW_FIX_2026_05_20: if VIN landed but miles didn't, flag
+    # the bid as needs_verification='missing_miles' so a follow-up bare
+    # number SMS (e.g. "9207") routes via the stitch-verify path at
+    # ~line 3635 instead of getting captured by partner-reply on an older
+    # bid. The flag gets cleared automatically when miles lands (via
+    # Carfax-aware photo extraction OR customer SMS) — see ~line 3221.
+    if vin and not miles:
+        try:
+            cur.execute("""
+                UPDATE bids
+                   SET needs_verification_at = COALESCE(needs_verification_at, NOW()),
+                       needs_verification_reason = CASE
+                          WHEN needs_verification_reason IS NULL
+                               THEN 'missing_miles'
+                          WHEN position('missing_miles' IN needs_verification_reason) > 0
+                               THEN needs_verification_reason
+                          ELSE needs_verification_reason || ',missing_miles'
+                       END
+                 WHERE id = %s AND needs_verification_cleared_at IS NULL
+            """, (bid_id,))
+            print(f'[stitch-window] bid={bid_id} flagged missing_miles '
+                  f'(VIN={vin}, awaiting miles followup)', flush=True)
+        except Exception as _smwe:
+            print(f'[stitch-window] flag err bid={bid_id}: {_smwe}', flush=True)
+
     # Store inbound message — use structured summary for long prose so the
     # thread stays readable. Original full body lives in bids.raw_message.
     if body:
