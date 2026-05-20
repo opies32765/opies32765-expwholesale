@@ -13131,7 +13131,7 @@ def api_trim_select():
     )
 
     model = 'gemini-2.5-flash'
-    raw = gemini_call(prompt, model=model, max_tokens=400, temperature=0.1)
+    raw = gemini_call(prompt, model=model, max_tokens=400, temperature=0.1, disable_thinking=True)  # TRIM_SELECT_FAST_2026_05_20: skip 10-15s Gemini thinking overhead (prompt has explicit rules; Flash follows them fine without extended reasoning)
     if not raw:
         db.close()
         return jsonify({'index': None, 'reason': 'llm_unavailable'}), 200
