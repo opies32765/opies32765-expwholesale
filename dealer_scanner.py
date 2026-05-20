@@ -1345,6 +1345,19 @@ def extract_vehicle(url, html):
             except ValueError:
                 pass
 
+    # 8c) DEALERON_COLOR_2026_05_20 — interior + exterior color from the
+    # same info__label/info__value DOM the mileage extractor uses. JSON-LD
+    # on DealerOn rooftops doesn't carry interior_color, and ext_color
+    # JSON-LD coverage is patchy. Fallback fills both fields when missing.
+    if not out.get('int_color'):
+        c = _extract_dealeron_int_color(html)
+        if c:
+            out['int_color'] = c
+    if not out.get('ext_color'):
+        c = _extract_dealeron_ext_color(html)
+        if c:
+            out['ext_color'] = c
+
     # Canonicalise make capitalisation
     if out.get('make'):
         out['make'] = _normalize_make(out['make'])
@@ -1849,6 +1862,38 @@ def _extract_dealeron_mileage(html):
     except ValueError:
         pass
     return None
+
+
+# ── DealerOn HTML color extractors — DEALERON_COLOR_2026_05_20 ─────────
+# Same DealerOn DOM pattern as mileage: `<span class="info__label">
+# Interior Color</span><span class="info__value info__value--color"
+# title="Ivory White/Dark Oyster">`. JSON-LD on DealerOn sites doesn't
+# carry interior color reliably, so this is the only path for those
+# rooftops. Confirmed working on Encore (encoreautos.com) 2026-05-20.
+_DEALERON_INT_COLOR_RE = re.compile(
+    r'>Interior Color</span>\s*<span[^>]*?title="([^"]+)"', re.I)
+_DEALERON_EXT_COLOR_RE = re.compile(
+    r'>Exterior Color</span>\s*<span[^>]*?title="([^"]+)"', re.I)
+
+
+def _extract_dealeron_int_color(html):
+    if not html:
+        return None
+    m = _DEALERON_INT_COLOR_RE.search(html)
+    if not m:
+        return None
+    s = m.group(1).strip()
+    return s or None
+
+
+def _extract_dealeron_ext_color(html):
+    if not html:
+        return None
+    m = _DEALERON_EXT_COLOR_RE.search(html)
+    if not m:
+        return None
+    s = m.group(1).strip()
+    return s or None
 
 
 # ── Photo-filename timestamp extractor ─────────────────────────────────

@@ -42,7 +42,7 @@ bp = Blueprint('partner', __name__)
 # Populated nightly by /opt/expwholesale/encore_comps_pipeline.py
 # (cron /etc/cron.d/encore_comps). Add a slug here and schedule a comps
 # cron for that dealer to roll out to additional partners.
-COMPS_ENABLED_SLUGS = {'encore'}
+COMPS_ENABLED_SLUGS = {'encore', 'txtcharlie'}
 
 
 @bp.after_request

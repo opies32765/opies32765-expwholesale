@@ -316,8 +316,10 @@
        From Us" (green/pitch) and "Needs Attention" (amber/action). #}
   {% if intel_summary and intel_summary._kind == 'newsletter' %}
     {%- set _section_styles = {
-      "What's Working":        {'accent': '#22c55e', 'bg': '#0a1a10'},
-      "Hot At EW This Week":   {'accent': '#3b82f6', 'bg': '#0a1428'},
+      "What You Buy + Sell":              {'accent': '#22c55e', 'bg': '#0a1a10'},
+      "Your Price-Drop Track Record":     {'accent': '#3b82f6', 'bg': '#0a1428'},
+      "Color, Trim & Spec Patterns":      {'accent': '#06b6d4', 'bg': '#06192a'},
+      "Worth Stocking More Of":           {'accent': '#f59e0b', 'bg': '#1f1505'},
     } -%}
     <article style="background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:20px 24px;margin:0 0 18px;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
       <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px">
@@ -1237,17 +1239,20 @@
               {# ── DEALER_INTEL_2026_05_19 · per-vehicle action chip ── #}
               {% set _intel = (intel_by_inv_id or {}).get(v.id) %}
               {% if _intel %}
+                {# CHIP_COLOR_SWAP_2026_05_20: PRICE DROP → red (was amber);
+                   HOLD → amber (was slate); SELL NOW now darker red so it
+                   still reads distinctly more urgent than PRICE DROP. #}
                 {%- set _chip_color = {
                   'keep':       '#16a34a',
-                  'hold':       '#64748b',
-                  'price_drop': '#f59e0b',
-                  'sell_now':   '#dc2626'
+                  'hold':       '#f59e0b',
+                  'price_drop': '#dc2626',
+                  'sell_now':   '#991b1b'
                 }.get(_intel.chip, '#64748b') -%}
                 {%- set _chip_bg = {
                   'keep':       '#0a1f0a',
-                  'hold':       '#0b1220',
-                  'price_drop': '#1f1505',
-                  'sell_now':   '#1f0a0a'
+                  'hold':       '#1f1505',
+                  'price_drop': '#1f0a0a',
+                  'sell_now':   '#150505'
                 }.get(_intel.chip, '#0b1220') -%}
                 {%- set _chip_label = {
                   'keep':       '✓ KEEP',
@@ -1634,8 +1639,31 @@ function _safeToReload() {
             a.tagName === 'SELECT' || a.isContentEditable)) return false;
   const qd = document.getElementById('qdCard');
   if (qd && qd.open) return false;
+  // RELOAD_GUARDS_2026_05_20: don't reload while dealer is reading a
+  // chart tooltip, viewing an image lightbox, or has any modal/overlay
+  // open. Was yanking the chart hover state every 30 seconds.
+  if (window._chartHover) return false;
+  if (document.querySelector('.lightbox.open')) return false;
+  if (document.querySelector('.share-overlay.show')) return false;
+  if (document.querySelector('.modal.show, .modal.open, .modal[style*="display: block"], .modal[style*="display:block"]')) return false;
+  if (document.querySelector('dialog[open]')) return false;
+  // Skip if user is actively hovering a comp chart card (chart tooltip
+  // would disappear mid-look).
+  if (document.querySelector('.comp-chart:hover, .chart-card:hover, [data-hover-block="1"]:hover')) return false;
   return true;
 }
+// Track chart-hover state explicitly so reload-guard can read it.
+window._chartHover = false;
+document.addEventListener('mouseover', e => {
+  if (e.target.closest && e.target.closest('.comp-chart, .chart-card, [data-hover-block="1"]')) {
+    window._chartHover = true;
+  }
+}, true);
+document.addEventListener('mouseout', e => {
+  if (e.target.closest && e.target.closest('.comp-chart, .chart-card, [data-hover-block="1"]')) {
+    window._chartHover = false;
+  }
+}, true);
 function _snapshotDetailsState() {
   try {
     const open = [];
@@ -1662,11 +1690,15 @@ _restoreDetailsState();
 document.querySelectorAll('details[id]').forEach(d => {
   d.addEventListener('toggle', _snapshotDetailsState);
 });
+// RELOAD_INTERVAL_2026_05_20: bumped from 30s → 120s. The 15s /poll
+// above still fires the chime + gold-star for new EW responses with no
+// page reload, so the 2-min interval is just the bulk-state refresh.
+// Slower = less interruption when reading charts / scrolling rows.
 setInterval(() => {
   if (!_safeToReload()) return;
   _snapshotDetailsState();
   location.reload();
-}, 30 * 1000);
+}, 120 * 1000);
 </script>
 <script>
 (function(){

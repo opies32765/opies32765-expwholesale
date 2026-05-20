@@ -114,7 +114,7 @@ def load_active_inventory(cur, dealer_id, limit=None):
                    GREATEST(0, (CURRENT_DATE - first_seen_at::date)::int)
                END AS dol_today
           FROM dealer_inventory
-         WHERE dealer_id = %s AND status = 'active'
+         WHERE dealer_id = %s AND status = 'active' AND vin IS NOT NULL AND vin <> ''
          ORDER BY first_seen_at ASC
     """
     if limit:

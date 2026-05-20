@@ -2210,8 +2210,10 @@ def _parse_name_reply(body):
     return s[:64]
 
 
-_PHASE3_DEFAULT_TEXT = "thanks {name}, bid #{bid_id} received — we'll contact you back shortly."
-_PHASE3_NO_NAME_TEXT = "bid #{bid_id} received — we'll contact you back shortly."
+# BOT_QUIET_MODE_2026_05_20: single ack per bid, never any follow-up.
+# YMM injected via _send_phase3_ack when available; falls to "your vehicle" otherwise.
+_PHASE3_DEFAULT_TEXT  = "Hey, EW Bot. Got Bid #{bid_id} on {ymm} — confirmed."
+_PHASE3_NO_NAME_TEXT  = "Hey, EW Bot. Got Bid #{bid_id} on {ymm} — confirmed."
 
 
 def _send_phase3_ack(cur, bid_id, phone, name=None):
@@ -2220,16 +2222,24 @@ def _send_phase3_ack(cur, bid_id, phone, name=None):
     Caller commits the transaction."""
     if not phone or phone.startswith('field:'):
         return False
-    cur.execute("SELECT phase3_notified_at FROM bids WHERE id = %s", (bid_id,))
+    cur.execute("SELECT phase3_notified_at, year, make, model FROM bids WHERE id = %s", (bid_id,))
     row = cur.fetchone()
     if not row:
         return False
     if row.get('phase3_notified_at'):
         return True  # already sent
-    if name:
-        body = _PHASE3_DEFAULT_TEXT.format(name=name, bid_id=bid_id)
+    # BOT_QUIET_MODE_2026_05_20: compose YMM phrase; default "your vehicle" when unknown
+    _yr = row.get('year'); _mk = (row.get('make') or '').strip(); _md = (row.get('model') or '').strip()
+    if _yr and (_mk or _md):
+        ymm = f"the {_yr} {_mk} {_md}".strip()
+    elif _mk or _md:
+        ymm = f"the {_mk} {_md}".strip()
     else:
-        body = _PHASE3_NO_NAME_TEXT.format(bid_id=bid_id)
+        ymm = "your vehicle"
+    if name:
+        body = _PHASE3_DEFAULT_TEXT.format(name=name, bid_id=bid_id, ymm=ymm)
+    else:
+        body = _PHASE3_NO_NAME_TEXT.format(bid_id=bid_id, ymm=ymm)
     sent = send_sms(phone, body)
     if sent:
         cur.execute(
@@ -2359,7 +2369,19 @@ def dashboard():
         conditions.append("b.phone = %s")
         params.append(f'field:{rep_filter}')
 
-    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    # DAY_COLLAPSE_2026_05_20: dashboard defaults to TODAY only. Older bids
+    # are surfaced as collapsed-day rows beneath, click expands via
+    # /api/dashboard/day/<date>. Operator workflow: most bids are touched
+    # once and don't get revisited within 48h, so today's slice is the only
+    # fast-render the dashboard actually needs. status_filter is preserved
+    # (passed/bought tabs still scope by status, just within today).
+    today_only = True
+    today_conditions = list(conditions)
+    today_params = list(params)
+    if today_only:
+        today_conditions.append("b.created_at::date = CURRENT_DATE")
+    today_where = f"WHERE {' AND '.join(today_conditions)}" if today_conditions else ""
+
     q = """
         SELECT b.*, c.name as contact_name, c.company as contact_company,
                c.role as contact_role, d.name as partner_dealer_name,
@@ -2377,8 +2399,45 @@ def dashboard():
         {where}
         ORDER BY b.created_at DESC LIMIT 200
     """
-    cur.execute(q.format(where=where), params)
+    cur.execute(q.format(where=today_where), today_params)
     bids = list(cur.fetchall())
+
+    # Prior-day buckets - same conditions, but EXCLUDING today. Just date
+    # + count. Limit to last 30 days so very old bids don't clutter.
+    prior_days = []
+    try:
+        pd_conditions = list(conditions)
+        pd_conditions.append("b.created_at::date < CURRENT_DATE")
+        pd_conditions.append("b.created_at::date >= CURRENT_DATE - INTERVAL '30 days'")
+        pd_where = f"WHERE {' AND '.join(pd_conditions)}"
+        pd_q = f"""
+            SELECT b.created_at::date AS d, COUNT(*) AS cnt
+              FROM bids b
+              {pd_where}
+             GROUP BY b.created_at::date
+             ORDER BY 1 DESC
+             LIMIT 30
+        """
+        cur.execute(pd_q, params)
+        import datetime as _dt
+        _today = _dt.date.today()
+        _yest  = _today - _dt.timedelta(days=1)
+        for r in cur.fetchall():
+            _d = r['d']
+            if _d == _yest:
+                label = 'Yesterday'
+            elif (_today - _d).days < 7:
+                label = _d.strftime('%A')
+            else:
+                label = _d.strftime('%b %-d')
+            prior_days.append({
+                'date_iso': _d.isoformat(),
+                'label': label,
+                'count': int(r['cnt']),
+            })
+    except Exception as _pde:
+        print(f'[dashboard] prior_days err: {_pde}', flush=True)
+        prior_days = []
 
     # Compute opportunity for each DealerClub-sourced bid so the template
     # can render the colored badge without per-row math.
@@ -2542,11 +2601,148 @@ def dashboard():
                            partner_offer_counts=partner_offer_counts,
                            time_ago=time_ago,
                            network_claims=network_claims,
-                           network_claims_by_bid=network_claims_by_bid)
+                           network_claims_by_bid=network_claims_by_bid,
+                           prior_days=prior_days)
+
+
+@app.route('/api/dashboard/day/<date_iso>')
+def api_dashboard_day(date_iso):
+    """DAY_COLLAPSE_2026_05_20: render bid rows for one prior date. Returns
+    raw HTML (a series of <tr>s) that the client AJAX-injects into the
+    dashboard tbody after the collapsed-day header row. Honors current
+    status + rep filters so expand stays consistent.
+    """
+    import datetime as _dt
+    try:
+        target_date = _dt.date.fromisoformat(date_iso)
+    except ValueError:
+        return ('bad date', 400)
+    if target_date >= _dt.date.today() or (
+            _dt.date.today() - target_date).days > 60:
+        return ('out of range', 400)
+
+    db = get_db()
+    cur = db.cursor()
+
+    status_filter = request.args.get('status', 'all')
+    rep_filter = request.args.get('rep', 'all')
+    conditions, params = [], []
+    if status_filter == 'field':
+        conditions.append("b.phone LIKE 'field:%'")
+    elif status_filter not in ('all', 'today'):
+        conditions.append("b.status = %s")
+        params.append(status_filter)
+    if rep_filter != 'all':
+        conditions.append("b.phone = %s")
+        params.append(f'field:{rep_filter}')
+    conditions.append("b.created_at::date = %s")
+    params.append(target_date)
+    where = "WHERE " + " AND ".join(conditions)
+
+    q = f"""
+        SELECT b.*, c.name as contact_name, c.company as contact_company,
+               c.role as contact_role, d.name as partner_dealer_name,
+               dl.current_price       AS dc_current_price,
+               dl.end_time            AS dc_end_time,
+               dl.is_no_reserve       AS dc_no_reserve,
+               dl.reserve_met         AS dc_reserve_met,
+               dl.detail_url          AS dc_detail_url,
+               dl.status              AS dc_status,
+               dl.closed_at           AS dc_closed_at
+          FROM bids b
+          LEFT JOIN contacts c ON b.contact_id = c.id
+          LEFT JOIN dealers d ON b.partner_dealer_id = d.id
+          LEFT JOIN dealerclub_lots dl ON dl.bid_id = b.id
+          {where}
+         ORDER BY b.created_at DESC
+         LIMIT 300
+    """
+    cur.execute(q, params)
+    bids = list(cur.fetchall())
+
+    for bid in bids:
+        if not isinstance(bid, dict):
+            continue
+        if not bid.get('dc_current_price'):
+            continue
+        ai = bid.get('ai_price')
+        if ai is None:
+            bid['dc_opp_tier'] = 'gray'
+            bid['dc_opp_pct'] = None
+            continue
+        all_in = float(bid['dc_current_price']) + DEALERCLUB_BUY_FEE_FLAT \
+                 + DEALERCLUB_TRANSPORT_EST
+        try:
+            ai_f = float(ai)
+            pct = (ai_f - all_in) / ai_f * 100 if ai_f else None
+        except (TypeError, ValueError):
+            pct = None
+        bid['dc_opp_pct'] = round(pct, 1) if pct is not None else None
+        bid['dc_opp_dollars'] = round(float(ai) - all_in) if pct is not None else None
+        if pct is None:
+            bid['dc_opp_tier'] = 'gray'
+        elif pct >= 15:
+            bid['dc_opp_tier'] = 'green'
+        elif pct >= 5:
+            bid['dc_opp_tier'] = 'yellow'
+        else:
+            bid['dc_opp_tier'] = 'red'
+
+    bid_ids = [b['id'] for b in bids if isinstance(b, dict)]
+    photo_counts, first_photos, vauto_done, active_workers, partner_offer_counts = {}, {}, set(), {}, {}
+    if bid_ids:
+        cur.execute(
+            "SELECT bid_id, COUNT(*) as cnt FROM bid_photos "
+            "WHERE bid_id = ANY(%s) GROUP BY bid_id",
+            (bid_ids,))
+        photo_counts = {r['bid_id']: int(r['cnt']) for r in cur.fetchall()}
+        cur.execute(
+            "SELECT DISTINCT ON (bid_id) bid_id, COALESCE(local_path, url) AS src "
+            "FROM bid_photos WHERE bid_id = ANY(%s) ORDER BY bid_id, id",
+            (bid_ids,))
+        first_photos = {r['bid_id']: r['src'] for r in cur.fetchall()}
+        cur.execute(
+            "SELECT v.bid_id FROM vauto_lookups v "
+            "JOIN accutrade_lookups a ON a.bid_id = v.bid_id "
+            "WHERE v.bid_id = ANY(%s)", (bid_ids,))
+        vauto_done = {r['bid_id'] for r in cur.fetchall()}
+        cur.execute(
+            "SELECT DISTINCT ON (bid_id) bid_id, worker_id, job_type, status, "
+            "claimed_at, completed_at FROM worker_jobs "
+            "WHERE bid_id = ANY(%s) ORDER BY bid_id, claimed_at DESC", (bid_ids,))
+        for r in cur.fetchall():
+            active_workers.setdefault(r['bid_id'], []).append({
+                'worker_id': r['worker_id'],
+                'job_type': r['job_type'],
+                'status': r.get('status', ''),
+                'completed': r.get('completed_at') is not None,
+            })
+        cur.execute(
+            "SELECT bid_id, COUNT(*) AS n, "
+            "COUNT(*) FILTER (WHERE ew_seen_at IS NULL) AS unseen "
+            "FROM bid_partner_offers WHERE bid_id = ANY(%s) GROUP BY bid_id",
+            (bid_ids,))
+        for r in cur.fetchall():
+            partner_offer_counts[r['bid_id']] = {
+                'n': int(r['n']),
+                'unseen': int(r['unseen']),
+            }
+
+    db.close()
+    return render_template('_bid_rows_partial.html',
+                           bids=bids,
+                           photo_counts=photo_counts,
+                           first_photos=first_photos,
+                           vauto_done=vauto_done,
+                           active_workers=active_workers,
+                           partner_offer_counts=partner_offer_counts,
+                           time_ago=time_ago)
 
 
 @app.route('/bid/<int:bid_id>')
 def bid_detail(bid_id):
+    import time as _perf_t
+    _perf_start = _perf_t.perf_counter()
     db = get_db()
     cur = db.cursor()
 
@@ -3008,6 +3204,8 @@ def bid_detail(bid_id):
     except Exception as _po_err:
         print(f'[bid_detail] partner_offers err: {_po_err}', flush=True)
 
+    _perf_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
+    print(f'[bid-detail-perf] bid={bid_id} server_ms={_perf_ms}', flush=True)
     return render_template('bid.html', bid=bid, photos=photos,
                            messages=messages, valuations=valuations,
                            vauto_data=vauto_data,
@@ -3762,22 +3960,13 @@ def twilio_webhook():
             if 100 <= _n <= 999999:
                 _bare_miles = _n
 
-    _open_bids = _pa_find_open_bids(cur, from_phone, hours=24)
-    if _open_bids:
-        _pa_miles_to_stage = miles or _bare_miles
-        _pa_media_urls = [request.form.get(f'MediaUrl{i}')
-                          for i in range(num_media)]
-        _pa_media_urls = [u for u in _pa_media_urls if u]
-        _pa_media_types = [request.form.get(f'MediaContentType{i}',
-                                             'image/jpeg')
-                           for i in range(num_media)]
-        _resp = _pa_create_and_ask(
-            cur, from_phone, body, num_media,
-            _pa_media_urls, _pa_media_types,
-            vin, _pa_miles_to_stage,
-            _open_bids, intake_log_id)
-        db.commit(); db.close()
-        return _resp
+    # BOT_QUIET_MODE_2026_05_20: pa-create A/B/C asks DISABLED. Operator
+    # wants no follow-up bot interactions. Inbound texts now always fall
+    # through to the new-bid creation path. Set the old open-bids check
+    # to a no-op so downstream code is unchanged.
+    _open_bids = []  # was: _pa_find_open_bids(cur, from_phone, hours=24)
+    # Original pa-create branch commented out. To re-enable: restore the
+    # if _open_bids: block from /tmp/app.py.bak.*-bot-quiet.
     # No open bid → falls through to new-bid creation below.
     recent = None  # legacy variable kept None to keep downstream code happy
 
@@ -12697,20 +12886,18 @@ def opaque_photo(photo_id, size):
 
 @app.route('/api/vauto/status/<int:bid_id>')
 def api_vauto_status(bid_id):
-    """Check if vAuto lookup is complete for a bid."""
+    """Check if vAuto lookup is complete for a bid.
+    PERF_TRIM_2026_05_20: returns ONLY {status: 'complete'|'pending'} (was
+    SELECT * dumping ~130KB raw_json + competitive_set + comps). The JS
+    consumer only reads d.status and triggers location.reload() on
+    'complete' — full data is already in the next page render. Saves
+    ~130KB per poll × every 5s while a bid is enriching."""
     db = get_db()
     cur = db.cursor()
-    cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid_id,))
+    cur.execute("SELECT 1 FROM vauto_lookups WHERE bid_id = %s AND raw_json IS NOT NULL LIMIT 1", (bid_id,))
     row = cur.fetchone()
     db.close()
-    if row:
-        d = dict(row)
-        # Serialize datetime for JSON
-        for k, v in d.items():
-            if hasattr(v, 'isoformat'):
-                d[k] = v.isoformat()
-        return jsonify({'status': 'complete', 'data': d})
-    return jsonify({'status': 'pending'})
+    return jsonify({'status': 'complete' if row else 'pending'})
 
 
 # ── AccuTrade worker API ────────────────────────────────────────────────────
@@ -13562,23 +13749,18 @@ def serve_accutrade_report(filename):
 
 @app.route('/api/accutrade/status/<int:bid_id>')
 def api_accutrade_status(bid_id):
-    """Check if AccuTrade lookup is complete for a bid."""
+    """PERF_TRIM_2026_05_20: tiny status response. JS only reads d.status."""
     db = get_db()
     cur = db.cursor()
     try:
-        cur.execute("SELECT * FROM accutrade_lookups WHERE bid_id = %s", (bid_id,))
+        cur.execute("SELECT not_available FROM accutrade_lookups WHERE bid_id = %s", (bid_id,))
         row = cur.fetchone()
     except Exception:
         row = None
     db.close()
-    if row:
-        d = dict(row)
-        for k, v in d.items():
-            if hasattr(v, 'isoformat'):
-                d[k] = v.isoformat()
-        status = 'not_available' if d.get('not_available') else 'complete'
-        return jsonify({'status': status, 'data': d})
-    return jsonify({'status': 'pending'})
+    if not row:
+        return jsonify({'status': 'pending'})
+    return jsonify({'status': 'not_available' if row.get('not_available') else 'complete'})
 
 
 # ── iPacket worker API ─────────────────────────────────────────────────────
@@ -14425,23 +14607,18 @@ def _load_comp_msrps(vins):
 
 @app.route('/api/ipacket/status/<int:bid_id>')
 def api_ipacket_status(bid_id):
-    """Check if iPacket lookup is complete for a bid."""
+    """PERF_TRIM_2026_05_20: tiny status response. JS only reads d.status."""
     db = get_db()
     cur = db.cursor()
     try:
-        cur.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
+        cur.execute("SELECT not_available FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
         row = cur.fetchone()
     except Exception:
         row = None
     db.close()
-    if row:
-        d = dict(row)
-        for k, v in d.items():
-            if hasattr(v, 'isoformat'):
-                d[k] = v.isoformat()
-        status = 'not_available' if d.get('not_available') else 'complete'
-        return jsonify({'status': status, 'data': d})
-    return jsonify({'status': 'pending'})
+    if not row:
+        return jsonify({'status': 'pending'})
+    return jsonify({'status': 'not_available' if row.get('not_available') else 'complete'})
 
 
 @app.route('/api/verify-comps', methods=['POST'])

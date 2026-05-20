@@ -2913,13 +2913,21 @@ async function clearEstimate() {
 //   - hidden tab (no point reloading in the background)
 //   - <5 s since last reload (avoid double-fires with the 4 enrichment pollers)
 (function _autoRefresh() {
+  // AUTO_REFRESH_MODAL_GUARDS_2026_05_20: don't reload while the user
+  // is reading a modal/lightbox. Was only checking .share-overlay.show
+  // — Carfax/AutoCheck/AccuTrade/iPacket viewers use .lightbox.open and
+  // were being yanked closed mid-read. Now bails on ANY visible modal.
   let lastReload = Date.now();
   setInterval(() => {
     if (document.hidden) return;
     if (Date.now() - lastReload < 5000) return;
     const a = document.activeElement;
     if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && !a.readOnly) return;
+    // Modal/overlay guards — skip reload if ANY visible:
     if (document.querySelector('.share-overlay.show')) return;
+    if (document.querySelector('.lightbox.open')) return;       // Carfax/AutoCheck/AccuTrade/iPacket image viewer
+    if (document.querySelector('.modal.show, .modal.open, .modal[style*="display: block"], .modal[style*="display:block"]')) return;
+    if (document.querySelector('dialog[open]')) return;          // native <dialog>
     lastReload = Date.now();
     location.reload();
   }, 45000);

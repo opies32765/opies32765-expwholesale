@@ -672,6 +672,331 @@ def load_source_opportunities(cur, dealer_id, top_n=4):
     return [dict(r) for r in cur.fetchall()]
 
 
+def load_buying_patterns(cur, dealer_id, days=30):
+    """What the dealer has been ADDING to inventory in the last N days,
+    model-level. Shows their actual acquisition behavior — the brief uses
+    this to identify their loaded-up segments."""
+    cur.execute("""
+        SELECT make, model,
+               CASE
+                 WHEN year < 2015 THEN 'pre-2015'
+                 WHEN year < 2020 THEN '2015-2019'
+                 WHEN year < 2024 THEN '2020-2023'
+                 ELSE '2024+'
+               END AS year_band,
+               COUNT(*) AS bought_n,
+               ROUND(AVG(price)::numeric, 0) AS avg_listed_at
+          FROM dealer_inventory
+         WHERE dealer_id=%s
+           AND first_seen_at > NOW() - (INTERVAL '1 day' * %s)
+           AND make IS NOT NULL AND model IS NOT NULL
+         GROUP BY make, model, year_band
+        HAVING COUNT(*) >= 2
+         ORDER BY bought_n DESC
+         LIMIT 8
+    """, (dealer_id, days))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def load_selling_patterns_detailed(cur, dealer_id, days=30):
+    """What the dealer has been SELLING, model-level, with true DOL at
+    sale + avg list price."""
+    cur.execute("""
+        SELECT make, model,
+               CASE
+                 WHEN year < 2015 THEN 'pre-2015'
+                 WHEN year < 2020 THEN '2015-2019'
+                 WHEN year < 2024 THEN '2020-2023'
+                 ELSE '2024+'
+               END AS year_band,
+               COUNT(*) AS sold_n,
+               ROUND(AVG(
+                 COALESCE(
+                   verified_days_on_lot
+                   + GREATEST(0,(sold_at::date - verified_at::date)::int),
+                   EXTRACT(EPOCH FROM (sold_at - first_seen_at))/86400.0
+                 )
+               )::numeric, 1) AS avg_dol_at_sale,
+               ROUND(AVG(price)::numeric, 0) AS avg_last_list_price
+          FROM dealer_inventory
+         WHERE dealer_id=%s AND status='sold'
+           AND sold_at > NOW() - (INTERVAL '1 day' * %s)
+           AND make IS NOT NULL AND model IS NOT NULL
+         GROUP BY make, model, year_band
+         ORDER BY sold_n DESC, avg_dol_at_sale ASC
+         LIMIT 8
+    """, (dealer_id, days))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def load_price_drop_velocity(cur, dealer_id, days=120):
+    """Surveillance signal: for each SOLD car at this dealer, did we see
+    a price drop in dealer_inventory_history before the sale? If so,
+    how many days from the drop until the sale.
+
+    Pulls every (vin, observed_at, price) ordered ASC per VIN, identifies
+    the LAST price decrease before sold_at, computes velocity.
+    """
+    cur.execute("""
+        WITH sold_units AS (
+          SELECT id, vin, sold_at, price AS final_price
+            FROM dealer_inventory
+           WHERE dealer_id=%s AND status='sold' AND sold_at IS NOT NULL
+             AND sold_at > NOW() - (INTERVAL '1 day' * %s)
+             AND vin IS NOT NULL
+        ), hist AS (
+          SELECT h.vin, h.observed_at, h.price,
+                 LAG(h.price) OVER (PARTITION BY h.vin ORDER BY h.observed_at) AS prev_price
+            FROM dealer_inventory_history h
+            JOIN sold_units s ON s.vin = h.vin
+           WHERE h.dealer_id=%s AND h.price IS NOT NULL
+        ), drops AS (
+          SELECT vin, observed_at, price, prev_price,
+                 prev_price - price AS drop_amt,
+                 (prev_price - price)::float / NULLIF(prev_price, 0) AS drop_pct
+            FROM hist
+           WHERE prev_price IS NOT NULL AND price < prev_price
+        ), last_drop_per_vin AS (
+          SELECT DISTINCT ON (vin)
+                 vin, observed_at AS last_drop_at,
+                 drop_amt, drop_pct
+            FROM drops
+           ORDER BY vin, observed_at DESC
+        )
+        SELECT
+          COUNT(*) AS units_w_drop_then_sold,
+          ROUND(AVG(
+            EXTRACT(EPOCH FROM (s.sold_at - d.last_drop_at))/86400.0
+          )::numeric, 1) AS avg_days_drop_to_sale,
+          ROUND(AVG(d.drop_pct * 100)::numeric, 1) AS avg_drop_pct,
+          ROUND(AVG(d.drop_amt)::numeric, 0) AS avg_drop_amount,
+          COUNT(*) FILTER (
+            WHERE s.sold_at - d.last_drop_at < INTERVAL '7 days'
+          ) AS sold_within_7d,
+          COUNT(*) FILTER (
+            WHERE s.sold_at - d.last_drop_at < INTERVAL '14 days'
+          ) AS sold_within_14d,
+          ROUND(AVG(d.drop_pct * 100) FILTER (
+            WHERE s.sold_at - d.last_drop_at < INTERVAL '7 days'
+          )::numeric, 1) AS avg_drop_pct_sold_under_7d
+          FROM last_drop_per_vin d
+          JOIN sold_units s ON s.vin = d.vin
+         WHERE d.last_drop_at <= s.sold_at
+    """, (dealer_id, days, dealer_id))
+    row = cur.fetchone()
+    return dict(row) if row else {}
+
+
+def load_ew_sell_anchors_for_dealer_models(cur, dealer_id, days=30):
+    """EW SALE anchors tightly correlated with the dealer's TOP BUYING +
+    TOP SELLING models. We only surface EW sale data for models the
+    dealer has bought OR sold AT LEAST 2 of in the last 60 days — no
+    single-unit-coincidence matches. Ranked so the model the dealer
+    works MOST shows up first.
+    """
+    cur.execute("""
+        WITH dealer_top_models AS (
+          -- Rank models by total activity (bought + sold) last 60 days.
+          -- 2+ unit threshold = real working portfolio, not a one-off.
+          SELECT UPPER(make) AS make,
+                 UPPER(SPLIT_PART(
+                   REGEXP_REPLACE(REPLACE(model, '-Class', ''),
+                                    '^\\s*A\\.?M\\.?G\\.?[®\\s]*', '', 'i'),
+                   ' ', 1
+                 )) AS model_root,
+                 model AS sample_model_name,
+                 COUNT(*) AS dealer_activity
+            FROM dealer_inventory
+           WHERE dealer_id=%s
+             AND make IS NOT NULL AND model IS NOT NULL
+             AND (first_seen_at > NOW() - INTERVAL '60 days'
+                  OR (status='sold' AND sold_at > NOW() - INTERVAL '60 days'))
+           GROUP BY 1, 2, 3
+          HAVING COUNT(*) >= 2
+        )
+        SELECT
+          UPPER(l.make_name) AS make,
+          UPPER(SPLIT_PART(REPLACE(l.model_name, '-Class', ''), ' ', 1)) AS model_root,
+          dm.sample_model_name AS dealer_model_label,
+          CASE
+            WHEN l.year < 2015 THEN 'pre-2015'
+            WHEN l.year < 2020 THEN '2015-2019'
+            WHEN l.year < 2024 THEN '2020-2023'
+            ELSE '2024+'
+          END AS year_band,
+          COUNT(*) AS ew_sold_n,
+          ROUND(AVG(l.sale_price)::numeric, 0) AS avg_ew_sale_price,
+          MAX(dm.dealer_activity) AS dealer_activity_score
+          FROM lsl_training l
+          JOIN dealer_top_models dm
+            ON dm.make = UPPER(l.make_name)
+           AND dm.model_root = UPPER(SPLIT_PART(REPLACE(l.model_name, '-Class', ''), ' ', 1))
+         WHERE l.sale_price > 5000
+           AND l.sold_at > NOW() - (INTERVAL '1 day' * %s)
+         GROUP BY 1, 2, 3, 4
+        HAVING COUNT(*) >= 2
+         ORDER BY dealer_activity_score DESC, ew_sold_n DESC
+         LIMIT 8
+    """, (dealer_id, days))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def load_color_velocity(cur, dealer_id, days=90, min_sales=2):
+    """Exterior color velocity by make."""
+    cur.execute("""
+        SELECT make, ext_color, COUNT(*) AS sold_n,
+               ROUND(AVG(
+                 COALESCE(
+                   verified_days_on_lot
+                   + GREATEST(0,(sold_at::date - verified_at::date)::int),
+                   EXTRACT(EPOCH FROM (sold_at - first_seen_at))/86400.0
+                 )
+               )::numeric, 1) AS avg_dol_at_sale,
+               ROUND(AVG(price)::numeric, 0) AS avg_sold_price
+          FROM dealer_inventory
+         WHERE dealer_id=%s AND status='sold'
+           AND sold_at > NOW() - (INTERVAL '1 day' * %s)
+           AND ext_color IS NOT NULL
+           AND make IS NOT NULL
+         GROUP BY make, ext_color
+        HAVING COUNT(*) >= %s
+         ORDER BY sold_n DESC, avg_dol_at_sale ASC
+         LIMIT 10
+    """, (dealer_id, days, min_sales))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def load_int_color_velocity(cur, dealer_id, days=90, min_sales=2):
+    """Interior color velocity by make. Some dealers have a strong
+    int_color signal (e.g. tan/cognac interiors move faster on luxury
+    SUVs). Same shape as ext_color, separate field."""
+    cur.execute("""
+        SELECT make, int_color, COUNT(*) AS sold_n,
+               ROUND(AVG(
+                 COALESCE(
+                   verified_days_on_lot
+                   + GREATEST(0,(sold_at::date - verified_at::date)::int),
+                   EXTRACT(EPOCH FROM (sold_at - first_seen_at))/86400.0
+                 )
+               )::numeric, 1) AS avg_dol_at_sale
+          FROM dealer_inventory
+         WHERE dealer_id=%s AND status='sold'
+           AND sold_at > NOW() - (INTERVAL '1 day' * %s)
+           AND int_color IS NOT NULL AND TRIM(int_color) <> ''
+           AND make IS NOT NULL
+         GROUP BY make, int_color
+        HAVING COUNT(*) >= %s
+         ORDER BY sold_n DESC, avg_dol_at_sale ASC
+         LIMIT 10
+    """, (dealer_id, days, min_sales))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def load_trim_velocity(cur, dealer_id, days=90, min_sales=2):
+    """Trim-level velocity. Encore's trim strings are extremely granular
+    ("430i Convertible Convenience Package", "2 Door Stingray Coupe W1LT")
+    so we normalize to FIRST TOKEN to form buckets:
+       "430i Convertible..."          → "430i"
+       "M440i xDrive Premium..."      → "M440i"
+       "2 Door Stingray Coupe..."     → "STINGRAY" (skip leading digits/qualifiers)
+       "AMG GT Black Series..."       → "AMG"
+    Strategy: split on whitespace, take first token that ISN'T a number,
+    door-count, or generic qualifier ('2', 'Door', 'Sedan', 'Coupe').
+    """
+    cur.execute("""
+        WITH trim_norm AS (
+          SELECT make, model,
+                 -- pick the first 'meaningful' token from trim
+                 (
+                   SELECT t FROM unnest(string_to_array(trim, ' ')) AS t
+                    WHERE t !~ '^[0-9]+$'
+                      AND UPPER(t) NOT IN ('DOOR','SEDAN','COUPE','SUV','CABRIOLET',
+                                            'CONVERTIBLE','HATCHBACK','WAGON','PICKUP',
+                                            'TRUCK','VAN','BASE','BASIC','THE','NEW')
+                      AND length(t) >= 2
+                    LIMIT 1
+                 ) AS trim_short,
+                 verified_days_on_lot, verified_at, sold_at, first_seen_at, price
+            FROM dealer_inventory
+           WHERE dealer_id=%s AND status='sold'
+             AND sold_at > NOW() - (INTERVAL '1 day' * %s)
+             AND trim IS NOT NULL AND TRIM(trim) <> ''
+             AND make IS NOT NULL AND model IS NOT NULL
+        )
+        SELECT make, model, trim_short,
+               COUNT(*) AS sold_n,
+               ROUND(AVG(
+                 COALESCE(
+                   verified_days_on_lot
+                   + GREATEST(0,(sold_at::date - verified_at::date)::int),
+                   EXTRACT(EPOCH FROM (sold_at - first_seen_at))/86400.0
+                 )
+               )::numeric, 1) AS avg_dol_at_sale,
+               ROUND(AVG(price)::numeric, 0) AS avg_sold_price
+          FROM trim_norm
+         WHERE trim_short IS NOT NULL
+         GROUP BY make, model, trim_short
+        HAVING COUNT(*) >= %s
+         ORDER BY sold_n DESC, avg_dol_at_sale ASC
+         LIMIT 10
+    """, (dealer_id, days, min_sales))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def load_mileage_band_velocity(cur, dealer_id, days=90):
+    """Sold-unit DOL grouped by mileage band — surfaces whether fresh
+    (<40k) units move faster than higher-miles inventory at this dealer."""
+    cur.execute("""
+        SELECT
+          CASE WHEN mileage IS NULL OR mileage <= 0 THEN 'unknown'
+               WHEN mileage < 40000  THEN '0-40k'
+               WHEN mileage < 80000  THEN '40k-80k'
+               ELSE '80k+' END AS mi_band,
+          COUNT(*) AS sold_n,
+          ROUND(AVG(
+            COALESCE(
+              verified_days_on_lot
+              + GREATEST(0,(sold_at::date - verified_at::date)::int),
+              EXTRACT(EPOCH FROM (sold_at - first_seen_at))/86400.0
+            )
+          )::numeric, 1) AS avg_dol_at_sale,
+          ROUND(AVG(price)::numeric, 0) AS avg_sold_price
+          FROM dealer_inventory
+         WHERE dealer_id=%s AND status='sold'
+           AND sold_at > NOW() - (INTERVAL '1 day' * %s)
+         GROUP BY mi_band
+         ORDER BY sold_n DESC
+    """, (dealer_id, days))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def load_price_band_velocity(cur, dealer_id, days=90):
+    """Sold-unit DOL by asking-price band. Helpful for spotting whether
+    the dealer's <$40k segment turns faster than their $80k+ segment, etc."""
+    cur.execute("""
+        SELECT
+          CASE WHEN price IS NULL OR price <= 0 THEN 'unknown'
+               WHEN price < 30000  THEN 'under_30k'
+               WHEN price < 60000  THEN '30-60k'
+               WHEN price < 100000 THEN '60-100k'
+               ELSE 'over_100k' END AS px_band,
+          COUNT(*) AS sold_n,
+          ROUND(AVG(
+            COALESCE(
+              verified_days_on_lot
+              + GREATEST(0,(sold_at::date - verified_at::date)::int),
+              EXTRACT(EPOCH FROM (sold_at - first_seen_at))/86400.0
+            )
+          )::numeric, 1) AS avg_dol_at_sale
+          FROM dealer_inventory
+         WHERE dealer_id=%s AND status='sold'
+           AND sold_at > NOW() - (INTERVAL '1 day' * %s)
+         GROUP BY px_band
+         ORDER BY sold_n DESC
+    """, (dealer_id, days))
+    return [dict(r) for r in cur.fetchall()]
+
+
 def load_whats_working(cur, dealer_id, days=7):
     """Encore's last-7d sold cars, grouped to surface 'what you did well'.
     Uses verified DOL where available."""
@@ -716,42 +1041,68 @@ def load_sample_sizes(cur, dealer_id, peer_count):
 
 # ── Prompt + Gemini ─────────────────────────────────────────────────────
 
-PROMPT_TEMPLATE = """Write a short, punchy daily column for a luxury used-car wholesale dealer.
-EW (Experience Wholesale) is the platform — a wholesale broker that BUYS cars from
-dealers and SELLS to other dealers. This column is from EW addressed to the dealer.
+PROMPT_TEMPLATE = """Write a daily intelligence column for a luxury used-car wholesale dealer.
+EW (Experience Wholesale) is a wholesale broker that BUYS from dealers and SELLS to
+other dealers. This column is from EW addressed to the dealer, with a "we're watching
+the lot and we know your patterns" tone — confident, data-driven, slightly inside-baseball.
 
-VOICE: short Slack-message-from-a-smart-trader tone. Tight, specific, no fluff.
-Sentences not bullets. Each section is 2-4 sentences MAX. Whole column should be
-readable in 60 seconds. Address dealer as "you", refer to EW as "we"/"us".
+VOICE: trader-to-trader. Sentences not bullets. Each section is 2-4 sentences MAX.
+Use specific models + numbers. The dealer should feel that we're tracking their
+behavior precisely. Address the dealer as "you", refer to EW as "we"/"us".
 
-KEY ANGLES:
-- LEAD with the dealer's WINS — what they've been selling and how fast.
-- SIGNAL — what EW has been buying and selling A LOT of in the last 7 days,
-  at MODEL level (not just make). "BMW M3 2024+ — 8 bought at ~$72K" beats "BMW".
-- Stop there. Don't pitch sourcing, don't restate aging-inventory tactics.
-  Dealers know what to do with the data — just give it cleanly.
+KEY ANGLES (in this order):
+1. WHAT YOU BUY + SELL — show we know their model-level acquisition + sale velocity.
+   CRITICAL: `newly_acquired_last_30d` and `units_sold_last_30d` are TWO INDEPENDENT
+   SETS. A model name appearing in both does NOT mean the SAME PHYSICAL CARS.
+   The sold units came onto the lot earlier and sold during the window. NEVER write
+   things like "you bought 5 and sold 3 of them" — the 3 sold are different cars
+   from the 5 acquired. Write them as parallel observations:
+   "You acquired 5 Mercedes E 450s in the last 30 days, AND separately moved 3
+   units of the same model that had been sitting an average of 111 days."
+   Or just keep the counts apart: "Acquired this month: 5 E 450s, 5 BMW 4 Series.
+   Sold this month: 3 E 450s (avg 111d on lot)." — total clarity, no implied overlap.
+2. YOUR PRICE-DROP TRACK RECORD — surveillance tone. Cite their actual drop-to-sale
+   pace from price_drop_velocity. If we have data: "Of your last N price drops, X
+   sold within 7 days. Average drop that moved a car: Y%." Frame as observation,
+   not lecture. If no data yet, omit the section.
+3. COLOR / TRIM / MILEAGE / PRICE granular signals. Surface the 3-4 STRONGEST
+   spec patterns from these inputs:
+     - color_velocity_90d     (ext color × make)
+     - int_color_velocity_90d (interior color × make)
+     - trim_velocity_90d      (trim level inside a model)
+     - mileage_band_velocity_90d
+     - price_band_velocity_90d
+   Examples: "White Mercedes-Benz moves in avg 64 days; Black Mercedes 102d."
+   "BMW 4 Series M440i trim turns in 22 days vs base 4 Series at 65 days."
+   "Tan-interior G-Wagons move faster than black-interior."
+   "Your 0-40k mileage band averages 58 days; 80k+ averages 142d."
+   "Under-$30K price band turns fastest at 56 days."
+   Pick the 3-4 strongest observations — don't recite every row.
+4. WORTH STOCKING MORE OF — combine sections 1 + 3 into a SPECIFIC pitch
+   that names model + trim + color/mileage/price spec the dealer should be
+   sourcing. E.g. "Stock more BMW 4 Series M440i in white, under 40K miles —
+   your fastest-turning intersection of inputs."
 
 STRICT RULES:
 1. NEVER name peer dealers.
-2. NEVER reveal EW's margin/gross. Cite buy prices and sell prices separately;
-   do NOT subtract them or imply spread.
-3. Use only data from the inputs. No invented stats. Cite SPECIFIC MODELS in
-   the Hot At EW section — "BMW M3", "Porsche 911", "Mercedes E-Class" — not
-   just makes.
-4. Tone: collaborative trader, not marketing copy.
+2. NEVER reveal what EW PAID to acquire (ai_price, buy-side). Only cite EW's
+   SELL prices ("we sold ... to other dealers at avg $X"). That's the price
+   the dealer would face to source from us — relevant. What we paid is internal.
+3. Brand-fit: only cite MODELS the dealer is actually buying or selling. If
+   a model isn't in their buying_patterns_30d or selling_patterns_30d, don't
+   mention it. Skip Porsche if they don't stock Porsche, etc.
+4. Use only data from inputs. No invented stats.
+5. Don't restate every model — pick the 2-3 strongest signals per section.
 
 OUTPUT JSON:
   - headline:        short, includes day-of-week and date
-  - lede:            ONE sentence — today's lot snapshot (new / sold / drops counts)
-  - body_sections:   array — use exactly these titles in this order, omit any
-                     with no input data:
-                       * "What's Working" — whats_working_7d. The dealer's
-                         strongest makes this week with sold count and avg DOL.
-                         2-3 sentences max.
-                       * "Hot At EW This Week" — ew_buy_activity_7d +
-                         ew_sell_activity_7d. Cite SPECIFIC MODELS, not just
-                         makes. Pair buy + sell when the same model appears in
-                         both lists. 3-5 sentences max.
+  - lede:            ONE sentence — today's lot snapshot (new today / sold 7d / drops 7d)
+  - body_sections:   array — use these titles in this order. Omit ANY section with
+                     no input data:
+                       * "What You Buy + Sell"
+                       * "Your Price-Drop Track Record"
+                       * "Color, Trim & Spec Patterns"  ← granular: ext+int color, trim, miles, price
+                       * "Worth Stocking More Of"
 
 INPUTS (JSON):
 """
@@ -914,6 +1265,19 @@ def run(dealer_slug, dry_run=False):
             ew_sell_7d = load_ew_sell_activity_7d(cur, dealer_id)
             sourcing_opps = load_source_opportunities(cur, dealer_id)
             whats_working = load_whats_working(cur, dealer_id)
+            # NEW_SURVEILLANCE_SIGNALS_2026_05_20: model-level buying +
+            # selling history per dealer + price-drop velocity (their
+            # actual track record on drops) + EW SALE anchors (what we
+            # sold like-units to OTHER dealers for, not what we paid).
+            buying_30d = load_buying_patterns(cur, dealer_id, days=30)
+            selling_30d = load_selling_patterns_detailed(cur, dealer_id, days=30)
+            drop_velocity = load_price_drop_velocity(cur, dealer_id)
+            ew_sale_anchors = load_ew_sell_anchors_for_dealer_models(cur, dealer_id)
+            color_velocity = load_color_velocity(cur, dealer_id)
+            int_color_velocity = load_int_color_velocity(cur, dealer_id)
+            trim_velocity = load_trim_velocity(cur, dealer_id)
+            mileage_velocity = load_mileage_band_velocity(cur, dealer_id)
+            price_band_velocity = load_price_band_velocity(cur, dealer_id)
             ss = load_sample_sizes(cur, dealer_id, len(peer_ids))
 
             log.info('diff: new_today=%d new_7d=%d sold_7d=%d drops_7d=%d',
@@ -928,15 +1292,22 @@ def run(dealer_slug, dry_run=False):
                 'dealer_name': dealer['name'],
                 'date': str(today),
                 'diff': diff,
-                'whats_working_7d': whats_working,
-                'ew_buy_activity_7d': ew_buy_7d,
-                'ew_sell_activity_7d': ew_sell_7d,
-                'sourcing_opportunities': sourcing_opps,
-                'pattern_memory': pattern,
-                'peers': peers,
-                'per_car_peer_comps': per_car,
-                'acquisitions': acquisitions,
-                'ew_recent_acquisitions_tight_match': ew_recent,
+                # IMPORTANT for prompt: these are TWO INDEPENDENT SETS,
+                # not overlapping. Cars listed in newly_acquired_last_30d
+                # are CURRENT inventory recently added. Cars listed in
+                # units_sold_last_30d are SEPARATE units that cleared the
+                # lot in the same window — they came in earlier and were
+                # on the lot for sold_units.avg_dol_at_sale days when
+                # they sold. The model name being the same does NOT mean
+                # the SAME PHYSICAL CAR.
+                'newly_acquired_last_30d': buying_30d,
+                'units_sold_last_30d': selling_30d,
+                'price_drop_velocity': drop_velocity,
+                'color_velocity_90d': color_velocity,
+                'int_color_velocity_90d': int_color_velocity,
+                'trim_velocity_90d': trim_velocity,
+                'mileage_band_velocity_90d': mileage_velocity,
+                'price_band_velocity_90d': price_band_velocity,
                 'sample_sizes': ss,
             }
 

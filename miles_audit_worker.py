@@ -393,6 +393,13 @@ TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '')
 
 def _twilio_send(to_phone, body):
     """Direct Twilio send. Returns True on success."""
+    # BOT_QUIET_MODE_2026_05_20: short-circuit ALL outbound SMS from
+    # this worker. Operator wants no follow-up bot interactions. The
+    # audit/discrepancy logic (miles_carfax, miles_discrepancy, damage
+    # badges) keeps running and writing to the bids table — only the
+    # outbound SMS is muted. To re-enable: delete this block.
+    print(f"[bot-quiet] suppressed SMS to {phone!r}: {body[:80]!r}", flush=True)
+    return False
     if not (TWILIO_SID and TWILIO_TOKEN and TWILIO_PHONE and to_phone and body):
         return False
     try:

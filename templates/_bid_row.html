@@ -1,0 +1,128 @@
+      {% set _po = partner_offer_counts.get(bid.id, {'n':0,'unseen':0}) if partner_offer_counts is defined else {'n':0,'unseen':0} %}
+      <tr data-id="{{ bid.id }}" data-created="{{ bid.created_at.isoformat() if bid.created_at else '' }}" data-unread="{{ '1' if bid.has_unread else '0' }}" class="status-{{ bid.status }}{% if bid.vin_invalid_reason %} bad-vin{% endif %}{% if bid.needs_verification_at and not bid.needs_verification_cleared_at %} needs-verify{% endif %}">
+        <td>
+          <div class="bid-num">{% if bid.has_unread %}<span class="unread-star" title="Unread message">&#9733;</span>{% endif %}{% if _po.n %}<span title="{{ _po.n }} partner offer{% if _po.n != 1 %}s{% endif %} received{% if _po.unseen %} ({{ _po.unseen }} new){% endif %}" style="color:#fbbf24;font-weight:700;margin-right:3px">&#9733;</span>{% endif %}#{{ bid.id }}</div>
+          <div class="bid-time">{{ time_ago(bid.created_at) }}</div>
+          {% set _active = active_workers.get(bid.id, []) if active_workers else [] %}
+          {% if _active %}
+            {% set _row = _active[0] %}
+            {% set _wid = _row.worker_id %}
+            {% set _wname = ('Worker-' + _wid.split('-')[1]) if _wid.startswith('worker-') else _wid|capitalize %}
+            <div title="{{ _wid }} working on {{ _row.job_type }}" style="margin-top:3px;display:inline-flex;align-items:center;gap:5px;padding:2px 7px;background:rgba(96,165,250,.10);border:1px solid rgba(96,165,250,.3);border-radius:10px;font-size:10px;font-weight:600;color:#60a5fa;font-family:'Inter',sans-serif;letter-spacing:.2px">
+              <span style="width:6px;height:6px;background:#4ade80;border-radius:50%;display:inline-block;animation:pulse 1.5s ease-in-out infinite"></span>
+              {{ _wname }} · {{ _row.job_type }}
+            </div>
+          {% endif %}
+        </td>
+        <td>
+          {% if bid.phone.startswith('field:') %}
+            <div class="contact-name">{{ bid.contact_name or 'Field Rep' }}</div>
+            <div><span class="badge-field">{{ bid.contact_role or 'Field Rep' }}</span></div>
+          {% elif bid.phone.startswith('thalist:') %}
+            <div class="contact-name" style="color:#34d399">{{ bid.contact_name or 'Thalist Post' }}</div>
+            {% if bid.contact_company %}<div class="contact-company" style="color:#94a3b8;font-size:11px">{{ bid.contact_company }}</div>{% endif %}
+            <div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.3);border-radius:3px;font-size:9px;font-weight:700;color:#34d399;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from thalist.com Wholesale Inventory">Thalist</span></div>
+          {% elif bid.phone.startswith('dealerclub:') %}
+            <div class="contact-name" style="color:#f59e0b">DealerClub</div>
+            <div class="contact-company" style="color:#94a3b8;font-size:11px">
+              {% if bid.dc_current_price %}Bid ${{ '{:,}'.format(bid.dc_current_price) }}{% else %}Live auction{% endif %}
+            </div>
+            <div style="margin-top:3px">
+              <span style="display:inline-block;padding:1px 7px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);border-radius:3px;font-size:9px;font-weight:700;color:#f59e0b;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from app.dealerclub.com live auction">DealerClub</span>
+              {% if bid.dc_opp_tier %}
+                {% if bid.dc_opp_tier == 'green' %}
+                  <span title="Opportunity: AI buy beats current bid + fees + transport by 15%+" style="display:inline-block;padding:1px 7px;margin-left:3px;background:rgba(74,222,128,.18);border:1px solid rgba(74,222,128,.45);border-radius:3px;font-size:9px;font-weight:700;color:#86efac;letter-spacing:.4px;text-transform:uppercase">🟢 +{{ bid.dc_opp_pct }}%</span>
+                {% elif bid.dc_opp_tier == 'yellow' %}
+                  <span title="Marginal: 5-15% gap" style="display:inline-block;padding:1px 7px;margin-left:3px;background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.4);border-radius:3px;font-size:9px;font-weight:700;color:#fde047;letter-spacing:.4px;text-transform:uppercase">🟡 +{{ bid.dc_opp_pct }}%</span>
+                {% elif bid.dc_opp_tier == 'red' %}
+                  <span title="Skip: AI ceiling below all-in cost" style="display:inline-block;padding:1px 7px;margin-left:3px;background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.35);border-radius:3px;font-size:9px;font-weight:700;color:#fca5a5;letter-spacing:.4px;text-transform:uppercase">🔴 {{ bid.dc_opp_pct }}%</span>
+                {% else %}
+                  <span title="Gemini still analyzing" style="display:inline-block;padding:1px 7px;margin-left:3px;background:rgba(148,163,184,.12);border:1px solid rgba(148,163,184,.3);border-radius:3px;font-size:9px;font-weight:700;color:#cbd5e1;letter-spacing:.4px;text-transform:uppercase">⚪ analyzing</span>
+                {% endif %}
+              {% endif %}
+            </div>
+          {% elif bid.phone == 'sys:db_push' %}
+            <div class="contact-name" style="color:#a78bfa">EW Search</div>
+            {% if bid.partner_dealer_name %}<div class="contact-company" style="color:#94a3b8;font-size:11px">{{ bid.partner_dealer_name }}</div>{% endif %}
+            <div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3);border-radius:3px;font-size:9px;font-weight:700;color:#a78bfa;letter-spacing:.4px;text-transform:uppercase">Dealer DB</span></div>
+          {% else %}
+            {% if bid.awaiting_name %}
+              <div class="contact-name" style="color:#fbbf24">Awaiting name…</div>
+              <div class="contact-phone">{{ bid.phone }}</div>
+            {% elif bid.bidder_name %}
+              <div class="contact-name">{{ bid.bidder_name }}</div>
+              {% if bid.partner_dealer_name %}
+                <div class="contact-company" style="color:#a78bfa;font-size:11px">{{ bid.partner_dealer_name }}</div>
+              {% endif %}
+              <div class="contact-phone">{{ bid.phone }}</div>
+            {% else %}
+              <div class="contact-name">{{ bid.contact_name or bid.phone }}</div>
+              {% if bid.contact_name %}<div class="contact-phone">{{ bid.phone }}</div>{% endif %}
+              {% if bid.contact_company %}<div class="contact-company">{{ bid.contact_company }}</div>{% endif %}
+            {% endif %}
+          {% endif %}
+        </td>
+        <td>
+          {% if bid.vin %}
+            <div class="vehicle-vin"{% if bid.vin_invalid_reason %} style="color:#fca5a5;text-decoration:line-through"{% endif %}>{{ bid.vin }}{% if bid.vin_invalid_reason %} <span title="VIN failed structural check: {{ bid.vin_invalid_reason }}. Worker pool will not pick this up." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ INVALID VIN</span>{% endif %}{% if bid.needs_verification_at and not bid.needs_verification_cleared_at %} <span title="Awaiting verification: {{ bid.needs_verification_reason or 'data check' }}. AI assessment paused until VIN/miles confirmed via SMS or operator edit." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fbbf24;background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ VERIFY</span>{% endif %}{% if bid.damage_signal == 'disagreement' %} <span title="Carfax/AutoCheck disagree on damage. Operator review needed." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ DAMAGE MISMATCH</span>{% elif bid.damage_signal == 'both_damaged' %} <span title="Both Carfax and AutoCheck report damage/accidents." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fbbf24;background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ DAMAGE</span>{% endif %}{% if bid.id in vauto_done %}<span title="vAuto complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% else %}<span title="vAuto pending" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>{% endif %}</div>
+            {% if bid.year or bid.make or bid.mileage %}
+              <div class="vehicle-desc">{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }}{% if bid.mileage %} {% if bid.year or bid.make %}· {% endif %}{{ '{:,}'.format(bid.mileage) }} mi{% endif %}</div>
+            {% endif %}
+          {% else %}
+            <div class="no-vin">No VIN extracted</div>
+          {% endif %}
+        </td>
+        <td>
+          {% if bid.partner_request_id %}
+            <span style="display:inline-block;padding:2px 7px;background:#1e3a8a;color:#dbeafe;border-radius:10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;margin-right:6px">PARTNER</span>
+          {% endif %}
+          {% if bid.salesperson %}
+            <span style="display:inline-block;padding:2px 7px;background:rgba(168,139,250,.15);color:#c4b5fd;border:1px solid rgba(168,139,250,.35);border-radius:10px;font-size:10px;font-weight:700;letter-spacing:.3px;margin-right:6px" title="EW salesperson tagged from dealer assignment at submit time">👤 {{ bid.salesperson }}</span>
+          {% endif %}
+          <div class="msg-preview">{{ (bid.raw_message or '')|msg_display or '—' }}</div>
+        </td>
+        <td>
+          {% if bid.asking_price %}
+            <div style="font-size:15px;font-weight:700;color:#94a3b8">${{ '{:,.0f}'.format(bid.asking_price) }}</div>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if bid.ai_price %}
+            <div style="font-size:15px;font-weight:700;color:#a78bfa">${{ '{:,.0f}'.format(bid.ai_price) }}</div>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if bid.bid_amount %}
+            <div style="font-size:15px;font-weight:700;color:#34d399">${{ '{:,.0f}'.format(bid.bid_amount) }}</div>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if _po.n %}
+            <a href="/bid/{{ bid.id }}#partner-offers-card" style="display:inline-flex;align-items:center;gap:6px;padding:5px 9px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.4);border-radius:6px;text-decoration:none;font-size:13px;font-weight:700;color:#fbbf24;font-family:ui-monospace,Consolas,monospace" title="Click to view partner offers">
+              &#9733; {{ _po.n }} offer{% if _po.n != 1 %}s{% endif %}{% if _po.unseen %} <span style="font-size:9px;background:#fbbf24;color:#0f172a;padding:1px 5px;border-radius:3px;letter-spacing:.3px">{{ _po.unseen }} NEW</span>{% endif %}
+            </a>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% set pc = photo_counts.get(bid.id, 0) %}
+          {% set fp = first_photos.get(bid.id) if first_photos else None %}
+          {% if pc > 0 %}
+          <div class="photo-cell">
+            {% if fp %}
+            {# Wrapper starts hidden. img.onload reveals it once the bytes load
+               successfully — onerror leaves it hidden. Avoids the broken-icon
+               flash on bids whose Twilio MediaUrls have expired. #}
+            <a href="/bid/{{ bid.id }}" class="photo-thumb-link" title="Click to open bid" style="display:none">
+              <img class="photo-thumb" src="{% if fp.startswith('/static/') %}{{ fp }}{% else %}{{ fp|thumb_url('mobile') }}{% endif %}" alt="" onload="this.parentElement.style.display='block'" onerror="this.parentElement.style.display='none'">
+            </a>
+            {% endif %}
+            <span class="photo-badge">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+              {{ pc }}
+            </span>
+          </div>
+          {% else %}—{% endif %}
+        </td>
+        <td><span class="badge badge-{{ bid.status }}">{{ bid.status.replace('_',' ') }}</span></td>
+        <td><a href="/bid/{{ bid.id }}" class="btn-view">View →</a></td>
+      </tr>
