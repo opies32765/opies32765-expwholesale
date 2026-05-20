@@ -2582,33 +2582,20 @@ def api_ipacket_should_run():
 
 @app.route('/api/bid/<int:bid_id>/run-ipacket', methods=['POST'])
 def api_run_ipacket(bid_id):
-    """IPACKET_AUTODISABLE_2026_05_20: operator clicks 'Run iPacket' on bid.html.
-    Flips the auto-disabled flag for THIS bid only, wipes any existing iPacket
-    row, and re-queues for process_bid. Does NOT clear ai_assessed_at so the
-    LLM assessment is preserved — iPacket data lands later and just enriches
-    the visual sticker section.
+    """IPACKET_ONLY_2026_05_20: operator clicks 'Run iPacket' on bid.html.
+    Flips ipacket_disabled=FALSE for THIS bid only + clears existing iPacket row.
+    Does NOT touch vauto/accutrade/AI. Workers poll /api/ipacket/pending and
+    run an iPacket-ONLY browser session (no vauto, no accutrade rerun).
     """
     db = get_db()
     cur = db.cursor()
     try:
-        cur.execute("""
-            UPDATE bids
-               SET ipacket_disabled = FALSE,
-                   vauto_priority = TRUE,
-                   vauto_claimed_by = NULL,
-                   vauto_claimed_at = NULL
-             WHERE id = %s
-        """, (bid_id,))
+        cur.execute("UPDATE bids SET ipacket_disabled = FALSE WHERE id = %s", (bid_id,))
         cur.execute("DELETE FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
-        # Also clear vauto + accutrade so process_bid runs ALL 3 vendors —
-        # otherwise worker skips and only ipacket would run, but worker code
-        # currently runs all 3 in parallel per process_bid.
-        cur.execute("DELETE FROM vauto_lookups WHERE bid_id = %s", (bid_id,))
-        cur.execute("DELETE FROM accutrade_lookups WHERE bid_id = %s", (bid_id,))
         db.commit()
     finally:
         db.close()
-    print(f'[run-ipacket] bid={bid_id} flag flipped, reprocess queued', flush=True)
+    print(f'[run-ipacket] bid={bid_id} ipacket-only queued (vauto/accu untouched)', flush=True)
     return jsonify({'ok': True, 'bid_id': bid_id})
 
 
@@ -13673,7 +13660,10 @@ def api_accutrade_status(bid_id):
 
 @app.route('/api/ipacket/pending')
 def api_ipacket_pending():
-    """Return bids that need iPacket sticker lookup."""
+    """IPACKET_ONLY_2026_05_20: return bids where operator clicked 'Run iPacket'
+    (ipacket_disabled=FALSE) AND no iPacket row yet. Workers poll this in their
+    run_pass loop and open an iPacket-only Playwright session for each.
+    """
     db = get_db()
     cur = db.cursor()
     cur.execute("""
@@ -13682,6 +13672,7 @@ def api_ipacket_pending():
         LEFT JOIN ipacket_lookups il ON il.bid_id = b.id
         WHERE b.vin IS NOT NULL AND length(b.vin) = 17
           AND il.id IS NULL
+          AND b.ipacket_disabled = FALSE
         ORDER BY b.created_at DESC
         LIMIT 20
     """)
@@ -15799,6 +15790,7 @@ def api_bid_dealer_gallery(bid_id):
         FROM dealer_inventory di
         LEFT JOIN dealers d ON d.id = di.dealer_id
         WHERE di.vin = %s
+          AND di.status = 'active'
         ORDER BY di.last_seen_at DESC NULLS LAST
     """, (vin,))
     dealer_rows = cur.fetchall()

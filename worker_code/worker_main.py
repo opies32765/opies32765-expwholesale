@@ -29,6 +29,9 @@ import requests as http_requests
 
 # Reuse the working bid pipeline as a module — DO NOT modify these.
 from process_bid import process_bid
+# IPACKET_ONLY_2026_05_20: import for the new iPacket-only path
+from process_bid import IPACKET_PROFILE_DIR
+import worker_ipacket as _worker_ipacket_mod
 
 # ── Config ────────────────────────────────────────────────────────────────────
 EW_SERVER = os.environ.get("EW_SERVER", "https://experience-wholesale.net")
@@ -591,23 +594,130 @@ def process_one_bid(item):
     return vauto_ok
 
 
+# IPACKET_ONLY_2026_05_20: dedicated iPacket-only run. Triggered by operator
+# clicking 'Run iPacket' on bid.html. Opens just iPacket Playwright (no vauto,
+# no accutrade), runs the lookup, submits result. Does NOT disturb existing
+# vauto/accutrade values OR re-fire the AI assessment.
+def process_one_ipacket(item):
+    bid_id = item.get("bid_id")
+    vin = item.get("vin")
+    if not bid_id or not vin:
+        return False
+    print(f"\n[ipacket-only bid #{bid_id}] {vin}")
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            ctx = p.chromium.launch_persistent_context(
+                user_data_dir=str(IPACKET_PROFILE_DIR),
+                headless=False,
+                viewport={"width": 1500, "height": 1000},
+                user_agent=(
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/124.0.0.0 Safari/537.36'),
+                locale="en-US",
+                timezone_id="America/New_York",
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+            )
+            page = ctx.new_page()
+            t = time.time()
+            # NOTE: pass bid_id so the gate-check inside worker_ipacket.lookup
+            # sees ipacket_disabled=FALSE and proceeds with the scrape.
+            result = _worker_ipacket_mod.lookup(page, ctx, vin, t, bid_id=bid_id)
+            try: ctx.close()
+            except Exception: pass
+    except Exception as e:
+        traceback.print_exc()
+        try:
+            ew_submit_ipacket({
+                "bid_id": bid_id, "vin": vin, "not_available": True,
+                "unavailable_reason": f"ipacket-only worker error: {str(e)[:200]}",
+            })
+        except Exception: pass
+        return False
+
+    # Submit result — mirror the not_available / error / success branches from
+    # process_one_bid's iPacket block.
+    if result.get("not_available"):
+        na_payload = {
+            "bid_id": bid_id, "vin": vin, "not_available": True,
+            "unavailable_reason": result.get("reason", "unavailable"),
+        }
+        if result.get("screenshot"):
+            na_payload["screenshot"] = ipacket_upload(result.get("screenshot"))
+        ok = ew_submit_ipacket(na_payload)
+        print(f"  iPacket {'OK' if ok else 'FAIL'}: NOT AVAILABLE")
+        return ok
+    if result.get("error"):
+        ok = ew_submit_ipacket({
+            "bid_id": bid_id, "vin": vin, "not_available": True,
+            "unavailable_reason": f"worker error: {result.get('error')}",
+        })
+        print(f"  iPacket {'OK' if ok else 'FAIL'}: error->NA")
+        return ok
+    screenshot_path = ipacket_upload(result.get("screenshot"))
+    i_payload = {
+        "bid_id": bid_id, "vin": vin,
+        "total_msrp": result.get("total_msrp"),
+        "base_price": result.get("base_price"),
+        "exterior_color": result.get("exterior_color"),
+        "interior_color": result.get("interior_color"),
+        "screenshot": screenshot_path,
+        "raw": result.get("raw", {}),
+    }
+    ok = ew_submit_ipacket(i_payload)
+    msrp = result.get("total_msrp") or 0
+    print(f"  iPacket {'OK' if ok else 'FAIL'}: MSRP=${msrp:,}")
+    return ok
+
+
+def ew_get_ipacket_only_pending():
+    """IPACKET_ONLY_2026_05_20: separate poll for manual iPacket runs."""
+    try:
+        params = {"worker_id": WORKER_ID, "priority": WORKER_PRIORITY, "source": WORKER_SOURCE}
+        r = http_requests.get(f"{EW_SERVER}/api/ipacket/pending",
+                              params=params, timeout=15)
+        if r.status_code == 200:
+            return r.json().get("pending", [])
+    except Exception as e:
+        print(f"  [EW] ipacket-only pending fetch err: {e}")
+    return []
+
+
 # ── Main loop ────────────────────────────────────────────────────────────────
 
 def run_pass():
     pending = ew_get_pending()
-    if not pending:
+    if pending:
+        print(f"  {len(pending)} pending")
+        ok_count = 0
+        for item in pending:
+            try:
+                if process_one_bid(item):
+                    ok_count += 1
+            except Exception:
+                traceback.print_exc()
+            time.sleep(2)
+    else:
         print("  0 pending")
-        return 0
-    print(f"  {len(pending)} pending")
-    ok_count = 0
-    for item in pending:
-        try:
-            if process_one_bid(item):
-                ok_count += 1
-        except Exception:
-            traceback.print_exc()
-        # Small breather between bids
-        time.sleep(2)
+        ok_count = 0
+
+    # IPACKET_ONLY_2026_05_20: after vauto-pending pass, check for manual
+    # iPacket-only requests. Operator's 'Run iPacket' button flips
+    # ipacket_disabled=FALSE which makes the bid appear here.
+    ipkt_pending = ew_get_ipacket_only_pending()
+    if ipkt_pending:
+        print(f"  {len(ipkt_pending)} ipacket-only pending")
+        for item in ipkt_pending:
+            try:
+                process_one_ipacket(item)
+            except Exception:
+                traceback.print_exc()
+            time.sleep(2)
     return ok_count
 
 
