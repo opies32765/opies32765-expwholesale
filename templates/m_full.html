@@ -341,13 +341,29 @@
 </details>
 {% endif %}
 
-{# Book Values #}
+{# Book Values — COMBINED_SMS_2026_05_20: includes saved vAuto + AccuTrade links #}
 <details class="card books">
   <summary>
     <span class="title">Book Values</span>
     <span class="summary-text">vAuto · AccuTrade · iPacket</span>
   </summary>
   <div class="body">
+    {% if (vauto and vauto.appraisal_url) or (accutrade and accutrade.appraisal_url) %}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      {% if vauto and vauto.appraisal_url and vauto.appraisal_url.startswith('http') %}
+      <a href="{{ vauto.appraisal_url }}" target="_blank" rel="noopener"
+         style="flex:1;min-width:140px;padding:9px 12px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#67e8f9;text-decoration:none;font-size:12px;font-weight:600;text-align:center">
+        🔗 Open saved vAuto →
+      </a>
+      {% endif %}
+      {% if accutrade and accutrade.appraisal_url and accutrade.appraisal_url.startswith('http') %}
+      <a href="{{ accutrade.appraisal_url }}" target="_blank" rel="noopener"
+         style="flex:1;min-width:140px;padding:9px 12px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#67e8f9;text-decoration:none;font-size:12px;font-weight:600;text-align:center">
+        🔗 Open saved AccuTrade →
+      </a>
+      {% endif %}
+    </div>
+    {% endif %}
     {% set has_any = false %}
     {% if vauto %}
       {% if vauto.rbook %}<div class="row"><span class="lbl">vAuto rBook</span><span class="val">${{ '{:,}'.format(vauto.rbook|int) }}</span></div>{% set has_any = true %}{% endif %}
@@ -369,5 +385,63 @@
   </div>
 </details>
 
+{# COMBINED_SMS_2026_05_20 ─ Vehicle History card (Carfax + AutoCheck proofs) #}
+{% if vauto and (vauto.carfax_screenshot or vauto.autocheck_screenshot or vauto.carfax_share_url) %}
+<details class="card hist">
+  <summary>
+    <span class="title">Vehicle History</span>
+    <span class="summary-text">Carfax{% if vauto.autocheck_screenshot %} · AutoCheck{% endif %}</span>
+  </summary>
+  <div class="body">
+    {% if vauto.carfax_share_url %}
+    <a href="{{ vauto.carfax_share_url }}" target="_blank" rel="noopener"
+       style="display:inline-block;padding:9px 12px;margin-bottom:12px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#67e8f9;text-decoration:none;font-size:12px;font-weight:600">
+      🔗 Open shareable Carfax →
+    </a>
+    {% endif %}
+    {% if vauto.carfax_screenshot %}
+    <div style="margin-bottom:14px">
+      <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Carfax</div>
+      <a href="{{ vauto.carfax_screenshot }}" target="_blank">
+        <img src="{{ vauto.carfax_screenshot }}" style="width:100%;border-radius:6px;border:1px solid #1f2937;display:block" alt="Carfax Report">
+      </a>
+    </div>
+    {% endif %}
+    {% if vauto.autocheck_screenshot %}
+    <div>
+      <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">AutoCheck</div>
+      <a href="{{ vauto.autocheck_screenshot }}" target="_blank">
+        <img src="{{ vauto.autocheck_screenshot }}" style="width:100%;border-radius:6px;border:1px solid #1f2937;display:block" alt="AutoCheck Report">
+      </a>
+    </div>
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+{# COMBINED_SMS_2026_05_20 ─ AccuTrade Report card (screenshot + saved-page link) #}
+{% if accutrade and (accutrade.screenshot or accutrade.appraisal_url) %}
+<details class="card accutrade">
+  <summary>
+    <span class="title">AccuTrade Report</span>
+    <span class="summary-text">{% if accutrade.guaranteed_offer %}GO ${{ '{:,}'.format(accutrade.guaranteed_offer|int) }}{% else %}saved page{% endif %}</span>
+  </summary>
+  <div class="body">
+    {% if accutrade.appraisal_url and accutrade.appraisal_url.startswith('http') %}
+    <a href="{{ accutrade.appraisal_url }}" target="_blank" rel="noopener"
+       style="display:inline-block;padding:9px 12px;margin-bottom:12px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#67e8f9;text-decoration:none;font-size:12px;font-weight:600">
+      🔗 Open saved AccuTrade page →
+    </a>
+    {% endif %}
+    {% if accutrade.screenshot %}
+    <a href="{{ accutrade.screenshot }}" target="_blank">
+      <img src="{{ accutrade.screenshot }}" style="width:100%;border-radius:6px;border:1px solid #1f2937;display:block" alt="AccuTrade Report">
+    </a>
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
 </body>
 </html>
+

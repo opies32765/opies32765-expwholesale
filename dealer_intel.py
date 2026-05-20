@@ -436,7 +436,12 @@ def compute_chip(v, comp, mmr, seg_lookup, today):
     not_aging = (dol is None or seg_avg is None or dol <= 1.2 * seg_avg)
 
     chip = 'hold'
-    if over_age_15 and mmr_falling and priced_above_75:
+    # P50_ONLY_2026_05_20: single anchor (rBook P50) across all chip
+    # decisions and reasoning text. SELL_NOW used to require above P75
+    # but that gate never fired on the live data (0 sell_now / 200 units
+    # observed). Lowering to P50 + aging 1.5x + falling MMR keeps the
+    # severity ladder intact while giving the dealer a consistent anchor.
+    if over_age_15 and mmr_falling and priced_above_50:
         chip = 'sell_now'
     elif over_age_12 and priced_above_50:
         chip = 'price_drop'
@@ -457,11 +462,10 @@ def compute_chip(v, comp, mmr, seg_lookup, today):
             bits.append(f'MMR {_fmt_pct(mmr_7d)} last 7d (rising)')
         else:
             bits.append(f'MMR {_fmt_pct(mmr_7d)} last 7d (steady)')
+    # P50_ONLY_2026_05_20: single anchor in displayed reasoning. P75
+    # branch removed — dealer asked for consistency across all cards.
     if asking is not None and rbook_p50 is not None:
-        if priced_above_75 and rbook_p75 is not None:
-            bits.append(f'Asking {_fmt_money(asking)} above rBook P75 '
-                        f'{_fmt_money(rbook_p75)}')
-        elif priced_above_50:
+        if priced_above_50:
             bits.append(f'Asking {_fmt_money(asking)} above rBook P50 '
                         f'{_fmt_money(rbook_p50)}')
         elif priced_at_or_below_50:
