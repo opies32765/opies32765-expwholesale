@@ -16254,15 +16254,29 @@ def _notify_driver_combined(bid_id):
     try:
         db = get_db()
         cur = db.cursor()
-        cur.execute("""
-            SELECT id, driver_token, driver_phone,
-                   driver_notified_at, phase2_notified_at,
-                   year, make, model,
-                   needs_verification_at, needs_verification_cleared_at,
-                   needs_verification_reason
-              FROM bids WHERE id = %s
-        """, (bid_id,))
-        bid = cur.fetchone()
+        # COMBINED_SMS_2026_05_20: retry-poll for YMM. The Phase 2 gate
+        # in _maybe_fire_assessment requires vAuto + AccuTrade + iPacket
+        # + manheim, but the canonicalize path that writes year/make/model
+        # back to bids can race behind. Wait up to ~6s for YMM to land.
+        bid = None
+        for _attempt in range(4):  # 0, 2s, 4s, 6s total max
+            cur.execute("""
+                SELECT id, driver_token, driver_phone,
+                       driver_notified_at, phase2_notified_at,
+                       year, make, model, trim, mileage, vin,
+                       needs_verification_at, needs_verification_cleared_at,
+                       needs_verification_reason
+                  FROM bids WHERE id = %s
+            """, (bid_id,))
+            bid = cur.fetchone()
+            if not bid:
+                break
+            # Stop polling once YMM lands OR we've waited long enough.
+            if bid.get('year') and (bid.get('make') or bid.get('model')):
+                break
+            if _attempt < 3:
+                import time as _ymm_t
+                _ymm_t.sleep(2)
         if not bid or not bid.get('driver_phone') or not bid.get('driver_token'):
             db.close()
             return False
@@ -16298,9 +16312,21 @@ def _notify_driver_combined(bid_id):
         ymm_parts = [str(bid['year']) if bid['year'] else '',
                      bid['make'] or '', bid['model'] or '']
         ymm = ' '.join(p for p in ymm_parts if p).strip() or 'Vehicle'
+        # COMBINED_SMS_2026_05_20: SINGLE-LINE body so iMessage renders as
+        # one bubble with the link preview below (not two separate bubbles).
+        # Trim + miles + VIN last-4 give the customer full vehicle ID inline.
+        extras = []
+        if bid.get('trim'):
+            extras.append(bid['trim'])
+        if bid.get('mileage'):
+            try: extras.append(f"{int(bid['mileage']):,} mi")
+            except (ValueError, TypeError): pass
+        if bid.get('vin') and len(bid['vin']) >= 4:
+            extras.append(f"VIN \u2026{bid['vin'][-4:]}")
+        ymm_full = ymm + (' \u2022 ' + ' \u2022 '.join(extras) if extras else '')
         base = os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net')
         link = f"{base}/m/{bid['driver_token']}/full"
-        body = f"Bid #{bid['id']} {ymm}\nFull report:\n{link}"
+        body = f"Bid #{bid['id']} {ymm_full} {link}"
 
         sent = send_sms(bid['driver_phone'], body)
         if sent:
