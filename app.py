@@ -3531,7 +3531,29 @@ def twilio_webhook():
     _partner_looks_like_new_bid = (
         bool(extract_vin_from_text(body)) if body else False
     ) or (num_media > 0)
-    if partner_row and not _partner_looks_like_new_bid:
+    # STITCH_WINDOW_FIX_2026_05_20: also skip partner-reply if this phone
+    # has a verify-pending bid in the last 5 min. The follow-up data (e.g.
+    # bare miles like "9207") belongs to that fresh bid, NOT to whatever
+    # old partner bid happens to be the most recent for this dealer.
+    _partner_has_recent_verify_pending = False
+    if partner_row and body and not _partner_looks_like_new_bid:
+        try:
+            cur.execute("""
+                SELECT 1 FROM bids
+                 WHERE phone = %s
+                   AND needs_verification_at IS NOT NULL
+                   AND needs_verification_cleared_at IS NULL
+                   AND created_at > NOW() - INTERVAL '5 minutes'
+                 LIMIT 1
+            """, (from_phone,))
+            _partner_has_recent_verify_pending = cur.fetchone() is not None
+            if _partner_has_recent_verify_pending:
+                print(f'[partner-reply-gate] phone={from_phone} has recent '
+                      f'verify-pending bid; skipping partner-reply path so '
+                      f'verify-stitch can handle this follow-up', flush=True)
+        except Exception as _pgate_err:
+            print(f'[partner-reply-gate] err: {_pgate_err}', flush=True)
+    if partner_row and not _partner_looks_like_new_bid and not _partner_has_recent_verify_pending:
         target_bid_id = None
         # Path 2: explicit "#NNN" — only if the bid is tied to this dealer.
         m = re.search(r'#\s*(\d+)', body or '')
