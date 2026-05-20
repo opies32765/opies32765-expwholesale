@@ -6346,7 +6346,7 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
     return True
 
 
-def _schedule_assessment_fallback(bid_id, delay_sec=300):
+def _schedule_assessment_fallback(bid_id, delay_sec=60):
     """Arm a one-shot timer that fires assessment with require_all=False if
     AccuTrade/iPacket never landed. Safe to call on every vAuto submit —
     the gate bails if assessment already fired."""
@@ -12585,7 +12585,7 @@ def api_vauto_submit():
     # Gate assessment on all three books (vAuto+AccuTrade+iPacket) — fire now
     # if they're all present, otherwise arm a 5-minute fallback timer.
     _maybe_fire_assessment(bid_id, require_all=True, source='vauto')
-    _schedule_assessment_fallback(bid_id, delay_sec=300)
+    _schedule_assessment_fallback(bid_id, delay_sec=60)
 
     return jsonify({'ok': True, 'bid_id': bid_id})
 
@@ -16304,13 +16304,15 @@ def _notify_driver_combined(bid_id):
         # COMBINED_SMS_2026_05_20: retry-poll for YMM. The Phase 2 gate
         # in _maybe_fire_assessment requires vAuto + AccuTrade + iPacket
         # + manheim, but the canonicalize path that writes year/make/model
-        # back to bids can race behind. Wait up to ~6s for YMM to land.
+        # back to bids can race behind — especially for unusual VINs that
+        # need photo OCR or NHTSA decode. Wait up to ~60s for YMM to land.
         bid = None
-        for _attempt in range(4):  # 0, 2s, 4s, 6s total max
+        for _attempt in range(13):  # 0,5,10,...,60s total max
             cur.execute("""
                 SELECT id, driver_token, driver_phone,
                        driver_notified_at, phase2_notified_at,
                        year, make, model, trim, mileage, vin,
+                       bidder_name,
                        needs_verification_at, needs_verification_cleared_at,
                        needs_verification_reason
                   FROM bids WHERE id = %s
@@ -16321,9 +16323,9 @@ def _notify_driver_combined(bid_id):
             # Stop polling once YMM lands OR we've waited long enough.
             if bid.get('year') and (bid.get('make') or bid.get('model')):
                 break
-            if _attempt < 3:
+            if _attempt < 12:
                 import time as _ymm_t
-                _ymm_t.sleep(2)
+                _ymm_t.sleep(5)
         if not bid or not bid.get('driver_phone') or not bid.get('driver_token'):
             db.close()
             return False
@@ -16373,7 +16375,11 @@ def _notify_driver_combined(bid_id):
         ymm_full = ymm + (' \u2022 ' + ' \u2022 '.join(extras) if extras else '')
         base = os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net')
         link = f"{base}/m/{bid['driver_token']}/full"
-        body = f"Bid #{bid['id']} {ymm_full} {link}"
+        # COMBINED_SMS_2026_05_20: prepend bidder first-name when known
+        _bn = (bid.get('bidder_name') or '').strip()
+        _first = _bn.split()[0] if _bn else ''
+        _greet = f"Hi {_first}, " if _first else ""
+        body = f"{_greet}Bid #{bid['id']} {ymm_full} {link}"
 
         sent = send_sms(bid['driver_phone'], body)
         if sent:
