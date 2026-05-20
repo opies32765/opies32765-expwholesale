@@ -591,8 +591,8 @@ def main():
     log.info('phase 1 done in %.1fs: rows=%d', time.monotonic() - t0, len(mmr_by_inv))
 
     if _auth_failed.is_set():
-        log.error('auth failed in phase 1 — preserving cookies, exiting 2')
-        return 2
+        log.error('auth failed in phase 1 — preserving cookies, exiting 3')
+        return 3
 
     if not args.skip_backfill:
         log.info('phase 2: ManheimTransactions sweep, concurrency=%d', args.mmr_concurrency)

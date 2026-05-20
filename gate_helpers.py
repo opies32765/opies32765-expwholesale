@@ -71,6 +71,10 @@ def gate_digits(gate_type):
         # env is empty (matches the old sourcing_bot.py default behavior).
         env = _env_digits('SOURCING_PHONE_GATE') or _env_digits('PHASE2_PHONE_GATE')
         result = env | _db_digits('sourcing')
+    elif gate_type == 'bot_mute':
+        # Bot Mute (2026-05-19): phones the EW Bot must never auto-text.
+        # No env baseline — entirely DB-driven via /admin/phone-gates.
+        result = _db_digits('bot_mute')
     else:
         raise ValueError(f'unknown gate_type {gate_type!r}')
     _CACHE[gate_type] = result

@@ -15,6 +15,9 @@ h1 { font-size: 24px; margin: 0 0 4px; color: #0d2240; }
            box-shadow: 0 1px 3px rgba(0,0,0,0.06); margin-bottom: 18px;
            border-left: 4px solid #0d2240; }
 .section.sourcing { border-left-color: #16a34a; }
+.section.bot-mute { border-left-color: #dc2626; }
+.bot-mute .add-form .btn-add { background:#dc2626; }
+.bot-mute .add-form .btn-add:hover { background:#ef4444; }
 .section h2 { font-size: 16px; margin: 0 0 4px; color: #0d2240; }
 .section .what { color:#5a6878; font-size:12px; margin: 0 0 12px; }
 
@@ -80,6 +83,7 @@ Changes apply within 30s — no restart.
 
 {% set fb_active = rows | selectattr('disabled_at', 'none') | selectattr('gate_type', 'equalto', 'full_broker') | list %}
 {% set sc_active = rows | selectattr('disabled_at', 'none') | selectattr('gate_type', 'equalto', 'sourcing') | list %}
+{% set bm_active = rows | selectattr('disabled_at', 'none') | selectattr('gate_type', 'equalto', 'bot_mute') | list %}
 {% set disabled = rows | rejectattr('disabled_at', 'none') | list %}
 
 <div class="section">
@@ -96,7 +100,11 @@ Changes apply within 30s — no restart.
     {% for e in env_full_broker %}
       <tr>
         <td class="phone">{{ e.pretty }}</td>
+        {% if e.name %}
+        <td class="label-cell" title="resolved from bidder_contacts">{{ e.name }}</td>
+        {% else %}
         <td class="label-cell empty">(baseline)</td>
+        {% endif %}
         <td><span class="env-pill">env</span></td>
         <td class="meta">systemd</td>
         <td class="meta" style="font-size:10px;">edit service file</td>
@@ -136,7 +144,11 @@ Changes apply within 30s — no restart.
     {% for e in env_sourcing %}
       <tr>
         <td class="phone">{{ e.pretty }}</td>
+        {% if e.name %}
+        <td class="label-cell" title="resolved from bidder_contacts">{{ e.name }}</td>
+        {% else %}
         <td class="label-cell empty">(baseline)</td>
+        {% endif %}
         <td><span class="env-pill">env</span></td>
         <td class="meta">systemd</td>
         <td class="meta" style="font-size:10px;">edit service file</td>
@@ -157,6 +169,39 @@ Changes apply within 30s — no restart.
       </tr>
     {% else %}
       {% if not env_sourcing %}<tr><td colspan="5" class="meta">No phones gated. Sourcing-bot effectively closed.</td></tr>{% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="section bot-mute">
+  <h2>Bot Mute &mdash; Phones the EW Bot must never auto-text</h2>
+  <p class="what">Inbound from these numbers still creates bids normally; only outbound
+     auto-bot messages (ack, miles-request, vin-verify, pa-create A/B/C) are silenced.
+     Use this when a high-volume submitter is getting spammed by automated questions.</p>
+  <form class="add-form" onsubmit="return addGate(event, 'bot_mute')">
+    <input type="text" name="phone" placeholder="561-301-8622" autocomplete="off" required>
+    <input type="text" name="label" placeholder="Name / reason (optional)" autocomplete="off">
+    <button class="btn-add" type="submit">+ Mute Bot</button>
+  </form>
+  <table>
+    <thead><tr><th>Phone</th><th>Name / Reason</th><th>Source</th><th>Added</th><th></th></tr></thead>
+    <tbody>
+    {% for r in bm_active %}
+      <tr id="row-{{ r.id }}">
+        <td class="phone">{{ r.phone_pretty }}</td>
+        <td class="label-cell">
+          <input type="text" class="name-edit" data-id="{{ r.id }}"
+                 value="{{ r.label or '' }}" placeholder="(add reason)"
+                 onblur="saveName(this)"
+                 onkeydown="if(event.key==='Enter'){this.blur();}">
+        </td>
+        <td><span class="db-pill">db</span></td>
+        <td class="meta">{{ r.added_at.strftime('%Y-%m-%d %H:%M') if r.added_at else '—' }}{% if r.added_by %} &middot; {{ r.added_by }}{% endif %}</td>
+        <td><button class="btn-remove" onclick="removeGate({{ r.id }})">unmute</button></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="meta">No phones muted. EW Bot speaks to everyone.</td></tr>
     {% endfor %}
     </tbody>
   </table>

@@ -2049,14 +2049,27 @@ def extract_carfax_multi(files_list):
 
 _TWILIO_MAGIC_RE = re.compile(r'^\+1555555\d{4}$')
 
+# Operator-managed mute list — phones we never auto-text. Sourced from
+# gated_phones(gate_type='bot_mute') via gate_helpers (30s cache). Admins
+# add/remove via /admin/phone-gates without restart. Original hardcoded
+# constant kept as a fallback safety floor — leave it empty in code.
+SMS_BOT_SKIP_PHONES = set()  # fallback floor; runtime list lives in DB
+
 def send_sms(to, body):
     """Send SMS via Twilio. Returns True on success, False on failure. Never raises.
 
     Twilio reserves +1 (555) 555-XXXX for testing; live accounts reject these
     with HTTP 400 ("Invalid To"). We short-circuit here so test fixtures
     leaking into prod data don't generate noisy retry storms.
+
+    SMS_BOT_SKIP_PHONES gives the operator a per-number kill switch — handy
+    for high-volume submitters who shouldn't see automated questions.
     """
     if not to or to.startswith('field:') or not TWILIO_SID or not TWILIO_TOKEN or not TWILIO_PHONE:
+        return False
+    _digits = gate_helpers.phone_digits(to)
+    if to in SMS_BOT_SKIP_PHONES or (_digits in gate_helpers.gate_digits('bot_mute')):
+        print(f'SMS BOT MUTED for {to}: {body[:80]!r}', flush=True)
         return False
     if _TWILIO_MAGIC_RE.match(to):
         print(f'SMS skipped: Twilio magic number {to[-4:]} (test fixture)', flush=True)
@@ -12751,7 +12764,7 @@ def _normalize_accutrade_url(url):
 # Empty by default → no canary bids → existing LLM behavior preserved fleet-wide.
 # Add a bid_id here to test the new flow for that specific bid.
 ACCUTRADE_WAIT_FOR_EVIDENCE_ALLOWLIST: set[int] = {1764}
-ACCUTRADE_EVIDENCE_WAIT_SECONDS = 55  # less than worker timeout 65s so worker doesn't drop the call
+ACCUTRADE_EVIDENCE_WAIT_SECONDS = 8  # TIMING_FIX_2_2026_05_19: was 20. Bid 1830 (BMW 740i) overflowed worker 90s budget when LLM trim_select ran slow (~25s LLM + 20s evidence wait + 34s scrape = 79s of useful + 9s overhead = 99s, abandoned at 90s losing real values). 8s wait still lets vauto/ipacket land partway while leaving budget for slow LLM cases.
 
 
 def _evidence_first_trim_pick(db, vin, bid_id, choices):
@@ -12821,49 +12834,76 @@ def _evidence_first_trim_pick(db, vin, bid_id, choices):
     except Exception as _e:
         print(f'[trim_select/canary] evidence fetch err bid={bid_id}: {_e}', flush=True)
 
-    # Match choice → evidence (longest choice-text wins on substring hit)
+    # STRICT_TRIM_MATCH_2026_05_19: previous logic asked "is choice's first
+    # trim word a substring of evidence?" That direction is too loose - bid
+    # 1834 (2023 Dodge Challenger SRT HELLCAT REDEYE) matched the simpler
+    # "SRT HELLCAT COUPE 6.2L V8 S/CHGD HEMI" choice because "SRT HELLCAT"
+    # is a substring of evidence "SRT HELLCAT REDEYE" - AccuTrade returned
+    # Regular Hellcat values for what's actually a Redeye.
+    #
+    # NEW direction: pull the CLEAN trim signal (canon_trim/trim/vauto_trim)
+    # and require ALL its tokens to be word-boundary-present in the choice.
+    # If no choice contains the full evidence trim, return None and fall
+    # through to LLM.
     sorted_choices = sorted(
         [c for c in choices if isinstance(c, dict) and c.get('text')],
         key=lambda c: -len((c.get('text') or '').strip())
     )
-    _evidence_blob = ' \n '.join(s[1].upper() for s in evidence_sources)
-    best = None
-    for c in sorted_choices:
-        choice_text = (c.get('text') or '').strip().upper()
-        if not choice_text:
-            continue
-        # Extract the "trim word" tokens from the choice (e.g. "LARIAT 4 DOOR P/UP 5.0L V8" -> "LARIAT")
-        choice_first_token = _re_local.split(r'\s+(?:\d\s*DOOR|P/UP|PICKUP|SUV|WAGON|SEDAN|COUPE|CREW|EXT|REG|\d+\.\d+L)\b', choice_text)[0].strip()
-        if choice_first_token and choice_first_token in _evidence_blob:
-            best = c
+
+    primary_trim = None
+    primary_source = None
+    for src in evidence_sources:
+        if src[0] == 'seller_hint' and src[1] and src[1].strip():
+            primary_trim = src[1].strip().upper()
+            primary_source = 'seller_hint'
             break
+    if not primary_trim:
+        for src in evidence_sources:
+            if src[0] in ('vauto_trim','vauto_series',
+                          'vauto_canonical_trim','vauto_model_series') \
+               and src[1] and src[1].strip():
+                primary_trim = src[1].strip().upper()
+                primary_source = src[0]
+                break
+
+    best = None
+    match_reason = None
+    if primary_trim:
+        primary_tokens = [t for t in primary_trim.split() if t]
+        if primary_tokens:
+            for c in sorted_choices:
+                choice_text = (c.get('text') or '').strip().upper()
+                if not choice_text:
+                    continue
+                if all(_re_local.search(r'\b' + _re_local.escape(tok) + r'\b',
+                                        choice_text)
+                       for tok in primary_tokens):
+                    best = c
+                    match_reason = (f'all primary_trim tokens '
+                                    f'[{primary_trim}] from {primary_source} '
+                                    f'present in choice')
+                    break
 
     if best is not None:
         return {
             'index': int(best.get('index') or sorted_choices.index(best)),
             'text': best.get('text'),
-            'source': 'evidence_match',
+            'source': 'evidence_match_strict',
+            'primary_trim': primary_trim,
+            'primary_source': primary_source,
             'evidence_sources': [s[0] for s in evidence_sources],
-            'reason': f'matched on choice token vs evidence',
+            'reason': match_reason,
             'vauto_ready': vauto_ready, 'ipacket_ready': ipacket_ready,
         }
 
-    # No evidence match → alphabetically lowest = "safe" base trim (XL/XLT/Base ranks above Lariat/Limited/Platinum)
-    by_alpha = sorted(
-        [c for c in choices if isinstance(c, dict) and c.get('text')],
-        key=lambda c: (c.get('text') or '').strip().upper()
-    )
-    if by_alpha:
-        pick = by_alpha[0]
-        return {
-            'index': int(pick.get('index') or choices.index(pick)),
-            'text': pick.get('text'),
-            'source': 'alpha_fallback',
-            'evidence_sources': [s[0] for s in evidence_sources] or [],
-            'reason': 'no evidence matched any choice — picking alphabetically lowest (safe base trim)',
-            'vauto_ready': vauto_ready, 'ipacket_ready': ipacket_ready,
-        }
-    return {'index': None, 'source': 'alpha_fallback', 'reason': 'no choices'}
+    # EVIDENCE_FIRST_DEFAULT_2026_05_19: when no evidence matches, return None
+    # to signal fall-through. Caller then continues to the LLM path which has
+    # iPacket OCR + Carfax hints in the prompt. Previous behavior was an
+    # alpha_fallback pick which was deterministic-but-arbitrary (could pick
+    # 'PREMIUM LUXURY' for an Escalade where the right trim is 'SPORT
+    # PLATINUM' or 'V-SERIES'). LLM with evidence in prompt is the better
+    # backstop when deterministic substring match has nothing to lock onto.
+    return None
 
 
 @app.route('/api/accutrade/trim_select', methods=['POST'])
@@ -12894,15 +12934,23 @@ def api_trim_select():
         if isinstance(c, dict) and c.get('text'):
             c['text'] = normalize_trim_text(c['text'])
 
-    # ── Canary: evidence-first path (allowlisted bids only) ──
-    if bid_id is not None and int(bid_id) in ACCUTRADE_WAIT_FOR_EVIDENCE_ALLOWLIST:
+    # ── Evidence-first default (EVIDENCE_FIRST_DEFAULT_2026_05_19) ──
+    # Every bid with an id runs the deterministic Carfax/iPacket/vAuto
+    # substring match first. If it locks onto a choice, return it (zero
+    # LLM cost, zero hallucination risk). If no evidence matches, fall
+    # through to the LLM path below where iPacket OCR text + Carfax hints
+    # go into the prompt as the smart fallback.
+    if bid_id is not None:
         _canary_db = get_db()
         try:
             result = _evidence_first_trim_pick(_canary_db, vin, int(bid_id), choices)
-            print(f'[trim_select/canary] bid={bid_id} vin={vin} -> '
-                  f'index={result.get("index")} source={result.get("source")} '
-                  f'reason={result.get("reason")}', flush=True)
-            return jsonify(result), 200
+            if result is not None:
+                print(f'[trim_select/evidence] bid={bid_id} vin={vin} -> '
+                      f'index={result.get("index")} source={result.get("source")} '
+                      f'reason={result.get("reason")}', flush=True)
+                return jsonify(result), 200
+            # Evidence-first returned None — fall through to LLM with evidence in prompt
+            print(f'[trim_select/evidence] bid={bid_id} vin={vin} -> no evidence match, falling through to LLM', flush=True)
         finally:
             try: _canary_db.close()
             except Exception: pass
@@ -12910,46 +12958,18 @@ def api_trim_select():
     db = get_db()
     cur = db.cursor()
 
-    # 2026-05-18 bid 1787: cache hits were serving stale picks made BEFORE
-    # the iPacket OCR text was wired into the overseer prompt. The cache
-    # entry for VIN 2T2BBMCA8SC068162 dates from 2026-05-15 (RX350H base —
-    # wrong; sticker shows Premium). Skip the cache when we have iPacket
-    # OCR text available for this VIN — call the LLM fresh with the sticker
-    # text in the prompt. Cache stays useful for VINs without OCR sticker.
-    _has_ocr = False
-    try:
-        with db.cursor() as _ocheck:
-            _ocheck.execute("""
-                SELECT 1 FROM ipacket_lookups
-                 WHERE vin = %s
-                   AND raw_json ? '_ocr_text'
-                   AND length(raw_json->>'_ocr_text') > 200
-                 LIMIT 1
-            """, (vin,))
-            _has_ocr = bool(_ocheck.fetchone())
-    except Exception as _oe:
-        print(f'[trim_select] OCR-check err vin={vin}: {_oe}', flush=True)
-
-    if not _has_ocr:
-        # Cache hit by VIN (only when no fresh OCR evidence to bring)
-        cur.execute(
-            "SELECT selected_index, selected_text, confidence, model_used, clean_trim "
-            "FROM accutrade_trim_select_cache WHERE vin=%s", (vin,)
-        )
-        row = cur.fetchone()
-        if row:
-            db.close()
-            return jsonify({
-                'index': int(row['selected_index']),
-                'text': normalize_trim_text(row['selected_text']),
-                'clean_trim': row.get('clean_trim') if isinstance(row, dict) else None,
-                'confidence': float(row['confidence']) if row['confidence'] is not None else None,
-                'source': 'cache',
-                'model': row['model_used'],
-            })
-    else:
-        print(f'[trim_select] cache bypassed for vin={vin} — '
-              f'iPacket OCR available, calling LLM fresh', flush=True)
+    # TRIM_CACHE_REMOVED_2026_05_19: cache lookup disabled per operator
+    # request. The cache was short-circuiting the evidence-first path when
+    # iPacket OCR wasn't present for a VIN — returning stale picks from
+    # earlier sibling VINs (e.g. cached 'SPORT PLATINUM 4 DOOR SUV 6.2L V8'
+    # served for a different 2026 Escalade where the correct trim differed,
+    # leading to AccuTrade returning NULL guaranteed_offer/trade_in). Every
+    # call now goes to the LLM (or evidence-first canary path) with fresh
+    # Carfax/iPacket/vAuto signals. Cache writes downstream remain in place
+    # for forensic reference; they're just never read. To revert: restore
+    # the if/else block this comment replaced from
+    # /tmp/app.py.bak.*-trimcache-v2.
+    pass  # was: if not _has_ocr: ... cache read ... else: ... bypass log
 
     # Pull bid context + iPacket signal + Carfax/AutoCheck for the prompt
     bid_trim = None
@@ -17862,7 +17882,6 @@ def admin_phone_gates():
                      FROM gated_phones
                     ORDER BY disabled_at IS NULL DESC, added_at DESC""")
     rows = [dict(r) for r in cur.fetchall()]
-    db.close()
     for r in rows:
         d = r['phone_digits']
         r['phone_pretty'] = f'({d[0:3]}) {d[3:6]}-{d[6:10]}' if len(d) == 10 else d
@@ -17876,12 +17895,43 @@ def admin_phone_gates():
                           or gate_helpers._env_digits('PHASE2_PHONE_GATE'))
     def _pretty(d):
         return f'({d[0:3]}) {d[3:6]}-{d[6:10]}' if len(d) == 10 else d
-    env_full_broker = [{'digits': d, 'pretty': _pretty(d)} for d in env_full_broker]
-    env_sourcing = [{'digits': d, 'pretty': _pretty(d)} for d in env_sourcing]
+    # GATE_PHONE_NAMES_BIDDER_LOOKUP_2026_05_19: resolve names for env-baseline
+    # entries from bidder_contacts so the admin page shows e.g. "Todd Kozak"
+    # next to 5613018622 instead of just "(baseline)". Read-only display;
+    # actual edits to bidder names still happen via the normal name-capture
+    # flow (Stage 2c name-reply handler). One batched query per page load.
+    all_env_digits = sorted(set(env_full_broker) | set(env_sourcing))
+    env_name_map = {}
+    if all_env_digits:
+        try:
+            cur.execute("""
+                SELECT RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10)
+                       AS digits10,
+                       name
+                  FROM bidder_contacts
+                 WHERE RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10)
+                       = ANY(%s)
+            """, (all_env_digits,))
+            for _row in cur.fetchall():
+                _d = _row['digits10']
+                _n = (_row['name'] or '').strip()
+                if _d and _n and _d not in env_name_map:
+                    env_name_map[_d] = _n
+        except Exception as _bne:
+            print(f'[admin-phone-gates] bidder-contact lookup err: {_bne}',
+                  flush=True)
+    db.close()
+    env_full_broker = [{'digits': d, 'pretty': _pretty(d),
+                        'name': env_name_map.get(d)}
+                       for d in env_full_broker]
+    env_sourcing = [{'digits': d, 'pretty': _pretty(d),
+                     'name': env_name_map.get(d)}
+                    for d in env_sourcing]
     return render_template('admin_phone_gates.html',
                            rows=rows,
                            env_full_broker=env_full_broker,
-                           env_sourcing=env_sourcing)
+                           env_sourcing=env_sourcing,
+                           env_bot_mute=[])  # bot_mute has no env baseline
 
 
 @app.route('/admin/phone-gates/add', methods=['POST'])
@@ -17892,8 +17942,8 @@ def admin_phone_gates_add():
     digits = gate_helpers.phone_digits(phone_raw)
     if len(digits) != 10:
         return jsonify({'ok': False, 'error': f'invalid phone (need 10 digits, got {len(digits)})'}), 400
-    if gate_type not in ('full_broker', 'sourcing'):
-        return jsonify({'ok': False, 'error': 'gate_type must be full_broker or sourcing'}), 400
+    if gate_type not in ('full_broker', 'sourcing', 'bot_mute'):
+        return jsonify({'ok': False, 'error': 'gate_type must be full_broker, sourcing, or bot_mute'}), 400
     db = get_db()
     cur = db.cursor()
     # If a previously-disabled row exists, re-enable it (preserves history).

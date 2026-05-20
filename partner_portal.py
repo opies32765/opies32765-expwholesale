@@ -538,6 +538,9 @@ def dashboard(slug):
         comps_by_inv_id = {}
         wishlists_by_inv_id = {}
         history_by_inv_id = {}
+        intel_by_inv_id = {}     # DEALER_INTEL_2026_05_19
+        segment_intel = []        # DEALER_INTEL_2026_05_19
+        intel_summary = None      # DEALER_INTEL_L4_2026_05_19
         if dealer.get('portal_slug') in COMPS_ENABLED_SLUGS and not wholesaler_mode:
             cur.execute("""
                 SELECT DISTINCT ON (di.id)
@@ -593,6 +596,65 @@ def dashboard(slug):
                         'src': r['source'],
                     })
 
+            # DEALER_INTEL_2026_05_19: per-VIN action chips (keep/hold/
+            # price_drop/sell_now) + segment rollups for the top-of-page
+            # banner. Written by dealer_intel.py daily after the comps
+            # pipeline. Gated by COMPS_ENABLED_SLUGS so other dealers
+            # never see this surface.
+            cur.execute("""
+                SELECT dealer_inventory_id, chip, confidence, reasoning_text,
+                       inputs, days_on_lot, segment_avg_dol, segment_volume,
+                       asking_price, rbook_p50, rbook_p75, mmr_now,
+                       mmr_trend_7d_pct, mmr_trend_30d_pct
+                  FROM dealer_intel_snapshot
+                 WHERE dealer_id = %s
+            """, (dealer['id'],))
+            for r in cur.fetchall():
+                intel_by_inv_id[r['dealer_inventory_id']] = dict(r)
+            # Segment rollups — keep just today's snapshot per (dealer,
+            # segment_key). Pulls strong/slow segments for the banner.
+            cur.execute("""
+                SELECT DISTINCT ON (segment_key)
+                       segment_key, make, year_band, mileage_band,
+                       window_days, sold_volume, avg_dol_days,
+                       median_dol_days, active_count, aging_count,
+                       mmr_trend_7d_pct, mmr_trend_30d_pct, verdict, confidence,
+                       snapshot_date
+                  FROM dealer_intel_segments
+                 WHERE dealer_id = %s
+                 ORDER BY segment_key, snapshot_date DESC
+            """, (dealer['id'],))
+            segment_intel = [dict(r) for r in cur.fetchall()]
+
+            # DEALER_INTEL_NEWSLETTER_2026_05_19: long-form daily Gemini
+            # newsletter replacing the old 3-card summary. Falls back to
+            # the older summary row if newsletter not yet generated.
+            cur.execute("""
+                SELECT headline, lede, body_sections, sample_sizes,
+                       snapshot_date, computed_at, model_name
+                  FROM dealer_intel_newsletter
+                 WHERE dealer_id = %s
+                 ORDER BY snapshot_date DESC, computed_at DESC
+                 LIMIT 1
+            """, (dealer['id'],))
+            _dn = cur.fetchone()
+            if _dn:
+                intel_summary = dict(_dn)
+                intel_summary['_kind'] = 'newsletter'
+            else:
+                cur.execute("""
+                    SELECT headline, what_you_move_best, watch_list,
+                           acquisition_blind_spots, sample_sizes,
+                           snapshot_date, computed_at, model_name
+                      FROM dealer_intel_summary
+                     WHERE dealer_id = %s
+                     ORDER BY snapshot_date DESC, computed_at DESC
+                     LIMIT 1
+                """, (dealer['id'],))
+                _ds = cur.fetchone()
+                if _ds:
+                    intel_summary = dict(_ds)
+                    intel_summary['_kind'] = 'cards_legacy'
 
             # Wishlist matches: active sourcing_requests whose YMM matches
             # any Encore inventory row. One query, grouped client-side by
@@ -657,6 +719,9 @@ def dashboard(slug):
                            wholesaler_mode=wholesaler_mode,
                            comps_by_inv_id=comps_by_inv_id,
                            history_by_inv_id=history_by_inv_id if dealer.get("portal_slug") in COMPS_ENABLED_SLUGS else {},
+                           intel_by_inv_id=intel_by_inv_id,
+                           segment_intel=segment_intel,
+                           intel_summary=intel_summary,
                            wishlists_by_inv_id=wishlists_by_inv_id,
                            viewing_as_admin=session.get('partner_viewing_as_admin', False),
                            BUCKETS=BUCKETS)

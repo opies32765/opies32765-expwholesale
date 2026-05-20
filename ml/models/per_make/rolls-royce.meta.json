@@ -1,9 +1,9 @@
 {
   "make_name": "ROLLS-ROYCE",
-  "trained_at": "2026-05-18T08:31:26.586002Z",
-  "n_total": 125,
+  "trained_at": "2026-05-19T08:32:54.431023Z",
+  "n_total": 126,
   "n_train": 114,
-  "n_test": 11,
+  "n_test": 12,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -189,49 +189,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 13512.0,
-    "mape_pct": 11.92,
-    "r2": 0.9691,
-    "within_5pct": 45.5,
-    "within_10pct": 63.6
+    "mae_dollars": 12401.0,
+    "mape_pct": 10.93,
+    "r2": 0.9712,
+    "within_5pct": 50.0,
+    "within_10pct": 66.7
   },
   "baseline_metrics": {
-    "mae_dollars": 14808.0,
-    "mape_pct": 10.2,
+    "mae_dollars": 14818.0,
+    "mape_pct": 9.8,
     "ratio": 1.0239
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.30424320697784424
+      "importance": 0.30463629961013794
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.2548586428165436
+      "importance": 0.2540489733219147
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.14334891736507416
+      "importance": 0.14372165501117706
     },
     {
       "name": "body_type_SUV",
-      "importance": 0.12110699713230133
+      "importance": 0.12072224915027618
     },
     {
       "name": "body_type_Sedan",
-      "importance": 0.03449379280209541
+      "importance": 0.03438420593738556
     },
     {
       "name": "original_msrp",
-      "importance": 0.02712087705731392
+      "importance": 0.027179963886737823
     },
     {
       "name": "body_type_Convertible",
-      "importance": 0.010716058313846588
+      "importance": 0.01068201381713152
     },
     {
       "name": "model_name_Wraith Coupe",
-      "importance": 0.009377479553222656
+      "importance": 0.009347687475383282
     }
   ]
 }
