@@ -37,6 +37,18 @@ UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
 _INT = re.compile(r'>Interior Color</span>\s*<span[^>]*?title="([^"]+)"', re.I)
 _EXT = re.compile(r'>Exterior Color</span>\s*<span[^>]*?title="([^"]+)"', re.I)
 
+# WP_VEHICLE_COLOR_2026_05_20 — WordPress dealer plugin body class
+# taxonomy (TXT Charlie + Cars Dealer / Elementor rooftops).
+_WP_INT = re.compile(r'\b(?:interior_color|interiorcolor)-([a-z0-9-]+)', re.I)
+_WP_EXT = re.compile(r'\b(?:exterior_color|exteriorcolor)-([a-z0-9-]+)', re.I)
+
+
+def _wp_slug_to_display(slug):
+    if not slug:
+        return None
+    parts = [p for p in slug.split('-') if p]
+    return ' '.join(p.capitalize() for p in parts) if parts else None
+
 log = logging.getLogger('backfill_int_color')
 logging.basicConfig(
     level=logging.INFO,
@@ -52,10 +64,19 @@ def fetch_and_parse(row):
         if r.status_code != 200:
             return row['id'], None, None, f'http={r.status_code}'
         html = r.text
+        # DealerOn first (info__label DOM), then WP-Elementor body class.
         ic = _INT.search(html)
         ec = _EXT.search(html)
         ic_v = ic.group(1).strip() if ic else None
         ec_v = ec.group(1).strip() if ec else None
+        if not ic_v:
+            m = _WP_INT.search(html)
+            if m:
+                ic_v = _wp_slug_to_display(m.group(1))
+        if not ec_v:
+            m = _WP_EXT.search(html)
+            if m:
+                ec_v = _wp_slug_to_display(m.group(1))
         return row['id'], ic_v, ec_v, None
     except Exception as e:
         return row['id'], None, None, f'{type(e).__name__}: {e}'

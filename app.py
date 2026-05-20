@@ -2369,19 +2369,7 @@ def dashboard():
         conditions.append("b.phone = %s")
         params.append(f'field:{rep_filter}')
 
-    # DAY_COLLAPSE_2026_05_20: dashboard defaults to TODAY only. Older bids
-    # are surfaced as collapsed-day rows beneath, click expands via
-    # /api/dashboard/day/<date>. Operator workflow: most bids are touched
-    # once and don't get revisited within 48h, so today's slice is the only
-    # fast-render the dashboard actually needs. status_filter is preserved
-    # (passed/bought tabs still scope by status, just within today).
-    today_only = True
-    today_conditions = list(conditions)
-    today_params = list(params)
-    if today_only:
-        today_conditions.append("b.created_at::date = CURRENT_DATE")
-    today_where = f"WHERE {' AND '.join(today_conditions)}" if today_conditions else ""
-
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     q = """
         SELECT b.*, c.name as contact_name, c.company as contact_company,
                c.role as contact_role, d.name as partner_dealer_name,
@@ -2399,45 +2387,8 @@ def dashboard():
         {where}
         ORDER BY b.created_at DESC LIMIT 200
     """
-    cur.execute(q.format(where=today_where), today_params)
+    cur.execute(q.format(where=where), params)
     bids = list(cur.fetchall())
-
-    # Prior-day buckets - same conditions, but EXCLUDING today. Just date
-    # + count. Limit to last 30 days so very old bids don't clutter.
-    prior_days = []
-    try:
-        pd_conditions = list(conditions)
-        pd_conditions.append("b.created_at::date < CURRENT_DATE")
-        pd_conditions.append("b.created_at::date >= CURRENT_DATE - INTERVAL '30 days'")
-        pd_where = f"WHERE {' AND '.join(pd_conditions)}"
-        pd_q = f"""
-            SELECT b.created_at::date AS d, COUNT(*) AS cnt
-              FROM bids b
-              {pd_where}
-             GROUP BY b.created_at::date
-             ORDER BY 1 DESC
-             LIMIT 30
-        """
-        cur.execute(pd_q, params)
-        import datetime as _dt
-        _today = _dt.date.today()
-        _yest  = _today - _dt.timedelta(days=1)
-        for r in cur.fetchall():
-            _d = r['d']
-            if _d == _yest:
-                label = 'Yesterday'
-            elif (_today - _d).days < 7:
-                label = _d.strftime('%A')
-            else:
-                label = _d.strftime('%b %-d')
-            prior_days.append({
-                'date_iso': _d.isoformat(),
-                'label': label,
-                'count': int(r['cnt']),
-            })
-    except Exception as _pde:
-        print(f'[dashboard] prior_days err: {_pde}', flush=True)
-        prior_days = []
 
     # Compute opportunity for each DealerClub-sourced bid so the template
     # can render the colored badge without per-row math.
@@ -2601,142 +2552,7 @@ def dashboard():
                            partner_offer_counts=partner_offer_counts,
                            time_ago=time_ago,
                            network_claims=network_claims,
-                           network_claims_by_bid=network_claims_by_bid,
-                           prior_days=prior_days)
-
-
-@app.route('/api/dashboard/day/<date_iso>')
-def api_dashboard_day(date_iso):
-    """DAY_COLLAPSE_2026_05_20: render bid rows for one prior date. Returns
-    raw HTML (a series of <tr>s) that the client AJAX-injects into the
-    dashboard tbody after the collapsed-day header row. Honors current
-    status + rep filters so expand stays consistent.
-    """
-    import datetime as _dt
-    try:
-        target_date = _dt.date.fromisoformat(date_iso)
-    except ValueError:
-        return ('bad date', 400)
-    if target_date >= _dt.date.today() or (
-            _dt.date.today() - target_date).days > 60:
-        return ('out of range', 400)
-
-    db = get_db()
-    cur = db.cursor()
-
-    status_filter = request.args.get('status', 'all')
-    rep_filter = request.args.get('rep', 'all')
-    conditions, params = [], []
-    if status_filter == 'field':
-        conditions.append("b.phone LIKE 'field:%'")
-    elif status_filter not in ('all', 'today'):
-        conditions.append("b.status = %s")
-        params.append(status_filter)
-    if rep_filter != 'all':
-        conditions.append("b.phone = %s")
-        params.append(f'field:{rep_filter}')
-    conditions.append("b.created_at::date = %s")
-    params.append(target_date)
-    where = "WHERE " + " AND ".join(conditions)
-
-    q = f"""
-        SELECT b.*, c.name as contact_name, c.company as contact_company,
-               c.role as contact_role, d.name as partner_dealer_name,
-               dl.current_price       AS dc_current_price,
-               dl.end_time            AS dc_end_time,
-               dl.is_no_reserve       AS dc_no_reserve,
-               dl.reserve_met         AS dc_reserve_met,
-               dl.detail_url          AS dc_detail_url,
-               dl.status              AS dc_status,
-               dl.closed_at           AS dc_closed_at
-          FROM bids b
-          LEFT JOIN contacts c ON b.contact_id = c.id
-          LEFT JOIN dealers d ON b.partner_dealer_id = d.id
-          LEFT JOIN dealerclub_lots dl ON dl.bid_id = b.id
-          {where}
-         ORDER BY b.created_at DESC
-         LIMIT 300
-    """
-    cur.execute(q, params)
-    bids = list(cur.fetchall())
-
-    for bid in bids:
-        if not isinstance(bid, dict):
-            continue
-        if not bid.get('dc_current_price'):
-            continue
-        ai = bid.get('ai_price')
-        if ai is None:
-            bid['dc_opp_tier'] = 'gray'
-            bid['dc_opp_pct'] = None
-            continue
-        all_in = float(bid['dc_current_price']) + DEALERCLUB_BUY_FEE_FLAT \
-                 + DEALERCLUB_TRANSPORT_EST
-        try:
-            ai_f = float(ai)
-            pct = (ai_f - all_in) / ai_f * 100 if ai_f else None
-        except (TypeError, ValueError):
-            pct = None
-        bid['dc_opp_pct'] = round(pct, 1) if pct is not None else None
-        bid['dc_opp_dollars'] = round(float(ai) - all_in) if pct is not None else None
-        if pct is None:
-            bid['dc_opp_tier'] = 'gray'
-        elif pct >= 15:
-            bid['dc_opp_tier'] = 'green'
-        elif pct >= 5:
-            bid['dc_opp_tier'] = 'yellow'
-        else:
-            bid['dc_opp_tier'] = 'red'
-
-    bid_ids = [b['id'] for b in bids if isinstance(b, dict)]
-    photo_counts, first_photos, vauto_done, active_workers, partner_offer_counts = {}, {}, set(), {}, {}
-    if bid_ids:
-        cur.execute(
-            "SELECT bid_id, COUNT(*) as cnt FROM bid_photos "
-            "WHERE bid_id = ANY(%s) GROUP BY bid_id",
-            (bid_ids,))
-        photo_counts = {r['bid_id']: int(r['cnt']) for r in cur.fetchall()}
-        cur.execute(
-            "SELECT DISTINCT ON (bid_id) bid_id, COALESCE(local_path, url) AS src "
-            "FROM bid_photos WHERE bid_id = ANY(%s) ORDER BY bid_id, id",
-            (bid_ids,))
-        first_photos = {r['bid_id']: r['src'] for r in cur.fetchall()}
-        cur.execute(
-            "SELECT v.bid_id FROM vauto_lookups v "
-            "JOIN accutrade_lookups a ON a.bid_id = v.bid_id "
-            "WHERE v.bid_id = ANY(%s)", (bid_ids,))
-        vauto_done = {r['bid_id'] for r in cur.fetchall()}
-        cur.execute(
-            "SELECT DISTINCT ON (bid_id) bid_id, worker_id, job_type, status, "
-            "claimed_at, completed_at FROM worker_jobs "
-            "WHERE bid_id = ANY(%s) ORDER BY bid_id, claimed_at DESC", (bid_ids,))
-        for r in cur.fetchall():
-            active_workers.setdefault(r['bid_id'], []).append({
-                'worker_id': r['worker_id'],
-                'job_type': r['job_type'],
-                'status': r.get('status', ''),
-                'completed': r.get('completed_at') is not None,
-            })
-        cur.execute(
-            "SELECT bid_id, COUNT(*) AS n, "
-            "COUNT(*) FILTER (WHERE ew_seen_at IS NULL) AS unseen "
-            "FROM bid_partner_offers WHERE bid_id = ANY(%s) GROUP BY bid_id",
-            (bid_ids,))
-        for r in cur.fetchall():
-            partner_offer_counts[r['bid_id']] = {
-                'n': int(r['n']),
-                'unseen': int(r['unseen']),
-            }
-
-    db.close()
-    return render_template('_bid_rows_partial.html',
-                           bids=bids,
-                           photo_counts=photo_counts,
-                           first_photos=first_photos,
-                           vauto_done=vauto_done,
-                           active_workers=active_workers,
-                           partner_offer_counts=partner_offer_counts,
-                           time_ago=time_ago)
+                           network_claims_by_bid=network_claims_by_bid)
 
 
 @app.route('/bid/<int:bid_id>')
@@ -3138,48 +2954,17 @@ def bid_detail(bid_id):
         print(f'[bid view] market_intel compute err: {_mi_err}', flush=True)
         market_intel = None
 
-    # ── ML model second opinion (per-make XGBoost) ────────────────────
-    # Built from existing market_intel + bid attrs. Models are pre-warmed
-    # at gunicorn startup (see ml_predict.preload_all() called from wsgi.py),
-    # so each bid card render hits warm cache (~5-30ms typical).
+    # SKIP_ML_ON_RENDER_2026_05_20: ml_prediction skipped on bid_detail page
+    # render. predict_for_bid() costs 100-700ms warm + 2400ms first-import
+    # per gunicorn worker. Operator does not need to see the ML number on
+    # the bid card. The LLM still gets ML context via the independent
+    # _run_assessment path (~app.py:5947) which has its own predict_for_bid
+    # call feeding ai_assessment_v2 — that path is unchanged.
+    # Template at bid.html:776 guards with {% if ml_prediction and ml_prediction.prediction %},
+    # so passing None cleanly hides the ML card.
+    # To re-enable: restore the predict_for_bid block from
+    # /tmp/app.py.bak.*-skip-ml-render.
     ml_prediction = None
-    try:
-        from ml_predict import predict_for_bid
-        _mi = market_intel or {}
-        _manheim = _mi.get('manheim') or {}
-        _rbook = _mi.get('rbook') or {}
-        # 2026-05-08: include mmr_median fallback (same fix as in
-        # _run_assessment). vauto.mmr is NULL for many exotics; manheim
-        # transactions often have real hammer prices whose median is the
-        # truest wholesale signal.
-        # 2026-05-08: AccuTrade trade_in fallback. For bids where vAuto's MMR
-        # feed is empty AND Manheim has zero transactions (Bentley Bentayga,
-        # rare exotics), AccuTrade's trade_in value is wholesale-shaped and
-        # serves as the last wholesale signal before giving up on ML.
-        _est_wholesale = (_manheim.get('adjusted_mmr')
-                          or _manheim.get('base_mmr')
-                          or _manheim.get('mmr_median')
-                          or (accutrade_data or {}).get('trade_in')
-                          or (vauto_data or {}).get('mmr'))
-        _market_asking = (_rbook.get('avg_price')
-                          or _rbook.get('median')
-                          or (vauto_data or {}).get('rbook'))
-        _ipkt_msrp = (ipacket_data or {}).get('total_msrp')
-        if _est_wholesale and bid.get('make'):
-            ml_prediction = predict_for_bid({
-                'make_name':          bid.get('make') or '',
-                'model_name':         bid.get('model'),
-                'year':               bid.get('year'),
-                'odometer':           bid.get('mileage'),
-                'est_wholesale_price': _est_wholesale,
-                'market_asking_price': _market_asking,
-                'original_msrp':      _ipkt_msrp,
-                'base_appraised_value': _market_asking,
-                'sale_type':          'Wholesale',
-                'vehicle_sale_type':  'Used',
-            })
-    except Exception as _ml_err:
-        print(f'[bid_detail] ml_predict err: {_ml_err}', flush=True)
 
     # 2026-05-11: offers from subscribed partner dealers on this bid.
     # Uses a fresh connection — the main `db` is already closed at this

@@ -95,7 +95,7 @@ def load_dealer_inventory(slug: str, limit: int | None = None):
                AND vin IS NOT NULL AND length(vin) = 17
                AND year IS NOT NULL
                AND make IS NOT NULL AND model IS NOT NULL
-               AND COALESCE(price, 0) > 0
+               
              ORDER BY id
         """
         if limit:

@@ -428,7 +428,7 @@
   {% endif %}
 
   {# ── Inbound Market Bids · cars EW collected that you can offer on ── #}
-  {% if inbound_pushes %}
+  {% if inbound_pushes and slug == 'encore' %}
   <div id="inboundBanner" data-unread="{{ inbound_unread }}" style="display:none;position:sticky;top:0;z-index:200;background:linear-gradient(90deg,#f59e0b,#f97316);color:#0a0f1a;font-weight:700;font-size:15px;padding:13px 18px;border-radius:10px;margin:0 0 12px;cursor:pointer;box-shadow:0 4px 18px rgba(245,158,11,.45)" onclick="document.getElementById('inboundCard').scrollIntoView({behavior:'smooth',block:'start'});document.getElementById('inboundCard').open=true">
     🔔 <span id="inboundBannerCount">{{ inbound_unread }}</span> new inbound bid<span id="inboundBannerS">{% if inbound_unread != 1 %}s{% endif %}</span> waiting — click to view
   </div>

@@ -1358,6 +1358,18 @@ def extract_vehicle(url, html):
         if c:
             out['ext_color'] = c
 
+    # 8d) WP_VEHICLE_COLOR_2026_05_20 — WordPress dealer plugin body class
+    # taxonomy (TXT Charlie + any Cars Dealer / Elementor rooftop). Falls
+    # through DealerOn miss; safe to run on any HTML.
+    if not out.get('int_color'):
+        c = _extract_wp_vehicle_int_color(html)
+        if c:
+            out['int_color'] = c
+    if not out.get('ext_color'):
+        c = _extract_wp_vehicle_ext_color(html)
+        if c:
+            out['ext_color'] = c
+
     # Canonicalise make capitalisation
     if out.get('make'):
         out['make'] = _normalize_make(out['make'])
@@ -1894,6 +1906,39 @@ def _extract_dealeron_ext_color(html):
         return None
     s = m.group(1).strip()
     return s or None
+
+
+# WP_VEHICLE_COLOR_2026_05_20 — WordPress dealer plugins (Elementor /
+# Cars Dealer family) emit taxonomy slugs into the <body class="...">
+# attribute, e.g. `interior_color-nero-ade interior_color-yellow-black
+# exterior_color-giallo-inti-pearl`. Multiple slugs per car (primary +
+# accent); first one is canonical. Confirmed on TXT Charlie 2026-05-20.
+_WP_VEHICLE_INT_COLOR_RE = re.compile(
+    r'\b(?:interior_color|interiorcolor)-([a-z0-9-]+)', re.I)
+_WP_VEHICLE_EXT_COLOR_RE = re.compile(
+    r'\b(?:exterior_color|exteriorcolor)-([a-z0-9-]+)', re.I)
+
+
+def _wp_color_slug_to_display(slug):
+    """nero-ade -> Nero Ade · yellow-black -> Yellow Black."""
+    if not slug:
+        return None
+    parts = [p for p in slug.split('-') if p]
+    return ' '.join(p.capitalize() for p in parts) if parts else None
+
+
+def _extract_wp_vehicle_int_color(html):
+    if not html:
+        return None
+    m = _WP_VEHICLE_INT_COLOR_RE.search(html)
+    return _wp_color_slug_to_display(m.group(1)) if m else None
+
+
+def _extract_wp_vehicle_ext_color(html):
+    if not html:
+        return None
+    m = _WP_VEHICLE_EXT_COLOR_RE.search(html)
+    return _wp_color_slug_to_display(m.group(1)) if m else None
 
 
 # ── Photo-filename timestamp extractor ─────────────────────────────────
