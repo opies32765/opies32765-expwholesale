@@ -120,26 +120,34 @@
   </div>
 </div>
 
-{% if bid.ai_price %}
-<div class="buy-price">
-  <div class="lbl">Recommended Buy</div>
-  <div class="val">${{ '{:,}'.format(bid.ai_price|int) }}</div>
-  {% if confidence_low and confidence_high %}<div class="range">range ${{ '{:,}'.format(confidence_low) }} – ${{ '{:,}'.format(confidence_high) }}</div>{% endif %}
+
+{# COMBINED_SMS_2026_05_20 ─ damage callout #}
+{% if bid.damage_signal in ('disagreement', 'both_damaged', 'damaged') %}
+<div style="background:linear-gradient(135deg,rgba(220,38,38,.22),rgba(127,29,29,.10));border:1.5px solid rgba(220,38,38,.6);border-left-width:6px;border-radius:12px;padding:14px 16px;margin:12px 0 10px;color:#fecaca">
+  <div style="font-size:11px;font-weight:800;color:#f87171;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">⚠ Damage reported</div>
+  <div style="font-size:14px;line-height:1.45;color:#fee2e2">
+    {% if bid.damage_signal == 'disagreement' %}
+      Carfax and AutoCheck disagree — one source reports damage/accident history. Operator review needed.
+    {% elif bid.damage_signal == 'both_damaged' %}
+      Both Carfax and AutoCheck report damage or accident history on this VIN.
+    {% else %}
+      Damage or accident history reported.
+    {% endif %}
+  </div>
 </div>
 {% endif %}
 
-{# AI Reasoning #}
-{% if reasoning %}
-<details class="card ai">
-  <summary>
-    <span class="title">AI Reasoning</span>
-    <span class="summary-text">{% if flags %}{{ flags|length }} flag{% if flags|length > 1 %}s{% endif %}{% endif %}</span>
-  </summary>
-  <div class="body">
-    <div class="reasoning">{{ reasoning }}</div>
-    {% if flags %}<div class="flags">{% for f in flags %}<span class="flag">{{ f }}</span>{% endfor %}</div>{% endif %}
+{# COMBINED_SMS_2026_05_20 ─ miles_discrepancy callout #}
+{% if bid.miles_discrepancy and bid.miles_discrepancy > 0 %}
+<div style="background:linear-gradient(135deg,rgba(245,158,11,.18),rgba(180,83,9,.08));border:1.5px solid rgba(245,158,11,.55);border-left-width:6px;border-radius:12px;padding:14px 16px;margin:12px 0 10px;color:#fde68a">
+  <div style="font-size:11px;font-weight:800;color:#fbbf24;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">⚠ Mileage discrepancy</div>
+  <div style="font-size:14px;line-height:1.45;color:#fef3c7">
+    Customer reported <b style="color:#fff">{{ '{:,}'.format(bid.mileage|int) }} mi</b>.
+    {% if bid.miles_higher_source == 'carfax' %}Carfax{% else %}AutoCheck{% endif %}
+    shows <b style="color:#fff">{{ '{:,}'.format((bid.miles_carfax if bid.miles_higher_source == 'carfax' else bid.miles_autocheck)|int) }} mi</b>
+    as the most recent odometer (Δ +{{ '{:,}'.format(bid.miles_discrepancy|int) }} mi).
   </div>
-</details>
+</div>
 {% endif %}
 
 {# Manheim Auction #}

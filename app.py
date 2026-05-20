@@ -6066,16 +6066,14 @@ def _auto_assess(bid_id):
 
 
 def _notify_driver_if_pending(bid_id):
-    """If this bid came in via SMS (has driver_phone) and we haven't already
-    auto-replied, text the sender the mini-page link. Idempotent — sets
-    driver_notified_at so a re-run of assessment won't double-text.
-
-    Phase 1 (this) is restricted to the 4-number full-broker whitelist via
-    PHASE2_PHONE_GATE (shared with Phase 2). Phones outside that whitelist
-    fall into Phase 3 — they received their final ack at bid intake
-    (_send_phase3_ack), no mini-page link, no AI links. This function
-    no-ops for them so we don't double-message.
+    """COMBINED_SMS_2026_05_20: legacy Phase 1 SMS — DISABLED. Operator
+    consolidated to one SMS fired by _notify_driver_combined() when Phase 2
+    enrichment completes (rbook+manheim+accu+ipkt all done). Kept as a no-op
+    so legacy callers don't break. To re-enable: restore from
+    /tmp/app.py.bak.*-combined-sms.
     """
+    return
+    # --- LEGACY BODY BELOW (unreachable) ---
     try:
         import time as _t_dn
         import traceback as _tb_dn
@@ -6289,6 +6287,15 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
     print(f'assess-fire bid={bid_id} source={source} require_all={require_all} '
           f'vauto={has_vauto} accu={has_accu} ipkt={has_ipkt}', flush=True)
     threading.Thread(target=_auto_assess, args=(bid_id,), daemon=True).start()
+    # COMBINED_SMS_2026_05_20: fire the customer SMS in parallel with AI.
+    # Phase 2 enrichment is complete here (gate above required rb_done +
+    # mh_done + accu + ipkt). AI keeps running in the daemon thread above;
+    # the customer gets their report link immediately, no Gemini wait.
+    try:
+        threading.Thread(target=_notify_driver_combined, args=(bid_id,),
+                         daemon=True, name=f'combined-sms-{bid_id}').start()
+    except Exception as _cs_spawn_err:
+        print(f'[combined-sms] thread spawn err: {_cs_spawn_err}', flush=True)
     return True
 
 
@@ -16229,12 +16236,99 @@ def driver_full_page(token):
     )
 
 
-def _notify_driver_phase2(bid_id):
-    """Send the second SMS with link to /m/<token>/full once Phase 2 is done.
-    Idempotent via bids.phase2_notified_at — runs at most once per bid.
-    Called from _run_assessment success path (which gates on rbook + manheim
-    completion). Returns True if SMS sent, False otherwise.
+def _notify_driver_combined(bid_id):
+    """COMBINED_SMS_2026_05_20: the ONE customer SMS, fired when Phase 2
+    enrichment lands (rbook + manheim + accu + ipkt all complete). NOT
+    gated on AI assessment — that runs in parallel and shows up on the
+    page when ready (page is NOT live-polling; customer just refreshes
+    if they care about AI).
+
+    Idempotent via bids.phase2_notified_at (we reuse the existing column —
+    we also stamp driver_notified_at so the now-disabled Phase 1 path
+    couldn't double-fire even if its early-return is later removed).
+
+    Honors the PHASE2_PHONE_GATE allowlist (full-broker only) AND the
+    needs_verification hold (miles_discrepancy / vin_not_found bids wait
+    for operator clarification before the SMS goes out).
     """
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            SELECT id, driver_token, driver_phone,
+                   driver_notified_at, phase2_notified_at,
+                   year, make, model,
+                   needs_verification_at, needs_verification_cleared_at,
+                   needs_verification_reason
+              FROM bids WHERE id = %s
+        """, (bid_id,))
+        bid = cur.fetchone()
+        if not bid or not bid.get('driver_phone') or not bid.get('driver_token'):
+            db.close()
+            return False
+        # Idempotency: either column being stamped means SMS already went out.
+        if bid.get('phase2_notified_at') is not None or bid.get('driver_notified_at') is not None:
+            db.close()
+            return False
+        # Verification hold — same gate as legacy Phase 1/2 SMS.
+        if (bid.get('needs_verification_at') is not None
+                and bid.get('needs_verification_cleared_at') is None):
+            print(f'[combined-sms] HELD — bid={bid_id} '
+                  f'needs_verification={bid.get("needs_verification_reason")}',
+                  flush=True)
+            db.close()
+            return False
+        # Full-broker phone gate (matches legacy PHASE2_PHONE_GATE behavior).
+        gate = (os.environ.get('PHASE2_PHONE_GATE') or '').strip()
+        if gate:
+            def _digits(p):
+                d = ''.join(c for c in (p or '') if c.isdigit())
+                if len(d) == 11 and d[0] == '1':
+                    d = d[1:]
+                return d
+            allowed = {_digits(tok) for tok in gate.replace(',', ' ').split()
+                       if len(_digits(tok)) == 10}
+            if _digits(bid['driver_phone']) not in allowed:
+                print(f'[combined-sms] gated — bid={bid_id} '
+                      f'driver={bid["driver_phone"]} not in allowlist',
+                      flush=True)
+                db.close()
+                return False
+
+        ymm_parts = [str(bid['year']) if bid['year'] else '',
+                     bid['make'] or '', bid['model'] or '']
+        ymm = ' '.join(p for p in ymm_parts if p).strip() or 'Vehicle'
+        base = os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net')
+        link = f"{base}/m/{bid['driver_token']}/full"
+        body = f"Bid #{bid['id']} {ymm}\nFull report:\n{link}"
+
+        sent = send_sms(bid['driver_phone'], body)
+        if sent:
+            cur.execute(
+                "UPDATE bids "
+                "SET driver_notified_at = NOW(), phase2_notified_at = NOW() "
+                "WHERE id = %s",
+                (bid_id,),
+            )
+            db.commit()
+            print(f'[combined-sms] bid={bid_id} → {bid["driver_phone"]}', flush=True)
+        else:
+            print(f'[combined-sms] SMS send failed bid={bid_id}', flush=True)
+        db.close()
+        return sent
+    except Exception as _cs_err:
+        print(f'[combined-sms] error bid={bid_id}: {_cs_err}', flush=True)
+        return False
+
+
+def _notify_driver_phase2(bid_id):
+    """COMBINED_SMS_2026_05_20: legacy Phase 2 SMS — DISABLED. Consolidated
+    into _notify_driver_combined() which fires the only SMS, immediately
+    when Phase 2 enrichment lands (no AI wait). Kept as a no-op stub so
+    legacy callers from _auto_assess don't break.
+    """
+    return False
+    # --- LEGACY BODY BELOW (unreachable) ---
     try:
         db = get_db()
         cur = db.cursor()
