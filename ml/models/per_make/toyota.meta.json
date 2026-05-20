@@ -1,9 +1,9 @@
 {
   "make_name": "TOYOTA",
-  "trained_at": "2026-05-19T08:31:47.333164Z",
-  "n_total": 1145,
+  "trained_at": "2026-05-20T08:31:16.802916Z",
+  "n_total": 1149,
   "n_train": 1071,
-  "n_test": 74,
+  "n_test": 78,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -225,49 +225,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2084.0,
-    "mape_pct": 8.22,
-    "r2": 0.9552,
-    "within_5pct": 47.3,
-    "within_10pct": 78.4
+    "mae_dollars": 2113.0,
+    "mape_pct": 8.12,
+    "r2": 0.9519,
+    "within_5pct": 47.4,
+    "within_10pct": 78.2
   },
   "baseline_metrics": {
-    "mae_dollars": 10710.0,
-    "mape_pct": 38.21,
+    "mae_dollars": 10970.0,
+    "mape_pct": 38.59,
     "ratio": 1.4211
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.3362478017807007
+      "importance": 0.3367639482021332
     },
     {
       "name": "market_asking_price",
-      "importance": 0.29287853837013245
+      "importance": 0.2899846136569977
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.11697889119386673
+      "importance": 0.11820096522569656
     },
     {
       "name": "body_type_Coupe",
-      "importance": 0.08597559481859207
+      "importance": 0.08687377721071243
     },
     {
       "name": "original_msrp",
-      "importance": 0.038789052516222
+      "importance": 0.03873709216713905
     },
     {
       "name": "days_since_purchase",
-      "importance": 0.01156728994101286
+      "importance": 0.01168813370168209
     },
     {
       "name": "odometer",
-      "importance": 0.00744238356128335
+      "importance": 0.007446914445608854
     },
     {
       "name": "year",
-      "importance": 0.006918685510754585
+      "importance": 0.006955398712307215
     }
   ]
 }

@@ -1,0 +1,3 @@
+# WARM_BID_CACHE_2026_05_20: pre-warm PG cache for active bids every 5min
+# so operator click on any bid lands in PG RAM instead of cold disk.
+*/5 * * * * root /opt/expwholesale/warm_bid_cache.py >> /var/log/ew_warm_cache.log 2>&1
