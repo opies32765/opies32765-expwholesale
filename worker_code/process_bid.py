@@ -120,7 +120,7 @@ def process_bid(vin, miles, trim=None, on_phase=None, bid_id=None):
         threading.Thread(
             target=_wrap, name="ipacket", daemon=True,
             args=("ipacket", IPACKET_PROFILE_DIR,
-                  lambda page, ctx: worker_ipacket.lookup(page, ctx, vin, t)),
+                  lambda page, ctx: worker_ipacket.lookup(page, ctx, vin, t, bid_id=bid_id)),
         ),
     ]
     for th in threads: th.start()

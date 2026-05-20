@@ -1948,7 +1948,9 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           {% elif ipacket_data %}
           <span style="font-size:10px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">COMPLETE</span>
           {% elif bid.vin %}
-          <span id="ipacket-status-badge" style="font-size:10px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px;animation:pulse 2s infinite">PENDING</span>
+          {# IPACKET_AUTODISABLE_2026_05_20: iPacket is auto-disabled fleet-wide due to vendor rate-limit.
+             Operator can opt-in to a single iPacket run via the button below. #}
+          <span style="font-size:10px;font-weight:700;color:#94a3b8;background:rgba(148,163,184,.12);border:1px solid rgba(148,163,184,.25);border-radius:4px;padding:2px 8px;letter-spacing:.4px">AUTO-OFF</span>
           {% else %}
           <span style="font-size:10px;font-weight:700;color:#475569;background:rgba(71,85,105,.12);border:1px solid rgba(71,85,105,.2);border-radius:4px;padding:2px 8px;letter-spacing:.4px">NO VIN</span>
           {% endif %}
@@ -1964,6 +1966,20 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         {% if ipacket_data.looked_up_at %}
         <div style="margin-top:10px;font-size:10px;color:#334155;text-align:right">Checked {{ time_ago(ipacket_data.looked_up_at) }}</div>
         {% endif %}
+
+        {% elif not ipacket_data and bid.vin %}
+        {# IPACKET_AUTODISABLE_2026_05_20: no auto-fetch. Operator opts in here. #}
+        <div style="font-size:13px;color:#94a3b8;line-height:1.5;margin-bottom:12px">
+          iPacket auto-disabled (vendor rate-limit). Click below to pull the sticker for this VIN.
+        </div>
+        <button id="run-ipacket-btn" onclick="runIPacket({{ bid.id }})"
+                style="display:block;width:100%;padding:10px 14px;background:linear-gradient(135deg,#4338ca,#6366f1);color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;letter-spacing:.4px;cursor:pointer;font-family:Inter,system-ui,sans-serif">
+          🪟 Run iPacket Now
+        </button>
+        <div style="margin-top:8px;font-size:10px;color:#475569;text-align:center">
+          Triggers a full re-process: vAuto + AccuTrade also re-run.<br>
+          AI assessment is preserved (won't re-fire).
+        </div>
 
         {% elif ipacket_data %}
         <div style="display:flex;flex-direction:column;gap:6px">
@@ -2344,7 +2360,30 @@ async function updateStatus(status) {
   if (d.success) { toast('Status updated'); setTimeout(() => location.reload(), 800); }
 }
 
-async function rerunAssess() {
+async function runIPacket(bidId) {
+  const btn = document.getElementById('run-ipacket-btn');
+  if (!btn || !confirm('Run iPacket for this bid? (will re-process the whole bid; AI assessment is preserved)')) return;
+  btn.disabled = true;
+  btn.style.opacity = '0.6';
+  btn.textContent = '⏳ Queued — refreshing in 60s';
+  fetch(`/api/bid/${bidId}/run-ipacket`, { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        // Reload the page after 60s so the iPacket result has time to land.
+        setTimeout(() => location.reload(), 60000);
+      } else {
+        btn.textContent = '✕ FAILED';
+        btn.style.background = '#7f1d1d';
+      }
+    })
+    .catch(e => {
+      btn.textContent = '✕ ERROR: ' + e.message;
+      btn.style.background = '#7f1d1d';
+    });
+}
+
+function rerunAssess() {
   if (!confirm('Re-run AI assessment with latest data?')) return;
   const badge = event.target;
   badge.textContent = '⏳ ANALYZING...';

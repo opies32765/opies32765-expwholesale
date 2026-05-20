@@ -2555,6 +2555,63 @@ def dashboard():
                            network_claims_by_bid=network_claims_by_bid)
 
 
+@app.route('/api/ipacket/should-run')
+def api_ipacket_should_run():
+    """IPACKET_AUTODISABLE_2026_05_20: workers call this from worker_ipacket.lookup
+    before scraping iPacket. Returns {run: true} only when the bid has been
+    explicitly flagged via the 'Run iPacket' button. Default = {run: false}.
+    """
+    bid_id = request.args.get('bid_id', type=int)
+    if not bid_id:
+        return jsonify({'run': False, 'reason': 'no_bid_id'})
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT ipacket_disabled FROM bids WHERE id = %s", (bid_id,))
+        row = cur.fetchone()
+    finally:
+        db.close()
+    if not row:
+        return jsonify({'run': False, 'reason': 'no_bid'})
+    disabled = row.get('ipacket_disabled')
+    if disabled is None:  # legacy/null = treat as disabled
+        disabled = True
+    return jsonify({'run': not disabled,
+                    'reason': 'manual_request' if not disabled else 'auto_disabled'})
+
+
+@app.route('/api/bid/<int:bid_id>/run-ipacket', methods=['POST'])
+def api_run_ipacket(bid_id):
+    """IPACKET_AUTODISABLE_2026_05_20: operator clicks 'Run iPacket' on bid.html.
+    Flips the auto-disabled flag for THIS bid only, wipes any existing iPacket
+    row, and re-queues for process_bid. Does NOT clear ai_assessed_at so the
+    LLM assessment is preserved — iPacket data lands later and just enriches
+    the visual sticker section.
+    """
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            UPDATE bids
+               SET ipacket_disabled = FALSE,
+                   vauto_priority = TRUE,
+                   vauto_claimed_by = NULL,
+                   vauto_claimed_at = NULL
+             WHERE id = %s
+        """, (bid_id,))
+        cur.execute("DELETE FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
+        # Also clear vauto + accutrade so process_bid runs ALL 3 vendors —
+        # otherwise worker skips and only ipacket would run, but worker code
+        # currently runs all 3 in parallel per process_bid.
+        cur.execute("DELETE FROM vauto_lookups WHERE bid_id = %s", (bid_id,))
+        cur.execute("DELETE FROM accutrade_lookups WHERE bid_id = %s", (bid_id,))
+        db.commit()
+    finally:
+        db.close()
+    print(f'[run-ipacket] bid={bid_id} flag flipped, reprocess queued', flush=True)
+    return jsonify({'ok': True, 'bid_id': bid_id})
+
+
 @app.route('/bid/<int:bid_id>')
 def bid_detail(bid_id):
     import time as _perf_t
@@ -6301,17 +6358,17 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
         has_ipkt = cur.fetchone() is not None
 
         if require_all:
-            # Wait for the full market stack — rbook + manheim must finish
-            # so Gemini gets retail comps + auction floor in the prompt.
-            # The 5-minute fallback timer (_schedule_assessment_fallback) will fire
-            # with require_all=False if rbook/manheim never land (rare/exotic).
-            ready = has_vauto and has_accu and has_ipkt and rb_done and mh_done
+            # IPACKET_AUTODISABLE_2026_05_20: iPacket auto-disabled fleet-wide
+            # (rate-limit from iPacket). AI no longer waits for it. Operator can
+            # trigger via 'Run iPacket' button on bid.html which sets the flag
+            # for that one bid only.
+            ready = has_vauto and has_accu and rb_done and mh_done
         else:
             ready = has_vauto  # fallback: fire with what we have
 
         if not ready:
             print(f'assess-gate bid={bid_id} source={source} require_all={require_all} '
-                  f'vauto={has_vauto} accu={has_accu} ipkt={has_ipkt} '
+                  f'vauto={has_vauto} accu={has_accu} ipkt={has_ipkt}(off) '
                   f'rb_done={rb_done} mh_done={mh_done} → wait', flush=True)
             db.close()
             return False
