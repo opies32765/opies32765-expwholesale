@@ -32,8 +32,24 @@ app.permanent_session_lifetime = 86400 * 30  # 30 days
 # Auto-reload templates on filesystem change so template-only edits don't
 # require a gunicorn restart. Jinja bytecode-caches by default in prod;
 # this flips it to check mtime every request. Negligible perf cost.
-app.config['TEMPLATES_AUTO_RELOAD'] = True
-app.jinja_env.auto_reload = True
+app.config['TEMPLATES_AUTO_RELOAD'] = False  # AUTO_RELOAD_OFF_2026_05_20
+app.jinja_env.auto_reload = False  # AUTO_RELOAD_OFF_2026_05_20
+
+# JINJA_BYTECODE_CACHE_2026_05_20: gunicorn runs 10 workers; without a
+# shared bytecode cache each worker re-parses every template (bid.html
+# is 180KB / 3000 lines) on its first hit — caused first-click render
+# spikes of 1300-2000ms while later clicks on the same worker were
+# ~140ms. FileSystemBytecodeCache lets workers share compiled bytecode
+# on disk: first worker compiles + writes .cache file, the other nine
+# load from disk in single-digit ms.
+try:
+    from jinja2 import FileSystemBytecodeCache as _FSBC
+    _jinja_cache_dir = '/var/cache/ew_jinja'
+    os.makedirs(_jinja_cache_dir, exist_ok=True)
+    app.jinja_env.bytecode_cache = _FSBC(_jinja_cache_dir)
+    print(f'[jinja] bytecode cache enabled at {_jinja_cache_dir}', flush=True)
+except Exception as _bc_err:
+    print(f'[jinja] bytecode cache setup failed: {_bc_err}', flush=True)
 
 # Dealer DB blueprint (partner inventory scanning + UI)
 try:
@@ -83,6 +99,15 @@ try:
 except Exception as _e:
     print(f'[network_push] blueprint not loaded: {_e}', flush=True)
 
+# VOICE_AGENT_2026_05_20 — EW voice bot ("EW") for YMM-based valuation.
+# Read-only on shared tables, writes only to voice_valuations. Comment
+# this block to disable the bot without touching anything else.
+try:
+    from voice_agent import voice_bp as _voice_bp
+    app.register_blueprint(_voice_bp)
+except Exception as _e:
+    print(f'[voice_agent] blueprint not loaded: {_e}', flush=True)
+
 # ── Dashboard login ───────────────────────────────────────────────────────────
 EW_USERNAME = os.environ.get('EW_USERNAME', 'admin')
 EW_PASSWORD = os.environ.get('EW_PASSWORD', 'Sedecrem3')
@@ -110,6 +135,7 @@ _PUBLIC_PREFIXES = (
     '/api/push-unsubscribe', '/api/vapid-public-key',
     '/.well-known/', '/api/tesla-vin/', '/share/', '/m/',
     '/api/quick-extract',
+    '/api/voice/', '/v/', '/mobile/ewbot',  # VOICE_AGENT_2026_05_20 EW bot — partner-token auth inside handlers
     '/wholesaler-',  # public self-serve signup at /wholesaler-<reviewer>/signup; admin routes still gated by _require_admin().
 )
 
@@ -2603,6 +2629,9 @@ def api_run_ipacket(bid_id):
 def bid_detail(bid_id):
     import time as _perf_t
     _perf_start = _perf_t.perf_counter()
+    _perf_marks = []
+    def _mark(name):
+        _perf_marks.append((name, int((_perf_t.perf_counter() - _perf_start) * 1000)))
     db = get_db()
     cur = db.cursor()
 
@@ -2696,6 +2725,7 @@ def bid_detail(bid_id):
 
     cur.execute("SELECT * FROM valuations WHERE bid_id = %s ORDER BY fetched_at DESC", (bid_id,))
     valuations = cur.fetchall()
+    _mark('db_basics')
 
     if bid['status'] == 'new':
         cur.execute("UPDATE bids SET status='reviewing', has_unread=FALSE, updated_at=NOW() WHERE id=%s", (bid_id,))
@@ -2725,6 +2755,7 @@ def bid_detail(bid_id):
                 db.commit()
                 bid = dict(bid)
                 bid.update(decoded)
+    _mark('vin_decode')
 
     # vAuto lookup data — explicit columns, drops heavy JSONB blobs
     # (rbook_competitive_set + manheim_transactions) which are only used
@@ -2752,6 +2783,7 @@ def bid_detail(bid_id):
     # iPacket sticker data — same-VIN fallback for blank/failed captures
     # (mirrors /m/<token> mini-page so desktop bid card matches the SMS link).
     ipacket_data = _ipacket_with_vin_fallback(cur, bid_id, bid.get('vin'))
+    _mark('enrichments')
 
     # Tesla auto-decode (if VIN is Tesla)
     tesla_data = None
@@ -2770,6 +2802,7 @@ def bid_detail(bid_id):
                 db.commit()
         except Exception:
             pass
+    _mark('tesla')
 
     # ── Latest hybrid-assessment log row (bucket + baseline + adjustment) ───
     ai_log = None
@@ -2823,23 +2856,24 @@ def bid_detail(bid_id):
                     ai_log['market_intel'] = None
     except Exception as _aelog_err:
         print(f'ai_assessment_log read error: {_aelog_err}', flush=True)
+    _mark('ai_log')
 
-    # ── MSRP enrichment for dealer_intel + buyer_intel VINs ───────────────
-    # Mirrors the rBook closest_3 pattern: collect VINs from cached
-    # dealer/buyer matches, enqueue them in comp_msrps (VM 121 scrapes
-    # iPacket), then attach any cached msrp_lookup back to each row so the
-    # template renders "MSRP $X". Idempotent — repeat views don't re-queue
-    # already-cached VINs.
+    # MSRP_ENRICH_GATE_2026_05_20: skip the dealer/buyer-intel MSRP
+    # enrichment entirely when MSRP enrichment is disabled. The existing
+    # COMP_MSRP_DAEMON env var ('0' = disabled, default) was only gating
+    # the daemon — bid_detail was still doing 2× fresh DB connections of
+    # work per click for nothing. Flip env to '1' to re-enable.
+    _msrp_enabled = os.environ.get('COMP_MSRP_DAEMON', '0') == '1'
     try:
         _msrp_vins = []
-        if ai_log and isinstance(ai_log.get('dealer_intel'), dict):
+        if _msrp_enabled and ai_log and isinstance(ai_log.get('dealer_intel'), dict):
             for r in (ai_log['dealer_intel'].get('active') or []):
                 if r.get('vin'):
                     _msrp_vins.append(r['vin'])
             for r in (ai_log['dealer_intel'].get('recent_sales') or []):
                 if r.get('vin'):
                     _msrp_vins.append(r['vin'])
-        if ai_log and isinstance(ai_log.get('buyer_intel'), dict):
+        if _msrp_enabled and ai_log and isinstance(ai_log.get('buyer_intel'), dict):
             for r in (ai_log['buyer_intel'].get('deals') or []):
                 # LSL field is vin_no
                 vn = r.get('vin_no') or r.get('vin')
@@ -2862,6 +2896,7 @@ def bid_detail(bid_id):
                                      'vin_no', _msrp_cache)
     except Exception as _msrp_err:
         print(f'[bid view] dealer/buyer MSRP enrich err: {_msrp_err}', flush=True)
+    _mark('msrp_enrich')
 
     # Partner-dealer info — show channel-selector UI on Send Bid for any bid
     # tied to a partner dealer. Three resolution paths, in priority order:
@@ -2923,6 +2958,7 @@ def bid_detail(bid_id):
         m = re.search(r'Photo VIN candidate \(verify\):\s*([A-Z0-9]+)', bid['notes'])
         if m:
             vin_candidate = m.group(1)
+    _mark('partner_info')
 
     # Read cached market_intel from vauto_lookups (populated when rbook
     # completes via vauto_enrichment.kick_direct_enrichment, or lazily
@@ -2977,15 +3013,37 @@ def bid_detail(bid_id):
         # merge any cached MSRPs into the closest_3 rows so both the UI and
         # (downstream) the AI prompt see them. Idempotent — repeat visits
         # don't re-queue done VINs.
-        if market_intel:
-            _enqueue_comp_msrps_for_bid(bid_id, market_intel)
-            # Make sure the background iPacket-MSRP processor is running.
-            # Daemon thread, idempotent — only spawns once per worker.
-            try: _start_comp_msrp_processor()
-            except Exception: pass
+        if market_intel and _msrp_enabled:
+            # MSRP_LOAD_FIRST_2026_05_20: load existing comp_msrps via the
+            # MAIN cursor first (no new connection). Only enqueue VINs that
+            # are missing — saves a redundant INSERT+commit round-trip on
+            # every click for cars whose closest_3 are already cached.
+            # Whole block gated on COMP_MSRP_DAEMON via _msrp_enabled.
             _closest = (market_intel.get('rbook') or {}).get('closest_3') or []
-            _vins = [c.get('vin') for c in _closest if c.get('vin')]
-            _msrps = _load_comp_msrps(_vins)
+            _vins = [(c.get('vin') or '').upper() for c in _closest if c.get('vin')]
+            _vins = [v for v in _vins if len(v) == 17]
+            _msrps = {}
+            if _vins:
+                try:
+                    cur.execute(
+                        "SELECT vin, msrp, base_price, status, error "
+                        "FROM comp_msrps WHERE vin = ANY(%s)", (_vins,))
+                    _msrps = {r['vin']: dict(r) for r in cur.fetchall()}
+                except Exception as _msrp_load_err:
+                    print(f'[bid view] comp_msrps load err: {_msrp_load_err}', flush=True)
+            _missing = [v for v in _vins if v not in _msrps]
+            if _missing:
+                # Only spawn the daemon when there's actual work to do.
+                try: _start_comp_msrp_processor()
+                except Exception: pass
+                try:
+                    cur.executemany(
+                        "INSERT INTO comp_msrps (vin, trigger_bid_id, status) "
+                        "VALUES (%s, %s, 'pending') ON CONFLICT (vin) DO NOTHING",
+                        [(v, bid_id) for v in _missing])
+                    db.commit()
+                except Exception as _msrp_ins_err:
+                    print(f'[bid view] comp_msrps enqueue err: {_msrp_ins_err}', flush=True)
             for c in _closest:
                 v = (c.get('vin') or '').upper()
                 if v in _msrps:
@@ -2997,6 +3055,7 @@ def bid_detail(bid_id):
     except Exception as _mi_err:
         print(f'[bid view] market_intel compute err: {_mi_err}', flush=True)
         market_intel = None
+    _mark('market_intel')
 
     # SKIP_ML_ON_RENDER_2026_05_20: ml_prediction skipped on bid_detail page
     # render. predict_for_bid() costs 100-700ms warm + 2400ms first-import
@@ -3010,45 +3069,63 @@ def bid_detail(bid_id):
     # /tmp/app.py.bak.*-skip-ml-render.
     ml_prediction = None
 
-    # 2026-05-11: offers from subscribed partner dealers on this bid.
-    # Uses a fresh connection — the main `db` is already closed at this
-    # point in the request, so cursor reuse throws "connection already closed".
+    # PARTNER_OFFERS_FAST_2026_05_20: only bids linked to a partner_dealer
+    # or partner_request can have offers. Skip the JOIN entirely otherwise
+    # (saves ~300ms / click for the common case). When we DO query, reuse
+    # the main `db`/`cur` — opening a fresh connection here was costing
+    # ~100ms of TCP+auth overhead. Older comment about `db` being closed
+    # was stale — `db` is still open at this point in the request.
     partner_offers = []
-    try:
-        _po_db = get_db()
-        _po_cur = _po_db.cursor()
-        _po_cur.execute("""
-            SELECT o.id, o.offer_amount, o.message, o.submitted_at,
-                   o.ew_seen_at, o.ew_action,
-                   d.name AS dealer_name,
-                   pu.full_name AS user_name, pu.email AS user_email
-              FROM bid_partner_offers o
-              JOIN dealers d ON o.dealer_id = d.id
-         LEFT JOIN partner_users pu ON o.partner_user_id = pu.id
-             WHERE o.bid_id = %s
-             ORDER BY o.submitted_at DESC
-        """, (bid_id,))
-        partner_offers = _po_cur.fetchall()
-        _po_db.close()
-    except Exception as _po_err:
-        print(f'[bid_detail] partner_offers err: {_po_err}', flush=True)
+    if bid.get('partner_dealer_id') or bid.get('partner_request_id'):
+        try:
+            cur.execute("""
+                SELECT o.id, o.offer_amount, o.message, o.submitted_at,
+                       o.ew_seen_at, o.ew_action,
+                       d.name AS dealer_name,
+                       pu.full_name AS user_name, pu.email AS user_email
+                  FROM bid_partner_offers o
+                  JOIN dealers d ON o.dealer_id = d.id
+             LEFT JOIN partner_users pu ON o.partner_user_id = pu.id
+                 WHERE o.bid_id = %s
+                 ORDER BY o.submitted_at DESC
+            """, (bid_id,))
+            partner_offers = cur.fetchall()
+        except Exception as _po_err:
+            print(f'[bid_detail] partner_offers err: {_po_err}', flush=True)
+    _mark('partner_offers')
 
-    _perf_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
-    print(f'[bid-detail-perf] bid={bid_id} server_ms={_perf_ms}', flush=True)
-    return render_template('bid.html', bid=bid, photos=photos,
-                           messages=messages, valuations=valuations,
-                           vauto_data=vauto_data,
-                           accutrade_data=accutrade_data,
-                           ipacket_data=ipacket_data,
-                           tesla_data=tesla_data,
-                           ai_assessment=bid.get('ai_assessment'),
-                           ai_log=ai_log,
-                           partner_info=partner_info,
-                           vin_candidate=vin_candidate,
-                           market_intel=market_intel,
-                           ml_prediction=ml_prediction,
-                           partner_offers=partner_offers,
-                           bid_network_claim=bid_network_claim, time_ago=time_ago)
+    _handler_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
+    # RENDER_TIMER_2026_05_20: also time the Jinja template render. Server
+    # work and template work are different problems with different fixes;
+    # need to see both. Phase deltas printed AFTER render so the log line
+    # has the full picture.
+    _rendered = render_template('bid.html', bid=bid, photos=photos,
+                                messages=messages, valuations=valuations,
+                                vauto_data=vauto_data,
+                                accutrade_data=accutrade_data,
+                                ipacket_data=ipacket_data,
+                                tesla_data=tesla_data,
+                                ai_assessment=bid.get('ai_assessment'),
+                                ai_log=ai_log,
+                                partner_info=partner_info,
+                                vin_candidate=vin_candidate,
+                                market_intel=market_intel,
+                                ml_prediction=ml_prediction,
+                                partner_offers=partner_offers,
+                                bid_network_claim=bid_network_claim, time_ago=time_ago)
+    _total_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
+    _render_ms = _total_ms - _handler_ms
+    # PHASE_TIMERS_2026_05_20: deltas between marks so we can see which
+    # section of bid_detail is eating the time on any given click.
+    _last = 0
+    _phase_str = []
+    for _n, _ms in _perf_marks:
+        _phase_str.append(f'{_n}={_ms - _last}ms')
+        _last = _ms
+    print(f'[bid-detail-perf] bid={bid_id} total_ms={_total_ms} '
+          f'handler={_handler_ms}ms render={_render_ms}ms ' + ' '.join(_phase_str),
+          flush=True)
+    return _rendered
 
 
 # ── SMS intake observability helpers ─────────────────────────────────────────
@@ -14397,14 +14474,18 @@ def _start_comp_msrp_processor():
     if os.environ.get('COMP_MSRP_DAEMON', '0') != '1':
         return
     import threading
-    global _COMP_MSRP_THREAD_STARTED
+    # PRELOAD_FORK_SAFE_2026_05_20: gunicorn --preload starts threads in
+    # the master, but threads do NOT survive fork — children inherit the
+    # "started" flag without the actual thread. Track by PID so each
+    # worker re-spawns its own daemon after fork.
+    global _COMP_MSRP_THREAD_PID
     try:
-        _COMP_MSRP_THREAD_STARTED
+        _COMP_MSRP_THREAD_PID
     except NameError:
-        _COMP_MSRP_THREAD_STARTED = False
-    if _COMP_MSRP_THREAD_STARTED:
+        _COMP_MSRP_THREAD_PID = None
+    if _COMP_MSRP_THREAD_PID == os.getpid():
         return
-    _COMP_MSRP_THREAD_STARTED = True
+    _COMP_MSRP_THREAD_PID = os.getpid()
     t = threading.Thread(target=_comp_msrp_processor_loop,
                          name='comp_msrp_processor', daemon=True)
     t.start()

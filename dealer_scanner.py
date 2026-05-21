@@ -1312,6 +1312,15 @@ def extract_vehicle(url, html):
         if m:
             out['year'] = int(m.group(1))
 
+    # 6c) WP_VEHICLE_PRICE_TERM_2026_05_20 — TXT Charlie / Cars Dealer
+    # taxonomy. Body class `price-<id>` → resolve via WP REST `name` field.
+    # Runs only when JSON-LD + dealer.com inline JSON + URL slug all missed.
+    # Falls through to PRICE_RE if API returns nothing.
+    if not out.get('price'):
+        v = _resolve_wp_price_from_html(url, html)
+        if v:
+            out['price'] = v
+
     # 7) Price regex fallback — ONLY if the number is plausibly a retail price.
     # Without the $2000 floor, "call for price" VDPs leak $377/mo payment
     # estimates into the price field. Structured extractors (AAN feed,
@@ -1918,6 +1927,16 @@ _WP_VEHICLE_INT_COLOR_RE = re.compile(
 _WP_VEHICLE_EXT_COLOR_RE = re.compile(
     r'\b(?:exterior_color|exteriorcolor)-([a-z0-9-]+)', re.I)
 
+# WP_VEHICLE_PRICE_TERM_2026_05_20 — TXT Charlie / Cars Dealer / Elementor
+# WordPress sites encode price as a taxonomy term referenced by ID in the
+# body class (e.g., `price-11992`). The visible $74,999 in the DOM is
+# JS-hydrated from term metadata; static HTML has only the term ID. Resolve
+# via /wp-json/wp/v2/price/<id> where term `name` is the numeric price string.
+# Some sites also expose `total-price-<id>` (vehicle price + dealer fee);
+# we use `price` for parity with how other dealers report asking price.
+_WP_VEHICLE_PRICE_TERM_RE = re.compile(
+    r'\bprice-([0-9]{2,8})\b')
+
 
 def _wp_color_slug_to_display(slug):
     """nero-ade -> Nero Ade · yellow-black -> Yellow Black."""
@@ -1939,6 +1958,37 @@ def _extract_wp_vehicle_ext_color(html):
         return None
     m = _WP_VEHICLE_EXT_COLOR_RE.search(html)
     return _wp_color_slug_to_display(m.group(1)) if m else None
+
+
+def _resolve_wp_price_from_html(url, html):
+    """Resolve WP price taxonomy term ID → numeric dollar value.
+    Returns int or None. Fires only when the body class contains the
+    `price-<term_id>` token, so it's effectively a no-op on non-WP sites.
+    One GET per VDP; ~50-150ms typical. Failures swallowed (returns None).
+    """
+    if not html or not url:
+        return None
+    m = _WP_VEHICLE_PRICE_TERM_RE.search(html)
+    if not m:
+        return None
+    term_id = m.group(1)
+    try:
+        parsed = urlparse(url)
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        api = f"{base}/wp-json/wp/v2/price/{term_id}?_fields=name"
+        r = requests.get(api, timeout=8,
+                         headers={'User-Agent': 'Mozilla/5.0 EW-Scanner'})
+        if r.status_code != 200:
+            return None
+        name = (r.json() or {}).get('name')
+        if not name:
+            return None
+        val = int(str(name).replace(',', '').replace('$', '').strip())
+        if val >= 2000:
+            return val
+    except Exception:
+        return None
+    return None
 
 
 # ── Photo-filename timestamp extractor ─────────────────────────────────

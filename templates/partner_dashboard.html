@@ -1295,12 +1295,14 @@
                   <div style="display:flex;gap:14px;align-items:center;font-size:11px">
                     <span style="color:#a78bfa;font-weight:700;letter-spacing:.5px">● MMR</span>
                     <span style="color:#3b82f6;font-weight:700;letter-spacing:.5px">● rBook</span>
+                    <span style="color:#dc2626;font-weight:700;letter-spacing:.5px">● Ask</span>
                   </div>
                   <div style="font-size:10px;color:#64748b;letter-spacing:.5px;text-transform:uppercase">Last 30 days</div>
                 </div>
                 {% if _hist %}
                   <div class="comp-chart" id="chart-{{ v.id }}"
                        data-series='{{ _hist|tojson }}'
+                       data-ask="{{ v.price or '' }}"
                        style="height:120px;position:relative"></div>
                 {% else %}
                   <div style="height:120px;display:flex;align-items:center;justify-content:center;color:#475569;font-size:11px;font-style:italic">
@@ -1709,17 +1711,28 @@ setInterval(() => {
     var mmr   = pts.filter(function(p){ return p.mmr   != null; }).map(function(p){ return {x:new Date(p.d).getTime(), y:p.mmr}; });
     var rbook = pts.filter(function(p){ return p.rbook != null; }).map(function(p){ return {x:new Date(p.d).getTime(), y:p.rbook}; });
     var all = mmr.concat(rbook);
+    var askRaw = container.getAttribute('data-ask');
+    var ask = (askRaw && askRaw.trim() !== '') ? parseFloat(askRaw) : null;
+    if (ask !== null && (isNaN(ask) || ask <= 0)) ask = null;
     container.innerHTML = '';
-    if(!all.length){
+    if(!all.length && ask === null){
       container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#475569;font-size:11px;font-style:italic">No data in last ' + windowDays + ' days</div>';
       return;
     }
     var W = container.clientWidth || 600, H = 120, padL=46, padR=8, padT=8, padB=18;
-    var xMin = Math.min.apply(null, all.map(function(p){return p.x;}));
-    var xMax = Math.max.apply(null, all.map(function(p){return p.x;}));
+    var xMin, xMax;
+    if (all.length) {
+      xMin = Math.min.apply(null, all.map(function(p){return p.x;}));
+      xMax = Math.max.apply(null, all.map(function(p){return p.x;}));
+    } else {
+      xMax = Date.now();
+      xMin = xMax - windowDays * 86400000;
+    }
     if(xMin === xMax){ xMin -= 86400000; xMax += 86400000; }
-    var yMin = Math.min.apply(null, all.map(function(p){return p.y;}));
-    var yMax = Math.max.apply(null, all.map(function(p){return p.y;}));
+    var ys = all.map(function(p){return p.y;});
+    if (ask !== null) ys.push(ask);
+    var yMin = Math.min.apply(null, ys);
+    var yMax = Math.max.apply(null, ys);
     var yPad = (yMax - yMin) * 0.1 || yMax * 0.05 || 1000;
     yMin -= yPad; yMax += yPad;
     function sx(x){ return padL + (x - xMin)/(xMax-xMin) * (W - padL - padR); }
@@ -1741,8 +1754,14 @@ setInterval(() => {
     // x-axis date labels (start + end)
     var d0 = new Date(xMin), d1 = new Date(xMax);
     function dlbl(d){ return (d.getMonth()+1) + '/' + d.getDate(); }
+    var askLine = '';
+    if (ask !== null) {
+      var ay = sy(ask).toFixed(1);
+      askLine = '<line x1="' + padL + '" y1="' + ay + '" x2="' + (W-padR) + '" y2="' + ay + '" stroke="#dc2626" stroke-width="1.8" stroke-dasharray="2,2"/>';
+    }
     var svg = '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block;overflow:visible">' +
               grid +
+              askLine +
               '<path d="' + pathOf(mmr)   + '" fill="none" stroke="#a78bfa" stroke-width="1.8" stroke-dasharray="5,3"/>' +
               '<path d="' + pathOf(rbook) + '" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-dasharray="5,3"/>' +
               dotsOf(mmr, '#a78bfa', 'MMR') + dotsOf(rbook, '#3b82f6', 'rBook') +

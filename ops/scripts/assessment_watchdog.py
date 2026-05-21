@@ -36,7 +36,7 @@ import requests
 DB = dict(host='localhost', port=5433, dbname='expwholesale',
           user='expuser', password='ExpWholesale2026!')
 APP_HOST = os.environ.get('EW_APP_HOST', 'http://127.0.0.1:9001')
-ORPHAN_THRESHOLD_MIN = int(os.environ.get('ORPHAN_THRESHOLD_MIN', '5'))
+ORPHAN_THRESHOLD_MIN = int(os.environ.get('ORPHAN_THRESHOLD_MIN', '2'))
 TIMEOUT_SEC = 120
 
 # /api/bid/<id>/assess sits behind the global @before_request login gate.

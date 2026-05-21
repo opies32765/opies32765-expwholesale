@@ -1966,6 +1966,13 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         {% if ipacket_data.looked_up_at %}
         <div style="margin-top:10px;font-size:10px;color:#334155;text-align:right">Checked {{ time_ago(ipacket_data.looked_up_at) }}</div>
         {% endif %}
+        {# IPACKET_AUTODISABLE_2026_05_20: retry button on failed/NA pulls too #}
+        {% if bid.vin %}
+        <button id="run-ipacket-btn" onclick="runIPacket({{ bid.id }})"
+                style="margin-top:12px;display:block;width:100%;padding:8px 12px;background:linear-gradient(135deg,#4338ca,#6366f1);color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:700;letter-spacing:.4px;cursor:pointer;font-family:Inter,system-ui,sans-serif">
+          🪟 Retry iPacket
+        </button>
+        {% endif %}
 
         {% elif not ipacket_data and bid.vin %}
         {# IPACKET_AUTODISABLE_2026_05_20: no auto-fetch. Operator opts in here. #}
@@ -2383,7 +2390,7 @@ async function runIPacket(bidId) {
     });
 }
 
-function rerunAssess() {
+async function rerunAssess() {
   if (!confirm('Re-run AI assessment with latest data?')) return;
   const badge = event.target;
   badge.textContent = '⏳ ANALYZING...';
