@@ -14250,7 +14250,13 @@ def _attach_msrp_to_rows(rows, vin_field, msrps):
 def _enqueue_comp_msrps_for_bid(bid_id, market_intel_obj):
     """Helper called from the bid view: take the closest-3 rBook comp VINs
     and INSERT them into comp_msrps (idempotent). Worker on VM 121 picks up.
-    No-op if no closest_3 yet."""
+    No-op if no closest_3 yet.
+
+    COMP_MSRP_ENQUEUE_GATE_2026_05_22: hard no-op when comp_msrp daemon is
+    off. Otherwise every bid assessment silently accumulates 3 pending
+    rows that no worker can claim."""
+    if os.environ.get('COMP_MSRP_DAEMON', '0') != '1':
+        return
     try:
         rb = (market_intel_obj or {}).get('rbook') or {}
         closest = rb.get('closest_3') or []
