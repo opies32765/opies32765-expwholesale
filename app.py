@@ -104,6 +104,11 @@ except Exception as _e:
 # this block to disable the bot without touching anything else.
 try:
     from voice_agent import voice_bp as _voice_bp
+    try:
+        from voice_agent import init_voice_ws
+        init_voice_ws(app)
+    except Exception as _wsexc:
+        print(f'[voice_agent] WS init failed: {_wsexc}', flush=True)
     app.register_blueprint(_voice_bp)
 except Exception as _e:
     print(f'[voice_agent] blueprint not loaded: {_e}', flush=True)
@@ -121,7 +126,6 @@ _PUBLIC_PREFIXES = (
     '/api/ipacket/', '/ipacket_reports/',
     '/api/enrichment/',  # rbook/manheim enrichment workers (oscar VMs)
     '/api/thalist/',     # thalist.com scraper -> EW (shared-secret auth)
-    '/api/dealerclub/',  # dealerclub live-auction scraper -> EW (shared-secret auth)
     '/api/comp_msrp/',   # VM 121 comp_msrp worker (claim, submit, jwt, status)
     "/api/internal/",  # internal worker -> SMS bridge (X-Auth gated inside handler)
     '/api/worker/',  # progress, session_lost — worker-facing, no login
@@ -135,7 +139,7 @@ _PUBLIC_PREFIXES = (
     '/api/push-unsubscribe', '/api/vapid-public-key',
     '/.well-known/', '/api/tesla-vin/', '/share/', '/m/',
     '/api/quick-extract',
-    '/api/voice/', '/v/', '/mobile/ewbot',  # VOICE_AGENT_2026_05_20 EW bot — partner-token auth inside handlers
+    '/api/voice/', '/v/', '/mobile/ewbot', '/model/ewbot', '/ewbot', '/m/ewbot', '/bot',  # VOICE_AGENT_2026_05_20 EW bot — partner-token auth inside handlers
     '/wholesaler-',  # public self-serve signup at /wholesaler-<reviewer>/signup; admin routes still gated by _require_admin().
 )
 
@@ -808,6 +812,8 @@ DIA_DB_URL = 'postgresql://scraper@127.0.0.1/dealer_intelligence'
 TWILIO_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
 TWILIO_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
 TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '')
+DEALERCLUB_BUY_FEE_FLAT = int(os.environ.get("DEALERCLUB_BUY_FEE_FLAT", "199"))
+DEALERCLUB_TRANSPORT_EST = int(os.environ.get("DEALERCLUB_TRANSPORT_EST", "350"))
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 UPLOAD_DIR = os.environ.get('UPLOAD_DIR', '/opt/expwholesale/static/uploads')
 VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY', '')
@@ -1954,6 +1960,42 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
                     print(f'[OCR] miles via Gemini Flash (no-think): {n}',
                           flush=True)
                     return n
+
+    # AUCTION_LISTING_FORMAT_2026_05_21: fall back to a listing-screenshot
+    # prompt when the dashboard-odometer pass finds nothing. Catches Carbly,
+    # vAuto Manheim listings, and similar layouts where odometer appears in
+    # a tabular column rather than on a vehicle dashboard. Triggered by Joe
+    # Humphries sending VIN-only Manheim screenshots (bid 1925, 2026-05-21).
+    _listing_prompt = (
+        "This image is a vehicle LISTING screenshot \u2014 Manheim auction, "
+        "Carbly, vAuto, or dealer inventory. Find the ODOMETER / MILEAGE. "
+        "In these layouts, the mileage is a 4-6 digit integer in its own "
+        "column, typically RIGHT of the VIN/year/make/model and LEFT of "
+        "the auction lane code. Examples: '9090', '25000', '152340'.\n"
+        "\n"
+        "NOT the MMR price (usually has $ or appears as '$26,700').\n"
+        "NOT the Adj MMR Range.\n"
+        "NOT the auction lane code (formatted like '3-41' / 'N-NN').\n"
+        "NOT the condition grade (CR 5.0, 4.5, etc).\n"
+        "NOT the year (4-digit but always 19XX-20XX).\n"
+        "NOT part of the VIN.\n"
+        "\n"
+        "If a clear odometer number is in the listing, reply with ONLY the "
+        "integer (no commas, no units). If unsure or it's not visible, NONE."
+    )
+    gresult2 = gemini_call(_listing_prompt, image_bytes=file_bytes,
+                           mime=media_type, model='gemini-2.5-flash',
+                           max_tokens=64, temperature=0, disable_thinking=True)
+    if gresult2:
+        up = gresult2.strip().upper()
+        if up != 'NONE':
+            digits = re.sub(r'[^\d]', '', up)
+            if digits:
+                n = int(digits)
+                if 100 <= n <= 999999:
+                    print(f'[OCR] miles via listing-format prompt: {n}',
+                          flush=True)
+                    return n
     return None
 
 
@@ -2587,6 +2629,8 @@ def api_ipacket_should_run():
     before scraping iPacket. Returns {run: true} only when the bid has been
     explicitly flagged via the 'Run iPacket' button. Default = {run: false}.
     """
+    if os.environ.get('IPACKET_DISABLED', '0') == '1':
+        return jsonify({'run': False, 'reason': 'ipacket_killswitch'})
     bid_id = request.args.get('bid_id', type=int)
     if not bid_id:
         return jsonify({'run': False, 'reason': 'no_bid_id'})
@@ -9099,527 +9143,6 @@ def _is_nonauto_make(make):
     return None
 
 
-DEALERCLUB_SECRET = os.environ.get(
-    'EW_DEALERCLUB_SECRET',
-    'Uu11t87Ki1nrvMEddMX2kHOrfkd_bI4o-iGa5Jsu6yg')  # default for first deploy
-DEALERCLUB_ALERT_PHONE = '+14074309675'
-
-# DealerClub serves vehicle photos via imagekit.io / s3-accelerate hosts.
-# Both accept anonymous GET (no signed URL needed for thumbnail_url), so
-# we can download them locally for Gemini just like the thalist path.
-def _dealerclub_download_photo(remote_url: str) -> str | None:
-    import uuid as _uuid
-    try:
-        r = requests.get(remote_url, timeout=20)
-        if r.status_code != 200 or not r.content:
-            return None
-        data = r.content
-        if data[:3] == b'\xff\xd8\xff':
-            ext = '.jpg'
-        elif data[:8] == b'\x89PNG\r\n\x1a\n':
-            ext = '.png'
-        elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
-            ext = '.webp'
-        elif data[:6] in (b'GIF87a', b'GIF89a'):
-            ext = '.gif'
-        else:
-            ext = '.jpg'
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
-        fname = f'dealerclub_{_uuid.uuid4().hex}{ext}'
-        fpath = os.path.join(UPLOAD_DIR, fname)
-        with open(fpath, 'wb') as fp:
-            fp.write(data)
-        return f'/static/uploads/{fname}'
-    except Exception as e:
-        print(f'[dealerclub] photo download failed {remote_url}: {e}',
-              flush=True)
-        return None
-
-
-@app.route('/api/dealerclub/lot', methods=['POST'])
-def api_dealerclub_lot():
-    """Receive one DealerClub active-auction row.
-
-    Auth: X-Auth header must match EW_DEALERCLUB_SECRET.
-
-    Body (JSON): normalized lot dict from dealerclub_scraper.normalize_lot.
-    Always required: external_id + detail_url. VIN may be missing for
-    salvage / dealer-block lots and that's fine — bid still gets created.
-
-    Behavior:
-      - UPSERT dealerclub_lots on external_id. is_insert distinguishes
-        first-seen (create bid) from refresh (just update price/timer).
-      - First-seen: dedupe by VIN against open bids; if dupe, skip bid
-        creation and just record the dupe target. Otherwise create a bid
-        with creation_source='dealerclub', kick canon + market check.
-      - On refresh: bump current_price / end_time / bid_count /
-        reserve_met / status. If status flipped from active → ended,
-        stamp closed_at + close_reason for downstream cleanup.
-
-    Response: {ok, status: 'new'|'updated'|'dupe', lot_id, bid_id?, ...}
-    """
-    auth = (request.headers.get('X-Auth') or '').strip()
-    if not DEALERCLUB_SECRET or auth != DEALERCLUB_SECRET:
-        return jsonify({'error': 'bad auth'}), 401
-
-    data = request.get_json(silent=True) or {}
-    external_id = (data.get('external_id') or '').strip()
-    detail_url = (data.get('detail_url') or '').strip()
-    if not external_id or not detail_url:
-        return jsonify({'error': 'external_id + detail_url required'}), 400
-
-    vin = (data.get('vin') or '').strip().upper() or None
-    if vin and len(vin) != 17:
-        vin = None
-
-    year = data.get('year')
-    make = (data.get('make') or '').strip() or None
-    model = (data.get('model') or '').strip() or None
-    trim = (data.get('trim') or '').strip() or None
-    odometer = data.get('odometer')
-    current_price = data.get('current_price')
-    high_bid = data.get('high_bid')
-    bid_count = data.get('bid_count') or 0
-    unique_bidder_count = data.get('unique_bidder_count') or 0
-    end_time = data.get('end_time')
-    duration = data.get('duration_in_minutes')
-    reserve_met = bool(data.get('reserve_met'))
-    is_no_reserve = bool(data.get('is_no_reserve'))
-    reserve_price = data.get('reserve_price')
-    reserve_color = (data.get('reserve_progress_color') or '').strip() or None
-    status = (data.get('status') or '').strip() or None
-    featured_image_url = (data.get('featured_image_url') or '').strip() or None
-    drivetrain = (data.get('drivetrain') or '').strip() or None
-
-    # Transport-quote fields from the scraper (DealerClub /transportation/quote/)
-    transport_price    = data.get('transport_price')
-    transport_mileage  = data.get('transport_mileage')
-    transport_eta_min  = data.get('transport_eta_min')
-    transport_eta_max  = data.get('transport_eta_max')
-    transport_enclosed = data.get('transport_enclosed')
-
-    # DEALERCLUB_NONAUTO_FILTER_2026_05_18: early exit for known non-auto
-    # makes. We still want to UPSERT the lot ledger (so DealerClub stops
-    # re-sending it every poll cycle); we just skip bid creation.
-    _nonauto_match = _is_nonauto_make(make)
-
-    db = get_db()
-    cur = db.cursor()
-    try:
-        # UPSERT the ledger row
-        cur.execute("""
-            INSERT INTO dealerclub_lots
-                (external_id, vin, year, make, model, trim, odometer,
-                 drivetrain, current_price, high_bid, bid_count,
-                 unique_bidder_count, end_time, duration_in_minutes,
-                 reserve_met, is_no_reserve, reserve_price,
-                 reserve_progress_color, status, featured_image_url,
-                 detail_url, raw_payload,
-                 estimated_transport, transport_mileage,
-                 transport_eta_min, transport_eta_max, transport_enclosed,
-                 first_seen_at, last_seen_at, last_polled_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s::jsonb,
-                    %s, %s, %s, %s, %s,
-                    NOW(), NOW(), NOW())
-            ON CONFLICT (external_id) DO UPDATE SET
-                current_price          = EXCLUDED.current_price,
-                high_bid               = EXCLUDED.high_bid,
-                bid_count              = EXCLUDED.bid_count,
-                unique_bidder_count    = EXCLUDED.unique_bidder_count,
-                end_time               = EXCLUDED.end_time,
-                reserve_met            = EXCLUDED.reserve_met,
-                reserve_progress_color = EXCLUDED.reserve_progress_color,
-                reserve_price          = EXCLUDED.reserve_price,
-                status                 = EXCLUDED.status,
-                last_seen_at           = NOW(),
-                last_polled_at         = NOW(),
-                raw_payload            = EXCLUDED.raw_payload,
-                closed_at = CASE
-                    WHEN dealerclub_lots.closed_at IS NOT NULL THEN
-                        dealerclub_lots.closed_at
-                    WHEN EXCLUDED.status IS NOT NULL
-                         AND EXCLUDED.status != 'active' THEN NOW()
-                    ELSE NULL END,
-                close_reason = CASE
-                    WHEN dealerclub_lots.close_reason IS NOT NULL THEN
-                        dealerclub_lots.close_reason
-                    WHEN EXCLUDED.status IS NOT NULL
-                         AND EXCLUDED.status != 'active' THEN EXCLUDED.status
-                    ELSE NULL END,
-                estimated_transport = COALESCE(
-                    EXCLUDED.estimated_transport,
-                    dealerclub_lots.estimated_transport),
-                transport_mileage = COALESCE(
-                    EXCLUDED.transport_mileage,
-                    dealerclub_lots.transport_mileage),
-                transport_eta_min = COALESCE(
-                    EXCLUDED.transport_eta_min,
-                    dealerclub_lots.transport_eta_min),
-                transport_eta_max = COALESCE(
-                    EXCLUDED.transport_eta_max,
-                    dealerclub_lots.transport_eta_max),
-                transport_enclosed = COALESCE(
-                    EXCLUDED.transport_enclosed,
-                    dealerclub_lots.transport_enclosed)
-            RETURNING id, bid_id, (xmax = 0) AS is_insert
-        """, (
-            external_id, vin, year, make, model, trim, odometer,
-            drivetrain, current_price, high_bid, bid_count,
-            unique_bidder_count, end_time, duration,
-            reserve_met, is_no_reserve, reserve_price,
-            reserve_color, status, featured_image_url,
-            detail_url, json.dumps(data),
-            transport_price, transport_mileage,
-            transport_eta_min, transport_eta_max, transport_enclosed,
-        ))
-        row = cur.fetchone()
-        lot_id = row['id']
-        existing_bid_id = row['bid_id']
-        is_insert = bool(row['is_insert'])
-
-
-        # DEALERCLUB_NONAUTO_FILTER_2026_05_18: now that the lot is
-        # ledgered, bail before bid creation if the make is a known
-        # non-auto brand (RV / trailer / motorcycle).
-        if _nonauto_match:
-            db.commit()
-            db.close()
-            print(f'[dealerclub-filter] skipped non-auto lot '
-                  f'external_id={external_id} make={make!r} '
-                  f'match={_nonauto_match!r}', flush=True)
-            return jsonify({
-                'ok': True, 'status': 'skipped_nonauto',
-                'lot_id': lot_id, 'make': make, 'reason': _nonauto_match,
-            })
-
-        if not is_insert:
-            db.commit()
-            return jsonify({
-                'ok': True, 'status': 'updated',
-                'lot_id': lot_id,
-                'bid_id': existing_bid_id,
-                'current_price': current_price,
-            })
-
-        # First-seen — dedupe by VIN against open bids
-        dupe_target = None
-        if vin:
-            cur.execute("""
-                SELECT id FROM bids
-                WHERE vin = %s
-                  AND COALESCE(status,'') NOT IN ('cancelled', 'rejected')
-                ORDER BY id DESC LIMIT 1
-            """, (vin,))
-            d = cur.fetchone()
-            if d:
-                dupe_target = d['id']
-                cur.execute("""
-                    UPDATE dealerclub_lots SET bid_id = NULL
-                    WHERE id = %s
-                """, (lot_id,))
-                db.commit()
-                print(f'[dealerclub] lot {external_id} VIN {vin} dupe of '
-                      f'bid #{dupe_target}', flush=True)
-                return jsonify({
-                    'ok': True, 'status': 'dupe',
-                    'lot_id': lot_id,
-                    'dedupe_target_bid_id': dupe_target,
-                })
-
-        # Build the bid's notes + raw_message
-        end_str = (end_time or '')[:19].replace('T', ' ') + ' UTC'
-        rsv_str = ('no reserve' if is_no_reserve
-                   else f'reserve {"met" if reserve_met else "not met"}')
-        note_parts = [f'[DealerClub {external_id}]',
-                      f'Auction ends {end_str}',
-                      rsv_str,
-                      f'Current bid ${(current_price or 0):,}',
-                      f'{bid_count} bids']
-        if odometer:
-            note_parts.append(f'{int(odometer):,} mi')
-        note_parts.append(f'View: {detail_url}')
-        full_notes = ' — '.join(note_parts)
-
-        rm_parts = ['[DEALERCLUB]', f'Lot: {external_id}']
-        if vin: rm_parts.append(f'VIN: {vin}')
-        if year and make and model:
-            ymm = f'{year} {make} {model}'
-            if trim:
-                ymm += f' {trim}'
-            rm_parts.append(ymm)
-        if odometer: rm_parts.append(f'{int(odometer):,} mi')
-        rm_parts.append(f'Current bid ${(current_price or 0):,}')
-        raw_message = ' | '.join(rm_parts)
-
-        # Create / upsert a contact for the DealerClub source
-        contact_phone = 'dealerclub:auction'
-        contact_name = 'DealerClub Auction'
-        cur.execute("""
-            INSERT INTO contacts (phone, name)
-            VALUES (%s, %s)
-            ON CONFLICT (phone) DO UPDATE SET name = EXCLUDED.name
-            RETURNING id
-        """, (contact_phone, contact_name))
-        contact_id = cur.fetchone()['id']
-
-        cur.execute("""
-            INSERT INTO bids
-                (contact_id, phone, vin, year, make, model, trim,
-                 mileage, raw_message, asking_price, notes,
-                 status, creation_source, vauto_priority)
-            VALUES (%s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s,
-                    'new', 'dealerclub', TRUE)
-            RETURNING id
-        """, (
-            contact_id, contact_phone, vin,
-            year if year else None,
-            make, model, trim,
-            int(odometer) if odometer else None,
-            raw_message,
-            int(current_price) if current_price else None,
-            full_notes,
-        ))
-        new_bid_id = cur.fetchone()['id']
-
-        # Featured photo → local upload (Gemini-friendly content-type)
-        if featured_image_url:
-            local_url = _dealerclub_download_photo(featured_image_url)
-            if local_url:
-                try:
-                    cur.execute(
-                        "INSERT INTO bid_photos (bid_id, url) "
-                        "VALUES (%s, %s)",
-                        (new_bid_id, local_url))
-                except Exception:
-                    pass
-
-        # Link ledger row to the new bid
-        cur.execute("""
-            UPDATE dealerclub_lots SET bid_id = %s WHERE id = %s
-        """, (new_bid_id, lot_id))
-
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        db.close()
-        return jsonify({'error': f'{type(e).__name__}: {e}'}), 500
-    finally:
-        try: db.close()
-        except Exception: pass
-
-    # Kick downstream enrichment (canon + vAuto + market check). Gemini
-    # assessment will set ai_price; the live dashboard tile compares it
-    # against current_price to compute the opportunity score.
-    try:
-        if vin:
-            trigger_market_check(new_bid_id, vin)
-    except Exception as e:
-        print(f'[dealerclub] market_check kick failed: {e}', flush=True)
-
-    return jsonify({
-        'ok': True, 'status': 'new',
-        'lot_id': lot_id,
-        'bid_id': new_bid_id,
-        'vin': vin,
-        'current_price': current_price,
-    })
-
-
-# Buy fee + transport assumptions for opportunity scoring. Operator has
-# max_buy_fee_override=300 on DealerClub, and transport averages ~$700 for
-# domestic moves to FL. Real transport quotes come from DealerClub's
-# /transportation/quote/ endpoint later — these are sane defaults.
-DEALERCLUB_BUY_FEE_FLAT = 300
-DEALERCLUB_TRANSPORT_EST = 700
-
-
-def _compute_opportunity(current_price, ai_price,
-                         buy_fee=None, transport=None):
-    """Return (all_in_cost, gap_dollars, gap_pct) for a given lot.
-
-    gap_pct = (ai_price - all_in_cost) / ai_price * 100
-    Positive = opportunity. None = not enough data (AI still analyzing).
-    """
-    if current_price is None or ai_price is None or ai_price <= 0:
-        return None, None, None
-    bf = buy_fee if buy_fee is not None else DEALERCLUB_BUY_FEE_FLAT
-    tr = transport if transport is not None else DEALERCLUB_TRANSPORT_EST
-    all_in = float(current_price) + bf + tr
-    gap = float(ai_price) - all_in
-    pct = gap / float(ai_price) * 100.0
-    return round(all_in), round(gap), round(pct, 2)
-
-
-@app.route('/admin/live_auctions')
-def admin_live_auctions_page():
-    """Live tile grid of every active DealerClub auction."""
-    return render_template('live_auctions.html')
-
-
-# ── Thalist inventory tile view ──────────────────────────────────────────
-#
-# Same shape as /admin/live_auctions but for thalist.com wholesale posts.
-# Differences from DealerClub: no countdown (these aren't auctions), no
-# reserve, no bid count. Opportunity = ai_price - (asking_price +
-# THALIST_TRANSPORT_EST). Buy fee is zero (asking IS the price).
-#
-# Sources for one row:
-#   thalist_posts  ledger row (one per active post)
-#   bids           AI assessment + canon decode
-#   bid_photos     first photo URL for the tile (after local download)
-
-THALIST_TRANSPORT_EST = 700   # flat for now; no API equivalent on thalist
-
-
-@app.route('/admin/thalist_inventory')
-def admin_thalist_inventory_page():
-    """Tile grid of every active thalist Wholesale Inventory post."""
-    return render_template('thalist_inventory.html')
-
-
-@app.route('/api/admin/thalist/state')
-def api_admin_thalist_state():
-    """JSON state for the thalist inventory dashboard. Polled by JS every
-    30s. Returns one row per active thalist post (not invalidated, not
-    deduped to an old bid), joined with the EW bid's ai_price so the
-    client can render the opportunity tier."""
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("""
-        SELECT tp.id              AS post_row_id,
-               tp.post_id,
-               tp.vin,
-               tp.title,
-               tp.year, tp.make_id, tp.model,
-               tp.asking_price,
-               tp.mileage,
-               tp.location_zip,
-               tp.description,
-               tp.teaser,
-               tp.poster_name,
-               tp.poster_company,
-               tp.poster_company_id,
-               tp.post_type_code,
-               tp.detail_url,
-               tp.first_seen_at,
-               tp.bid_id,
-               b.ai_price                       AS ai_price,
-               b.year                           AS bid_year,
-               b.make                           AS bid_make,
-               b.model                          AS bid_model,
-               b.trim                           AS bid_trim,
-               b.status                         AS bid_status,
-               (SELECT url FROM bid_photos
-                 WHERE bid_id = b.id
-                 ORDER BY id ASC LIMIT 1)       AS photo_url
-        FROM thalist_posts tp
-        JOIN bids b ON b.id = tp.bid_id
-        WHERE tp.invalidated_at IS NULL
-          AND tp.bid_id IS NOT NULL
-          AND COALESCE(b.status,'') NOT IN ('cancelled','rejected','passed','bought')
-        ORDER BY tp.first_seen_at DESC
-        LIMIT 200
-    """)
-    rows = list(cur.fetchall())
-    db.close()
-    posts = []
-    for r in rows:
-        d = dict(r)
-        ai = d.get('ai_price')
-        ai_int = int(float(ai)) if ai is not None else None
-        ask = d.get('asking_price')
-        # Opportunity = AI ceiling - (asking + flat transport).
-        # Buy fee is 0 (wholesale offers don't carry one on top).
-        all_in = None
-        gap = None
-        pct = None
-        if ask is not None and ai_int is not None and ai_int > 0:
-            all_in = int(ask) + THALIST_TRANSPORT_EST
-            gap = ai_int - all_in
-            pct = round(gap / ai_int * 100, 2)
-        d['ai_price'] = ai_int
-        d['all_in_cost'] = all_in
-        d['opportunity_gap'] = gap
-        d['opportunity_pct'] = pct
-        # Friendly display fields
-        d['ymm'] = (f'{d.get("bid_year") or d.get("year") or ""} '
-                    f'{d.get("bid_make") or ""} '
-                    f'{d.get("bid_model") or d.get("model") or ""} '
-                    f'{d.get("bid_trim") or ""}').strip()
-        if d.get('first_seen_at') and hasattr(d['first_seen_at'], 'isoformat'):
-            d['first_seen_at'] = d['first_seen_at'].isoformat()
-        posts.append(d)
-    return jsonify({'posts': posts, 'as_of': time.strftime('%Y-%m-%dT%H:%M:%S')})
-
-
-@app.route('/api/admin/dealerclub/state')
-def api_admin_dealerclub_state():
-    """JSON state for the live auction dashboard. Polled by JS every 15s.
-
-    Returns one row per ACTIVE DealerClub lot, joined with the EW bid's
-    ai_price so the client can compute opportunity color + gap.
-    """
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("""
-        SELECT dl.id              AS lot_id,
-               dl.external_id,
-               dl.vin,
-               dl.year, dl.make, dl.model, dl.trim,
-               dl.odometer,
-               dl.current_price,
-               dl.high_bid,
-               dl.bid_count,
-               dl.unique_bidder_count,
-               dl.end_time,
-               dl.duration_in_minutes,
-               dl.reserve_met,
-               dl.is_no_reserve,
-               dl.reserve_price,
-               dl.reserve_progress_color,
-               dl.status,
-               dl.featured_image_url,
-               dl.detail_url,
-               dl.estimated_buy_fee,
-               dl.estimated_transport,
-               dl.bid_id,
-               dl.last_polled_at,
-               b.ai_price        AS ai_price
-        FROM dealerclub_lots dl
-        LEFT JOIN bids b ON b.id = dl.bid_id
-        WHERE dl.closed_at IS NULL
-          AND (dl.end_time IS NULL OR dl.end_time > NOW())
-        ORDER BY dl.end_time ASC
-    """)
-    rows = list(cur.fetchall())
-    db.close()
-    lots = []
-    for r in rows:
-        d = dict(r)
-        ai = d.get('ai_price')
-        ai_int = int(float(ai)) if ai is not None else None
-        all_in, gap, pct = _compute_opportunity(
-            d.get('current_price'),
-            ai_int,
-            d.get('estimated_buy_fee'),
-            d.get('estimated_transport'),
-        )
-        d['ai_price'] = ai_int
-        d['all_in_cost'] = all_in
-        d['opportunity_gap'] = gap
-        d['opportunity_pct'] = pct
-        # Convert timestamps to ISO so the JS countdown can parse them
-        for k in ('end_time', 'last_polled_at'):
-            if d.get(k) and hasattr(d[k], 'isoformat'):
-                d[k] = d[k].isoformat()
-        lots.append(d)
-    return jsonify({'lots': lots, 'as_of': time.strftime('%Y-%m-%dT%H:%M:%S')})
 
 
 @app.route('/admin/ai-levers')
@@ -10052,6 +9575,8 @@ def share_autocheck(bid_id):
 def share_ipacket(bid_id):
     """iPacket OEM sticker share proxy: PUT to start pull, poll for result,
     redirect client to the public document-viewer URL."""
+    if os.environ.get('IPACKET_DISABLED', '0') == '1':
+        return ('iPacket integration temporarily disabled (account suspended)', 503)
     db = get_db()
     cur = db.cursor()
     cur.execute("SELECT vin FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
@@ -13665,11 +13190,16 @@ def api_accutrade_submit():
     # uses the authoritative VIN-derived trim instead of whatever the seller
     # texted in. Bid 1188 case: seller said "Carrera 4 (Coupe)" but AccuTrade
     # modal only offered GT3 variants → canon_trim should become "GT3".
+    # 2026-05-21 OVERSEER_OVERWRITE: AccuTrade overseer is more authoritative
+    # than VIN-decoder hallucinations (bid 1941: WP0AJ2A70PL100116 Sonnet
+    # guessed '911 Carrera GTS', AccuTrade modal said Panamera). When
+    # overseer confidence >= 0.7 AND existing canon_source is a low-tier
+    # VIN-decoder, overwrite canon_trim AND correct model if NHTSA confirms.
     try:
         vin = (data.get('vin') or '').upper()
         if vin and len(vin) == 17:
             cur.execute(
-                "SELECT clean_trim, selected_text, confidence "
+                "SELECT clean_trim, selected_text, confidence, choices_json "
                 "FROM accutrade_trim_select_cache WHERE vin=%s", (vin,))
             crow = cur.fetchone()
             if crow:
@@ -13677,6 +13207,60 @@ def api_accutrade_submit():
                 ctrim = (crow.get('clean_trim')
                          or normalize_trim_text(crow.get('selected_text'))
                          or '').strip()
+                cur.execute(
+                    "SELECT model, canon_model, canon_source, canon_confidence "
+                    "FROM bids WHERE id=%s", (bid_id,))
+                _brow = cur.fetchone() or {}
+                _cur_model = (_brow.get('model') or '').strip()
+                _cur_canon_source = (_brow.get('canon_source') or '').strip()
+                _cur_canon_conf = float(_brow.get('canon_confidence') or 0)
+                _LOW_TIER_SOURCES = {
+                    'claude_sonnet', 'claude_sonnet_4_6', 'vin_decoder',
+                    'nhtsa', 'nhtsa_fallback', 'vin_prefix',
+                    'vds_table', '',
+                }
+                _can_overwrite_canon = (
+                    _cur_canon_source in _LOW_TIER_SOURCES
+                    and cconf >= _cur_canon_conf
+                )
+
+                # Strip leading current-model token from clean_trim to avoid
+                # pollution like '911 Carrera 4 Platinum Edition' when
+                # ingestion model was wrong.
+                if ctrim and _cur_model:
+                    import re as _re
+                    _mre = _re.compile(r'^' + _re.escape(_cur_model)
+                                       + r'\s+', _re.IGNORECASE)
+                    ctrim = _mre.sub('', ctrim).strip() or ctrim
+
+                # Detect model mismatch from AccuTrade choices via NHTSA.
+                _nhtsa_model = None
+                _choices_text = ''
+                try:
+                    import json as _json
+                    _cj = crow.get('choices_json')
+                    if isinstance(_cj, str):
+                        _cj = _json.loads(_cj)
+                    if isinstance(_cj, list):
+                        _choices_text = ' '.join(
+                            (c.get('text') or '').upper()
+                            for c in _cj if isinstance(c, dict)
+                        )
+                except Exception:
+                    pass
+                try:
+                    _nh = decode_vin(vin) or {}
+                    _nhtsa_model = (_nh.get('model') or '').strip()
+                except Exception:
+                    _nhtsa_model = None
+
+                _model_mismatch = bool(
+                    _nhtsa_model
+                    and _cur_model
+                    and _nhtsa_model.upper() != _cur_model.upper()
+                    and _nhtsa_model.upper() in _choices_text
+                )
+
                 if ctrim and cconf >= 0.7:
                     cur.execute("""
                         UPDATE bids
@@ -13684,11 +13268,35 @@ def api_accutrade_submit():
                                canon_source = 'accutrade_overseer',
                                canon_confidence = %s
                          WHERE id = %s
-                           AND (canon_trim IS NULL OR canon_trim = '')
-                    """, (ctrim[:80], cconf, bid_id))
+                           AND (canon_trim IS NULL OR canon_trim = '' OR %s)
+                    """, (ctrim[:80], cconf, bid_id, _can_overwrite_canon))
                     if cur.rowcount > 0:
                         print(f'[canon_trim] bid={bid_id} set canon_trim="{ctrim}" '
-                              f'conf={cconf:.2f} from accutrade_overseer', flush=True)
+                              f'conf={cconf:.2f} from accutrade_overseer '
+                              f'(overwrite={_can_overwrite_canon}, '
+                              f'prev_source={_cur_canon_source!r})', flush=True)
+
+                    if _model_mismatch:
+                        _new_model = _nhtsa_model.title()
+                        cur.execute("""
+                            UPDATE bids
+                               SET model = %s,
+                                   canon_model = %s,
+                                   canon_source = 'accutrade_overseer',
+                                   canon_confidence = %s
+                             WHERE id = %s
+                        """, (_new_model[:50], _new_model[:80],
+                               cconf, bid_id))
+                        print(f'[canon_model] bid={bid_id} corrected '
+                              f'model {_cur_model!r} -> {_new_model!r} '
+                              f'(NHTSA + AccuTrade overseer)', flush=True)
+
+                    cur.execute("""
+                        UPDATE bids
+                           SET trim = %s
+                         WHERE id = %s
+                           AND (trim IS NULL OR trim = '')
+                    """, (ctrim[:100], bid_id))
                     db.commit()
     except Exception as _canon_err:
         print(f'[canon_trim] writeback err bid={bid_id}: {_canon_err}', flush=True)
@@ -13939,6 +13547,8 @@ def api_comp_msrp_enqueue():
 def api_comp_msrp_jwt():
     """Return the iPacket JWT for distributed comp_msrp workers (e.g.
     VM 121's worker_comp_msrp.py)."""
+    if os.environ.get('IPACKET_DISABLED', '0') == '1':
+        return jsonify({'error': 'ipacket killswitch active'}), 503
     db = get_db()
     cur = db.cursor()
     try:
@@ -13960,6 +13570,8 @@ def api_comp_msrp_jwt():
 @app.route('/api/comp_msrp/claim', methods=['POST'])
 def api_comp_msrp_claim():
     """Worker claims one pending VIN. Body: {worker_id: 'oscar-worker-2'}"""
+    if os.environ.get('IPACKET_DISABLED', '0') == '1':
+        return jsonify({'job': None, 'reason': 'ipacket_killswitch'})
     data = request.json or {}
     worker_id = (data.get('worker_id') or '').strip()
     if not worker_id:
@@ -14292,6 +13904,12 @@ def _ipacket_lookup_msrp_for_vin(vin):
     Roughly 5-15s per call. Reused for both subject-vehicle iPacket and
     comp-vehicle MSRP lookups (Phase 2).
     """
+    # IPACKET_KILLSWITCH_20260521: account opies32765@gmail.com suspended.
+    # Hard-gate ALL outbound iPacket HTTP calls until JWT/account restored.
+    # Revert by unsetting IPACKET_DISABLED in /etc/systemd/system/expwholesale.service.d/.
+    if os.environ.get('IPACKET_DISABLED', '0') == '1':
+        print(f'[ipacket-killswitch] BLOCKED pull vin={vin} (IPACKET_DISABLED=1)', flush=True)
+        return {'ok': False, 'error': 'ipacket killswitch active'}
     import requests as _rr
     import time as _tt
     db = get_db()
@@ -18378,6 +17996,552 @@ def admin_phone_gates_remove(row_id):
     gate_helpers.bust_gate_cache()
     return jsonify({'ok': True, 'id': row['id'],
                     'phone_digits': row['phone_digits'], 'gate_type': row['gate_type']})
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# LSL_BOOK_TO_LSL_2026_05_21
+# Operator clicks "Book to LSL" on a bid card → we stage selections + build
+# the LSL deal payload locally. The actual POST to LSL is wired separately
+# once the write endpoint is captured. Picker data lives in lsl_suppliers
+# + lsl_sales_reps (refreshed by /opt/expwholesale/lsl_sync_pickers.py).
+# Field names mirror LSL camelCase verbatim — no invented vocabulary.
+# ─────────────────────────────────────────────────────────────────────────
+
+# Make-name → makeId catalog (captured from LSL deals on 2026-05-21).
+# Used to populate makeId + makeName on the staged payload from the bid's
+# `make` text. Anything not in this dict gets makeId=0 (LSL will reject or
+# accept on its side at POST time).
+LSL_MAKE_IDS = {
+    'ACURA': 1, 'ALFA ROMEO': 2, 'AM GENERAL': 3, 'ASTON MARTIN': 9,
+    'AUDI': 11, 'BENTLEY': 14, 'BMW': 20, 'BUICK': 25, 'CADILLAC': 26,
+    'CHEVROLET': 30, 'CHRYSLER': 31, 'COBRA': 32, 'DODGE': 38,
+    'E-TON': 41, 'FERRARI': 42, 'FIAT': 43, 'FISKER': 44, 'FORD': 45,
+    'FREIGHTLINER': 46, 'GENESIS': 157157, 'GMC': 49, 'HARLEY DAVIDSON': 50,
+    'HONDA': 53, 'HUMMER': 54, 'HYUNDAI': 58, 'INFINITI': 61, 'JAGUAR': 64,
+    'JEEP': 65, 'KARMA': 151151, 'KIA': 70, 'LAMBORGHINI': 75,
+    'LAND ROVER': 76, 'LEXUS': 78, 'LINCOLN': 79, 'LOLA': 153153, 'LOTUS': 80,
+    'MASERATI': 82, 'MAYBACH': 83, 'MAZDA': 84, 'MCLAREN': 85,
+    'MERCEDES-BENZ': 86, 'MERCEDES BENZ': 86, 'MINI': 88, 'MITSUBISHI': 89,
+    'NISSAN': 97, 'PANOZ': 103, 'PLYMOUTH': 108, 'POLARIS': 109,
+    'PONTIAC': 110, 'PORSCHE': 111, 'RAM': 113, 'RIVIAN': 158158,
+    'ROLLS-ROYCE': 147148, 'ROLLS ROYCE': 147148, 'SATURN': 119,
+    'SCION': 120, 'SHELBY': 147149, 'SMART': 124, 'SUBARU': 128,
+    'TESLA': 130, 'TOYOTA': 132, 'VOLKSWAGEN': 138, 'VOLVO': 139,
+    'YAMAHA': 144,
+}
+LSL_DEALER_ID = 10010
+LSL_SUBSCRIBER_ID = 1
+
+
+def _lsl_make_id(make_text):
+    if not make_text:
+        return 0
+    return LSL_MAKE_IDS.get(make_text.strip().upper(), 0)
+
+
+def _build_lsl_customer_payload(pc):
+    """Build the LSL customer-save payload from a lsl_pending_customers
+    row. Mirrors the 45-field LSL customer raw_json shape we decoded from
+    crm.db. Operator-input fields are populated; LSL-derived fields
+    (id, customerId uuid, OFAC, verified flags, duplicate checks) are left
+    out and LSL will fill them on save."""
+    full = (pc.get('full_name') or '').strip()
+    if not full:
+        full = f"{(pc.get('first_name') or '').strip()} {(pc.get('last_name') or '').strip()}".strip()
+    return {
+        'firstName':            pc.get('first_name'),
+        'lastName':             pc.get('last_name'),
+        'fullName':             full,
+        'companyName':          pc.get('company_name') or '',
+        'type':                 pc.get('type') or 'Individual',
+        'email':                pc.get('email') or '',
+        'mobile':               pc.get('mobile') or '',
+        'additionalEmails':     pc.get('additional_emails') or pc.get('email') or '',
+        'additionalContactNumbers': pc.get('additional_contact_numbers'),
+        'fullAddress':          pc.get('full_address') or '',
+        'fullAddressUnFormatted': pc.get('full_address') or '',
+        'leadStatus':           pc.get('lead_status') or '',
+        'note':                 pc.get('note') or '',
+        'defaultPaymentMethod': pc.get('default_payment_method') or 'Check',
+        'defaultCheckDeliveryType': '',
+        'accountHolder':        pc.get('account_holder'),
+        'accountNo':            pc.get('account_no'),
+        'accountType':          pc.get('account_type') or 'Check',
+        'bankName':             pc.get('bank_name'),
+        'branchNo':             pc.get('branch_no'),
+        'branchName':           pc.get('branch_name'),
+        'swiftNo':              pc.get('swift_no'),
+        'customerNumber':       '',
+        'subscriberId':         LSL_SUBSCRIBER_ID,
+        'dealerId':             LSL_DEALER_ID,
+        'status':               'Active',
+        'verified':             False,
+        'isBlocked':            False,
+        'isHotNote':            False,
+        'isDpLinked':           True,
+        'isExistingEntity':     False,
+        'isNewEntity':          True,
+    }
+
+
+def _build_lsl_book_payload(bid, seller_kind, supplier, pending_customer,
+                            sales_person, sales_manager, booked_by, buyer,
+                            purchase_cost, sale_price, source_text):
+    """Build the LSL deal-save payload (152-field raw_json shape observed
+    in crm.db). Two seller paths:
+      - 'wholesale': supplier is a dealer from lsl_suppliers. purchasedFromType=Wholesaler.
+      - 'individual': supplier is a private party from lsl_pending_customers.
+        purchasedFromType=Individual. customer_payload sub-object is created
+        in LSL first via /customer/save, then its id flows into purchasedFromId.
+
+    Operator-input fields populated; LSL-derived (days_on_lot, finance,
+    OFAC, etc.) left at default/null and LSL fills on its side."""
+    now_iso = datetime.utcnow().replace(microsecond=0).isoformat()
+    make_text = (bid.get('make') or '').strip()
+    model_text = (bid.get('model') or '').strip()
+    trim_text = (bid.get('trim') or '').strip()
+    year = bid.get('year') or 0
+    vehicle_info = ' '.join(x for x in [str(year), make_text, model_text, trim_text] if x)
+    sp_name = (sales_person or {}).get('full_name') or ''
+    sm_name = (sales_manager or {}).get('full_name') or sp_name
+    bb_name = (booked_by or {}).get('full_name') or sp_name
+    by_name = (buyer or {}).get('full_name') or sp_name
+
+    if seller_kind == 'individual':
+        # Private party seller — pre-stage the customer payload; the
+        # actual LSL POST flow will be: customer/save → take returned id →
+        # inventory/save (purchasedFromType=Individual, purchasedFromId=<id>) →
+        # deal/save.
+        pc = pending_customer or {}
+        customer_full = (pc.get('full_name') or '').strip() or \
+                        f"{(pc.get('first_name') or '').strip()} {(pc.get('last_name') or '').strip()}".strip()
+        counterparty = {
+            'purchasedFromType':      'Individual',
+            'purchasedFromId':        pc.get('lsl_id'),   # NULL until customer/save runs
+            'purchasedFromName':      customer_full,
+            'purchasedFromContactName': customer_full,
+            'supplierId':             None,
+            'supplierName':           customer_full,
+            'customerId':             pc.get('lsl_customer_id'),  # uuid; NULL pre-push
+            'customerName':           customer_full,
+            'customerType':           pc.get('type') or 'Individual',
+        }
+        customer_payload = _build_lsl_customer_payload(pc)
+    else:
+        sup_id = (supplier or {}).get('id')
+        sup_name = (supplier or {}).get('name') or ''
+        counterparty = {
+            'purchasedFromType':      'Wholesaler',
+            'purchasedFromId':        sup_id,
+            'purchasedFromName':      sup_name,
+            'purchasedFromContactName': (supplier or {}).get('primary_contact') or '',
+            'supplierId':             sup_id,
+            'supplierName':           sup_name,
+            'customerId':             None,
+            'customerName':           sup_name,
+            'customerType':           '',
+        }
+        customer_payload = None
+
+    deal_payload = {
+        **counterparty,
+        # Vehicle
+        'vinNo':            bid.get('vin') or '',
+        'stockNo':          '',  # LSL auto-assigns (sequential LL…)
+        'makeId':           _lsl_make_id(make_text),
+        'makeName':         make_text,
+        'vehicleInfo':      vehicle_info,
+        'vehicleSaleType':  'Used',
+        # Mileage — LSL doesn't expose the raw odometer on /inventory/get
+        # reads (only adjustment flags) so we send it under three likely
+        # field names. The capture of a real /inventory/save POST will
+        # confirm which one LSL actually uses; the other two are harmless
+        # extra keys LSL will ignore. Flags are observed defaults.
+        'mileage':              int(bid.get('mileage') or 0),
+        'odometer':             int(bid.get('mileage') or 0),
+        'currentMileage':       int(bid.get('mileage') or 0),
+        'mileageEstimate':      False,
+        'mileageExempt':        False,
+        'trueMileageUnknown':   False,
+        # Title / lien — titleStatus values observed: Yes / Pending / PayOff
+        'titleStatus':          bid.get('lsl_title_status') or 'Pending',
+        'originalTitleReceived': (bid.get('lsl_title_status') == 'Yes'),
+        # Payoff-specific (speculative field names — HAR capture will confirm)
+        'payoffAmount':         int(bid.get('lsl_payoff_amount') or 0),
+        'lienholderName':       bid.get('lsl_lienholder_name') or '',
+        # Money
+        'purchaseCost':     float(purchase_cost or 0),
+        'salePrice':        float(sale_price or 0),
+        'frontValue':       float((sale_price or 0)) - float((purchase_cost or 0)),
+        # Team
+        'salesPersonName':  sp_name,
+        'salesManagerName': sm_name,
+        'bookedBy':         bb_name,
+        'buyerName':        by_name,
+        # Status flags
+        'saleType':         'Wholesale',
+        'type':             'Booked',
+        'status':           'Active',
+        'inventoryType':    1,
+        'leadSource':       source_text or 'Unknown',
+        'source':           source_text or '',
+        # Org
+        'dealerId':         LSL_DEALER_ID,
+        'subscriberId':     LSL_SUBSCRIBER_ID,
+        'dealerName':       'Experience Wholesale',
+        # Timestamps (LSL recomputes; we stamp now for parity)
+        'soldAt':           now_iso,
+        'deliveryDate':     now_iso,
+        'createdAt':        now_iso,
+        'modifiedAt':       now_iso,
+        # Generated locally for traceability — strip before POST if LSL rejects
+        '_ew_origin':       {'bid_id': bid.get('id'), 'staged_at': now_iso,
+                              'seller_kind': seller_kind},
+    }
+    out = {'deal': deal_payload}
+    if customer_payload is not None:
+        out['customer'] = customer_payload  # POST this FIRST via /customer/save
+    return out
+
+
+@app.route('/api/lsl/suppliers')
+def api_lsl_suppliers():
+    """Autocomplete for the supplier picker on Book-to-LSL form.
+    Query: ?q=<substring>&limit=<n>. Ranked by 12mo deal count desc,
+    blocked suppliers excluded. Empty q returns top-N by activity."""
+    q = (request.args.get('q') or '').strip()
+    try:
+        limit = max(1, min(int(request.args.get('limit') or 20), 100))
+    except (TypeError, ValueError):
+        limit = 20
+    db = get_db()
+    cur = db.cursor()
+    try:
+        if q:
+            cur.execute("""
+                SELECT id, name, primary_contact, primary_contact_email,
+                       primary_contact_mobile, city, state, approved, trusted,
+                       deals_12mo, spent_12mo::int AS spent_12mo, last_bought_at
+                  FROM lsl_suppliers
+                 WHERE is_blocked = FALSE
+                   AND lower(name) LIKE %s
+                 ORDER BY deals_12mo DESC NULLS LAST, name
+                 LIMIT %s
+            """, (f'%{q.lower()}%', limit))
+        else:
+            cur.execute("""
+                SELECT id, name, primary_contact, primary_contact_email,
+                       primary_contact_mobile, city, state, approved, trusted,
+                       deals_12mo, spent_12mo::int AS spent_12mo, last_bought_at
+                  FROM lsl_suppliers
+                 WHERE is_blocked = FALSE
+                 ORDER BY deals_12mo DESC NULLS LAST, name
+                 LIMIT %s
+            """, (limit,))
+        return jsonify({'ok': True, 'results': [dict(r) for r in cur.fetchall()]})
+    finally:
+        db.close()
+
+
+@app.route('/api/lsl/customers')
+def api_lsl_customers():
+    """Autocomplete for the customer/buyer picker — counterparties EW
+    SOLD to in the last 12 months. Mostly overlaps with suppliers (272
+    wholesale dealers); the 8 unique rows are retail Individuals/Leads.
+    Query: ?q=<substring>&limit=<n>&kind=<wholesale|individual|lead|other>."""
+    q = (request.args.get('q') or '').strip()
+    kind = (request.args.get('kind') or '').strip().lower() or None
+    try:
+        limit = max(1, min(int(request.args.get('limit') or 20), 100))
+    except (TypeError, ValueError):
+        limit = 20
+    db = get_db()
+    cur = db.cursor()
+    try:
+        clauses = ["is_blocked = FALSE"]
+        args = []
+        if q:
+            clauses.append("lower(name) LIKE %s")
+            args.append(f'%{q.lower()}%')
+        if kind:
+            clauses.append("counterparty_kind = %s")
+            args.append(kind)
+        where = " AND ".join(clauses)
+        cur.execute(f"""
+            SELECT id, counterparty_kind, customer_id, supplier_id, name,
+                   customer_type, email, mobile, full_address, lead_status,
+                   deals_12mo, sold_12mo::int AS sold_12mo, last_sold_at
+              FROM lsl_customers
+             WHERE {where}
+             ORDER BY deals_12mo DESC NULLS LAST, name
+             LIMIT %s
+        """, (*args, limit))
+        return jsonify({'ok': True, 'results': [dict(r) for r in cur.fetchall()]})
+    finally:
+        db.close()
+
+
+@app.route('/api/lsl/sales-reps')
+def api_lsl_sales_reps():
+    """All active EW reps for the Sales Person / Manager / Booked By /
+    Buyer dropdowns. Small list (~22 rows) so no pagination needed."""
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            SELECT id, first_name, last_name, full_name, email, telephone,
+                   deals_12mo, last_active
+              FROM lsl_sales_reps
+             WHERE status = 'Active' AND dealer_id = %s
+             ORDER BY last_active DESC NULLS LAST, full_name
+        """, (LSL_DEALER_ID,))
+        return jsonify({'ok': True, 'results': [dict(r) for r in cur.fetchall()]})
+    finally:
+        db.close()
+
+
+@app.route('/api/bid/<int:bid_id>/book-lsl', methods=['POST'])
+@app.route('/api/lsl/pending-customer', methods=['POST'])
+def api_lsl_pending_customer_create():
+    """Stage a new retail/private-party customer locally. Returns the
+    new pending_customer_id which the Book-to-LSL form then references.
+    The actual /customer/save POST to LSL fires when the operator clicks
+    Push to LSL (after the write endpoint is captured)."""
+    data = request.get_json(silent=True) or {}
+    first_name = (data.get('first_name') or '').strip()
+    last_name  = (data.get('last_name') or '').strip()
+    company    = (data.get('company_name') or '').strip()
+    ctype      = (data.get('type') or 'Individual').strip()
+    mobile     = (data.get('mobile') or '').strip()
+    email      = (data.get('email') or '').strip()
+    street     = (data.get('address_street') or '').strip()
+    city       = (data.get('address_city') or '').strip()
+    state      = (data.get('address_state') or '').strip()
+    postal     = (data.get('address_postal_code') or '').strip()
+    country    = (data.get('address_country') or 'United States').strip()
+    lead_status= (data.get('lead_status') or '').strip()
+    note       = (data.get('note') or '').strip()
+    pay_method = (data.get('default_payment_method') or 'Check').strip()
+    if pay_method not in ('Check', 'Wire'):
+        return jsonify({'ok': False, 'error': f'invalid default_payment_method: {pay_method} (only Check or Wire observed in LSL)'}), 400
+    bid_id     = data.get('bid_id')
+
+    # Validation — name + at least one contact method
+    if ctype not in ('Individual','Lead','Company','Spouse'):
+        return jsonify({'ok': False, 'error': f'invalid type: {ctype}'}), 400
+    if ctype == 'Company' and not company:
+        return jsonify({'ok': False, 'error': 'company_name required for Company type'}), 400
+    if ctype != 'Company' and (not first_name or not last_name):
+        return jsonify({'ok': False, 'error': 'first_name and last_name required'}), 400
+    if not mobile and not email:
+        return jsonify({'ok': False, 'error': 'mobile or email required'}), 400
+
+    # Compose names + full_address in LSL's observed format
+    full_name = company if ctype == 'Company' else f'{first_name} {last_name}'.strip()
+    full_address = ''
+    if any([street, city, state, postal]):
+        parts = [p for p in [street, city, country, postal, state] if p]
+        full_address = ', '.join(parts)
+
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO lsl_pending_customers
+                (type, first_name, last_name, company_name, full_name,
+                 mobile, email, address_street, address_city, address_state,
+                 address_postal_code, address_country, full_address,
+                 lead_status, note, default_payment_method, created_by_bid_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id, full_name, mobile, email, full_address, type, lead_status
+        """, (
+            ctype, first_name or None, last_name or None, company or None, full_name,
+            mobile or None, email or None, street or None, city or None, state or None,
+            postal or None, country, full_address or None,
+            lead_status or None, note or None, pay_method, bid_id,
+        ))
+        row = cur.fetchone()
+        db.commit()
+        return jsonify({'ok': True, 'pending_customer': dict(row)})
+    finally:
+        db.close()
+
+
+@app.route('/api/lsl/pending-customers')
+def api_lsl_pending_customers():
+    """Autocomplete picker for previously-staged retail customers (lets
+    the operator reuse a customer already entered on a prior bid that
+    hasn't been pushed yet). Query: ?q=<substring>&limit=<n>."""
+    q = (request.args.get('q') or '').strip()
+    try:
+        limit = max(1, min(int(request.args.get('limit') or 15), 50))
+    except (TypeError, ValueError):
+        limit = 15
+    db = get_db()
+    cur = db.cursor()
+    try:
+        if q:
+            cur.execute("""
+                SELECT id, full_name, mobile, email, full_address, type, lead_status,
+                       lsl_id, pushed_at, staged_at
+                  FROM lsl_pending_customers
+                 WHERE lower(coalesce(full_name,'')) LIKE %s
+                    OR lower(coalesce(email,'')) LIKE %s
+                    OR mobile LIKE %s
+                 ORDER BY staged_at DESC
+                 LIMIT %s
+            """, (f'%{q.lower()}%', f'%{q.lower()}%', f'%{q}%', limit))
+        else:
+            cur.execute("""
+                SELECT id, full_name, mobile, email, full_address, type, lead_status,
+                       lsl_id, pushed_at, staged_at
+                  FROM lsl_pending_customers
+                 ORDER BY staged_at DESC
+                 LIMIT %s
+            """, (limit,))
+        return jsonify({'ok': True, 'results': [dict(r) for r in cur.fetchall()]})
+    finally:
+        db.close()
+
+
+def api_bid_book_lsl(bid_id):
+    """Stage a Book-to-LSL action on a bid. Validates picker selections,
+    builds the LSL deal payload, writes to bids.lsl_* columns. Does NOT
+    POST to LSL yet — wires up once the write endpoints are captured.
+
+    Two seller paths:
+      - seller_kind='wholesale' (default): supplier_id refs lsl_suppliers
+      - seller_kind='individual': pending_customer_id refs lsl_pending_customers
+    Returns staged payload (deal + optional customer sub-object) for preview."""
+    data = request.get_json(silent=True) or {}
+    seller_kind         = (data.get('seller_kind') or 'wholesale').strip().lower()
+    supplier_id         = data.get('supplier_id')
+    pending_customer_id = data.get('pending_customer_id')
+    sales_person_id     = data.get('sales_person_id')
+    sales_manager_id    = data.get('sales_manager_id') or sales_person_id
+    booked_by_id        = data.get('booked_by_id') or sales_person_id
+    buyer_id            = data.get('buyer_id') or sales_person_id
+    purchase_cost       = data.get('purchase_cost')
+    sale_price          = data.get('sale_price')
+    source_text         = (data.get('source') or '').strip()
+    title_status        = (data.get('title_status') or '').strip()  # Yes / Pending / PayOff
+    payoff_amount       = data.get('payoff_amount')
+    lienholder_name     = (data.get('lienholder_name') or '').strip()
+    if title_status and title_status not in ('Yes','Pending','PayOff'):
+        return jsonify({'ok': False, 'error': f'invalid title_status: {title_status} (must be Yes/Pending/PayOff)'}), 400
+
+    missing = []
+    if seller_kind == 'wholesale' and not supplier_id:
+        missing.append('supplier_id')
+    if seller_kind == 'individual' and not pending_customer_id:
+        missing.append('pending_customer_id')
+    if not sales_person_id: missing.append('sales_person_id')
+    if not purchase_cost:   missing.append('purchase_cost')
+    if seller_kind not in ('wholesale','individual'):
+        return jsonify({'ok': False, 'error': f'invalid seller_kind: {seller_kind}'}), 400
+    if missing:
+        return jsonify({'ok': False, 'error': f'missing required: {", ".join(missing)}'}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT * FROM bids WHERE id = %s", (bid_id,))
+        bid = cur.fetchone()
+        if not bid:
+            return jsonify({'ok': False, 'error': 'bid not found'}), 404
+
+        supplier = None
+        pending_customer = None
+        if seller_kind == 'wholesale':
+            cur.execute("SELECT id, name, primary_contact, primary_contact_email "
+                        "FROM lsl_suppliers WHERE id = %s", (supplier_id,))
+            supplier = cur.fetchone()
+            if not supplier:
+                return jsonify({'ok': False, 'error': f'supplier_id {supplier_id} not in lsl_suppliers'}), 404
+        else:
+            cur.execute("SELECT * FROM lsl_pending_customers WHERE id = %s", (pending_customer_id,))
+            pending_customer = cur.fetchone()
+            if not pending_customer:
+                return jsonify({'ok': False, 'error': f'pending_customer_id {pending_customer_id} not in lsl_pending_customers'}), 404
+
+        rep_ids = [sales_person_id, sales_manager_id, booked_by_id, buyer_id]
+        cur.execute("SELECT id, full_name FROM lsl_sales_reps WHERE id = ANY(%s)",
+                    (list({i for i in rep_ids if i}),))
+        reps_by_id = {r['id']: dict(r) for r in cur.fetchall()}
+        sp = reps_by_id.get(sales_person_id)
+        if not sp:
+            return jsonify({'ok': False, 'error': f'sales_person_id {sales_person_id} not in lsl_sales_reps'}), 404
+        sm = reps_by_id.get(sales_manager_id, sp)
+        bb = reps_by_id.get(booked_by_id, sp)
+        by = reps_by_id.get(buyer_id, sp)
+
+        # Merge title/lien fields into the bid dict so the payload builder
+        # sees the operator's current selections (not the stale row values).
+        bid_for_payload = dict(bid)
+        bid_for_payload['lsl_title_status']    = title_status or bid_for_payload.get('lsl_title_status')
+        bid_for_payload['lsl_payoff_amount']   = payoff_amount or bid_for_payload.get('lsl_payoff_amount')
+        bid_for_payload['lsl_lienholder_name'] = lienholder_name or bid_for_payload.get('lsl_lienholder_name')
+
+        payload = _build_lsl_book_payload(
+            bid_for_payload, seller_kind,
+            dict(supplier) if supplier else None,
+            dict(pending_customer) if pending_customer else None,
+            sp, sm, bb, by,
+            int(purchase_cost), int(sale_price or 0), source_text,
+        )
+
+        # Counterparty-side bids.lsl_* fields differ per path
+        if seller_kind == 'wholesale':
+            lsl_sup_id   = supplier_id
+            lsl_sup_name = supplier['name']
+            lsl_pc_id    = None
+        else:
+            lsl_sup_id   = None
+            lsl_sup_name = (pending_customer.get('full_name') or
+                            f"{pending_customer.get('first_name') or ''} {pending_customer.get('last_name') or ''}".strip())
+            lsl_pc_id    = pending_customer_id
+
+        # Stash title fields on the bid row so the payload builder picks them up
+        # (the builder reads from bid dict, which we update in place too).
+        cur.execute("""
+            UPDATE bids
+               SET lsl_seller_kind         = %s,
+                   lsl_supplier_id         = %s,
+                   lsl_supplier_name       = %s,
+                   lsl_pending_customer_id = %s,
+                   lsl_purchase_cost       = %s,
+                   lsl_sale_price          = %s,
+                   lsl_sales_person_id     = %s,
+                   lsl_sales_manager_id    = %s,
+                   lsl_booked_by_id        = %s,
+                   lsl_buyer_id            = %s,
+                   lsl_source              = %s,
+                   lsl_title_status        = %s,
+                   lsl_payoff_amount       = %s,
+                   lsl_lienholder_name     = %s,
+                   lsl_staged_at           = NOW(),
+                   lsl_book_payload        = %s::jsonb
+             WHERE id = %s
+        """, (
+            seller_kind, lsl_sup_id, lsl_sup_name, lsl_pc_id,
+            int(purchase_cost), int(sale_price or 0),
+            sales_person_id, sales_manager_id, booked_by_id, buyer_id,
+            source_text or None,
+            title_status or None,
+            int(payoff_amount) if payoff_amount else None,
+            lienholder_name or None,
+            json.dumps(payload), bid_id,
+        ))
+        db.commit()
+        return jsonify({
+            'ok': True,
+            'staged': True,
+            'pushed': False,
+            'note': 'Staged locally — LSL POST not wired yet (write endpoint pending).',
+            'payload': payload,
+        })
+    finally:
+        db.close()
 
 
 if __name__ == '__main__':

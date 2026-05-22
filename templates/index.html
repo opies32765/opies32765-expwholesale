@@ -228,9 +228,7 @@ tr:last-child td{border-bottom:none}
     <a href="/contacts" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Contacts</a>
     <a href="/tesla-vin" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Tesla VIN</a>
     <a href="/drop" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s;background:rgba(59,130,246,.08)" onmouseover="this.style.color='#60a5fa';this.style.borderColor='#3b82f6'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Quick Drop</a>
-    <a href="/admin/bulk_upload" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s;background:rgba(59,130,246,.08)" onmouseover="this.style.color='#60a5fa';this.style.borderColor='#3b82f6'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Upload a dealer xlsx/csv needs-to-go list — creates one bid per row with staggered enrichment">Bulk Upload</a>
-    <a href="/admin/live_auctions" style="font-size:13px;color:#f59e0b;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(245,158,11,.35);border-radius:6px;transition:all .15s;background:rgba(245,158,11,.1)" onmouseover="this.style.background='rgba(245,158,11,.2)';this.style.color='#fbbf24'" onmouseout="this.style.background='rgba(245,158,11,.1)';this.style.color='#f59e0b'" title="DealerClub live auctions with opportunity scoring">Live Auctions</a>
-    <a href="/admin/thalist_inventory" style="font-size:13px;color:#34d399;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(52,211,153,.35);border-radius:6px;transition:all .15s;background:rgba(52,211,153,.1)" onmouseover="this.style.background='rgba(52,211,153,.2)';this.style.color='#6ee7b7'" onmouseout="this.style.background='rgba(52,211,153,.1)';this.style.color='#34d399'" title="Scraped Thalist wholesale inventory with opportunity scoring">Thalist</a>
+    <a href="/admin/bulk_upload" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s;background:rgba(59,130,246,.08)" onmouseover="this.style.color='#60a5fa';this.style.borderColor='#3b82f6'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Upload a dealer xlsx/csv needs-to-go list — creates one bid per row with staggered enrichment">Bulk Upload</a>    <a href="/admin/thalist_inventory" style="font-size:13px;color:#34d399;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(52,211,153,.35);border-radius:6px;transition:all .15s;background:rgba(52,211,153,.1)" onmouseover="this.style.background='rgba(52,211,153,.2)';this.style.color='#6ee7b7'" onmouseout="this.style.background='rgba(52,211,153,.1)';this.style.color='#34d399'" title="Scraped Thalist wholesale inventory with opportunity scoring">Thalist</a>
     <a href="/reports" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Reports</a>
     <a href="/intel/" target="_blank" style="font-size:13px;color:#c084fc;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(168,85,247,.35);border-radius:6px;transition:all .15s;background:rgba(168,85,247,.1)" onmouseover="this.style.background='rgba(168,85,247,.2)';this.style.color='#d8b4fe'" onmouseout="this.style.background='rgba(168,85,247,.1)';this.style.color='#c084fc'" title="Dealer Intelligence — separate login (admin / Sedecrem34)">Dealer Intel ↗</a>
     <a href="/opportunities" style="font-size:13px;color:#c084fc;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(168,85,247,.35);border-radius:6px;transition:all .15s;background:rgba(168,85,247,.1)" onmouseover="this.style.background='rgba(168,85,247,.2)';this.style.color='#d8b4fe'" onmouseout="this.style.background='rgba(168,85,247,.1)';this.style.color='#c084fc'" title="Daily AI scout — top buy opportunities across the dealer network">Opportunities</a>
@@ -630,35 +628,15 @@ function renderRow(b, pc, fp, activeWorker) {
   // Source-aware contact cell shapes:
   //  - is_field: traveling rep (badge: "Field Rep")
   //  - phone thalist:*: scraped from thalist.com (green badge)
-  //  - phone dealerclub:*: scraped from app.dealerclub.com (amber badge
-  //                       + green/yellow/red opportunity pill)
   //  - is_db_push: bid created from Dealer DB Search (label: "EW Search")
   //  - default: real customer (name/company/phone)
   const isThalist = (b.phone||'').startsWith('thalist:');
-  const isDealerClub = (b.phone||'').startsWith('dealerclub:');
-  let dcOppPill = '';
-  if (isDealerClub && b.dc_opp_tier) {
-    const tier = b.dc_opp_tier;
-    const pct = b.dc_opp_pct;
-    const cfg = {
-      green:  {bg:'rgba(74,222,128,.18)',  bd:'rgba(74,222,128,.45)',  fg:'#86efac', icon:'🟢', sign:'+'},
-      yellow: {bg:'rgba(250,204,21,.12)',  bd:'rgba(250,204,21,.4)',   fg:'#fde047', icon:'🟡', sign:'+'},
-      red:    {bg:'rgba(248,113,113,.12)', bd:'rgba(248,113,113,.35)', fg:'#fca5a5', icon:'🔴', sign:''},
-      gray:   {bg:'rgba(148,163,184,.12)', bd:'rgba(148,163,184,.3)',  fg:'#cbd5e1', icon:'⚪', sign:''},
-    }[tier] || {bg:'rgba(148,163,184,.12)', bd:'rgba(148,163,184,.3)', fg:'#cbd5e1', icon:'⚪', sign:''};
-    const pctTxt = (pct == null) ? 'analyzing' : (cfg.sign + pct + '%');
-    dcOppPill = ` <span title="DealerClub opportunity (AI buy vs current bid + fees + transport)" style="display:inline-block;padding:1px 7px;margin-left:3px;background:${cfg.bg};border:1px solid ${cfg.bd};border-radius:3px;font-size:9px;font-weight:700;color:${cfg.fg};letter-spacing:.4px;text-transform:uppercase">${cfg.icon} ${pctTxt}</span>`;
-  }
   const contactCell = b.is_field
     ? `<div class="contact-name">${b.contact_name||'Field Rep'}</div><div><span class="badge-field">${b.contact_role||'Field Rep'}</span></div>`
     : isThalist
     ? `<div class="contact-name" style="color:#34d399">${b.contact_name||'Thalist Post'}</div>`
       + (b.contact_company ? `<div class="contact-company" style="color:#94a3b8;font-size:11px">${b.contact_company}</div>` : '')
       + `<div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.3);border-radius:3px;font-size:9px;font-weight:700;color:#34d399;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from thalist.com Wholesale Inventory">Thalist</span></div>`
-    : isDealerClub
-    ? `<div class="contact-name" style="color:#f59e0b">DealerClub</div>`
-      + (b.dc_current_price ? `<div class="contact-company" style="color:#94a3b8;font-size:11px">Bid $${Number(b.dc_current_price).toLocaleString()}</div>` : `<div class="contact-company" style="color:#94a3b8;font-size:11px">Live auction</div>`)
-      + `<div style="margin-top:3px"><span style="display:inline-block;padding:1px 7px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);border-radius:3px;font-size:9px;font-weight:700;color:#f59e0b;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from app.dealerclub.com live auction">DealerClub</span>${dcOppPill}</div>`
     : b.is_db_push
     ? `<div class="contact-name" style="color:#a78bfa">EW Search</div>`
       + (b.partner_dealer_name ? `<div class="contact-company" style="color:#94a3b8;font-size:11px">${b.partner_dealer_name}</div>` : '')

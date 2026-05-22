@@ -1,9 +1,9 @@
 {
   "make_name": "BMW",
-  "trained_at": "2026-05-20T08:30:56.898945Z",
-  "n_total": 1665,
+  "trained_at": "2026-05-21T08:30:39.199090Z",
+  "n_total": 1666,
   "n_train": 1558,
-  "n_test": 107,
+  "n_test": 108,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -221,15 +221,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2963.0,
-    "mape_pct": 8.3,
-    "r2": 0.9783,
-    "within_5pct": 54.2,
-    "within_10pct": 83.2
+    "mae_dollars": 2976.0,
+    "mape_pct": 8.36,
+    "r2": 0.9782,
+    "within_5pct": 53.7,
+    "within_10pct": 82.4
   },
   "baseline_metrics": {
-    "mae_dollars": 3504.0,
-    "mape_pct": 9.93,
+    "mae_dollars": 3505.0,
+    "mape_pct": 9.95,
     "ratio": 1.0233
   },
   "top_features": [

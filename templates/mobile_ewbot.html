@@ -66,17 +66,17 @@
 
   <div class="scroll" id="scroll">
     <div class="msg bot">
-      Hey, I'm EW. Tell me a year, make, model, and miles, and I'll get you a rough wholesale target. Tap the mic.
+      Hey, I'm EW. Tap the mic once to start a hands-free conversation. After that, just talk — I'll listen, answer, then automatically hand the mic back. Tap again any time to end the conversation.
     </div>
   </div>
 
   <div class="controls">
     <button class="mic" id="micBtn" type="button">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
-      <span id="micLabel">Tap to talk</span>
+      <span id="micLabel">Tap to start</span>
     </button>
     <div id="status">Ready</div>
-    <div class="hint">Tap mic · speak · tap to stop (or wait for silence)</div>
+    <div class="hint">Tap once to start a hands-free conversation · tap again to end</div>
     <div id="diag" style="font-family:ui-monospace,monospace;font-size:10px;color:#64748b;background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:8px;width:100%;max-height:140px;overflow:auto;white-space:pre-wrap"></div>
     <div class="typed">
       <input id="typedInput" placeholder="Or type if STT is being a pain…" autocomplete="off">
@@ -119,32 +119,364 @@
   }
 
   // ── TTS ────────────────────────────────────────────────
-  function speak(text){
-    try{
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.02; u.pitch = 1.0; u.volume = 1.0;
-      // Pick a preferred voice if available
-      const v = window.speechSynthesis.getVoices();
-      const pref = v.find(x => /en[-_]US/i.test(x.lang) && /(Samantha|Google US English|Microsoft Aria)/i.test(x.name))
-                 || v.find(x => /en[-_]US/i.test(x.lang))
-                 || v[0];
-      if (pref) u.voice = pref;
+  // iOS Safari requires speak() to fire as a direct response to a user
+  // gesture for the first time. Our voice path goes through two awaits
+  // (audio upload + valuation call) so the gesture context is lost by
+  // then. Prime with a silent utterance on the first tap to unlock the
+  // audio context for the session.
+  let __tts_unlocked = false;
+  function unlockTTS(){
+    if (__tts_unlocked) return;
+    try {
+      const u = new SpeechSynthesisUtterance(' ');
+      u.volume = 0; u.rate = 1;
       window.speechSynthesis.speak(u);
-    }catch(e){ console.warn('TTS failed:', e); }
+      __tts_unlocked = true;
+      dlog('TTS unlocked');
+    } catch(e){ dlog('TTS unlock failed: ' + e); }
   }
 
-  // ── Send to backend ────────────────────────────────────
+  function pickVoice(){
+    const v = window.speechSynthesis.getVoices() || [];
+    if (!v.length) return null;
+    return v.find(x => /en[-_]US/i.test(x.lang) && /(Samantha|Karen|Daniel|Aaron|Google US English|Microsoft Aria)/i.test(x.name))
+        || v.find(x => /en[-_]US/i.test(x.lang))
+        || v[0];
+  }
+
+  // Pre-allocated <audio> element. iOS Safari requires play() to be
+  // invoked inside a user-gesture frame at least ONCE before it'll
+  // honor later programmatic play() calls. We seed it with a
+  // ~10ms silent MP3 on each mic tap (see unlockAudio() below).
+  // Once unlocked, subsequent src swaps + play() work after awaits.
+  let __audio_el = null;
+  let __audio_unlocked = false;
+  // ~10ms of silence in MP3 form (44-byte LAME header + zero frames)
+  const SILENT_MP3 = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQwAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAACAAABxgD///////////////////////////////////////////////////////////////////8AAAA5TEFNRTMuMTAwAc0AAAAAAAAAABRgJAJAQgAAYAAAAcaH3RGqAAAAAAAAAAAAAAAAAAAA';
+
+  function _getAudioEl(){
+    if (__audio_el) return __audio_el;
+    __audio_el = document.createElement('audio');
+    __audio_el.style.display = 'none';
+    __audio_el.playsInline = true;
+    __audio_el.preload = 'auto';
+    document.body.appendChild(__audio_el);
+    return __audio_el;
+  }
+
+  // CALL THIS SYNCHRONOUSLY inside a user-gesture handler. Plays the
+  // silent stub so iOS will let us play() after later awaits.
+  function unlockAudio(){
+    if (__audio_unlocked) return;
+    const a = _getAudioEl();
+    a.src = SILENT_MP3;
+    const p = a.play();
+    if (p && p.then){
+      p.then(() => { __audio_unlocked = true; dlog('Audio unlocked'); })
+       .catch(e => dlog('Audio unlock failed: ' + (e && e.message ? e.message : e)));
+    } else {
+      __audio_unlocked = true;
+      dlog('Audio unlocked (sync)');
+    }
+  }
+
+  function stopAllSpeech(){
+    // iOS Safari needs both cancel + pause+cancel sequence to actually clear.
+    try {
+      if (window.speechSynthesis){
+        window.speechSynthesis.cancel();
+        // Belt-and-suspenders: on some iOS versions, cancel() leaves
+        // queued utterances in a "paused" state that resume later.
+        window.speechSynthesis.pause();
+        window.speechSynthesis.cancel();
+      }
+    } catch(e){}
+    try {
+      if (__audio_el){
+        __audio_el.onended = null;
+        __audio_el.onerror = null;
+        __audio_el.pause();
+        if (__audio_el.src && __audio_el.src.startsWith('blob:')) {
+          URL.revokeObjectURL(__audio_el.src);
+        }
+        __audio_el.removeAttribute('src');
+        __audio_el.load();
+      }
+    } catch(e){}
+  }
+
+  async function speak(text){
+    if (!text) return;
+    stopAllSpeech();  // clean slate before queuing new audio
+    try {
+      const t0 = Date.now();
+      const r = await fetch('/api/voice/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text }),
+      });
+      if (!r.ok){
+        dlog('TTS HTTP ' + r.status + ' — NO fallback (would sound robotic)');
+        setStatus('TTS unavailable (HTTP ' + r.status + ')');
+        return;
+      }
+      const arrayBuf = await r.arrayBuffer();
+      dlog('TTS Neural2 fetched ' + (Date.now()-t0) + 'ms blob=' + Math.round(arrayBuf.byteLength/1024) + 'kb');
+      try {
+        const ctx = await _getPlaybackCtx();
+        const buf = arrayBuf.slice(0);
+        const audioBuf = await new Promise((resolve, reject) => {
+          const p = ctx.decodeAudioData(buf, resolve, reject);
+          if (p && p.then) p.then(resolve, reject);
+        });
+        const src = ctx.createBufferSource();
+        src.buffer = audioBuf;
+        src.connect(ctx.destination);
+        src.onended = () => {
+          dlog('TTS done ' + (Date.now()-t0) + 'ms');
+          if (convMode) {
+            setTimeout(() => { if (convMode && !recActive) startRec(); }, 300);
+          }
+        };
+        src.start(0);
+      } catch (e){
+        dlog('TTS Web Audio play failed: ' + (e && e.message ? e.message : e));
+        if (convMode) {
+          setTimeout(() => { if (convMode && !recActive) startRec(); }, 500);
+        }
+      }
+    } catch (e){
+      dlog('TTS fetch threw: ' + e);
+    }
+  }
+
+  // Some browsers populate getVoices() asynchronously
+  if (window.speechSynthesis && typeof window.speechSynthesis.onvoiceschanged !== 'undefined') {
+    window.speechSynthesis.onvoiceschanged = () => {
+      const n = (window.speechSynthesis.getVoices() || []).length;
+      dlog('voices loaded: ' + n);
+    };
+  }
+
+  // ── Audio queue for streamed sentences ─────────────────
+  // WEBAUDIO_PLAYBACK_2026_05_21 — iOS Chrome blocks <audio>.play()
+  // after the silent-MP3 unlock fails ("operation is not supported").
+  // Web Audio API works through the vadCtx (already unlocked by the
+  // user-gesture mic tap), so use AudioBufferSourceNode instead.
+  const audioQueue = [];   // Array<{arrayBuf, sentence, onPlay}>
+  let audioPlaying = false;
+  // CONVMODE_LOOP_2026_05_21 — flag set when SSE stream finishes so the
+  // audio-queue drain handler knows it's safe to auto-restart the mic.
+  let convAwaitingRestart = false;
+
+  async function _getPlaybackCtx(){
+    if (!vadCtx || vadCtx.state === 'closed'){
+      vadCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (vadCtx.state === 'suspended') {
+      try { await vadCtx.resume(); } catch(e){ dlog('AudioCtx resume failed: ' + e); }
+    }
+    return vadCtx;
+  }
+
+  async function _playNext(){
+    if (audioQueue.length === 0){
+      audioPlaying = false;
+      // CONVMODE_LOOP_2026_05_21 — bot finished talking. In conversation
+      // mode, hand the mic back automatically (matches Anthropic / ChatGPT
+      // voice-mode UX: tap once to start, stay in the loop until you tap
+      // again to end).
+      if (convAwaitingRestart && convMode && !recActive){
+        convAwaitingRestart = false;
+        setTimeout(() => {
+          if (convMode && !recActive){
+            dlog('convMode: auto-restarting mic after bot reply');
+            startRec();
+          }
+        }, 350);
+      }
+      return;
+    }
+    audioPlaying = true;
+    const item = audioQueue.shift();
+    try {
+      const ctx = await _getPlaybackCtx();
+      // decodeAudioData mutates the buffer on some browsers — slice a copy.
+      const buf = item.arrayBuf.slice(0);
+      const audioBuf = await new Promise((resolve, reject) => {
+        // Callback form is needed for older Safari that doesn't return a Promise.
+        const p = ctx.decodeAudioData(buf, resolve, reject);
+        if (p && p.then) p.then(resolve, reject);
+      });
+      const src = ctx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(ctx.destination);
+      // Fire onPlay as the buffer starts — matches the prior UX where text
+      // appeared the instant audio began.
+      if (item.onPlay) { try { item.onPlay(); } catch(e){} }
+      src.onended = () => { _playNext(); };
+      src.start(0);
+    } catch (e){
+      dlog('chunk play err: ' + (e && e.message ? e.message : e));
+      // Surface text anyway so user isn't lost.
+      if (item.onPlay) { try { item.onPlay(); } catch(e){} }
+      _playNext();
+    }
+  }
+
+  function queueAudio(audio_b64, sentence, onPlay){
+    if (!audio_b64) {
+      if (onPlay) { try { onPlay(); } catch(e){} }
+      return;
+    }
+    try {
+      const bytes = Uint8Array.from(atob(audio_b64), c => c.charCodeAt(0));
+      audioQueue.push({ arrayBuf: bytes.buffer, sentence, onPlay });
+      if (!audioPlaying) _playNext();
+    } catch (e){
+      dlog('queueAudio decode failed: ' + e);
+      if (onPlay) { try { onPlay(); } catch(e){} }
+    }
+  }
+
+  // ── Send to backend (streaming) ────────────────────────
   async function send(transcript){
     if (!transcript || !transcript.trim()) return;
     appendMsg(transcript, 'user');
     setMic('thinking');
     setStatus('Thinking…');
+    // Clear any in-flight audio from a prior turn
+    audioQueue.length = 0; audioPlaying = false;
+    convAwaitingRestart = false;
+    stopAllSpeech();
+
+    let botMsgEl = null;
+    let botMsgText = '';
+    let finalData = null;
+    const t0 = Date.now();
+
+    try {
+      const r = await fetch('/api/voice/query/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+        body: JSON.stringify({
+          transcript: transcript,
+          session_id: sessionId,
+          turn_index: turnIndex,
+          phone: localStorage.getItem('ewbot_phone') || null,
+        }),
+      });
+      if (!r.ok || !r.body){
+        dlog('stream HTTP ' + r.status + ' — falling back to non-streaming');
+        throw new Error('stream HTTP ' + r.status);
+      }
+
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let sseBuffer = '';
+
+      while (true){
+        const { value, done } = await reader.read();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+        // SSE events split by blank line
+        let idx;
+        while ((idx = sseBuffer.indexOf('\n\n')) !== -1){
+          const raw = sseBuffer.slice(0, idx); sseBuffer = sseBuffer.slice(idx + 2);
+          if (!raw.startsWith('data: ')) continue;
+          let data;
+          try { data = JSON.parse(raw.slice(6)); } catch(e){ continue; }
+          if (data.type === 'sentence'){
+            if (!botMsgEl) botMsgEl = appendMsg('', 'bot');
+            // Capture text in closure; show only when audio plays
+            const sentText = data.text;
+            queueAudio(data.audio_b64, sentText, () => {
+              botMsgText += (botMsgText ? ' ' : '') + sentText;
+              botMsgEl.firstChild.nodeValue = botMsgText;
+              scroll.scrollTop = scroll.scrollHeight;
+              dlog('sentence playing @' + (Date.now()-t0) + 'ms');
+            });
+          } else if (data.type === 'final'){
+            finalData = data;
+          } else if (data.type === 'meta'){
+            setStatus(data.status === 'comps_fetched' ? 'Pulling comps…' : (data.status||''));
+          } else if (data.type === 'error'){
+            appendMsg('Error: ' + (data.message||'?'), 'bot', { err: true });
+          }
+        }
+      }
+
+      // Final event: add meta pills + buttons
+      if (finalData){
+        if (finalData.phone_captured) localStorage.setItem('ewbot_phone', finalData.phone_captured);
+        const cc = finalData.comps_counts || {};
+        const parsed = finalData.parsed || {};
+        const meta = (parsed.year || parsed.make) ?
+          '<span class="pill"><b>' + (parsed.year||'?') + ' ' + (parsed.make||'?') + ' ' + (parsed.model||'?') + '</b></span>' +
+          '<span class="pill">Live rBook <b>' + (cc.live||0) + '</b></span>' +
+          '<span class="pill">Live MMR <b>' + (cc.live_mmr ? '✓' : '–') + '</b></span>' +
+          '<span class="pill">Priors <b>' + (cc.priors||0) + '</b></span>' +
+          '<span class="pill">LSL <b>' + (cc.lsl||0) + '</b></span>' +
+          '<span class="pill">' + finalData.elapsed_ms + 'ms</span>' : '';
+        if (botMsgEl && meta){
+          const m = document.createElement('div'); m.className='meta'; m.innerHTML = meta;
+          botMsgEl.appendChild(m);
+        }
+        if (finalData.valuation_id && botMsgEl){
+          const btn = document.createElement('button');
+          btn.textContent = 'Text me this';
+          btn.style.cssText = 'margin-top:8px;background:#1d4ed8;color:#fff;border:0;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer';
+          btn.onclick = async () => {
+            let phone = localStorage.getItem('ewbot_phone');
+            if (!phone){ phone = prompt('Phone number?'); if (!phone) return; localStorage.setItem('ewbot_phone', phone); }
+            btn.disabled = true; btn.textContent = 'Sending…';
+            try {
+              const r = await fetch('/api/voice/' + finalData.valuation_id + '/sms', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
+              const j = await r.json();
+              btn.textContent = j.sent ? '✓ Sent to ' + j.to : 'Failed: ' + (j.error||'?');
+              if (!j.sent) btn.disabled = false;
+            } catch(e){ btn.textContent = 'Network error'; btn.disabled = false; }
+          };
+          botMsgEl.appendChild(btn);
+        }
+      }
+
+      turnIndex += 1;
+      setStatus('Ready'); setMic('idle');
+      // CONVMODE_LOOP_2026_05_21 — signal the audio drain handler that
+      // the SSE stream is done and it's safe to auto-restart mic when
+      // the queued audio finishes playing.
+      if (convMode){
+        convAwaitingRestart = true;
+        // Edge case: if audio queue is already empty (no audio in the
+        // reply OR all chunks finished before stream end), restart now.
+        if (!audioPlaying && audioQueue.length === 0){
+          setTimeout(() => {
+            if (convMode && !recActive){
+              convAwaitingRestart = false;
+              dlog('convMode: auto-restarting mic (no audio queued)');
+              startRec();
+            }
+          }, 350);
+        }
+      }
+      return;
+    } catch (e){
+      dlog('stream error: ' + e + ' — falling back to non-streaming');
+      // Fall through to legacy JSON path below
+    }
+
+    // ── Non-streaming fallback (iOS Safari SSE quirks etc) ─────────
     try{
       const r = await fetch('/api/voice/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript: transcript, session_id: sessionId, turn_index: turnIndex }),
+        body: JSON.stringify({
+          transcript: transcript,
+          session_id: sessionId,
+          turn_index: turnIndex,
+          phone: localStorage.getItem('ewbot_phone') || null,
+        }),
       });
       if (!r.ok){
         const t = await r.text();
@@ -152,14 +484,60 @@
         setStatus('Ready'); setMic('idle'); return;
       }
       const data = await r.json();
+      // Bot captured a phone number from a spoken digit-only utterance.
+      if (data.phone_captured){
+        localStorage.setItem('ewbot_phone', data.phone_captured);
+        dlog('phone saved: ' + data.phone_captured);
+      }
+      // If the bot asked for a phone (VIN handoff with no number on file),
+      // prompt once + store + auto-retry the same transcript.
+      if (data.needs_phone){
+        const p = prompt('What number should I text the full appraisal report to?');
+        if (p){
+          localStorage.setItem('ewbot_phone', p);
+          // re-send the same transcript with phone now attached
+          appendMsg(data.reply_text + ' (retrying with your number…)', 'bot');
+          setStatus('Retrying with phone…');
+          send(transcript);
+          return;
+        }
+      }
       const meta = data.parsed && (data.parsed.year || data.parsed.make) ?
         '<span class="pill"><b>' + (data.parsed.year||'?') + ' ' + (data.parsed.make||'?') + ' ' + (data.parsed.model||'?') + '</b></span>' +
-        (data.comps_counts ? '<span class="pill">MMR <b>' + data.comps_counts.mmr + '</b></span>' +
-                              '<span class="pill">Nat <b>' + data.comps_counts.national + '</b></span>' +
-                              '<span class="pill">LSL <b>' + data.comps_counts.lsl + '</b></span>' : '') +
+        (data.comps_counts ? '<span class="pill">Live rBook <b>' + (data.comps_counts.live||0) + '</b></span>' +
+                              '<span class="pill">Live MMR <b>' + (data.comps_counts.live_mmr ? '✓' : '–') + '</b></span>' +
+                              '<span class="pill">Priors <b>' + (data.comps_counts.priors||0) + '</b></span>' +
+                              '<span class="pill">LSL <b>' + (data.comps_counts.lsl||0) + '</b></span>' : '') +
         '<span class="pill">' + data.elapsed_ms + 'ms</span>'
         : '';
-      appendMsg(data.reply_text || '(no reply)', 'bot', { meta: meta });
+      const botMsg = appendMsg(data.reply_text || '(no reply)', 'bot', { meta: meta });
+      if (data.valuation_id){
+        const txtBtn = document.createElement('button');
+        txtBtn.textContent = 'Text me this';
+        txtBtn.style.cssText = 'margin-top:8px;background:#1d4ed8;color:#fff;border:0;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer';
+        txtBtn.onclick = async () => {
+          let phone = localStorage.getItem('ewbot_phone');
+          if (!phone){
+            phone = prompt('Phone number to text the report to?');
+            if (!phone) return;
+            localStorage.setItem('ewbot_phone', phone);
+          }
+          txtBtn.disabled = true; txtBtn.textContent = 'Sending…';
+          try {
+            const r = await fetch('/api/voice/' + data.valuation_id + '/sms', {
+              method: 'POST', headers: {'Content-Type':'application/json'},
+              body: JSON.stringify({phone: phone}),
+            });
+            const j = await r.json();
+            if (j.sent){ txtBtn.textContent = '✓ Sent to ' + j.to; }
+            else { txtBtn.textContent = 'Failed: ' + (j.error||'?'); txtBtn.disabled = false; }
+          } catch(e){
+            txtBtn.textContent = 'Network error';
+            txtBtn.disabled = false;
+          }
+        };
+        botMsg.appendChild(txtBtn);
+      }
       if (data.reply_text) speak(data.reply_text);
       turnIndex += 1;
     }catch(e){
@@ -186,13 +564,48 @@
   }
 
   // ── Feature detection (visible) ────────────────────────
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  // iOS Safari (and iOS Chrome which uses WebKit underneath) advertises
+  // webkitSpeechRecognition but the implementation is broken: onstart fires
+  // but no results are produced. Force-skip the SR path on iOS so we go
+  // straight to MediaRecorder + server-side Gemini STT.
+  const isIOS = /iP(hone|ad|od)/i.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  let SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (isIOS && SR){
+    SR = null;  // intentional: iOS SR is unreliable, force MR fallback
+  }
   const hasMR = !!window.MediaRecorder;
   const hasGUM = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-  dlog('SR=' + (SR ? 'yes' : 'no') + ' MR=' + (hasMR ? 'yes' : 'no') + ' GUM=' + (hasGUM ? 'yes' : 'no') + ' UA=' + navigator.userAgent.slice(0,60));
+  dlog('iOS=' + isIOS + ' SR=' + (SR ? 'yes' : 'forced-off-on-iOS/no') + ' MR=' + (hasMR ? 'yes' : 'no') + ' GUM=' + (hasGUM ? 'yes' : 'no'));
+  dlog('UA=' + navigator.userAgent.slice(0,100));
+
+  // STT_WS_2026_05_21 — Path C: WebSocket streaming STT (Google Cloud
+  // Speech). Falls back to SR (Path A) then MR-POST (Path B) on any
+  // failure (open error, server error frame, premature close).
+  const hasWS = !!window.WebSocket;
+  let useStreamingSTT = hasWS;   // session-level, flipped off on first failure
+  let stt_ws = null;
+  let stt_audio_src = null;
+  let stt_processor = null;
+  let stt_final_buf = '';
+  let stt_interim_buf = '';
+  let stt_active = false;
+  let stt_resolve_final = null;  // promise resolver for graceful stop
+  let stt_t_start = 0;
+  let stt_got_first_interim = false;
+  dlog('streaming-STT path ' + (useStreamingSTT ? 'enabled' : 'disabled (no WS)'));
+
 
   let rec = null, recActive = false, finalTranscript = '';
   let mediaStream = null, mediaRecorder = null, recordedChunks = [];
+  // Conversation-mode state (hands-free, like the Claude/ChatGPT app)
+  let convMode = false;            // true = stay in listen/answer loop
+  let vadCtx = null, vadAnalyser = null, vadInterval = null;
+  let lastSpeechAt = 0;
+  const VAD_RMS_THRESHOLD = 0.020;       // lower = picks up softer speech, breathing pauses
+  const VAD_SILENCE_END_MS = 1100;       // stop after 1.1s of silence — long enough for thinking pauses
+  const VAD_MIN_SPEECH_MS = 400;
+  const VAD_MAX_UTTERANCE_MS = 15000;    // hard cap: 15s for longer questions
 
   // ── Path A: webkitSpeechRecognition (Chrome desktop, sometimes iOS) ─
   function initSR(){
@@ -228,31 +641,143 @@
   // for now we just record + warn — server upload endpoint lands Day 3
   // once we add OpenAI Whisper or similar. Today this just verifies
   // mic permission + recording works on iOS.
-  async function startMR(){
+  function stopVAD(){
+    if (vadInterval) { clearInterval(vadInterval); vadInterval = null; }
+    // In conversation mode we keep the AudioContext alive between
+    // recordings — closing + recreating it on iOS Chrome triggers
+    // permission UI / glitches. Just disconnect the analyser.
+    if (!convMode) {
+      try { if (vadCtx) vadCtx.close(); } catch(e){}
+      vadCtx = null; vadAnalyser = null;
+    } else {
+      try { if (vadAnalyser) vadAnalyser.disconnect(); } catch(e){}
+      vadAnalyser = null;
+    }
+  }
+
+  function startVAD(stream){
+    try {
+      if (!vadCtx || vadCtx.state === 'closed') {
+        vadCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (vadCtx.state === 'suspended') { vadCtx.resume(); }
+      const src = vadCtx.createMediaStreamSource(stream);
+      vadAnalyser = vadCtx.createAnalyser();
+      vadAnalyser.fftSize = 1024;
+      src.connect(vadAnalyser);
+      const buf = new Float32Array(vadAnalyser.fftSize);
+      const startedAt = Date.now();
+      let speechStartedAt = 0;
+      lastSpeechAt = 0;
+      vadInterval = setInterval(() => {
+        if (!recActive || !vadAnalyser) return;
+        vadAnalyser.getFloatTimeDomainData(buf);
+        // RMS
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+        const rms = Math.sqrt(sum / buf.length);
+        const now = Date.now();
+        if (rms > VAD_RMS_THRESHOLD){
+          if (!speechStartedAt) speechStartedAt = now;
+          lastSpeechAt = now;
+        }
+        // Stop conditions:
+        //  - has spoken AND silence ≥ VAD_SILENCE_END_MS
+        //  - hard timeout VAD_MAX_UTTERANCE_MS
+        const haveSpeech = speechStartedAt && (lastSpeechAt - speechStartedAt) >= VAD_MIN_SPEECH_MS;
+        const silentFor = lastSpeechAt ? (now - lastSpeechAt) : 0;
+        const totalMs = now - startedAt;
+        if (haveSpeech && silentFor >= VAD_SILENCE_END_MS){
+          dlog('VAD silence → stop after ' + Math.round(totalMs) + 'ms');
+          stopRec();
+        } else if (totalMs >= VAD_MAX_UTTERANCE_MS){
+          dlog('VAD timeout → stop');
+          stopRec();
+        }
+      }, 100);
+    } catch(e){
+      dlog('VAD init failed: ' + e + ' (will fall back to tap-to-stop)');
+    }
+  }
+
+  async function _ensureStream(){
+    // Reuse the same MediaStream + AudioContext across the entire
+    // conversation so iOS doesn't re-prompt for mic permission on
+    // every turn (the symptom that frustrated the operator).
+    if (mediaStream && mediaStream.active) return mediaStream;
     if (!hasMR || !hasGUM){
       dlog('MR/GUM not available — cannot record');
       setStatus('No mic API on this device');
-      return false;
+      return null;
     }
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      dlog('mic permission OK');
-      mediaRecorder = new MediaRecorder(mediaStream);
+      dlog('mic stream acquired (reused across turns)');
+    } catch(e){
+      dlog('mic permission denied: ' + (e && e.message ? e.message : e));
+      setStatus('Mic permission denied');
+      return null;
+    }
+    return mediaStream;
+  }
+
+  async function startMR(){
+    const stream = await _ensureStream();
+    if (!stream) return false;
+    try {
+      mediaRecorder = new MediaRecorder(stream);
       recordedChunks = [];
       mediaRecorder.ondataavailable = (ev) => { if (ev.data && ev.data.size > 0) recordedChunks.push(ev.data); };
-      mediaRecorder.onstop = () => {
-        const blob = new Blob(recordedChunks, { type: 'audio/webm' });
-        dlog('recorded ' + Math.round(blob.size/1024) + 'kb · server-STT not wired yet, use the text box');
-        setStatus('Recorded ' + Math.round(blob.size/1024) + 'kb (no Whisper backend yet — type instead)');
-        // Stop tracks so the red mic icon goes away in the browser bar
-        mediaStream.getTracks().forEach(t => t.stop());
-        mediaStream = null; mediaRecorder = null;
-        setMic('idle');
+      mediaRecorder.onstop = async () => {
+        stopVAD();
+        const mime = mediaRecorder.mimeType || 'audio/mp4';
+        const blob = new Blob(recordedChunks, { type: mime });
+        dlog('recorded ' + Math.round(blob.size/1024) + 'kb mime=' + mime + ' — uploading…');
+        setStatus('Transcribing…');
+        // Keep the stream alive in conversation mode (so iOS doesn't
+        // re-prompt). Release ONLY when conversation actually ends.
+        if (!convMode && mediaStream){
+          mediaStream.getTracks().forEach(t => t.stop());
+          mediaStream = null;
+        }
+        mediaRecorder = null;
+        try {
+          const ext = mime.includes('mp4') ? 'm4a' : (mime.includes('webm') ? 'webm' : 'audio');
+          const fd = new FormData();
+          fd.append('audio', blob, 'voice.' + ext);
+          const r = await fetch('/api/voice/stt', { method: 'POST', body: fd });
+          if (!r.ok){
+            const t = await r.text();
+            dlog('STT HTTP ' + r.status + ' body=' + t.slice(0,140));
+            setStatus('Transcription failed (' + r.status + ')');
+            setMic('idle'); recActive = false; return;
+          }
+          const data = await r.json();
+          const t = (data.transcript || '').trim();
+          dlog('STT got: "' + t + '" (' + data.size_bytes + 'b ' + (data.mime||'?') + ')');
+          recActive = false;
+          if (t){
+            send(t);
+          } else {
+            setStatus("Didn't catch that — try again");
+            setMic('idle');
+          }
+        } catch (e){
+          dlog('STT upload threw: ' + (e && e.message ? e.message : e));
+          setStatus('Network error during transcribe');
+          setMic('idle'); recActive = false;
+        }
       };
       mediaRecorder.start();
       recActive = true;
       setMic('listening');
-      setStatus('Recording (no STT backend yet) — tap to stop');
+      // In conversation mode, VAD auto-stops on silence — no tap needed.
+      if (convMode){
+        setStatus('Listening… (just keep talking, I\'ll stop on silence)');
+        startVAD(mediaStream);
+      } else {
+        setStatus('Recording — tap to stop');
+      }
       return true;
     } catch (e) {
       dlog('MR start failed: ' + (e && e.message ? e.message : e));
@@ -262,9 +787,249 @@
     }
   }
 
+  // ── Path C helpers (WS streaming STT) ────────────────────
+  function _stt_downsample(buffer, srcRate, dstRate){
+    if (dstRate === srcRate) return buffer;
+    const ratio = srcRate / dstRate;
+    const newLen = Math.round(buffer.length / ratio);
+    const out = new Float32Array(newLen);
+    let oi = 0, bi = 0;
+    while (oi < newLen){
+      const next = Math.round((oi + 1) * ratio);
+      let sum = 0, n = 0;
+      for (let i = bi; i < next && i < buffer.length; i++){ sum += buffer[i]; n++; }
+      out[oi++] = n ? sum / n : 0;
+      bi = next;
+    }
+    return out;
+  }
+
+  function _stt_float32_to_int16le(f32){
+    const buf = new ArrayBuffer(f32.length * 2);
+    const view = new DataView(buf);
+    for (let i = 0; i < f32.length; i++){
+      let s = Math.max(-1, Math.min(1, f32[i]));
+      view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+    return buf;
+  }
+
+  async function startWS(){
+    stt_t_start = performance.now();
+    stt_got_first_interim = false;
+    // Reuse or open the audio context (shared with VAD).
+    if (!vadCtx || vadCtx.state === 'closed'){
+      vadCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (vadCtx.state === 'suspended') await vadCtx.resume();
+    const stream = await _ensureStream();
+    if (!stream) return false;
+
+    // Open the WebSocket.
+    const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = scheme + '//' + location.host + '/api/voice/stt/ws';
+    try { stt_ws = new WebSocket(url); }
+    catch(e){
+      dlog('WS ctor failed: ' + e + ' — falling back');
+      useStreamingSTT = false;
+      return false;
+    }
+    stt_ws.binaryType = 'arraybuffer';
+    stt_final_buf = '';
+    stt_interim_buf = '';
+    stt_active = false;
+
+    // Promise-based open wait so we don't blast PCM before server ready.
+    const opened = new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('WS open timeout')), 4000);
+      stt_ws.addEventListener('open', () => { clearTimeout(t); resolve(); });
+      stt_ws.addEventListener('error', () => { clearTimeout(t); reject(new Error('WS error')); });
+    });
+    const _t_ws_open = performance.now();
+    try { await opened; }
+    catch(e){
+      dlog('WS open failed: ' + e.message + ' — falling back to MR');
+      try { stt_ws.close(); } catch(_){}
+      stt_ws = null;
+      useStreamingSTT = false;
+      return false;
+    }
+    dlog('Path C: WS open in ' + Math.round(performance.now() - _t_ws_open) + 'ms');
+
+    stt_ws.addEventListener('message', (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch(_){ return; }
+      if (m.type === 'interim'){
+        stt_interim_buf = m.transcript || '';
+        setStatus(((stt_final_buf + ' ' + stt_interim_buf).trim()) || 'Listening…');
+        // First interim is the signal that streaming is actually working.
+        if (!stt_got_first_interim){
+          stt_got_first_interim = true;
+          dlog('Path C: first interim @ +' + Math.round(performance.now() - stt_t_start) + 'ms "' + (m.transcript||'').slice(0,40) + '"');
+        }
+      } else if (m.type === 'final'){
+        stt_final_buf = (stt_final_buf + ' ' + (m.transcript || '')).trim();
+        stt_interim_buf = '';
+        setStatus(stt_final_buf || 'Listening…');
+        dlog('Path C: final @ +' + Math.round(performance.now() - stt_t_start) + 'ms "' + (m.transcript||'').slice(0,60) + '"');
+        if (stt_resolve_final){
+          // Caller is awaiting final after a stop signal — resolve now.
+          const r = stt_resolve_final; stt_resolve_final = null; r(stt_final_buf);
+        }
+      } else if (m.type === 'utterance_end'){
+        // UTTERANCE_END_2026_05_21 — Google detected end-of-utterance and
+        // closed its side of the stream. Treat as authoritative stop:
+        // commit the transcript and fire send() WITHOUT waiting for VAD.
+        dlog('Path C: server signaled utterance_end → committing');
+        if (recActive){
+          recActive = false;
+          // Tear down PCM tap immediately.
+          try { if (stt_processor) stt_processor.disconnect(); } catch(_){}
+          try { if (stt_audio_src) stt_audio_src.disconnect(); } catch(_){}
+          stt_processor = null; stt_audio_src = null;
+          stopVAD();
+          const txt = (stt_final_buf || stt_interim_buf || '').trim();
+          stt_active = false;
+          try { stt_ws.close(); } catch(_){}
+          stt_ws = null;
+          if (txt){
+            setStatus(txt);
+            if (!convMode && mediaStream){
+              mediaStream.getTracks().forEach(tr => tr.stop());
+              mediaStream = null;
+            }
+            send(txt);
+          } else {
+            setStatus("Didn't catch that — try again");
+            setMic('idle');
+          }
+        }
+      } else if (m.type === 'error'){
+        dlog('WS STT error frame: ' + (m.message || '?') + ' — falling back');
+        useStreamingSTT = false;
+        try { stt_ws.close(); } catch(_){}
+        stt_ws = null;
+        // If still recording, swap to MR for this utterance.
+        if (recActive){
+          recActive = false;
+          startMR();
+        }
+      }
+    });
+
+    stt_ws.addEventListener('close', () => {
+      // If we still expected results, treat as failure for next session.
+      if (stt_active){
+        dlog('WS closed unexpectedly while active');
+      }
+      stt_active = false;
+    });
+
+    // Send the start frame with the AudioContext's actual sample rate so
+    // the server can configure Google's decoder accordingly. We still
+    // downsample to 16k locally (smaller frames, lower latency).
+    const targetSampleRate = 16000;
+    try { stt_ws.send(JSON.stringify({ type: 'start', sample_rate: targetSampleRate })); }
+    catch(e){
+      dlog('WS start-frame send failed: ' + e);
+      useStreamingSTT = false;
+      try { stt_ws.close(); } catch(_){}
+      stt_ws = null;
+      return false;
+    }
+
+    // Tap a ScriptProcessor off the existing media stream. ScriptProcessor
+    // is deprecated but universally supported; AudioWorklet would require
+    // a separate worklet file.
+    try {
+      stt_audio_src = vadCtx.createMediaStreamSource(stream);
+      const bufSize = 4096;
+      stt_processor = vadCtx.createScriptProcessor(bufSize, 1, 1);
+      const srcRate = vadCtx.sampleRate;
+      stt_processor.onaudioprocess = (e) => {
+        if (!stt_ws || stt_ws.readyState !== WebSocket.OPEN) return;
+        const input = e.inputBuffer.getChannelData(0);
+        const ds = _stt_downsample(input, srcRate, targetSampleRate);
+        const i16 = _stt_float32_to_int16le(ds);
+        try { stt_ws.send(i16); } catch(_){}
+      };
+      stt_audio_src.connect(stt_processor);
+      // ScriptProcessor must be connected to destination to receive
+      // process events — connect to a silent gain to avoid feedback.
+      const sink = vadCtx.createGain(); sink.gain.value = 0;
+      stt_processor.connect(sink);
+      sink.connect(vadCtx.destination);
+    } catch(e){
+      dlog('WS PCM tap setup failed: ' + e + ' — falling back');
+      useStreamingSTT = false;
+      try { stt_ws.close(); } catch(_){}
+      stt_ws = null;
+      return false;
+    }
+
+    recActive = true;
+    stt_active = true;
+    setMic('listening');
+    dlog('Path C: streaming PCM @ ' + vadCtx.sampleRate + 'Hz → 16k');
+    if (convMode){
+      setStatus("Listening… (I'll stop on silence)");
+      startVAD(stream);
+    } else {
+      setStatus('Listening — tap to stop');
+    }
+    return true;
+  }
+
+  async function stopWS(){
+    if (!stt_ws) return null;
+    // Tear down audio tap first so no more PCM lands after we say stop.
+    try { if (stt_processor) stt_processor.disconnect(); } catch(_){}
+    try { if (stt_audio_src) stt_audio_src.disconnect(); } catch(_){}
+    stt_processor = null; stt_audio_src = null;
+
+    // Tell server we're done sending. Wait up to 2s for the last final
+    // transcript before closing.
+    const waitFinal = new Promise((resolve) => {
+      stt_resolve_final = resolve;
+      setTimeout(() => {
+        if (stt_resolve_final){ stt_resolve_final = null; resolve(stt_final_buf); }
+      }, 2000);
+    });
+    try { stt_ws.send(JSON.stringify({ type: 'stop' })); } catch(_){}
+    const finalText = await waitFinal;
+    stt_active = false;
+    try { stt_ws.close(); } catch(_){}
+    stt_ws = null;
+    // INTERIM_FALLBACK_2026_05_21 — Google streams (single_utterance=false)
+    // don't always commit a final on stream end. The interim text the user
+    // saw live IS the transcript — use it if no final arrived.
+    const committed = (finalText || stt_interim_buf || '').trim();
+    if (!finalText && stt_interim_buf){
+      dlog('Path C: no final → committing last interim "' + stt_interim_buf.slice(0,60) + '"');
+    }
+    return committed;
+  }
+
   function startRec(){
     if (recActive) return;
     try { window.speechSynthesis.cancel(); } catch(e){}
+    finalTranscript = '';
+    // Path C (preferred): WebSocket streaming STT via Google Cloud Speech.
+    if (useStreamingSTT){
+      (async () => {
+        const ok = await startWS();
+        if (!ok){
+          // startWS already disabled useStreamingSTT + cleaned up. Fall
+          // back to the original path order.
+          if (SR){
+            try { rec.start(); dlog('SR.start() called (post-WS-fallback)'); }
+            catch(e){ dlog('SR.start() threw post-fallback: ' + e); startMR(); }
+          } else {
+            startMR();
+          }
+        }
+      })();
+      return;
+    }
     if (SR){
       try {
         rec.start();
@@ -291,6 +1056,23 @@
 
   function stopRec(){
     if (!recActive) return;
+    // Path C — graceful close: send {type:'stop'}, await final, then send().
+    if (stt_ws){
+      recActive = false;
+      stopVAD();
+      setStatus('Transcribing…');
+      (async () => {
+        const t = await stopWS();
+        if (!convMode && mediaStream){
+          mediaStream.getTracks().forEach(tr => tr.stop());
+          mediaStream = null;
+        }
+        dlog('WS final: "' + t + '"');
+        if (t){ send(t); }
+        else { setStatus("Didn't catch that — try again"); setMic('idle'); }
+      })();
+      return;
+    }
     if (rec){ try { rec.stop(); } catch(e){ dlog('SR.stop() threw: ' + e); } }
     if (mediaRecorder && mediaRecorder.state !== 'inactive'){
       try { mediaRecorder.stop(); } catch(e){ dlog('MR.stop() threw: ' + e); }
@@ -305,10 +1087,46 @@
   }
 
   // Single click handler (works for SR + MR paths).
+  // Unlock TTS synchronously inside this gesture frame BEFORE any async
+  // work — iOS requires it.
+  function startConversation(){
+    convMode = true;
+    micBtn.classList.add('listening');
+    micLabel.textContent = 'End conversation';
+    setStatus('Listening… speak when ready (will auto-stop on silence)');
+    dlog('CONVERSATION MODE on');
+    startRec();
+  }
+
+  function endConversation(){
+    convMode = false;
+    if (recActive) stopRec();
+    stopVAD();
+    stopAllSpeech();
+    // Release the mic stream now that we're done
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(t => t.stop());
+      mediaStream = null;
+      dlog('mic stream released');
+    }
+    if (vadCtx) { try { vadCtx.close(); } catch(e){} vadCtx = null; vadAnalyser = null; }
+    setMic('idle');
+    micLabel.textContent = 'Tap to start';
+    setStatus('Ready');
+    dlog('CONVERSATION MODE off');
+  }
+
   micBtn.addEventListener('click', () => {
-    dlog('mic clicked · recActive=' + recActive);
-    if (recActive) stopRec(); else startRec();
+    stopAllSpeech();    // kill any queued browser TTS + stop current audio
+    unlockAudio();      // <audio> element for Cloud TTS playback
+    dlog('mic clicked · convMode=' + convMode + ' recActive=' + recActive);
+    if (convMode){
+      endConversation();
+    } else {
+      startConversation();
+    }
   });
+  typedSend.addEventListener('click', () => { stopAllSpeech(); unlockAudio(); });
 })();
 </script>
 </body>

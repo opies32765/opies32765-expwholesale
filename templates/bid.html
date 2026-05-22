@@ -2040,7 +2040,669 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
   </div><!-- /columns-area -->
 
+{# ─────────── Book to LSL trigger bar (LSL_BOOK_BAR_2026_05_21) ─────────── #}
+{# Tiny trigger bar at the bottom of .page. Click → opens lsl-book-modal,  #}
+{# which is a position:fixed overlay outside .page so it has its own       #}
+{# scroll context and doesn't interfere with the AccuTrade card's          #}
+{# height:100% layout dependencies.                                         #}
+<div onclick="lslOpenModal()"
+     style="margin:14px 20px 16px;padding:11px 18px;border:1px solid #7c3aed;border-radius:8px;background:linear-gradient(180deg,rgba(124,58,237,.10),rgba(15,23,42,.0));color:#a78bfa;font-weight:700;font-size:12px;letter-spacing:.5px;text-transform:uppercase;cursor:pointer;display:flex;justify-content:space-between;align-items:center;user-select:none;flex-shrink:0">
+  <span>▸ Book to LSL</span>
+  {% if bid.lsl_pushed_at %}
+    <span style="font-size:10px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.3);border-radius:4px;padding:3px 8px">PUSHED · LSL #{{ bid.lsl_deal_id }}</span>
+  {% elif bid.lsl_staged_at %}
+    <span style="font-size:10px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.3);border-radius:4px;padding:3px 8px">STAGED · push pending</span>
+  {% else %}
+    <span style="font-size:10px;font-weight:500;color:#64748b;text-transform:none;letter-spacing:0">click to book</span>
+  {% endif %}
+</div>
+
 </div><!-- /page -->
+
+{# ─────────────── Book to LSL Modal (LSL_BOOK_MODAL_2026_05_21) ─────────── #}
+{# Lives OUTSIDE .page so it has its own scroll context and isn't clipped  #}
+{# by .page's overflow:hidden. Hidden by default; opens via lslOpenModal.  #}
+<div id="lsl-book-modal" onclick="if(event.target===this)lslCloseModal()"
+     style="display:none;position:fixed;inset:0;z-index:9000;background:rgba(0,0,0,.72);overflow-y:auto;padding:30px 20px;backdrop-filter:blur(4px)">
+<div style="max-width:880px;margin:20px auto">
+<div class="card" id="lsl-book-card"
+     style="border-color:#7c3aed;background:linear-gradient(180deg,rgba(124,58,237,.08),#0b0f19);box-shadow:0 30px 60px -15px rgba(0,0,0,.5)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid #1e293b">
+    <div style="font-size:16px;font-weight:800;color:#a78bfa;letter-spacing:.3px">Book to LSL · Bid #{{ bid.id }}</div>
+    <button onclick="lslCloseModal()" style="background:transparent;border:none;color:#64748b;cursor:pointer;font-size:24px;line-height:1;padding:0;width:32px;height:32px;border-radius:6px;display:flex;align-items:center;justify-content:center">✕</button>
+  </div>
+
+  <div id="lsl-book-body" style="display:block">
+
+  {# SELLER_KIND_TOGGLE_2026_05_21: choose path — wholesale dealer (default) #}
+  {# or private individual. Drives which counterparty UI shows below.       #}
+  <div style="margin-bottom:16px">
+    <label style="display:block;font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">
+      Seller Type <span style="color:#f87171">*</span>
+    </label>
+    <div style="display:inline-flex;background:#0f172a;border:1px solid #1e293b;border-radius:7px;padding:3px">
+      <button type="button" id="lsl-kind-wholesale" onclick="lslSetKind('wholesale')"
+              style="padding:7px 16px;border:none;border-radius:5px;background:#7c3aed;color:#fff;font-size:12px;font-weight:700;cursor:pointer;letter-spacing:.3px">
+        Wholesale Dealer
+      </button>
+      <button type="button" id="lsl-kind-individual" onclick="lslSetKind('individual')"
+              style="padding:7px 16px;border:none;border-radius:5px;background:transparent;color:#94a3b8;font-size:12px;font-weight:600;cursor:pointer;letter-spacing:.3px">
+        Private Individual
+      </button>
+    </div>
+    <input type="hidden" id="lsl-seller-kind" value="{{ bid.lsl_seller_kind or 'wholesale' }}">
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;font-family:Inter,system-ui,sans-serif">
+
+    {# ─── Wholesale supplier picker (default) ─── #}
+    <div id="lsl-wholesale-block" style="grid-column:1/-1">
+      <label style="display:block;font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">
+        Supplier (whom we bought from) <span style="color:#f87171">*</span>
+      </label>
+      <input id="lsl-supplier-search" type="text" autocomplete="off"
+             value="{{ bid.lsl_supplier_name or bid.partner_dealer_name or '' }}"
+             placeholder="Start typing dealer name…"
+             style="width:100%;padding:9px 11px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px">
+      <input type="hidden" id="lsl-supplier-id" value="{{ bid.lsl_supplier_id or '' }}">
+      <div id="lsl-supplier-results"
+           style="display:none;position:relative;margin-top:4px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;max-height:280px;overflow-y:auto;z-index:50"></div>
+    </div>
+
+    {# ─── Private Individual block (hidden by default) ─── #}
+    <div id="lsl-individual-block" style="grid-column:1/-1;display:none">
+      <div style="padding:14px;background:rgba(124,58,237,.04);border:1px dashed rgba(124,58,237,.3);border-radius:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <label style="font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px">
+            Private Seller <span style="color:#f87171">*</span>
+          </label>
+          <div style="display:flex;gap:6px">
+            <button type="button" id="lsl-pc-mode-existing" onclick="lslPcMode('existing')"
+                    style="padding:5px 10px;background:#1e293b;color:#cbd5e1;border:none;border-radius:5px;font-size:11px;font-weight:600;cursor:pointer">
+              Pick Existing
+            </button>
+            <button type="button" id="lsl-pc-mode-new" onclick="lslPcMode('new')"
+                    style="padding:5px 10px;background:#7c3aed;color:#fff;border:none;border-radius:5px;font-size:11px;font-weight:700;cursor:pointer">
+              + Add New
+            </button>
+          </div>
+        </div>
+
+        {# Existing-customer picker (lsl_pending_customers staged previously) #}
+        <div id="lsl-pc-existing-wrap" style="display:none;margin-bottom:6px">
+          <input id="lsl-pc-search" type="text" autocomplete="off"
+                 placeholder="Search name / phone / email of customer staged earlier…"
+                 style="width:100%;padding:9px 11px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px">
+          <input type="hidden" id="lsl-pending-customer-id" value="{{ bid.lsl_pending_customer_id or '' }}">
+          <div id="lsl-pc-results"
+               style="display:none;position:relative;margin-top:4px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;max-height:240px;overflow-y:auto;z-index:50"></div>
+        </div>
+
+        {# New-customer mini-form #}
+        <div id="lsl-pc-new-wrap" style="display:block">
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+            <div>
+              <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Type</label>
+              <select id="lsl-pc-type" onchange="lslPcTypeChanged()"
+                      style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px">
+                <option value="Individual" selected>Individual</option>
+                <option value="Lead">Lead</option>
+                <option value="Company">Company</option>
+              </select>
+            </div>
+            <div style="grid-column:span 2" id="lsl-pc-company-wrap" style="display:none">
+              <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Company Name *</label>
+              <input id="lsl-pc-company" type="text" placeholder="Company / LLC name"
+                     style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px">
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+            <div>
+              <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">First Name *</label>
+              <input id="lsl-pc-first" type="text" placeholder="Jane"
+                     style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px">
+            </div>
+            <div>
+              <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Last Name *</label>
+              <input id="lsl-pc-last" type="text" placeholder="Doe"
+                     style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px">
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+            <div>
+              <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Mobile *</label>
+              <input id="lsl-pc-mobile" type="tel" placeholder="(305) 555-1234"
+                     oninput="lslFormatMobile(this)"
+                     style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px;font-family:monospace">
+            </div>
+            <div>
+              <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Email</label>
+              <input id="lsl-pc-email" type="email" placeholder="jane@example.com"
+                     style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px">
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Street Address</label>
+            <input id="lsl-pc-street" type="text" placeholder="123 Main St"
+                   style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px">
+          </div>
+          <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px;margin-top:10px">
+            <div>
+              <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">City</label>
+              <input id="lsl-pc-city" type="text"
+                     style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px">
+            </div>
+            <div>
+              <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">State</label>
+              <input id="lsl-pc-state" type="text" maxlength="2" placeholder="FL"
+                     style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px;text-transform:uppercase">
+            </div>
+            <div>
+              <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">ZIP</label>
+              <input id="lsl-pc-zip" type="text" maxlength="10" placeholder="33301"
+                     style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px;font-family:monospace">
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+            <div>
+              <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Lead Status</label>
+              <input id="lsl-pc-lead-status" type="text" placeholder="(optional)"
+                     style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px">
+            </div>
+            <div>
+              <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Payment Method</label>
+              <select id="lsl-pc-paymethod"
+                      style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px">
+                <option value="Check" selected>Check</option>
+                <option value="Wire">Wire</option>
+              </select>
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Note (optional)</label>
+            <textarea id="lsl-pc-note" rows="2" placeholder="Any context for this seller"
+                      style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px;resize:vertical;font-family:inherit"></textarea>
+          </div>
+          <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+            <button type="button" id="lsl-pc-save-btn" onclick="lslSavePendingCustomer()"
+                    style="padding:8px 14px;background:#7c3aed;color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer">
+              Save Customer (stage locally)
+            </button>
+            <span id="lsl-pc-status" style="font-size:11px;color:#64748b"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {# Prices #}
+    <div>
+      <label style="display:block;font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">
+        Purchase Cost (we paid) <span style="color:#f87171">*</span>
+      </label>
+      <div style="display:flex;align-items:center;background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:0 11px">
+        <span style="color:#64748b;font-size:14px">$</span>
+        <input id="lsl-purchase-cost" type="text" inputmode="numeric"
+               value="{% if bid.lsl_purchase_cost %}{{ '{:,}'.format(bid.lsl_purchase_cost) }}{% endif %}"
+               placeholder="0"
+               oninput="this.value=this.value.replace(/[^0-9]/g,'').replace(/\B(?=(\d{3})+(?!\d))/g,',')"
+               style="flex:1;padding:9px 4px;background:transparent;border:none;color:#e2e8f0;font-size:14px;font-family:monospace">
+      </div>
+    </div>
+    <div>
+      <label style="display:block;font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">
+        Sale Price (intended resale)
+      </label>
+      <div style="display:flex;align-items:center;background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:0 11px">
+        <span style="color:#64748b;font-size:14px">$</span>
+        <input id="lsl-sale-price" type="text" inputmode="numeric"
+               value="{% if bid.lsl_sale_price %}{{ '{:,}'.format(bid.lsl_sale_price) }}{% endif %}"
+               placeholder="optional"
+               oninput="this.value=this.value.replace(/[^0-9]/g,'').replace(/\B(?=(\d{3})+(?!\d))/g,',')"
+               style="flex:1;padding:9px 4px;background:transparent;border:none;color:#e2e8f0;font-size:14px;font-family:monospace">
+      </div>
+    </div>
+
+    {# TITLE_STATUS_2026_05_21: Yes / Pending / PayOff — values mirrored  #}
+    {# verbatim from LSL inventory.titleStatus. PayOff path reveals       #}
+    {# payoff-amount + lienholder fields.                                  #}
+    <div>
+      <label style="display:block;font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">
+        Title Status
+      </label>
+      <select id="lsl-title-status" onchange="lslTitleStatusChanged()"
+              style="width:100%;padding:9px 11px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px">
+        <option value="Pending" {% if (bid.lsl_title_status or 'Pending') == 'Pending' %}selected{% endif %}>Pending</option>
+        <option value="Yes"     {% if bid.lsl_title_status == 'Yes' %}selected{% endif %}>Yes (have title)</option>
+        <option value="PayOff"  {% if bid.lsl_title_status == 'PayOff' %}selected{% endif %}>PayOff (lien)</option>
+      </select>
+    </div>
+
+    {# Payoff details — only shown when titleStatus=PayOff #}
+    <div id="lsl-payoff-wrap" style="display:{% if bid.lsl_title_status == 'PayOff' %}block{% else %}none{% endif %};grid-column:1/-1">
+      <div style="padding:12px 14px;background:rgba(251,191,36,.06);border:1px dashed rgba(251,191,36,.35);border-radius:8px">
+        <div style="font-size:11px;font-weight:700;color:#fbbf24;text-transform:uppercase;letter-spacing:.4px;margin-bottom:10px">
+          Lien Payoff Details
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 2fr;gap:10px">
+          <div>
+            <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Estimated Payoff Amount</label>
+            <div style="display:flex;align-items:center;background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:0 11px">
+              <span style="color:#64748b;font-size:13px">$</span>
+              <input id="lsl-payoff-amount" type="text" inputmode="numeric"
+                     value="{% if bid.lsl_payoff_amount %}{{ '{:,}'.format(bid.lsl_payoff_amount) }}{% endif %}"
+                     placeholder="0"
+                     oninput="this.value=this.value.replace(/[^0-9]/g,'').replace(/\B(?=(\d{3})+(?!\d))/g,',')"
+                     style="flex:1;padding:7px 4px;background:transparent;border:none;color:#e2e8f0;font-size:13px;font-family:monospace">
+            </div>
+          </div>
+          <div>
+            <label style="display:block;font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px">Lienholder (bank / finance company)</label>
+            <input id="lsl-lienholder" type="text"
+                   value="{{ bid.lsl_lienholder_name or '' }}"
+                   placeholder="e.g. Chase Auto Finance"
+                   style="width:100%;padding:7px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:13px">
+          </div>
+        </div>
+        <div style="margin-top:8px;font-size:10px;color:#64748b;font-style:italic">
+          Payoff-amount + lienholder field names are speculative — the next LSL save capture will confirm exact field names. LSL collects upload paperwork separately (payoffUploadStatus workflow).
+        </div>
+      </div>
+    </div>
+
+    {# Sales team #}
+    <div>
+      <label style="display:block;font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">
+        Sales Person <span style="color:#f87171">*</span>
+      </label>
+      <select id="lsl-sales-person"
+              onchange="lslAutoFillTeam()"
+              style="width:100%;padding:9px 11px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px"></select>
+    </div>
+    <div>
+      <label style="display:block;font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">
+        Sales Manager
+      </label>
+      <select id="lsl-sales-manager"
+              style="width:100%;padding:9px 11px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px"></select>
+    </div>
+    <div>
+      <label style="display:block;font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">
+        Booked By
+      </label>
+      <select id="lsl-booked-by"
+              style="width:100%;padding:9px 11px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px"></select>
+    </div>
+    <div>
+      <label style="display:block;font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">
+        Buyer
+      </label>
+      <select id="lsl-buyer"
+              style="width:100%;padding:9px 11px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px"></select>
+    </div>
+
+    {# Source / lead source — free text in LSL (sample: "Kimberly Silveria") #}
+    <div style="grid-column:1/-1">
+      <label style="display:block;font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">
+        Source / Lead Source <span style="font-weight:500;color:#475569;text-transform:none">(optional free text)</span>
+      </label>
+      <input id="lsl-source" type="text"
+             value="{{ bid.lsl_source or '' }}"
+             placeholder="e.g. Kimberly Silveria"
+             style="width:100%;padding:9px 11px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px">
+    </div>
+  </div>
+
+  <div style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button id="lsl-stage-btn" onclick="lslStageBooking()"
+            style="padding:10px 18px;background:#7c3aed;color:#fff;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer;letter-spacing:.3px">
+      Stage Booking
+    </button>
+    <button id="lsl-push-btn" onclick="lslPushBooking()" disabled
+            title="Disabled until LSL write endpoint is captured"
+            style="padding:10px 18px;background:#374151;color:#94a3b8;border:none;border-radius:6px;font-size:13px;font-weight:700;cursor:not-allowed;letter-spacing:.3px">
+      Push to LSL ▸
+    </button>
+    <button id="lsl-preview-btn" onclick="lslTogglePreview()"
+            style="padding:10px 14px;background:transparent;color:#a78bfa;border:1px solid rgba(167,139,250,.4);border-radius:6px;font-size:12px;font-weight:600;cursor:pointer">
+      Show Payload Preview
+    </button>
+    <div style="margin-left:auto;font-size:11px;color:#64748b;font-style:italic">
+      Field names mirror LSL camelCase verbatim. Staging writes locally only — no LSL POST yet.
+    </div>
+  </div>
+
+  <pre id="lsl-payload-preview"
+       style="display:none;margin-top:14px;padding:14px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#cbd5e1;font-size:11px;font-family:monospace;max-height:380px;overflow:auto;white-space:pre-wrap"></pre>
+  </div><!-- /lsl-book-body -->
+</div><!-- /lsl-book-card -->
+</div><!-- /modal inner -->
+</div><!-- /lsl-book-modal -->
+
+<script>
+(function(){
+  const BID_ID_LSL = {{ bid.id }};
+  // Pre-fills from the bid context
+  const PREFILL_BID_AMOUNT = {{ bid.bid_amount or 'null' }};
+  const PREFILL_PARTNER_DEALER_NAME = {{ (bid.partner_dealer_name or '')|tojson }};
+
+  let SALES_REPS = [];
+  let LSL_REPS_LOADED = false;
+
+  // LSL_BOOK_MODAL_2026_05_21: open/close the position:fixed overlay.
+  // Lazy-load reps on first open so collapsed state has zero cost.
+  window.lslOpenModal = function() {
+    document.getElementById('lsl-book-modal').style.display = 'block';
+    if (!LSL_REPS_LOADED) { LSL_REPS_LOADED = true; lslLoadReps(); }
+  };
+  window.lslCloseModal = function() {
+    document.getElementById('lsl-book-modal').style.display = 'none';
+  };
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      const m = document.getElementById('lsl-book-modal');
+      if (m && m.style.display === 'block') lslCloseModal();
+    }
+  });
+
+  async function lslLoadReps() {
+    try {
+      const r = await fetch('/api/lsl/sales-reps');
+      const d = await r.json();
+      if (!d.ok) return;
+      SALES_REPS = d.results || [];
+      const selects = ['lsl-sales-person','lsl-sales-manager','lsl-booked-by','lsl-buyer'];
+      const preset = {
+        'lsl-sales-person':  {{ bid.lsl_sales_person_id  or 'null' }},
+        'lsl-sales-manager': {{ bid.lsl_sales_manager_id or 'null' }},
+        'lsl-booked-by':     {{ bid.lsl_booked_by_id     or 'null' }},
+        'lsl-buyer':         {{ bid.lsl_buyer_id         or 'null' }},
+      };
+      selects.forEach(sid => {
+        const sel = document.getElementById(sid);
+        sel.innerHTML = '<option value="">— select —</option>' +
+          SALES_REPS.map(r => `<option value="${r.id}" ${preset[sid]==r.id?'selected':''}>${r.full_name}${r.deals_12mo?` (${r.deals_12mo} deals/12mo)`:''}</option>`).join('');
+      });
+    } catch(e) { console.error('lslLoadReps', e); }
+  }
+
+  // Auto-fill manager/booked_by/buyer when sales_person changes (matches
+  // observed LSL pattern: 4 fields = same person in 12/12 yesterday).
+  window.lslAutoFillTeam = function() {
+    const v = document.getElementById('lsl-sales-person').value;
+    if (!v) return;
+    ['lsl-sales-manager','lsl-booked-by','lsl-buyer'].forEach(sid => {
+      const sel = document.getElementById(sid);
+      if (!sel.value) sel.value = v;
+    });
+  };
+
+  // Supplier autocomplete
+  const sInp = document.getElementById('lsl-supplier-search');
+  const sBox = document.getElementById('lsl-supplier-results');
+  const sId  = document.getElementById('lsl-supplier-id');
+  let sTimer = null;
+  async function lslSupplierSearch(q) {
+    const r = await fetch('/api/lsl/suppliers?q=' + encodeURIComponent(q || '') + '&limit=15');
+    const d = await r.json();
+    if (!d.ok) return;
+    if (!d.results.length) { sBox.style.display='none'; return; }
+    sBox.innerHTML = d.results.map(s =>
+      `<div onclick='lslPickSupplier(${s.id}, ${JSON.stringify(s.name)})' style="padding:9px 12px;cursor:pointer;border-bottom:1px solid #1e293b;font-size:13px">
+         <div style="color:#e2e8f0;font-weight:600">${s.name}</div>
+         <div style="color:#64748b;font-size:11px;margin-top:2px">
+           ${s.deals_12mo||0} deals · $${(s.spent_12mo||0).toLocaleString()} spent (12mo)
+           ${s.city?` · ${s.city}, ${s.state||''}`:''}
+           ${s.primary_contact?` · ${s.primary_contact}`:''}
+         </div>
+       </div>`
+    ).join('');
+    sBox.style.display = 'block';
+  }
+  window.lslPickSupplier = function(id, name) {
+    sId.value = id;
+    sInp.value = name;
+    sBox.style.display = 'none';
+  };
+  sInp.addEventListener('input', () => {
+    sId.value = '';
+    const q = sInp.value.trim();
+    clearTimeout(sTimer);
+    sTimer = setTimeout(() => lslSupplierSearch(q), 180);
+  });
+  sInp.addEventListener('focus', () => {
+    if (!sInp.value.trim() && PREFILL_PARTNER_DEALER_NAME) {
+      sInp.value = PREFILL_PARTNER_DEALER_NAME;
+      lslSupplierSearch(PREFILL_PARTNER_DEALER_NAME);
+    } else {
+      lslSupplierSearch(sInp.value.trim());
+    }
+  });
+  document.addEventListener('click', e => {
+    if (!sBox.contains(e.target) && e.target !== sInp) sBox.style.display='none';
+  });
+
+  // Pre-fill Purchase Cost from accepted bid amount on first focus
+  document.getElementById('lsl-purchase-cost').addEventListener('focus', function(){
+    if (!this.value && PREFILL_BID_AMOUNT) {
+      this.value = Math.round(PREFILL_BID_AMOUNT).toLocaleString('en-US');
+    }
+  });
+
+  // SELLER_KIND_TOGGLE_2026_05_21
+  window.lslSetKind = function(kind) {
+    document.getElementById('lsl-seller-kind').value = kind;
+    const wholesale = (kind === 'wholesale');
+    document.getElementById('lsl-wholesale-block').style.display  = wholesale ? 'block' : 'none';
+    document.getElementById('lsl-individual-block').style.display = wholesale ? 'none'  : 'block';
+    // Style the buttons
+    const wb = document.getElementById('lsl-kind-wholesale');
+    const ib = document.getElementById('lsl-kind-individual');
+    wb.style.background = wholesale ? '#7c3aed' : 'transparent';
+    wb.style.color      = wholesale ? '#fff'    : '#94a3b8';
+    wb.style.fontWeight = wholesale ? '700'     : '600';
+    ib.style.background = wholesale ? 'transparent' : '#7c3aed';
+    ib.style.color      = wholesale ? '#94a3b8'     : '#fff';
+    ib.style.fontWeight = wholesale ? '600'         : '700';
+  };
+
+  // Pre-set kind based on saved bid state (defaults to wholesale)
+  lslSetKind(document.getElementById('lsl-seller-kind').value || 'wholesale');
+
+  // Pick Existing / Add New mode for the private-individual block
+  window.lslPcMode = function(mode) {
+    const ex = document.getElementById('lsl-pc-existing-wrap');
+    const nw = document.getElementById('lsl-pc-new-wrap');
+    const eb = document.getElementById('lsl-pc-mode-existing');
+    const nb = document.getElementById('lsl-pc-mode-new');
+    const isExisting = (mode === 'existing');
+    ex.style.display = isExisting ? 'block' : 'none';
+    nw.style.display = isExisting ? 'none'  : 'block';
+    eb.style.background = isExisting ? '#7c3aed' : '#1e293b';
+    eb.style.color      = isExisting ? '#fff'    : '#cbd5e1';
+    eb.style.fontWeight = isExisting ? '700'     : '600';
+    nb.style.background = isExisting ? '#1e293b' : '#7c3aed';
+    nb.style.color      = isExisting ? '#cbd5e1' : '#fff';
+    nb.style.fontWeight = isExisting ? '600'     : '700';
+  };
+
+  // Format mobile to LSL's +1(XXX)-XXX-XXXX as the user types
+  window.lslFormatMobile = function(el) {
+    let d = (el.value || '').replace(/[^0-9]/g, '');
+    if (d.length > 11) d = d.slice(0, 11);
+    if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
+    if (d.length === 10) {
+      el.value = `+1(${d.slice(0,3)})-${d.slice(3,6)}-${d.slice(6)}`;
+    } else if (d.length > 6) {
+      el.value = `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`;
+    } else if (d.length > 3) {
+      el.value = `(${d.slice(0,3)}) ${d.slice(3)}`;
+    } else {
+      el.value = d;
+    }
+  };
+
+  window.lslPcTypeChanged = function() {
+    const t = document.getElementById('lsl-pc-type').value;
+    const cw = document.getElementById('lsl-pc-company-wrap');
+    cw.style.display = (t === 'Company') ? 'block' : 'none';
+  };
+
+  // Pending-customer autocomplete (lsl_pending_customers)
+  const pcInp = document.getElementById('lsl-pc-search');
+  const pcBox = document.getElementById('lsl-pc-results');
+  const pcId  = document.getElementById('lsl-pending-customer-id');
+  let pcTimer = null;
+  async function lslPcSearch(q) {
+    const r = await fetch('/api/lsl/pending-customers?q=' + encodeURIComponent(q || '') + '&limit=12');
+    const d = await r.json();
+    if (!d.ok) return;
+    if (!d.results.length) { pcBox.innerHTML = '<div style="padding:10px 12px;color:#64748b;font-size:12px">No staged customers yet.</div>'; pcBox.style.display='block'; return; }
+    pcBox.innerHTML = d.results.map(p => `
+      <div onclick='lslPickPc(${p.id}, ${JSON.stringify(p.full_name)})'
+           style="padding:9px 12px;cursor:pointer;border-bottom:1px solid #1e293b;font-size:13px">
+        <div style="color:#e2e8f0;font-weight:600">${p.full_name || '(no name)'}</div>
+        <div style="color:#64748b;font-size:11px;margin-top:2px">
+          ${p.type||''} ${p.mobile?' · '+p.mobile:''} ${p.email?' · '+p.email:''}
+          ${p.pushed_at?' · <span style="color:#4ade80">pushed</span>':' · <span style="color:#fbbf24">staged</span>'}
+        </div>
+      </div>`).join('');
+    pcBox.style.display = 'block';
+  }
+  window.lslPickPc = function(id, name) {
+    pcId.value = id;
+    pcInp.value = name;
+    pcBox.style.display = 'none';
+  };
+  if (pcInp) {
+    pcInp.addEventListener('input', () => {
+      pcId.value = '';
+      clearTimeout(pcTimer);
+      pcTimer = setTimeout(() => lslPcSearch(pcInp.value.trim()), 180);
+    });
+    pcInp.addEventListener('focus', () => lslPcSearch(pcInp.value.trim()));
+    document.addEventListener('click', e => {
+      if (!pcBox.contains(e.target) && e.target !== pcInp) pcBox.style.display='none';
+    });
+  }
+
+  // Save new customer (stage locally; LSL POST fires on Push to LSL)
+  window.lslSavePendingCustomer = async function() {
+    const body = {
+      type:                document.getElementById('lsl-pc-type').value,
+      first_name:          document.getElementById('lsl-pc-first').value.trim(),
+      last_name:           document.getElementById('lsl-pc-last').value.trim(),
+      company_name:        document.getElementById('lsl-pc-company')?.value?.trim() || '',
+      mobile:              document.getElementById('lsl-pc-mobile').value.trim(),
+      email:               document.getElementById('lsl-pc-email').value.trim(),
+      address_street:      document.getElementById('lsl-pc-street').value.trim(),
+      address_city:        document.getElementById('lsl-pc-city').value.trim(),
+      address_state:       document.getElementById('lsl-pc-state').value.trim().toUpperCase(),
+      address_postal_code: document.getElementById('lsl-pc-zip').value.trim(),
+      lead_status:         document.getElementById('lsl-pc-lead-status').value.trim(),
+      default_payment_method: document.getElementById('lsl-pc-paymethod').value,
+      note:                document.getElementById('lsl-pc-note').value.trim(),
+      bid_id:              BID_ID_LSL,
+    };
+    const btn = document.getElementById('lsl-pc-save-btn');
+    const stat = document.getElementById('lsl-pc-status');
+    btn.disabled = true; btn.textContent = 'Saving…'; stat.textContent = '';
+    try {
+      const r = await fetch('/api/lsl/pending-customer', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (!d.ok) {
+        stat.style.color = '#f87171';
+        stat.textContent = '✗ ' + (d.error || 'save failed');
+        return;
+      }
+      pcId.value = d.pending_customer.id;
+      stat.style.color = '#4ade80';
+      stat.textContent = `✓ Staged as #${d.pending_customer.id} — ${d.pending_customer.full_name}`;
+    } catch (e) {
+      stat.style.color = '#f87171';
+      stat.textContent = '✗ ' + e.message;
+    } finally {
+      btn.disabled = false; btn.textContent = 'Save Customer (stage locally)';
+    }
+  };
+
+  // Reveal/hide payoff details when titleStatus changes
+  window.lslTitleStatusChanged = function() {
+    const v = document.getElementById('lsl-title-status').value;
+    document.getElementById('lsl-payoff-wrap').style.display = (v === 'PayOff') ? 'block' : 'none';
+  };
+
+  window.lslGatherForm = function() {
+    const num = (s) => parseInt((s||'').replace(/[^0-9]/g,''), 10) || 0;
+    const kind = document.getElementById('lsl-seller-kind').value || 'wholesale';
+    const titleStatus = document.getElementById('lsl-title-status')?.value || 'Pending';
+    return {
+      seller_kind:         kind,
+      supplier_id:         kind === 'wholesale' ? (parseInt(sId.value, 10) || null) : null,
+      pending_customer_id: kind === 'individual' ? (parseInt(pcId.value, 10) || null) : null,
+      purchase_cost:    num(document.getElementById('lsl-purchase-cost').value),
+      sale_price:       num(document.getElementById('lsl-sale-price').value),
+      sales_person_id:  parseInt(document.getElementById('lsl-sales-person').value, 10) || null,
+      sales_manager_id: parseInt(document.getElementById('lsl-sales-manager').value, 10) || null,
+      booked_by_id:     parseInt(document.getElementById('lsl-booked-by').value, 10) || null,
+      buyer_id:         parseInt(document.getElementById('lsl-buyer').value, 10) || null,
+      source:           document.getElementById('lsl-source').value.trim(),
+      title_status:     titleStatus,
+      payoff_amount:    titleStatus === 'PayOff' ? num(document.getElementById('lsl-payoff-amount').value) : null,
+      lienholder_name:  titleStatus === 'PayOff' ? (document.getElementById('lsl-lienholder').value.trim() || null) : null,
+    };
+  };
+
+  window.lslStageBooking = async function() {
+    const body = window.lslGatherForm();
+    const btn = document.getElementById('lsl-stage-btn');
+    btn.disabled = true; btn.textContent = 'Staging…';
+    try {
+      const r = await fetch(`/api/bid/${BID_ID_LSL}/book-lsl`, {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (!d.ok) {
+        if (typeof toast === 'function') toast(d.error || 'Stage failed', false);
+        else alert('Stage failed: ' + (d.error || 'unknown'));
+        return;
+      }
+      const pre = document.getElementById('lsl-payload-preview');
+      pre.textContent = JSON.stringify(d.payload, null, 2);
+      pre.style.display = 'block';
+      document.getElementById('lsl-preview-btn').textContent = 'Hide Payload Preview';
+      if (typeof toast === 'function') toast('Staged for LSL (' + (d.note || '') + ')', true);
+    } catch (e) {
+      console.error(e);
+      alert('Stage error: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Stage Booking';
+    }
+  };
+
+  window.lslPushBooking = function() {
+    alert('LSL write endpoint not captured yet. Operator: open LSL → DevTools → Network, book a deal, share the POST request — then this button will fire that same request with our staged payload.');
+  };
+
+  window.lslTogglePreview = function() {
+    const pre = document.getElementById('lsl-payload-preview');
+    const btn = document.getElementById('lsl-preview-btn');
+    if (pre.style.display === 'none' || !pre.style.display) {
+      pre.style.display = 'block';
+      if (!pre.textContent.trim()) pre.textContent = '(no preview yet — click Stage Booking first)';
+      btn.textContent = 'Hide Payload Preview';
+    } else {
+      pre.style.display = 'none';
+      btn.textContent = 'Show Payload Preview';
+    }
+  };
+
+  // Lazy: reps load only when the modal is first opened (see lslOpenModal).
+})();
+</script>
 
 <!-- Photo Lightbox -->
 <div class="lightbox" id="lightbox" onclick="closeLightbox()">
