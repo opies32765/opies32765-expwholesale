@@ -2529,6 +2529,30 @@ def dashboard():
             'completed': r.get('completed_at') is not None,
         })
 
+    # BUY_PROFILE_MATCH_2026_05_22: attach matches to each bid. ZERO DB hits during
+    # scoring — pre-fetched dealer profiles + VIN-owned sets used in-memory.
+    # Allowlist-gated: only scores against BUY_PROFILE_MATCH_ENABLED_SLUGS.
+    try:
+        if BUY_PROFILE_MATCH_ENABLED_SLUGS:
+            cur.execute("""SELECT id, name, portal_slug, buy_profile
+                             FROM dealers
+                            WHERE portal_slug = ANY(%s)
+                              AND buy_profile IS NOT NULL""",
+                        (list(BUY_PROFILE_MATCH_ENABLED_SLUGS),))
+            _dealers_with_profiles = [dict(r) for r in cur.fetchall()]
+            _vins_by_dealer = _load_dealer_vins_owned(cur)
+            for _b in bids:
+                if not isinstance(_b, dict):
+                    continue
+                try:
+                    _b['match_dealers'] = _compute_bid_matches(_b, _dealers_with_profiles,
+                                                              vins_by_dealer=_vins_by_dealer)
+                except Exception as _ie:
+                    _b['match_dealers'] = []
+                    print(f"[buy-profile-match] bid={_b.get('id')} err: {_ie}", flush=True)
+    except Exception as _e:
+        print(f"[buy-profile-match] dashboard attach failed: {_e}", flush=True)
+
     db.close()
     # Sourcing-bot active requests for the sticky top banner. Stays in
     # priority order (matched first → wishlist last). Pre-computes last
@@ -2621,7 +2645,6 @@ def dashboard():
                            time_ago=time_ago,
                            network_claims=network_claims,
                            network_claims_by_bid=network_claims_by_bid)
-
 
 
 @app.route('/bid/<int:bid_id>')
@@ -3093,6 +3116,27 @@ def bid_detail(bid_id):
             print(f'[bid_detail] partner_offers err: {_po_err}', flush=True)
     _mark('partner_offers')
 
+    # BUY_PROFILE_MATCH_2026_05_22: compute matches for this bid (in-memory),
+    # gated by BUY_PROFILE_MATCH_ENABLED_SLUGS. Uses a fresh DB connection
+    # because the request's `cur` may have been closed earlier in the handler.
+    match_dealers = []
+    try:
+        if BUY_PROFILE_MATCH_ENABLED_SLUGS:
+            _md_db = get_db()
+            _md_cur = _md_db.cursor()
+            _md_cur.execute("""SELECT id, name, portal_slug, buy_profile
+                                 FROM dealers
+                                WHERE portal_slug = ANY(%s)
+                                  AND buy_profile IS NOT NULL""",
+                            (list(BUY_PROFILE_MATCH_ENABLED_SLUGS),))
+            _ds = [dict(r) for r in _md_cur.fetchall()]
+            _vins = _load_dealer_vins_owned(_md_cur)
+            _md_db.close()
+            match_dealers = _compute_bid_matches(dict(bid), _ds, vins_by_dealer=_vins)
+    except Exception as _mm_err:
+        print(f'[bid_detail] match_dealers err: {_mm_err}', flush=True)
+    _mark('match_dealers')
+
     _handler_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
     # RENDER_TIMER_2026_05_20: also time the Jinja template render. Server
     # work and template work are different problems with different fixes;
@@ -3111,7 +3155,8 @@ def bid_detail(bid_id):
                                 market_intel=market_intel,
                                 ml_prediction=ml_prediction,
                                 partner_offers=partner_offers,
-                                bid_network_claim=bid_network_claim, time_ago=time_ago)
+                                bid_network_claim=bid_network_claim,
+                                match_dealers=match_dealers, time_ago=time_ago)
     _total_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
     _render_ms = _total_ms - _handler_ms
     # PHASE_TIMERS_2026_05_20: deltas between marks so we can see which
@@ -6604,6 +6649,7 @@ def api_bids():
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     q = """
         SELECT b.id, b.phone, b.vin, b.year, b.make, b.model, b.mileage,
+               b.color,  -- BUY_PROFILE_MATCH_2026_05_22: needed for color-aware scoring
                b.raw_message, b.status, b.created_at, b.bid_amount, b.ai_price, b.asking_price,
                b.has_unread, b.partner_dealer_id, b.partner_request_id, b.salesperson,
                b.bidder_name, b.awaiting_name, b.vin_invalid_reason,
@@ -6661,6 +6707,7 @@ def api_bids():
             'year': r['year'],
             'make': r['make'],
             'model': r['model'],
+            'color': r.get('color'),  # BUY_PROFILE_MATCH_2026_05_22: color-aware scoring
             'mileage': r['mileage'],
             'raw_message': r['raw_message'],
             'status': r['status'],
@@ -6753,6 +6800,25 @@ def api_bids():
             }
     except Exception as _poc_err:
         print(f'[api/bids] partner_offer_counts err: {_poc_err}', flush=True)
+
+    # BUY_PROFILE_MATCH_2026_05_22: attach matches to each /api/bids response so the
+    # JS row-refresh keeps the green tint + dealer badges between server-rendered loads.
+    try:
+        if BUY_PROFILE_MATCH_ENABLED_SLUGS:
+            cur.execute("""SELECT id, name, portal_slug, buy_profile
+                             FROM dealers
+                            WHERE portal_slug = ANY(%s) AND buy_profile IS NOT NULL""",
+                        (list(BUY_PROFILE_MATCH_ENABLED_SLUGS),))
+            _ds_api = [dict(r) for r in cur.fetchall()]
+            _vbd_api = _load_dealer_vins_owned(cur)
+            for _b in bids:
+                try:
+                    _b['match_dealers'] = _compute_bid_matches(_b, _ds_api,
+                                                              vins_by_dealer=_vbd_api)
+                except Exception as _ie:
+                    _b['match_dealers'] = []
+    except Exception as _e:
+        print(f"[api/bids] match attach failed: {_e}", flush=True)
 
     db.close()
     return jsonify({'bids': bids, 'stats': stats, 'photo_counts': photo_counts,
@@ -16824,13 +16890,94 @@ def api_bid_network_push_preview(bid_id):
 
 import math as _bp_math
 
-def _bp_score(bid, dealer_id, profile):
-    """Score one bid against one dealer's buy_profile JSONB."""
+# BUY_PROFILE_V3_2026_05_22: pure-Python scorer, ZERO DB calls.
+# Caller pre-fetches dealer-owned VINs and passes the set in.
+_BP_DEFAULT_MAX_STOCKED = 3
+
+def _bp_price_tier_key(price):
+    """Map a price into the learned_caps tier key. None price = unknown."""
+    if not price: return None
+    p = float(price)
+    if p >= 250000: return 'tier_250k_plus'
+    if p >= 150000: return 'tier_150k_250k'
+    if p >= 80000:  return 'tier_80k_150k'
+    if p >= 40000:  return 'tier_40k_80k'
+    return 'tier_lt_40k'
+
+
+_BP_HARDCODED_TIER_DEFAULTS = {
+    'tier_250k_plus': 1, 'tier_150k_250k': 2,
+    'tier_80k_150k':  3, 'tier_40k_80k':   5,
+    'tier_lt_40k':    8,
+}
+
+
+def _bp_price_tier_cap(price, profile=None):
+    """Per-dealer LEARNED cap. Walks profile.learned_caps to find this dealer's
+    observed peak active_n in this price tier; the cap = max(peak + 1, hardcoded
+    default). If the dealer has never stocked this tier, falls back to default."""
+    tier = _bp_price_tier_key(price)
+    if not tier:
+        return _BP_DEFAULT_MAX_STOCKED
+    default = _BP_HARDCODED_TIER_DEFAULTS.get(tier, _BP_DEFAULT_MAX_STOCKED)
+    learned = ((profile or {}).get('learned_caps') or {}).get(tier)
+    if learned is not None:
+        return max(int(learned) + 1, default)
+    return default
+
+
+def _bp_normalize_model(s):
+    """Normalize model name to base token so 'GLE-Class' / 'GLE 63' / 'GLE' all
+    match Charlie's scanner-stored 'Gle'. Strategy: replace '-' with space,
+    split, take first alphanumeric token, uppercase. Conservative — false-
+    negatives possible (e.g. 'AMG GLE 63' → 'AMG' bucket not 'GLE') but
+    much better than strict exact-string matching."""
+    if not s:
+        return ''
+    s = str(s).replace('-', ' ').strip().upper()
+    for tok in s.split():
+        if any(c.isalnum() for c in tok):
+            return tok
+    return ''
+
+
+def _bp_resolve_model_entry(models, bid_model):
+    """Find the dealer's model entry that matches the bid's model. Tries exact
+    match first, then normalized first-token match. Returns (entry, matched_key)
+    or (None, None) if no match."""
+    if not bid_model or not models:
+        return None, None
+    if bid_model in models:
+        return models[bid_model], bid_model
+    nm = _bp_normalize_model(bid_model)
+    if not nm:
+        return None, None
+    for k, v in models.items():
+        if _bp_normalize_model(k) == nm:
+            return v, k
+    return None, None
+
+# BUY_PROFILE_MATCH_ALLOWLIST_2026_05_22: gate matches to specific dealer slugs
+# while we tune. Empty tuple = all onboarded dealers. To expand: add the slug.
+BUY_PROFILE_MATCH_ENABLED_SLUGS = ('txtcharlie', 'nuccioautogroup')
+
+def _bp_score(bid, dealer_id, profile, vins_owned=None):
+    """Score one bid against one dealer's buy_profile JSONB.
+    vins_owned: optional set/list of UPPER VINs the dealer currently has on lot.
+    Returns (score, reason). Score None = hard skip. ZERO DB calls."""
     if not profile or not profile.get('makes'):
         return None, "no profile"
-    make = (bid.get('make') or '').upper().strip()
+    make  = (bid.get('make')  or '').upper().strip()
+    model = (bid.get('model') or '').upper().strip()
+    color = (bid.get('color') or '').upper().strip()
     if not make:
         return None, "bid missing make"
+
+    # VIN-on-lot (pre-fetched, in-memory)
+    bid_vin = (bid.get('vin') or '').strip().upper()
+    if bid_vin and vins_owned and bid_vin in vins_owned:
+        return None, f"dealer already has VIN {bid_vin}"
+
     makes = profile.get('makes') or {}
     if make not in makes:
         return None, f"never stocks {make.title()}"
@@ -16838,18 +16985,51 @@ def _bp_score(bid, dealer_id, profile):
     m = makes[make]
     bands = profile.get('bands') or {}
     overrides = profile.get('overrides') or {}
+    price = bid.get('asking_price') or bid.get('price')
+    miles = bid.get('mileage') if bid.get('mileage') is not None else bid.get('miles')
 
-    # Hard NEVER overrides
+    # LOW_VOLUME_REJECT_2026_05_22: skip makes that look like one-off trade-ins,
+    # not the dealer's actual buy pattern. Share < 2% AND sold < 3 = noise.
+    _share_pct = m.get('share') or 0
+    _sold_n_make = m.get('sold_n') or 0
+    if _share_pct < 2 and _sold_n_make < 3:
+        return None, (f"low volume ({make.title()}: {_share_pct}% share, "
+                      f"{_sold_n_make} sold — not a buy pattern)")
+
     for rule in overrides.get('never', []) or []:
-        if 'price_lt' in rule and bid.get('price') and bid['price'] < rule['price_lt']:
+        if 'price_lt' in rule and price and price < rule['price_lt']:
             return None, f"override never (price<{rule['price_lt']})"
-        if 'miles_gt' in rule and bid.get('miles') and bid['miles'] > rule['miles_gt']:
+        if 'miles_gt' in rule and miles and miles > rule['miles_gt']:
             return None, f"override never (miles>{rule['miles_gt']})"
-
-    # Hard ALWAYS overrides — boost to 100
     for rule in overrides.get('always', []) or []:
         if rule.get('make') == make:
             return 100, "override always"
+
+    # MODEL_MATCH_REQUIRED_2026_05_22: bid model MUST appear in dealer's history.
+    # Now uses fuzzy normalization so 'GLE-Class' matches 'Gle', 'Escalade ESV'
+    # matches 'Escalade', etc. Sierra HD still won't match because Charlie's GMC
+    # entries are Hummer-only.
+    models = m.get('models') or {}
+    model_entry, matched_model_key = _bp_resolve_model_entry(models, model)
+    if not model_entry:
+        return None, (f"never stocked {make.title()} "
+                      f"{model.title() if model else '(model unknown)'}")
+    # Use the dealer's actual model key in reason strings (less confusing).
+    model = matched_model_key
+
+    # LEARNED_TIER_CAP_v4_2026_05_22: cap = max(dealer's observed peak in this
+    # price tier + 1, hardcoded tier default). Each dealer learns its own cap
+    # from its own stocking history (Charlie comfortable with 7 Urus → cap 8).
+    max_stocked_map = overrides.get('max_stocked') or {}
+    _ref_price = model_entry.get('avg_price') or price or 0
+    default_cap = overrides.get('max_stocked_default', _bp_price_tier_cap(_ref_price, profile))
+    cap = max_stocked_map.get(f"{make} {model}".strip(), default_cap)
+    if cap is not None and cap >= 0:
+        active_n = model_entry.get('active_n') or 0
+        if active_n >= cap:
+            tier_lbl = (f", ~${int(_ref_price/1000)}K tier" if _ref_price else "")
+            return None, (f"overstocked: {active_n}× {make.title()} "
+                          f"{model.title()} (cap={cap}{tier_lbl})")
 
     score = 50
     share = m.get('share') or 0
@@ -16862,7 +17042,7 @@ def _bp_score(bid, dealer_id, profile):
         yd = abs(bid['year'] - avg_y)
         if yd <= 2:    score += 20
         elif yd <= 5:  score += 10
-        elif yd <= 10: score += 0
+        elif yd <= 10: pass
         else:          score -= 20
 
     ymin = bands.get('year_min'); ymax = bands.get('year_max')
@@ -16870,28 +17050,56 @@ def _bp_score(bid, dealer_id, profile):
         if bid['year'] < ymin - 2 or bid['year'] > ymax + 2:
             score -= 25
 
-    sold_n = m.get('sold_n') or 0
-    days = m.get('avg_days_on_lot') or 0
-    if sold_n >= 3 and 0 < days < 15:
-        score += 15
-    elif sold_n >= 1 and 0 < days < 30:
-        score += 5
+    # Velocity from model entry (model match already required upstream)
+    model_colors = model_entry.get('colors') or {}
+    mc = model_colors.get(color) if color else None
+    velocity_reason = None
 
-    p10 = bands.get('price_p10'); p90 = bands.get('price_p90')
-    if bid.get('price') and p10 and p90:
-        if p10 <= bid['price'] <= p90:
+    if mc and (mc.get('sold_n') or 0) >= 2 and 0 < (mc.get('avg_days_on_lot') or 0) < 10:
+        score += 30
+        velocity_reason = (f"{make.title()} {model.title()} {color.title()}: "
+                           f"{mc['sold_n']} sold @ {mc['avg_days_on_lot']}d (color prime)")
+    elif (model_entry.get('sold_n') or 0) >= 2 \
+            and 0 < (model_entry.get('avg_days_on_lot') or 0) < 10:
+        score += 25
+        velocity_reason = (f"{make.title()} {model.title()}: "
+                           f"{model_entry['sold_n']} sold @ {model_entry['avg_days_on_lot']}d (model prime)")
+    elif (model_entry.get('sold_n') or 0) >= 2 \
+            and 0 < (model_entry.get('avg_days_on_lot') or 0) < 20:
+        score += 15
+        velocity_reason = (f"{make.title()} {model.title()}: "
+                           f"{model_entry['sold_n']} sold @ {model_entry['avg_days_on_lot']}d")
+    elif (model_entry.get('sold_n') or 0) >= 1 \
+            and 0 < (model_entry.get('avg_days_on_lot') or 0) < 45:
+        score += 5
+        velocity_reason = (f"{make.title()} {model.title()}: "
+                           f"{model_entry['sold_n']} sold @ {model_entry['avg_days_on_lot']}d")
+    # else: model in history but no sale yet (only active stock) — no velocity bonus
+
+    # Price reasonableness — use MODEL avg_price ±50% (more accurate than make-wide bands)
+    _model_p = model_entry.get('avg_price')
+    if price and _model_p:
+        ratio = price / _model_p
+        if 0.7 <= ratio <= 1.3:
             score += 10
-        elif bid['price'] < p10 * 0.6 or bid['price'] > p90 * 1.5:
+        elif ratio < 0.5 or ratio > 1.7:
             score -= 15
+    elif price:
+        p10 = bands.get('price_p10'); p90 = bands.get('price_p90')
+        if p10 and p90:
+            if p10 <= price <= p90:
+                score += 10
+            elif price < p10 * 0.6 or price > p90 * 1.5:
+                score -= 15
 
     mp90 = bands.get('miles_p90')
-    if bid.get('miles') is not None and mp90:
-        if bid['miles'] <= mp90:
+    if miles is not None and mp90:
+        if miles <= mp90:
             score += 5
-        elif bid['miles'] > mp90 * 1.5:
+        elif miles > mp90 * 1.5:
             score -= 5
 
-    return score, "ok"
+    return score, (velocity_reason or f"{make.title()} {model.title()} (no recent sales)")
 
 
 def _bp_tier(score):
@@ -16899,6 +17107,52 @@ def _bp_tier(score):
     if score >= 80:   return "T1"
     if score >= 60:   return "T2"
     return "skip"
+
+
+def _load_dealer_vins_owned(cur):
+    """Pre-fetch all dealer-owned active VINs in ONE query. Returns
+    {dealer_id: {VIN, VIN, ...}}. Used by _compute_bid_matches to avoid
+    per-bid-per-dealer DB hits. ~10-50ms for ~30K active rows."""
+    try:
+        cur.execute("""SELECT dealer_id, UPPER(vin) AS vin
+                         FROM dealer_inventory
+                        WHERE status='active' AND vin IS NOT NULL AND vin <> ''""")
+        out = {}
+        for r in cur.fetchall():
+            out.setdefault(r['dealer_id'], set()).add(r['vin'])
+        return out
+    except Exception as _e:
+        print(f"[buy-profile-match] load_dealer_vins err: {_e}", flush=True)
+        return {}
+
+
+def _compute_bid_matches(bid, dealers, vins_by_dealer=None, min_score=60):
+    """Score one bid against every dealer's buy_profile. ZERO DB calls
+    (uses pre-fetched vins_by_dealer for VIN-on-lot exclusion).
+    Returns [{dealer_id, slug, name, score, tier, reason}, ...] sorted desc."""
+    out = []
+    for d in dealers:
+        prof = d.get('buy_profile') if isinstance(d, dict) else None
+        if not prof:
+            continue
+        try:
+            vins_owned = (vins_by_dealer or {}).get(d.get('id'))
+            score, reason = _bp_score(bid, d.get('id'), prof, vins_owned=vins_owned)
+        except Exception as _e:
+            print(f"[match] dealer={d.get('id')} bid={bid.get('id')} err={_e}", flush=True)
+            continue
+        if score is None or score < min_score:
+            continue
+        out.append({
+            'dealer_id': d.get('id'),
+            'slug':      d.get('portal_slug') or '',
+            'name':      d.get('name') or '',
+            'score':     int(score),
+            'tier':      'T1' if score >= 80 else 'T2',
+            'reason':    reason or '',
+        })
+    out.sort(key=lambda x: -x['score'])
+    return out
 
 
 @app.route('/admin/buy-profiles')

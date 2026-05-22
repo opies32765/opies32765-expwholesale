@@ -926,49 +926,38 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
       </div>
       {% else %}
-      <div class="card" id="network-push-card" style="border-color:#16a34a;flex-shrink:0">
+      {# BUY_PROFILE_MATCH_2026_05_22: replaced Push-to-Network card with auto-computed Buyer Match list. #}
+      <div class="card" id="buyer-match-card" style="border-color:{% if match_dealers %}#22c55e{% else %}#334155{% endif %};flex-shrink:0">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-          Push to Network
-          {% if bid.network_pushed_at %}
-            <span style="font-size:10px;font-weight:700;color:#16a34a;background:rgba(22,163,74,.15);border:1px solid rgba(22,163,74,.35);border-radius:4px;padding:2px 8px;letter-spacing:.4px">
-              PUSHED {{ bid.network_push_count or 1 }}× — ${{ '{:,.0f}'.format(bid.network_ask or 0) }}
+          Buyer Match
+          {% if match_dealers %}
+            <span style="font-size:10px;font-weight:700;color:#86efac;background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.5);border-radius:4px;padding:2px 8px;letter-spacing:.4px">
+              {{ match_dealers|length }} DEALER{% if match_dealers|length != 1 %}S{% endif %}
             </span>
           {% endif %}
         </div>
         <div style="padding:12px 16px 16px;background:#0b1220;border-radius:0 0 12px 12px">
-          <div style="font-size:12px;color:#94a3b8;margin-bottom:10px;line-height:1.4">
-            Need a number to make this work? Enter your target buy.<br>
-            Matched dealers (scored against their daily buy-profile, with VIN-on-lot exclusion) get a text — first responder wins.
-          </div>
-          <form id="network-push-form" onsubmit="return submitNetworkPush(event, {{ bid.id }})">
-            <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-              <div style="flex:1;min-width:130px">
-                <label style="display:block;font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600">Target Buy ($)</label>
-                <input type="text" name="network_ask" required inputmode="numeric"
-                       autocomplete="off"
-                       placeholder="$118,000"
-                       value="{{ '${:,}'.format(bid.network_ask|int) if bid.network_ask else '' }}"
-                       oninput="this.value=this.value.replace(/[^0-9]/g,'').replace(/\B(?=(\d{3})+(?!\d))/g,','); if(this.value)this.value='$'+this.value"
-                       style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:15px;font-weight:600">
-              </div>
-              <div style="flex:2;min-width:200px">
-                <label style="display:block;font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;font-weight:600">Note (optional)</label>
-                <input type="text" name="note" maxlength="240"
-                       placeholder="Quick close, seller waiting"
-                       value="{{ bid.network_ask_note or '' }}"
-                       style="width:100%;padding:8px 10px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;color:#e2e8f0;font-size:14px">
-              </div>
-              <button type="button" onclick="previewNetworkPush({{ bid.id }})"
-                      style="padding:9px 14px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#e2e8f0;font-size:13px;font-weight:600;cursor:pointer">
-                Preview
-              </button>
-              <button type="submit"
-                      style="padding:9px 18px;background:#16a34a;border:none;border-radius:6px;color:white;font-size:13px;font-weight:700;cursor:pointer">
-                Push & Text ›
-              </button>
+          {% if not match_dealers %}
+            <div style="font-size:13px;color:#64748b;line-height:1.5">
+              No onboarded dealers match this bid right now.<br>
+              <span style="color:#475569;font-size:12px">Auto-scored against each partner's nightly buy_profile (make + model + color velocity, with VIN-on-lot and overstock exclusion).</span>
             </div>
-          </form>
-          <div id="network-push-result" style="margin-top:12px;font-size:13px"></div>
+          {% else %}
+            <div style="display:flex;flex-direction:column;gap:8px">
+              {% for _m in match_dealers %}
+                <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:#0f172a;border:1px solid {% if _m.tier=='T1' %}rgba(34,197,94,.55){% else %}rgba(34,197,94,.30){% endif %};border-radius:8px">
+                  <div style="display:flex;flex-direction:column;align-items:center;min-width:46px">
+                    <span style="display:inline-block;padding:3px 8px;background:{% if _m.tier=='T1' %}rgba(34,197,94,.28);color:#86efac;border:1px solid rgba(34,197,94,.6){% else %}rgba(34,197,94,.14);color:#86efac;border:1px solid rgba(34,197,94,.45){% endif %};border-radius:4px;font-size:10px;font-weight:800;letter-spacing:.5px;line-height:1">{{ _m.tier }}</span>
+                    <span style="margin-top:2px;font-size:11px;font-weight:700;color:#64748b">{{ _m.score }}</span>
+                  </div>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:15px;font-weight:700;color:#e2e8f0;line-height:1.2">{{ _m.name }}</div>
+                    <div style="margin-top:4px;font-size:12px;color:#94a3b8;line-height:1.4">{{ _m.reason }}</div>
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
         </div>
       </div>
       {% endif %}
