@@ -194,29 +194,6 @@ def auto_login(page, ctx, max_seconds=60):
 
 def lookup(page, ctx, vin, t, bid_id=None):
     print(f"[+{time.time()-t:5.1f}s] [ipacket] start")
-    # IPACKET_AUTODISABLE_2026_05_20: server-side gate. iPacket is auto-disabled
-    # fleet-wide (vendor rate-limit). Only runs if operator explicitly clicked
-    # 'Run iPacket' on bid.html (which flips bids.ipacket_disabled=FALSE).
-    # Server returns {run: false} by default → we short-circuit and skip
-    # hitting iPacket entirely.
-    if bid_id is not None:
-        try:
-            import requests as _np_req
-            r = _np_req.get(f"{EW_SERVER}/api/ipacket/should-run?bid_id={bid_id}",
-                            timeout=8)
-            if r.status_code == 200:
-                d = r.json()
-                if not d.get("run"):
-                    print(f"[+{time.time()-t:5.1f}s] [ipacket] skipped — "
-                          f"reason={d.get('reason')} (auto-disabled fleet-wide; "
-                          f"operator clicks 'Run iPacket' on bid.html to enable)")
-                    return {"not_available": True,
-                            "unavailable_reason": "auto_disabled"}
-        except Exception as _gate_err:
-            # If server unreachable, fall through to normal behavior (safer to
-            # still run iPacket once than to block forever)
-            print(f"[+{time.time()-t:5.1f}s] [ipacket] gate-check failed: "
-                  f"{_gate_err}; falling through to scrape", flush=True)
     _attach_jwt_capture(ctx)  # 2026-05-08: keep server JWT fresh on every call (ctx-level since 2026-05-14)
     page.goto(IPACKET_DPAPP, wait_until="domcontentloaded", timeout=30000); time.sleep(3)
     if not is_logged_in(page):

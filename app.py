@@ -2623,51 +2623,6 @@ def dashboard():
                            network_claims_by_bid=network_claims_by_bid)
 
 
-@app.route('/api/ipacket/should-run')
-def api_ipacket_should_run():
-    """IPACKET_AUTODISABLE_2026_05_20: workers call this from worker_ipacket.lookup
-    before scraping iPacket. Returns {run: true} only when the bid has been
-    explicitly flagged via the 'Run iPacket' button. Default = {run: false}.
-    """
-    if os.environ.get('IPACKET_DISABLED', '0') == '1':
-        return jsonify({'run': False, 'reason': 'ipacket_killswitch'})
-    bid_id = request.args.get('bid_id', type=int)
-    if not bid_id:
-        return jsonify({'run': False, 'reason': 'no_bid_id'})
-    db = get_db()
-    cur = db.cursor()
-    try:
-        cur.execute("SELECT ipacket_disabled FROM bids WHERE id = %s", (bid_id,))
-        row = cur.fetchone()
-    finally:
-        db.close()
-    if not row:
-        return jsonify({'run': False, 'reason': 'no_bid'})
-    disabled = row.get('ipacket_disabled')
-    if disabled is None:  # legacy/null = treat as disabled
-        disabled = True
-    return jsonify({'run': not disabled,
-                    'reason': 'manual_request' if not disabled else 'auto_disabled'})
-
-
-@app.route('/api/bid/<int:bid_id>/run-ipacket', methods=['POST'])
-def api_run_ipacket(bid_id):
-    """IPACKET_ONLY_2026_05_20: operator clicks 'Run iPacket' on bid.html.
-    Flips ipacket_disabled=FALSE for THIS bid only + clears existing iPacket row.
-    Does NOT touch vauto/accutrade/AI. Workers poll /api/ipacket/pending and
-    run an iPacket-ONLY browser session (no vauto, no accutrade rerun).
-    """
-    db = get_db()
-    cur = db.cursor()
-    try:
-        cur.execute("UPDATE bids SET ipacket_disabled = FALSE WHERE id = %s", (bid_id,))
-        cur.execute("DELETE FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
-        db.commit()
-    finally:
-        db.close()
-    print(f'[run-ipacket] bid={bid_id} ipacket-only queued (vauto/accu untouched)', flush=True)
-    return jsonify({'ok': True, 'bid_id': bid_id})
-
 
 @app.route('/bid/<int:bid_id>')
 def bid_detail(bid_id):
@@ -5381,8 +5336,7 @@ def _run_assessment(bid_id):
     try:
         db2 = get_db()
         cur2 = db2.cursor()
-        cur2.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
-        ipacket = cur2.fetchone()
+        ipacket = _ipacket_with_vin_fallback(cur2, bid_id, bid.get('vin'))
         db2.close()
     except Exception:
         pass
@@ -6466,11 +6420,7 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
         has_ipkt = cur.fetchone() is not None
 
         if require_all:
-            # IPACKET_AUTODISABLE_2026_05_20: iPacket auto-disabled fleet-wide
-            # (rate-limit from iPacket). AI no longer waits for it. Operator can
-            # trigger via 'Run iPacket' button on bid.html which sets the flag
-            # for that one bid only.
-            ready = has_vauto and has_accu and rb_done and mh_done
+            ready = has_vauto and has_accu and rb_done and mh_done and has_ipkt
         else:
             ready = has_vauto  # fallback: fire with what we have
 
@@ -13342,28 +13292,6 @@ def api_accutrade_status(bid_id):
 
 
 # ── iPacket worker API ─────────────────────────────────────────────────────
-
-@app.route('/api/ipacket/pending')
-def api_ipacket_pending():
-    """IPACKET_ONLY_2026_05_20: return bids where operator clicked 'Run iPacket'
-    (ipacket_disabled=FALSE) AND no iPacket row yet. Workers poll this in their
-    run_pass loop and open an iPacket-only Playwright session for each.
-    """
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("""
-        SELECT b.id as bid_id, b.vin, b.mileage, b.year, b.make, b.model
-        FROM bids b
-        LEFT JOIN ipacket_lookups il ON il.bid_id = b.id
-        WHERE b.vin IS NOT NULL AND length(b.vin) = 17
-          AND il.id IS NULL
-          AND b.ipacket_disabled = FALSE
-        ORDER BY b.created_at DESC
-        LIMIT 20
-    """)
-    rows = cur.fetchall()
-    db.close()
-    return jsonify({'pending': [dict(r) for r in rows]})
 
 
 @app.route('/api/ipacket/submit', methods=['POST'])

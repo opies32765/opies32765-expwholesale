@@ -675,17 +675,6 @@ def process_one_ipacket(item):
     return ok
 
 
-def ew_get_ipacket_only_pending():
-    """IPACKET_ONLY_2026_05_20: separate poll for manual iPacket runs."""
-    try:
-        params = {"worker_id": WORKER_ID, "priority": WORKER_PRIORITY, "source": WORKER_SOURCE}
-        r = http_requests.get(f"{EW_SERVER}/api/ipacket/pending",
-                              params=params, timeout=15)
-        if r.status_code == 200:
-            return r.json().get("pending", [])
-    except Exception as e:
-        print(f"  [EW] ipacket-only pending fetch err: {e}")
-    return []
 
 
 # ── Main loop ────────────────────────────────────────────────────────────────
@@ -706,18 +695,6 @@ def run_pass():
         print("  0 pending")
         ok_count = 0
 
-    # IPACKET_ONLY_2026_05_20: after vauto-pending pass, check for manual
-    # iPacket-only requests. Operator's 'Run iPacket' button flips
-    # ipacket_disabled=FALSE which makes the bid appear here.
-    ipkt_pending = ew_get_ipacket_only_pending()
-    if ipkt_pending:
-        print(f"  {len(ipkt_pending)} ipacket-only pending")
-        for item in ipkt_pending:
-            try:
-                process_one_ipacket(item)
-            except Exception:
-                traceback.print_exc()
-            time.sleep(2)
     return ok_count
 
 
