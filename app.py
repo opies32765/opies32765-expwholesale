@@ -3511,6 +3511,77 @@ def twilio_webhook():
         except Exception:
             pass
 
+    # HASH_BID_REF_2026_05_23: explicit #N bid-reference routing.
+    # Restores the operator's trained behavior: "#1234 12,000 miles" stitches
+    # miles onto bid #1234 instead of creating a new bid. Original feature
+    # removed 2026-05-18 expecting ASK_EVERY_TIME YES/NO to replace it;
+    # BOT_QUIET_MODE_2026_05_20 then disabled that replacement. The ACK SMS
+    # still teaches senders "bid #N received" so the mental model is real.
+    _hash_m = re.match(r'^\s*#(\d{3,5})\b\s*(.*)$', (body or '').strip(), re.DOTALL)
+    if _hash_m:
+        _ref_bid_id = int(_hash_m.group(1))
+        _ref_payload = _hash_m.group(2).strip()
+        try:
+            _href_cur = db.cursor()
+            _href_cur.execute(
+                "SELECT id, phone, vin, mileage, year, make, model, status FROM bids "
+                "WHERE id=%s AND phone=%s",
+                (_ref_bid_id, from_phone)
+            )
+            _ref = _href_cur.fetchone()
+        except Exception:
+            _ref = None
+        if _ref and (_ref.get('status') or '') not in ('cancelled', 'archived', 'dead', 'duplicate'):
+            # Stitch payload onto referenced bid. Extract miles + VIN.
+            _stitch_log = []
+            # Miles
+            _ref_miles = None
+            try:
+                _miles_m = re.search(
+                    r'(\d{1,3}(?:[,.]?\d{3})*|\d+)\s*(?:k\b|mi\b|miles?\b)',
+                    _ref_payload, re.IGNORECASE)
+                if _miles_m:
+                    _ms = _miles_m.group(1).replace(',', '').replace('.', '')
+                    if _ms.isdigit():
+                        _ref_miles = int(_ms)
+                        if 'k' in (_miles_m.group(0) or '').lower() and _ref_miles < 1000:
+                            _ref_miles *= 1000
+            except Exception:
+                pass
+            if _ref_miles and not _ref.get('mileage'):
+                _href_cur.execute(
+                    "UPDATE bids SET mileage=%s, updated_at=NOW() WHERE id=%s",
+                    (_ref_miles, _ref_bid_id))
+                _stitch_log.append(f'miles={_ref_miles}')
+            # VIN
+            _vin_m = re.search(r'\b([A-HJ-NPR-Z0-9]{17})\b', _ref_payload.upper())
+            if _vin_m and not _ref.get('vin'):
+                _href_cur.execute(
+                    "UPDATE bids SET vin=%s, updated_at=NOW() WHERE id=%s",
+                    (_vin_m.group(1), _ref_bid_id))
+                _stitch_log.append(f'vin={_vin_m.group(1)}')
+            db.commit()
+            # Log to sms_intake_log via _finalize_sms_intake
+            _finalize_sms_intake(
+                cur, intake_log_id, 'hash_ref_stitch',
+                bid_id=_ref_bid_id,
+                reason=f'#{_ref_bid_id} -> {" ".join(_stitch_log) or "no-op"}')
+            db.commit()
+            print(f'[hash-ref] from={from_phone} body=#{_ref_bid_id} '
+                  f'stitched: {_stitch_log}', flush=True)
+            # Brief ack -- keep BOT_QUIET_MODE-compatible: only ack if we updated something
+            if _stitch_log:
+                from html import escape as _hesc
+                _ack_xml = ('<?xml version="1.0" encoding="UTF-8"?>'
+                            '<Response><Message>'
+                            + _hesc(f'added to bid #{_ref_bid_id}: {chr(44).join(_stitch_log)}')
+                            + '</Message></Response>')
+                db.close()
+                return (_ack_xml, 200, {'Content-Type': 'application/xml'})
+            db.close()
+            return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                    200, {'Content-Type': 'text/xml'})
+
     # PENDING_ATTACH_LAYER2_2026_05_18: reply handler for our YMM
     # confirmation SMS. Runs early so YES/NO/A/B supersede normal
     # routing for this phone if we asked them a question.
