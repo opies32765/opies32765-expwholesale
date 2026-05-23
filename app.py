@@ -13544,6 +13544,48 @@ def api_ipacket_submit():
     cur = db.cursor()
     bid_id = data['bid_id']
 
+    # RATE_LIMIT_DONOR_COPY_2026_05_23: when iPacket rate-limits a same-VIN
+    # re-pull (worker submits not_available=True with 'rate-limit' in reason),
+    # copy the sticker data from a recent successful same-VIN row. Window
+    # stickers are factory-locked to the VIN -- safe to copy. 4h freshness
+    # window is well outside iPacket's ~1h same-VIN rate-limit.
+    if data.get('not_available') and 'rate-limit' in (data.get('unavailable_reason') or '').lower():
+        _vin_val = (data.get('vin') or '').upper().strip()
+        if _vin_val and len(_vin_val) == 17:
+            try:
+                _dcur = db.cursor()
+                _dcur.execute("""
+                    SELECT bid_id, total_msrp, base_price, exterior_color, interior_color,
+                           screenshot, raw_json
+                    FROM ipacket_lookups
+                    WHERE vin = %s
+                      AND bid_id != %s
+                      AND not_available = FALSE
+                      AND (total_msrp IS NOT NULL OR base_price IS NOT NULL
+                           OR raw_json->'options' IS NOT NULL)
+                      AND looked_up_at > NOW() - INTERVAL '4 hours'
+                    ORDER BY looked_up_at DESC
+                    LIMIT 1
+""", (_vin_val, bid_id))
+                _donor = _dcur.fetchone()
+                if _donor:
+                    print(f'[ipacket-copy] bid={bid_id} vin={_vin_val} copying from '
+                          f'donor bid={_donor["bid_id"]} (rate-limit avoided)', flush=True)
+                    data['not_available'] = False
+                    data['unavailable_reason'] = None
+                    data['total_msrp'] = _donor.get('total_msrp')
+                    data['base_price'] = _donor.get('base_price')
+                    data['exterior_color'] = _donor.get('exterior_color')
+                    data['interior_color'] = _donor.get('interior_color')
+                    if _donor.get('screenshot'):
+                        data['screenshot'] = _donor.get('screenshot')
+                    _donor_raw = dict(_donor.get('raw_json') or {})
+                    _donor_raw['_copied_from_bid_id'] = _donor['bid_id']
+                    _donor_raw['_copy_reason'] = 'rate_limit_donor_copy'
+                    data['raw'] = _donor_raw
+            except Exception as _copy_err:
+                print(f'[ipacket-copy] bid={bid_id} donor lookup err: {_copy_err}', flush=True)
+
     cur.execute("""
         INSERT INTO ipacket_lookups
             (bid_id, vin, total_msrp, base_price, exterior_color,
