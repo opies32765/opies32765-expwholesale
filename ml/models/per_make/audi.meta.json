@@ -1,9 +1,9 @@
 {
   "make_name": "AUDI",
-  "trained_at": "2026-05-21T08:31:02.974468Z",
-  "n_total": 1139,
+  "trained_at": "2026-05-23T08:31:32.996667Z",
+  "n_total": 1140,
   "n_train": 1107,
-  "n_test": 32,
+  "n_test": 33,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3581.0,
-    "mape_pct": 6.24,
-    "r2": 0.9746,
-    "within_5pct": 37.5,
-    "within_10pct": 84.4
+    "mae_dollars": 3570.0,
+    "mape_pct": 6.14,
+    "r2": 0.9759,
+    "within_5pct": 39.4,
+    "within_10pct": 84.8
   },
   "baseline_metrics": {
-    "mae_dollars": 4007.0,
-    "mape_pct": 6.87,
+    "mae_dollars": 4080.0,
+    "mape_pct": 6.84,
     "ratio": 1.0271
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.37822094559669495
+      "importance": 0.37772896885871887
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.3497619032859802
+      "importance": 0.35005518794059753
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.12689031660556793
+      "importance": 0.12672527134418488
     },
     {
       "name": "original_msrp",
-      "importance": 0.03470391407608986
+      "importance": 0.03479631245136261
     },
     {
       "name": "supplier_name_Germain Honda Of Beavercreek",
-      "importance": 0.005773873068392277
+      "importance": 0.00576636241748929
     },
     {
       "name": "odometer",
-      "importance": 0.005564785096794367
+      "importance": 0.005567681044340134
     },
     {
       "name": "year",
-      "importance": 0.005309360567480326
+      "importance": 0.005370381288230419
     },
     {
       "name": "model_name_Q7 Premium Plus Sport Utility Vehicle",
-      "importance": 0.00421515479683876
+      "importance": 0.004209671635180712
     }
   ]
 }

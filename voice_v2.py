@@ -144,7 +144,7 @@ def lk_token():
         .with_ttl(__import__("datetime").timedelta(hours=1))
     ).to_jwt()
     return jsonify({"token": tok, "room": room, "identity": identity,
-                    "url": "wss://experience-wholesale.net/livekit"})
+                    "url": "wss://experience-wholesale.net/livekit/"})
 
 
 @app.route("/mobile/ewbot/lk")
@@ -182,8 +182,11 @@ def ew_voice_page():
 
 @app.route("/v-fast")
 def ew_voice_fast_page():
-    # Same UI; client-side overrides the stream endpoint via query flag
     return render_template("ew_voice.html")
+
+@app.route("/v-rtc")
+def ew_voice_rtc_page():
+    return render_template("ew_voice_rtc.html")
 
 
 # ── Silero VAD (loaded once at boot, shared across requests) ───────────

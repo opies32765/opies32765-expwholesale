@@ -333,6 +333,47 @@ def warmup():
         return jsonify({"error": str(e)[:200]}), 500
 
 
+
+@bp.route("/api/ew-voice/tool", methods=["POST"])
+def tool_proxy():
+    """Dispatch a single MCP tool call by name. Used by the local
+    LiveKit agent worker on the operator's home PC so it can call
+    our PG-backed tools over HTTPS instead of needing a DB tunnel.
+
+    Auth: Bearer token matching MCP_BEARER_TOKEN.
+    Body: {"tool": "get_bid", "args": {"bid_id": 1983}}
+    """
+    import os as _os, json as _json, asyncio as _asyncio, inspect as _inspect
+    # Cloudflare strips Authorization headers for non-EW-session calls,
+    # so accept the bearer in the JSON body too ("bearer" key).
+    data_pre = request.get_json(silent=True) or {}
+    auth_hdr = request.headers.get('Authorization', '')
+    auth_body = (data_pre.get('bearer') or '').strip()
+    auth = auth_hdr if auth_hdr.startswith('Bearer ') else ('Bearer ' + auth_body if auth_body else '')
+    expected = _os.environ.get("MCP_BEARER_TOKEN", "")
+    if not expected or auth != f"Bearer {expected}":
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    tool_name = (data.get("tool") or "").strip()
+    args = data.get("args") or {}
+    if not tool_name:
+        return jsonify({"error": "tool name required"}), 400
+    try:
+        import ew_mcp
+        obj = getattr(ew_mcp, tool_name, None)
+        if obj is None:
+            return jsonify({"error": f"unknown tool {tool_name}"}), 404
+        fn = getattr(obj, "fn", obj)
+        if _inspect.iscoroutinefunction(fn):
+            result = _asyncio.run(fn(**args))
+        else:
+            result = fn(**args)
+        return jsonify(result if isinstance(result, dict) else {"result": result})
+    except Exception as e:
+        log.exception("tool_proxy failed")
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
 @bp.route("/api/ew-voice/reset", methods=["POST"])
 def reset_history():
     data = request.get_json(silent=True) or {}

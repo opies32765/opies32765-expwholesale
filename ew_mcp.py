@@ -13,6 +13,7 @@ Transport: Streamable HTTP at /mcp (mounted by Starlette/Uvicorn).
 from __future__ import annotations
 
 import contextlib
+import asyncio
 import logging
 import os
 import secrets
@@ -921,10 +922,12 @@ async def get_vehicle_valuation(
             return _va._vauto_cache_get(key)
         _va._fetch_live_vauto_for_ymm = _live_or_cache
         try:
+            _ts_a = _t.monotonic()
             ctx = get_valuation_context(
                 year=year, make=make, model=model,
                 trim=trim, miles=miles, msrp=msrp,
             )
+            log.info(f"[TIMING] get_valuation_context: {(_t.monotonic()-_ts_a)*1000:.0f}ms")
         finally:
             _va._fetch_live_vauto_for_ymm = _orig_live
     except Exception as e:
@@ -982,31 +985,64 @@ async def get_vehicle_valuation(
             log.warning(f"prior_bids_trim err: {_e}")
             prior_bids_trim = {"n": 0, "error": str(_e)[:120]}
 
-    # LSL30_2026_05_22 — pull last 30 days LSL deals for this YMM for citation
-    # Trim-aware: when user mentions a specific trim, narrow first
-    lsl_30 = _lsl_30day_deals(year, make, model, trim=trim, limit=10) if trim else []
-    lsl_30_any_trim = _lsl_30day_deals(year, make, model, limit=10)
+    # PARALLELIZED 2026-05-23 — all helper queries below are independent
+    # sync DB calls. Run them concurrently in a thread pool. Was 15
+    # sequential queries → now 1 concurrent batch. Drops typical cold
+    # pull from 30-90s to ~10-25s. Each helper opens its own PG conn.
+    import concurrent.futures as _cf
+    _loop = asyncio.get_event_loop()
+    def _maybe(fn, *args, **kw):
+        """Wrap a callable so it can be passed to run_in_executor cleanly."""
+        return lambda: fn(*args, **kw)
+    tasks = {
+        "lsl_30_trim":           _maybe(_lsl_30day_deals, year, make, model, trim=trim, limit=10) if trim else _maybe(lambda: []),
+        "lsl_30_any":            _maybe(_lsl_30day_deals, year, make, model, limit=10),
+        "partner_sold":          _maybe(_partner_sold_history, year, make, model, limit=5),
+        "pb_30_all":             _maybe(_prior_bids_30day_summary, year, make, model, trim=None, miles=miles),
+        "pb_30_trim":            _maybe(_prior_bids_30day_summary, year, make, model, trim=trim, miles=miles) if trim else _maybe(lambda: None),
+        "at_30_all":             _maybe(_accutrade_30day_summary, year, make, model, trim=None, miles=miles),
+        "at_30_trim":            _maybe(_accutrade_30day_summary, year, make, model, trim=trim, miles=miles) if trim else _maybe(lambda: None),
+        "vsa_30_all":            _maybe(_vauto_saved_30day_summary, year, make, model, trim=None, miles=miles),
+        "vsa_30_trim":           _maybe(_vauto_saved_30day_summary, year, make, model, trim=trim, miles=miles) if trim else _maybe(lambda: None),
+        "lsl_inv_all":           _maybe(_lsl_inventory_now, year, make, model, trim=None),
+        "lsl_inv_trim":          _maybe(_lsl_inventory_now, year, make, model, trim=trim) if trim else _maybe(lambda: None),
+        "lsl_vel_all":           _maybe(_lsl_sold_velocity, year, make, model, trim=None),
+        "lsl_vel_trim":          _maybe(_lsl_sold_velocity, year, make, model, trim=trim) if trim else _maybe(lambda: None),
+    }
+    _pool = _cf.ThreadPoolExecutor(max_workers=16, thread_name_prefix="vv_helper")
+    try:
+        futs = [_loop.run_in_executor(_pool, fn) for fn in tasks.values()]
+        _ts_helpers = _t.monotonic()
+        results = await asyncio.gather(*futs, return_exceptions=True)
+        log.info(f"[TIMING] parallel helpers ({len(futs)} tasks): {(_t.monotonic()-_ts_helpers)*1000:.0f}ms")
+    finally:
+        _pool.shutdown(wait=False)
+    # Map back, swallow per-helper errors (don't fail the whole call if one DB query trips)
+    def _grab(key):
+        r = results[list(tasks.keys()).index(key)]
+        if isinstance(r, Exception):
+            log.warning(f"helper {key} failed: {type(r).__name__}: {r}")
+            return None
+        return r
+    lsl_30                  = _grab("lsl_30_trim") or []
+    lsl_30_any_trim         = _grab("lsl_30_any") or []
     if not lsl_30:
         lsl_30 = lsl_30_any_trim
-    # PARTNER_SOLD_2026_05_22 — partner-dealer listings that have left inventory
-    partner_sold = _partner_sold_history(year, make, model, limit=5)
-    # BID30_2026_05_22 — 30-day rolling EW bid window (any trim + trim-filtered)
-    prior_bids_30day_all = _prior_bids_30day_summary(year, make, model, trim=None, miles=miles)
-    prior_bids_30day_trim = _prior_bids_30day_summary(year, make, model, trim=trim, miles=miles) if trim else None
-    # ACCUTRADE30_2026_05_22 — 30-day rolling AccuTrade values
-    accutrade_30day_all = _accutrade_30day_summary(year, make, model, trim=None, miles=miles)
-    accutrade_30day_trim = _accutrade_30day_summary(year, make, model, trim=trim, miles=miles) if trim else None
-    # VSA30_2026_05_22 — vAuto saved appraisals (every appraisal touched,
-    # bigger than prior_bids which only covers EW-pushed ones)
-    vauto_saved_30day_all = _vauto_saved_30day_summary(year, make, model, trim=None, miles=miles)
-    vauto_saved_30day_trim = _vauto_saved_30day_summary(year, make, model, trim=trim, miles=miles) if trim else None
-    # LSL_INV_2026_05_22 — EW's actual lot today + 90-day sold velocity
-    lsl_inventory_now_all = _lsl_inventory_now(year, make, model, trim=None)
-    lsl_inventory_now_trim = _lsl_inventory_now(year, make, model, trim=trim) if trim else None
-    lsl_sold_velocity_all = _lsl_sold_velocity(year, make, model, trim=None)
-    lsl_sold_velocity_trim = _lsl_sold_velocity(year, make, model, trim=trim) if trim else None
+    partner_sold            = _grab("partner_sold") or []
+    prior_bids_30day_all    = _grab("pb_30_all")
+    prior_bids_30day_trim   = _grab("pb_30_trim")
+    accutrade_30day_all     = _grab("at_30_all")
+    accutrade_30day_trim    = _grab("at_30_trim")
+    vauto_saved_30day_all   = _grab("vsa_30_all")
+    vauto_saved_30day_trim  = _grab("vsa_30_trim")
+    lsl_inventory_now_all   = _grab("lsl_inv_all")
+    lsl_inventory_now_trim  = _grab("lsl_inv_trim")
+    lsl_sold_velocity_all   = _grab("lsl_vel_all")
+    lsl_sold_velocity_trim  = _grab("lsl_vel_trim")
     # MASTER_LIST_2026_05_22 — enrich live partner inventory with overnight comps
+    _ts_e = _t.monotonic()
     enriched = _enrich_partner_inventory_with_comps(ctx.get("partner_inventory_top3") or [])
+    log.info(f"[TIMING] _enrich_partner_inventory_with_comps: {(_t.monotonic()-_ts_e)*1000:.0f}ms")
     # TRIM_DISCIPLINE_2026_05_22 — when user requested a specific trim,
     # ONLY return matching rows. Empty list signals to the LLM "we don't
     # have a partner with this trim listed."
@@ -1037,7 +1073,9 @@ async def get_vehicle_valuation(
     has_prior = len(((ctx.get("prior_bids") or {}).get("rows") or [])) > 0
     has_live = bool(ctx.get("live_vauto"))
     if not has_prior and not has_live and lsl_30:
+        _ts_v = _t.monotonic()
         live = _fetch_live_via_lsl_vin(year, make, model, miles_hint=miles)
+        log.info(f"[TIMING] _fetch_live_via_lsl_vin: {(_t.monotonic()-_ts_v)*1000:.0f}ms")
         if live:
             ctx["live_vauto"] = live
             ctx["live_vauto_via_lsl_vin"] = live.get("subject_vin") if live.get("subject_vin") else lsl_30[0].get("vin_no")
@@ -1425,15 +1463,30 @@ async def get_bid(bid_id: int) -> dict:
                            b.ai_assessment, b.ai_assessed_at, b.ai_price,
                            b.asking_price, b.notes, b.raw_message,
                            b.created_at, b.updated_at, b.phone,
+                           b.carfax_damage, b.autocheck_damage,
+                           b.damage_signal, b.miles_carfax,
                            v.mmr AS vauto_mmr, v.rbook AS vauto_rbook,
-                           v.appraisal_url,
+                           v.black_book, v.kbb, v.kbb_com, v.jd_power,
+                           v.title_status, v.price_rank, v.adj_pct_market,
+                           v.appraisal_url, v.carfax_share_url,
+                           v.rbook_competitive_set, v.manheim_transactions,
                            a.guaranteed_offer, a.trade_in, a.trade_market,
                            a.retail AS accutrade_retail, a.market_avg,
                            a.not_available AS accutrade_unavailable,
+                           a.unavailable_reason AS accutrade_unavailable_reason,
+                           a.selected_trim_text AS accutrade_trim,
+                           ip.total_msrp AS ipacket_msrp,
+                           ip.base_price AS ipacket_base_price,
+                           ip.exterior_color AS ipacket_exterior_color,
+                           ip.interior_color AS ipacket_interior_color,
+                           ip.not_available AS ipacket_unavailable,
+                           ip.unavailable_reason AS ipacket_unavailable_reason,
+                           ip.raw_json AS ipacket_raw_json,
                            c2.name AS contact_name
                       FROM bids b
                       LEFT JOIN vauto_lookups v ON v.bid_id = b.id
                       LEFT JOIN accutrade_lookups a ON a.bid_id = b.id
+                      LEFT JOIN ipacket_lookups ip ON ip.bid_id = b.id
                       LEFT JOIN contacts c2 ON c2.id = b.contact_id
                      WHERE b.id = %s
                     LIMIT 1
@@ -1475,8 +1528,96 @@ async def get_bid(bid_id: int) -> dict:
         for k in ("created_at","updated_at","ai_assessed_at","bid_sent_at"):
             if out.get(k): out[k] = out[k].isoformat()
         for k in ("bid_amount","ai_price","asking_price","guaranteed_offer",
-                  "trade_in","trade_market","accutrade_retail","market_avg"):
+                  "trade_in","trade_market","accutrade_retail","market_avg",
+                  "ipacket_msrp","ipacket_base_price",
+                  "black_book","kbb","kbb_com","jd_power","adj_pct_market"):
             if out.get(k) is not None: out[k] = float(out[k])
+
+        # DAMAGE AUDIT — synthesize a quick read for the LLM
+        damage_flags = []
+        if out.get("carfax_damage"):    damage_flags.append("Carfax shows damage")
+        if out.get("autocheck_damage"): damage_flags.append("AutoCheck shows damage")
+        if out.get("damage_signal"):    damage_flags.append(out["damage_signal"])
+        # Discrepancies — odometer mismatch between bid and Carfax
+        if out.get("mileage") and out.get("miles_carfax"):
+            try:
+                gap = abs(int(out["mileage"]) - int(out["miles_carfax"]))
+                if gap > 500:
+                    damage_flags.append(
+                        f"odometer mismatch: bid={out['mileage']:,} vs carfax={out['miles_carfax']:,}"
+                    )
+            except Exception:
+                pass
+        out["damage_audit"] = {
+            "flags":            damage_flags,
+            "carfax_damage":    bool(out.get("carfax_damage")),
+            "autocheck_damage": bool(out.get("autocheck_damage")),
+            "damage_signal":    out.get("damage_signal"),
+            "miles_bid":        out.get("mileage"),
+            "miles_carfax":     out.get("miles_carfax"),
+            "carfax_share_url": out.get("carfax_share_url"),
+        }
+        # Extract options + Monroney sticker text from raw_json
+        _ip_raw = out.get("ipacket_raw_json") or {}
+        _ip_options = _ip_raw.get("options") or []
+        _ip_ocr = (_ip_raw.get("_ocr_text") or "")
+        # Trim OCR text to the option block (between ADDED OPTIONS and
+        # the next ALL-CAPS section header) — keeps response compact.
+        _ip_sticker = _ip_ocr
+        if "ADDED OPTIONS" in _ip_ocr:
+            _after = _ip_ocr.split("ADDED OPTIONS", 1)[1]
+            # End at the next obvious section break
+            for _stop in ("Options and Fees", "PRICE DETAILS",
+                          "TOTAL PREDICTED", "PREDICTIVE DATA",
+                          "AUTOIPACKET"):
+                if _stop in _after:
+                    _after = _after.split(_stop, 1)[0]
+            _ip_sticker = _after.strip()[:2500]  # cap for tool-result budget
+        out["ipacket"] = {
+            "total_msrp":     out.get("ipacket_msrp"),
+            "base_price":     out.get("ipacket_base_price"),
+            "exterior_color": out.get("ipacket_exterior_color"),
+            "interior_color": out.get("ipacket_interior_color"),
+            "unavailable":    bool(out.get("ipacket_unavailable")),
+            "reason":         out.get("ipacket_unavailable_reason"),
+            "options":        [{"name": o.get("name"),
+                                "price": o.get("price")}
+                               for o in _ip_options if isinstance(o, dict)],
+            "sticker_text":   _ip_sticker if _ip_sticker else None,
+        }
+        out.pop("ipacket_raw_json", None)
+
+        # rBook & Manheim DETAILED comps for voice (raw jsonb is too verbose
+        # — emit a trimmed top-10 summary the LLM can recite)
+        def _summ_comps(raw, kind):
+            if not raw:
+                return {"count": 0, "top": []}
+            try:
+                rows = raw if isinstance(raw, list) else raw.get("rows") or raw.get("comps") or []
+                top = []
+                for r in rows[:10]:
+                    if not isinstance(r, dict):
+                        continue
+                    top.append({
+                        "year":       r.get("year") or r.get("Year"),
+                        "trim":       r.get("trim") or r.get("Trim") or r.get("description"),
+                        "miles":      r.get("miles") or r.get("odometer") or r.get("mileage"),
+                        "price":      r.get("price") or r.get("sale_price") or r.get("asking_price") or r.get("amount"),
+                        "dealer":     r.get("dealer") or r.get("seller") or r.get("location"),
+                        "sold_at":    r.get("sold_at") or r.get("date") or r.get("sale_date"),
+                        "color":      r.get("color") or r.get("exterior_color"),
+                    })
+                return {"count": len(rows), "top": top}
+            except Exception:
+                return {"count": 0, "top": [], "error": "could not parse"}
+        out["rbook_comps"]         = _summ_comps(out.pop("rbook_competitive_set", None), "rbook")
+        out["manheim_transactions"] = _summ_comps(out.pop("manheim_transactions", None), "manheim")
+        # Pop the now-redundant flat iPacket fields — keep the nested
+        # `ipacket` object as the single source of truth for window sticker
+        for _k in ("ipacket_msrp", "ipacket_base_price",
+                   "ipacket_exterior_color", "ipacket_interior_color",
+                   "ipacket_unavailable", "ipacket_unavailable_reason"):
+            out.pop(_k, None)
 
         out["partner_offers"] = [
             {"dealer": o.get("dealer_name"),
@@ -1642,9 +1783,10 @@ async def find_best_buyer(
       - patterns: rolling window stats (90d/180d/365d)
       - deals: raw deal rows (most recent N for this YMM)
     """
-    if not _is_owner(caller_name):
-        return {"error": "owner-only — first name required",
-                "owner_required": True}
+    # UNGATED 2026-05-23 per operator request — partner-buyer match is
+    # daily-workflow data, not sensitive PII. caller_name still accepted
+    # (used for downstream context) but no longer required to be in
+    # OWNER_WHITELIST.
     try:
         from lsl_buyer_match import find_same_ymm_deals
         result = find_same_ymm_deals(
@@ -1827,6 +1969,703 @@ async def dashboard_stats() -> dict:
     except Exception as e:
         log.exception("dashboard_stats failed")
         return {"error": f"{type(e).__name__}: {e}"}
+
+
+
+
+@mcp.tool()
+async def lsl_salesperson_stats(
+    caller_name: str,
+    salesperson_name: str,
+    period: str = "this_month",
+) -> dict:
+    """OWNER-GATED. How is a specific salesperson doing in a period.
+    Returns: deals_count, total_gross, avg_pvr, top 5 deals by gross.
+    period: yesterday|today|last_7_days|last_30_days|this_month|last_month|
+    this_quarter|last_quarter|ytd|this_year|last_year|all_time
+    """
+    if not _is_owner(caller_name):
+        return {"error": "owner-only — first name required",
+                "owner_required": True}
+    if not salesperson_name:
+        return {"error": "salesperson_name required"}
+    import sqlite3, os as _os
+    path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+    if not _os.path.exists(path):
+        return {"error": "lsl crm not available"}
+    p = period.lower().strip().replace("-", "_").replace(" ", "_")
+    period_sql = {
+        "yesterday":     "sold_at >= date(\'now\', \'-1 day\') AND sold_at < date(\'now\')",
+        "today":         "sold_at >= date(\'now\')",
+        "last_7_days":   "sold_at >= date(\'now\', \'-7 days\')",
+        "last_30_days":  "sold_at >= date(\'now\', \'-30 days\')",
+        "this_month":    "sold_at >= date(\'now\', \'start of month\')",
+        "last_month":    ("sold_at >= date(\'now\', \'start of month\', \'-1 month\') "
+                          "AND sold_at < date(\'now\', \'start of month\')"),
+        "this_quarter":  "sold_at >= date(\'now\', \'-90 days\')",
+        "last_quarter":  "sold_at >= date(\'now\', \'-90 days\')",
+        "this_year":     "sold_at >= date(\'now\', \'start of year\')",
+        "ytd":           "sold_at >= date(\'now\', \'start of year\')",
+        "year_to_date":  "sold_at >= date(\'now\', \'start of year\')",
+        "last_year":     ("sold_at >= date(\'now\', \'start of year\', \'-1 year\') "
+                          "AND sold_at < date(\'now\', \'start of year\')"),
+        "all_time":      "1=1",
+    }.get(p)
+    if not period_sql:
+        return {"error": f"unsupported period {period!r}"}
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        cur = c.cursor()
+        cur.execute(f"""
+            SELECT COUNT(*) AS n,
+                   COALESCE(SUM({_LSL_PROFIT_SQL}), 0) AS total_profit,
+                   COALESCE(AVG({_LSL_PROFIT_SQL}), 0) AS avg_profit,
+                   COALESCE(SUM(sale_price), 0) AS total_rev
+              FROM deals
+             WHERE {period_sql}
+               AND sale_price IS NOT NULL AND sale_price > 0
+               AND (UPPER(sales_person) LIKE UPPER(?)
+                    OR UPPER(sales_manager) LIKE UPPER(?))
+        """, (f"%{salesperson_name}%", f"%{salesperson_name}%"))
+        agg = dict(cur.fetchone())
+        cur.execute(f"""
+            SELECT stock_no, vehicle_info, customer_name,
+                   sale_price, purchase_cost, {_LSL_PROFIT_SQL} AS profit,
+                   sold_at, sales_person, sales_manager
+              FROM deals
+             WHERE {period_sql}
+               AND sale_price IS NOT NULL AND sale_price > 0
+               AND (UPPER(sales_person) LIKE UPPER(?)
+                    OR UPPER(sales_manager) LIKE UPPER(?))
+             ORDER BY {_LSL_PROFIT_SQL} DESC LIMIT 5
+        """, (f"%{salesperson_name}%", f"%{salesperson_name}%"))
+        top = [dict(r) for r in cur.fetchall()]
+        c.close()
+        return {
+            "salesperson":   salesperson_name,
+            "period":        period,
+            "n_deals":       int(agg.get("n") or 0),
+            "total_profit":  float(agg.get("total_profit") or 0),
+            "pvr":           float(agg.get("avg_profit") or 0),
+            "total_revenue": float(agg.get("total_rev") or 0),
+            "top_5":         [
+                {"stock_no": r.get("stock_no"),
+                 "vehicle":  r.get("vehicle_info"),
+                 "customer": r.get("customer_name"),
+                 "salesperson": r.get("sales_person"),
+                 "manager":  r.get("sales_manager"),
+                 "sale_price": r.get("sale_price"),
+                 "profit":   r.get("profit"),
+                 "sold_at":  r.get("sold_at")}
+                for r in top
+            ],
+        }
+    except Exception as e:
+        log.exception("lsl_salesperson_stats failed")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+@mcp.tool()
+async def lsl_inventory_now(
+    caller_name: str,
+    make: str = "",
+    model: str = "",
+    year: int = 0,
+) -> dict:
+    """OWNER-GATED. Current cars on the EW lot. Optionally filter by
+    make/model/year. Returns count + sample rows with stock#, days on lot,
+    asking price, purchase cost."""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    import sqlite3, os as _os
+    path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+    if not _os.path.exists(path):
+        return {"error": "lsl crm not available"}
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        cur = c.cursor()
+        where = ["in_stock = 1", "sold = 0"]
+        args = []
+        if make:
+            where.append("UPPER(vehicle_make_name) LIKE UPPER(?)")
+            args.append(f"%{make}%")
+        if model:
+            where.append("UPPER(group_model_name) LIKE UPPER(?)")
+            args.append(f"%{model}%")
+        if year and year > 0:
+            where.append("group_model_trim_year LIKE ?")
+            args.append(f"%{year}%")
+        sql = f"""
+            SELECT stock_no, vin_no, group_model_trim_year, vehicle_make_name,
+                   group_model_name, group_model_trim, usage,
+                   asking_price, purchase_cost, est_wholesale_price,
+                   exterior_color, days_on_lot, days_since_marketed,
+                   lead_count, offer_count, arrived_at
+              FROM inventory
+             WHERE {' AND '.join(where)}
+             ORDER BY days_on_lot DESC LIMIT 25
+        """
+        cur.execute(sql, args)
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.execute(f"""SELECT COUNT(*) AS n, AVG(days_on_lot) AS avg_dol,
+                              SUM(asking_price) AS total_ask,
+                              SUM(purchase_cost) AS total_cost
+                         FROM inventory
+                        WHERE {' AND '.join(where)}""", args)
+        agg = dict(cur.fetchone())
+        c.close()
+        return {
+            "caller_name": caller_name,
+            "filter": {"make": make, "model": model, "year": year},
+            "total_in_stock": int(agg.get("n") or 0),
+            "avg_days_on_lot": (round(float(agg["avg_dol"]),1) if agg.get("avg_dol") else None),
+            "total_asking": float(agg.get("total_ask") or 0),
+            "total_purchase_cost": float(agg.get("total_cost") or 0),
+            "rows": [
+                {"stock_no": r.get("stock_no"),
+                 "vin": r.get("vin_no"),
+                 "title": r.get("group_model_trim_year"),
+                 "make": r.get("vehicle_make_name"),
+                 "model": r.get("group_model_name"),
+                 "trim": r.get("group_model_trim"),
+                 "miles": r.get("usage"),
+                 "asking_price": r.get("asking_price"),
+                 "purchase_cost": r.get("purchase_cost"),
+                 "color": r.get("exterior_color"),
+                 "days_on_lot": r.get("days_on_lot"),
+                 "leads": r.get("lead_count"),
+                 "offers": r.get("offer_count"),
+                 "arrived": (r.get("arrived_at") or "")[:10]}
+                for r in rows
+            ],
+        }
+    except Exception as e:
+        log.exception("lsl_inventory_now failed")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+@mcp.tool()
+async def lsl_customer_history(
+    caller_name: str,
+    customer_name: str,
+    limit: int = 10,
+) -> dict:
+    """OWNER-GATED. All deals with a specific customer (buyer OR supplier).
+    Use for 'what is our history with X dealer/customer' queries.
+    Matches customer_name OR supplier_name (LSL stores both ways)."""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    if not customer_name:
+        return {"error": "customer_name required"}
+    import sqlite3, os as _os
+    path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+    if not _os.path.exists(path):
+        return {"error": "lsl crm not available"}
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        cur = c.cursor()
+        pat = f"%{customer_name}%"
+        cur.execute(f"""
+            SELECT stock_no, vehicle_info, customer_name, supplier_name,
+                   sales_person, sale_price, purchase_cost,
+                   {_LSL_PROFIT_SQL} AS profit, sold_at, sale_type
+              FROM deals
+             WHERE (UPPER(customer_name) LIKE UPPER(?)
+                    OR UPPER(supplier_name) LIKE UPPER(?))
+               AND sale_price IS NOT NULL AND sale_price > 0
+             ORDER BY sold_at DESC LIMIT ?
+        """, (pat, pat, max(1, min(limit, 50))))
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.execute(f"""
+            SELECT COUNT(*) AS n,
+                   COALESCE(SUM({_LSL_PROFIT_SQL}), 0) AS total_profit,
+                   COALESCE(SUM(sale_price), 0) AS total_rev,
+                   MIN(sold_at) AS first_at, MAX(sold_at) AS last_at
+              FROM deals
+             WHERE (UPPER(customer_name) LIKE UPPER(?)
+                    OR UPPER(supplier_name) LIKE UPPER(?))
+               AND sale_price IS NOT NULL AND sale_price > 0
+        """, (pat, pat))
+        agg = dict(cur.fetchone())
+        c.close()
+        # Split by side — as buyer (we sold TO them) vs supplier (we bought FROM them)
+        bought_from_us = [r for r in rows
+                           if customer_name.lower() in (r.get("customer_name") or "").lower()]
+        sold_to_us = [r for r in rows
+                       if customer_name.lower() in (r.get("supplier_name") or "").lower()
+                       and r not in bought_from_us]
+        return {
+            "caller_name": caller_name,
+            "customer":    customer_name,
+            "n_deals":     int(agg.get("n") or 0),
+            "total_profit": float(agg.get("total_profit") or 0),
+            "total_revenue": float(agg.get("total_rev") or 0),
+            "first_deal":  agg.get("first_at"),
+            "last_deal":   agg.get("last_at"),
+            "n_bought_from_us": len(bought_from_us),
+            "n_sold_to_us":     len(sold_to_us),
+            "recent_deals":     [
+                {"stock_no": r.get("stock_no"),
+                 "vehicle":  r.get("vehicle_info"),
+                 "side":     "they_bought" if customer_name.lower() in (r.get("customer_name") or "").lower() else "they_sold",
+                 "salesperson": r.get("sales_person"),
+                 "sale_price": r.get("sale_price"),
+                 "purchase_cost": r.get("purchase_cost"),
+                 "profit": r.get("profit"),
+                 "sold_at": r.get("sold_at"),
+                 "sale_type": r.get("sale_type")}
+                for r in rows
+            ],
+        }
+    except Exception as e:
+        log.exception("lsl_customer_history failed")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+
+
+@mcp.tool()
+async def lsl_service_requests(
+    caller_name: str,
+    status_filter: str = "open",
+    days_back: int = 30,
+) -> dict:
+    """OWNER-GATED. Service / recon department queue. status_filter:
+    open|completed|all. Returns count, total_costs, and top 20 oldest
+    pending requests with stock#, advisor, age, costs, damage notes."""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    import sqlite3, os as _os
+    path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+    if not _os.path.exists(path):
+        return {"error": "lsl crm not available"}
+    where = []
+    sf = (status_filter or "open").lower().strip()
+    if sf == "open":
+        where.append("status NOT IN ('Completed','Closed','Cancelled')")
+    elif sf == "completed":
+        where.append("status IN ('Completed','Closed')")
+        where.append(f"datetime(created_at) >= datetime('now', '-{int(days_back)} days')")
+    else:
+        where.append(f"datetime(created_at) >= datetime('now', '-{int(days_back)} days')")
+    sql_where = " AND ".join(where) if where else "1=1"
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        cur = c.cursor()
+        cur.execute(f"""
+            SELECT COUNT(*) AS n,
+                   COALESCE(SUM(approved_costs),0) AS approved,
+                   COALESCE(SUM(pending_costs),0)  AS pending,
+                   COALESCE(SUM(total_costs),0)    AS total,
+                   COALESCE(SUM(damaged),0)        AS damaged_count
+              FROM service_requests
+             WHERE {sql_where}""")
+        agg = dict(cur.fetchone())
+        cur.execute(f"""
+            SELECT stock_no, vin_no, inventory_name, service_advisor,
+                   request_status, request_priority, service_request_type,
+                   approved_costs, pending_costs, total_costs,
+                   age_in_days, damaged, damage_notes,
+                   group_name, deal_customer_name, deal_sales_person_name,
+                   created_at, completed_at
+              FROM service_requests
+             WHERE {sql_where}
+             ORDER BY age_in_days DESC LIMIT 20""")
+        rows = [dict(r) for r in cur.fetchall()]
+        c.close()
+        return {
+            "caller_name": caller_name,
+            "status_filter": sf,
+            "days_back": days_back,
+            "n_requests": int(agg.get("n") or 0),
+            "approved_costs": float(agg.get("approved") or 0),
+            "pending_costs":  float(agg.get("pending") or 0),
+            "total_costs":    float(agg.get("total") or 0),
+            "damaged_count":  int(agg.get("damaged_count") or 0),
+            "requests": [
+                {"stock_no": r.get("stock_no"),
+                 "vin": r.get("vin_no"),
+                 "vehicle": r.get("inventory_name"),
+                 "advisor": r.get("service_advisor"),
+                 "status": r.get("request_status"),
+                 "priority": r.get("request_priority"),
+                 "type": r.get("service_request_type"),
+                 "approved": r.get("approved_costs"),
+                 "pending": r.get("pending_costs"),
+                 "total": r.get("total_costs"),
+                 "age_days": r.get("age_in_days"),
+                 "damaged": bool(r.get("damaged")),
+                 "damage_notes": r.get("damage_notes"),
+                 "group": r.get("group_name"),
+                 "customer": r.get("deal_customer_name"),
+                 "salesperson": r.get("deal_sales_person_name"),
+                 "created": (r.get("created_at") or "")[:10],
+                 "completed": (r.get("completed_at") or "")[:10] if r.get("completed_at") else None}
+                for r in rows
+            ],
+        }
+    except Exception as e:
+        log.exception("lsl_service_requests failed")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+@mcp.tool()
+async def lsl_appraisal_history(
+    caller_name: str,
+    vin: str = "",
+    stock_no: str = "",
+) -> dict:
+    """OWNER-GATED. Full appraisal history for a specific VIN or stock#.
+    Returns chain of appraised_value, msrp, est_wholesale, market days,
+    mileage_adjustment per appraisal pass. Pass either vin or stock_no."""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    if not vin and not stock_no:
+        return {"error": "vin or stock_no required"}
+    import sqlite3, os as _os
+    path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+    if not _os.path.exists(path):
+        return {"error": "lsl crm not available"}
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        cur = c.cursor()
+        if vin:
+            cur.execute("""SELECT id AS inventory_id, stock_no, vin_no,
+                                  group_model_trim_year, group_model_name,
+                                  usage, asking_price, purchase_cost,
+                                  days_on_lot, sold, sold_at,
+                                  original_msrp, est_wholesale_price
+                             FROM inventory WHERE UPPER(vin_no)=UPPER(?) LIMIT 1""",
+                        (vin,))
+        else:
+            cur.execute("""SELECT id AS inventory_id, stock_no, vin_no,
+                                  group_model_trim_year, group_model_name,
+                                  usage, asking_price, purchase_cost,
+                                  days_on_lot, sold, sold_at,
+                                  original_msrp, est_wholesale_price
+                             FROM inventory WHERE UPPER(stock_no)=UPPER(?) LIMIT 1""",
+                        (stock_no,))
+        inv_row = cur.fetchone()
+        if not inv_row:
+            c.close()
+            return {"error": "vehicle not found in LSL inventory",
+                    "vin": vin, "stock_no": stock_no}
+        inv = dict(inv_row)
+        inv_id = inv["inventory_id"]
+        cur.execute("""SELECT appraisal_id, appraised_at, original_msrp,
+                              appraised_value, base_appraised_value,
+                              mileage_adjustment_value, est_wholesale_value,
+                              market_asking_price, available_in_market,
+                              avg_days_on_market, n_appraisals_total,
+                              has_valid_blackbook, books_status
+                         FROM inventory_appraisal
+                        WHERE inventory_id = ?
+                        ORDER BY appraised_at DESC LIMIT 10""", (inv_id,))
+        appraisals = [dict(r) for r in cur.fetchall()]
+        cur.execute("""SELECT appraised_at, snapshot_index, original_msrp,
+                              appraised_value, base_appraised_value,
+                              mileage_adjustment_value, est_wholesale_value,
+                              market_asking_price, available_in_market,
+                              avg_days_on_market, avg_days_supply
+                         FROM inventory_appraisal_log
+                        WHERE inventory_id = ?
+                        ORDER BY appraised_at DESC LIMIT 8""", (inv_id,))
+        try:
+            log_rows = [dict(r) for r in cur.fetchall()]
+        except Exception:
+            log_rows = []
+        c.close()
+        return {
+            "caller_name": caller_name,
+            "vehicle": inv,
+            "n_appraisals": len(appraisals),
+            "appraisals": appraisals,
+            "recent_log": log_rows,
+        }
+    except Exception as e:
+        log.exception("lsl_appraisal_history failed")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+@mcp.tool()
+async def lsl_payments(
+    caller_name: str,
+    status_filter: str = "pending",
+    days_back: int = 60,
+) -> dict:
+    """OWNER-GATED. Payments / accounting queue. status_filter:
+    pending|paid|all. Returns count, total amount, breakdown by payee
+    type, and top 25 by amount (recipient, amount, deal, stock#)."""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    import sqlite3, os as _os
+    path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+    if not _os.path.exists(path):
+        return {"error": "lsl crm not available"}
+    sf = (status_filter or "pending").lower().strip()
+    where = [f"datetime(created_at) >= datetime('now', '-{int(days_back)} days')"]
+    if sf == "pending":
+        where.append("is_paid = 0")
+    elif sf == "paid":
+        where.append("is_paid = 1")
+    sql_where = " AND ".join(where)
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        cur = c.cursor()
+        cur.execute(f"""SELECT COUNT(*) AS n,
+                              COALESCE(SUM(amount), 0) AS amt,
+                              COALESCE(SUM(amount_paid), 0) AS paid,
+                              SUM(CASE WHEN is_commission=1 THEN amount ELSE 0 END) AS commission
+                         FROM payments WHERE {sql_where}""")
+        agg = dict(cur.fetchone())
+        cur.execute(f"""SELECT payee_type, COUNT(*) AS n, SUM(amount) AS amt
+                         FROM payments WHERE {sql_where}
+                        GROUP BY payee_type ORDER BY amt DESC LIMIT 10""")
+        by_type = [dict(r) for r in cur.fetchall()]
+        cur.execute(f"""SELECT stock_no, vin_no, payee_type, recipient_name,
+                              canonical_recipient, vendor_name,
+                              amount, amount_paid, payment_type_desc,
+                              payment_status, is_paid, is_commission,
+                              description, requested_by_name,
+                              created_at, paid_at
+                         FROM payments WHERE {sql_where}
+                        ORDER BY amount DESC LIMIT 25""")
+        rows = [dict(r) for r in cur.fetchall()]
+        c.close()
+        return {
+            "caller_name": caller_name,
+            "status_filter": sf,
+            "days_back": days_back,
+            "n_payments":      int(agg.get("n") or 0),
+            "total_amount":    float(agg.get("amt") or 0),
+            "total_paid":      float(agg.get("paid") or 0),
+            "total_commission":float(agg.get("commission") or 0),
+            "by_payee_type":   by_type,
+            "top_payments": [
+                {"stock_no": r.get("stock_no"),
+                 "vin": r.get("vin_no"),
+                 "payee_type": r.get("payee_type"),
+                 "recipient": r.get("canonical_recipient") or r.get("recipient_name") or r.get("vendor_name"),
+                 "amount": r.get("amount"),
+                 "amount_paid": r.get("amount_paid"),
+                 "type": r.get("payment_type_desc"),
+                 "status": r.get("payment_status"),
+                 "is_paid": bool(r.get("is_paid")),
+                 "is_commission": bool(r.get("is_commission")),
+                 "description": r.get("description"),
+                 "requested_by": r.get("requested_by_name"),
+                 "created": (r.get("created_at") or "")[:10],
+                 "paid": (r.get("paid_at") or "")[:10] if r.get("paid_at") else None}
+                for r in rows
+            ],
+        }
+    except Exception as e:
+        log.exception("lsl_payments failed")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+@mcp.tool()
+async def lsl_customer_lookup(
+    caller_name: str,
+    query: str,
+) -> dict:
+    """OWNER-GATED. Search the customer master. query matches name OR
+    email OR phone OR company. Returns up to 10 matching customer
+    profiles with active_deals, booked_deals, lead_status, blocked flag."""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    if not query or not query.strip():
+        return {"error": "query required"}
+    import sqlite3, os as _os
+    path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+    if not _os.path.exists(path):
+        return {"error": "lsl crm not available"}
+    pat = f"%{query.strip()}%"
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        cur = c.cursor()
+        cur.execute("""SELECT id, customer_id, type, company_name, full_name,
+                              first_name, last_name, email, mobile,
+                              full_address, verified, is_blocked, lead_status,
+                              active_deals, booked_deals, customer_number,
+                              note, created_at, modified_at
+                         FROM customers
+                        WHERE UPPER(full_name) LIKE UPPER(?)
+                           OR UPPER(COALESCE(company_name,'')) LIKE UPPER(?)
+                           OR UPPER(COALESCE(email,'')) LIKE UPPER(?)
+                           OR UPPER(COALESCE(mobile,'')) LIKE UPPER(?)
+                        ORDER BY booked_deals DESC NULLS LAST,
+                                 active_deals DESC NULLS LAST,
+                                 modified_at DESC
+                        LIMIT 10""",
+                    (pat, pat, pat, pat))
+        rows = [dict(r) for r in cur.fetchall()]
+        c.close()
+        return {
+            "caller_name": caller_name,
+            "query": query,
+            "n_matches": len(rows),
+            "matches": rows,
+        }
+    except Exception as e:
+        log.exception("lsl_customer_lookup failed")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+@mcp.tool()
+async def lsl_dealer_intel(
+    caller_name: str,
+    dealer_name: str,
+) -> dict:
+    """OWNER-GATED. Pre-rolled dealer profile + buyer aggregate. Returns
+    dealer_profile (segments, totals, last activity) + buyer_agg
+    (preferred makes / models / years / price bands) when available.
+    Use for 'tell me about <dealer>' deep dives that go beyond
+    lsl_customer_history."""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    if not dealer_name or not dealer_name.strip():
+        return {"error": "dealer_name required"}
+    import sqlite3, os as _os
+    path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+    if not _os.path.exists(path):
+        return {"error": "lsl crm not available"}
+    pat = f"%{dealer_name.strip()}%"
+    try:
+        c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        cur = c.cursor()
+        out = {"caller_name": caller_name, "dealer_name": dealer_name}
+        for tbl, key in [("dealer_profile","dealer_profile"),
+                         ("buyer_agg","buyer_agg"),
+                         ("combined_agg","combined_agg"),
+                         ("dealer_flags","dealer_flags"),
+                         ("source_agg","source_agg")]:
+            try:
+                cur.execute(f"PRAGMA table_info({tbl})")
+                cols = [r[1] for r in cur.fetchall()]
+                if not cols:
+                    continue
+                name_cols = [c2 for c2 in cols
+                             if c2.lower() in
+                             ("name","dealer_name","customer_name","supplier_name","company_name")]
+                if not name_cols:
+                    continue
+                where_clause = " OR ".join(
+                    f"UPPER(COALESCE({c2},'')) LIKE UPPER(?)" for c2 in name_cols
+                )
+                cur.execute(f"SELECT * FROM {tbl} WHERE {where_clause} LIMIT 5",
+                            tuple([pat]*len(name_cols)))
+                rows = [dict(r) for r in cur.fetchall()]
+                out[key] = rows
+            except Exception as e:
+                out[f"{key}_error"] = str(e)
+        # Quick deal totals for this dealer
+        cur.execute(f"""SELECT COUNT(*) AS n,
+                              COALESCE(SUM({_LSL_PROFIT_SQL}),0) AS profit,
+                              COALESCE(SUM(sale_price),0) AS revenue,
+                              MIN(sold_at) AS first_at,
+                              MAX(sold_at) AS last_at
+                         FROM deals
+                        WHERE (UPPER(customer_name) LIKE UPPER(?)
+                               OR UPPER(supplier_name) LIKE UPPER(?))
+                          AND sale_price IS NOT NULL""", (pat, pat))
+        out["deal_summary"] = dict(cur.fetchone())
+        c.close()
+        return out
+    except Exception as e:
+        log.exception("lsl_dealer_intel failed")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+
+
+@mcp.tool()
+async def lsl_query(
+    caller_name: str,
+    query_type: str,
+    target: str = "",
+    status_filter: str = "",
+    days_back: int = 30,
+) -> dict:
+    """OWNER-GATED. UNIFIED LSL DEEP-QUERY DISPATCHER. Use for any of:
+
+      query_type='service_requests' → service / recon dept queue (open ROs,
+          damaged-vehicle list, costs, advisor breakdown). status_filter:
+          open|completed|all. target unused.
+      query_type='payments' → accounting queue (pending / paid amounts, by
+          payee type). status_filter: pending|paid|all. target unused.
+      query_type='appraisal_history' → full appraisal trail for a vehicle.
+          target = VIN (17-char) or stock#. status_filter / days_back unused.
+      query_type='customer_lookup' → find customer by partial name / email /
+          phone / company. target = the search string. Others unused.
+      query_type='dealer_intel' → deep dealer profile (dealer_profile +
+          buyer_agg + deal_summary). target = dealer name. Others unused.
+
+    Returns the same payload as the underlying tool would. caller_name
+    must be a recognized owner first name."""
+    qt = (query_type or "").lower().strip()
+    if qt == "service_requests":
+        return await lsl_service_requests(
+            caller_name=caller_name,
+            status_filter=status_filter or "open",
+            days_back=days_back or 30,
+        )
+    if qt == "payments":
+        return await lsl_payments(
+            caller_name=caller_name,
+            status_filter=status_filter or "pending",
+            days_back=days_back or 60,
+        )
+    if qt == "appraisal_history":
+        v = (target or "").strip()
+        if len(v) == 17 and v.replace(" ","").isalnum():
+            return await lsl_appraisal_history(
+                caller_name=caller_name, vin=v, stock_no="")
+        return await lsl_appraisal_history(
+            caller_name=caller_name, vin="", stock_no=v)
+    if qt == "customer_lookup":
+        return await lsl_customer_lookup(
+            caller_name=caller_name, query=target)
+    if qt == "dealer_intel":
+        return await lsl_dealer_intel(
+            caller_name=caller_name, dealer_name=target)
+    if qt in ("customer_history", "history"):
+        return await lsl_customer_history(
+            caller_name=caller_name,
+            customer_name=target,
+            limit=10,
+        )
+    if qt == "recent_bids":
+        try:
+            n = int(target) if (target or "").isdigit() else 5
+        except Exception:
+            n = 5
+        return await recent_bids(limit=n)
+    if qt == "top_grosses":
+        return await lsl_top_grosses(
+            caller_name=caller_name,
+            period=(status_filter or "this_month"),
+            limit=10,
+        )
+    if qt in ("lookup_sale", "sale_lookup", "stock_lookup"):
+        v = (target or "").strip()
+        if len(v) == 17 and v.replace(" ","").isalnum():
+            return await lsl_lookup_sale(
+                caller_name=caller_name, vin=v, stock_no="")
+        return await lsl_lookup_sale(
+            caller_name=caller_name, vin="", stock_no=v)
+    return {"error": f"unknown query_type {query_type!r}. Valid: "
+            "customer_history | dealer_intel | service_requests | "
+            "payments | appraisal_history | customer_lookup | "
+            "recent_bids | top_grosses | lookup_sale"}
 
 
 @mcp.tool()
