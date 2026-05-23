@@ -12588,16 +12588,12 @@ def _evidence_first_trim_pick(db, vin, bid_id, choices):
     evidence_sources: list[tuple[str, str]] = []
     try:
         with db.cursor() as _ecur:
-            # Seller hint (from intake — may be just YMM or include trim word)
-            _ecur.execute("SELECT trim, canon_trim, raw_message FROM bids WHERE id=%s", (bid_id,))
+            # Bid context — year/make/model + canon_source (trim/raw_message NOT used as signals)
+            # DOCUMENTED_SOURCES_ONLY_2026_05_23: seller intake (bids.trim, raw_message)
+            # is dropped. VIN does not always encode trim (F-150, Bronco, Maverick,
+            # Wrangler, Range Rover, etc.) so seller-typed trim was a noise source.
+            _ecur.execute("SELECT year, make, model, canon_source FROM bids WHERE id=%s", (bid_id,))
             _b = _ecur.fetchone()
-            if _b:
-                _seller_trim = (_b.get('canon_trim') or _b.get('trim') or '').strip()
-                if _seller_trim:
-                    evidence_sources.append(('seller_hint', _seller_trim))
-                _raw = (_b.get('raw_message') or '').strip()
-                if _raw:
-                    evidence_sources.append(('raw_message', _raw))
             # vAuto canonical decode (may contain trim/series)
             _ecur.execute("""SELECT raw_json FROM vauto_lookups WHERE bid_id=%s
                               AND raw_json IS NOT NULL ORDER BY id DESC LIMIT 1""", (bid_id,))
@@ -12612,6 +12608,29 @@ def _evidence_first_trim_pick(db, vin, bid_id, choices):
                         _v = _vj.get(_k)
                         if _v and isinstance(_v, str) and _v.strip():
                             evidence_sources.append((f'vauto_{_k}', _v.strip()))
+            # Carfax + AutoCheck trim hints (CARFAX_AUTOCHECK_TRIM_2026_05_23)
+            # Most bids today have NULL carfax_json/autocheck_json (worker_vauto.py only saves
+            # screenshots, not parsed text). When populated (via api_carfax JSONB or future
+            # worker text extraction), these participate in priority above vauto.
+            _ecur.execute("""SELECT carfax_json, autocheck_json, api_carfax FROM vauto_lookups
+                              WHERE bid_id=%s AND raw_json IS NOT NULL ORDER BY id DESC LIMIT 1""", (bid_id,))
+            _cfrow = _ecur.fetchone()
+            if _cfrow:
+                for _key in ('carfax_json', 'autocheck_json', 'api_carfax'):
+                    _doc = _cfrow.get(_key) if hasattr(_cfrow, 'get') else None
+                    if isinstance(_doc, str):
+                        try: _doc = json.loads(_doc)
+                        except Exception: _doc = None
+                    if isinstance(_doc, dict):
+                        # Try common trim field paths
+                        _trim = (_doc.get('trim')
+                                 or (_doc.get('vehicle') or {}).get('trim')
+                                 or _doc.get('series')
+                                 or (_doc.get('decode') or {}).get('trim'))
+                        if _trim and isinstance(_trim, str) and _trim.strip():
+                            _src_name = 'carfax' if 'carfax' in _key else 'autocheck'
+                            evidence_sources.append((_src_name, _trim.strip()))
+                            break  # one hit per row is enough
             # iPacket OCR text (full sticker text)
             _ecur.execute("""SELECT raw_json, screenshot FROM ipacket_lookups
                               WHERE bid_id=%s ORDER BY looked_up_at DESC LIMIT 1""", (bid_id,))
@@ -12644,21 +12663,52 @@ def _evidence_first_trim_pick(db, vin, bid_id, choices):
         key=lambda c: -len((c.get('text') or '').strip())
     )
 
+    # NEW priority order (DOCUMENTED_SOURCES_ONLY_2026_05_23):
+    #   1. ipacket_ocr_trim — extract trim word from sticker OCR (factory-locked)
+    #   2. carfax — from api_carfax or carfax_json
+    #   3. autocheck — from autocheck_json
+    #   4. vauto_trim/series — ONLY when bids.canon_source begins with 'vds'
+    # seller_hint and raw_message are DROPPED. Intake-typed trim is unreliable
+    # because the VIN does not always encode trim (F-150, Bronco, Maverick,
+    # Wrangler, Range Rover, etc.).
     primary_trim = None
     primary_source = None
-    for src in evidence_sources:
-        if src[0] == 'seller_hint' and src[1] and src[1].strip():
-            primary_trim = src[1].strip().upper()
-            primary_source = 'seller_hint'
-            break
-    if not primary_trim:
-        for src in evidence_sources:
-            if src[0] in ('vauto_trim','vauto_series',
-                          'vauto_canonical_trim','vauto_model_series') \
-               and src[1] and src[1].strip():
-                primary_trim = src[1].strip().upper()
-                primary_source = src[0]
+    # 1. iPacket OCR trim extraction — look for choice-trim words IN the OCR text
+    ipkt_ocr = next((s[1] for s in evidence_sources if s[0] == 'ipacket_ocr'), None)
+    if ipkt_ocr:
+        # Build candidate trim keywords from the AccuTrade choice list itself
+        for c in sorted_choices:
+            ctext = (c.get('text') or '').strip().upper()
+            # Extract leading trim portion before body/door/engine boilerplate
+            _trim_word = _re_local.split(
+                r'\s+(?:\d+\s*DOOR|COUPE|SEDAN|HATCHBACK|CONVERTIBLE|SUV|TRUCK|WAGON|VAN|CABRIOLET|ROADSTER|FASTBACK|HARDTOP|P/?UP|PICKUP|S/?CHGD|HEMI|TURBO|HYBRID|EV|ELECTRIC|GAS|DIESEL|V\d|I\d|R\d|\d+\.\d+L|\d+\s*CYL)\b',
+                ctext, maxsplit=1
+            )[0].strip()
+            if _trim_word and _re_local.search(r'\b' + _re_local.escape(_trim_word) + r'\b', ipkt_ocr.upper()):
+                primary_trim = _trim_word
+                primary_source = 'ipacket_ocr'
                 break
+    # 2. Carfax
+    if not primary_trim:
+        cf = next((s[1] for s in evidence_sources if s[0] == 'carfax'), None)
+        if cf:
+            primary_trim = cf.strip().upper()
+            primary_source = 'carfax'
+    # 3. AutoCheck
+    if not primary_trim:
+        ac = next((s[1] for s in evidence_sources if s[0] == 'autocheck'), None)
+        if ac:
+            primary_trim = ac.strip().upper()
+            primary_source = 'autocheck'
+    # 4. vauto canonical — ONLY when canon_source begins with 'vds'
+    if not primary_trim:
+        _canon_src = (_b.get('canon_source') or '').lower() if _b else ''
+        if _canon_src.startswith('vds'):
+            for src in evidence_sources:
+                if src[0] in ('vauto_trim','vauto_series','vauto_canonical_trim','vauto_model_series'):
+                    primary_trim = src[1].strip().upper()
+                    primary_source = src[0]
+                    break
 
     best = None
     match_reason = None
