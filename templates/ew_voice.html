@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>EW · Voice</title>
+  <style>
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;height:100%;background:#0b1220;color:#e5e7eb;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+    body{display:flex;flex-direction:column;min-height:100dvh}
+    header{padding:18px 16px 10px;text-align:center;border-bottom:1px solid #1e293b}
+    header h1{margin:0;font-size:18px;letter-spacing:.04em}
+    header .sub{font-size:11px;color:#64748b;margin-top:4px;letter-spacing:.08em;text-transform:uppercase}
+    main{flex:1;display:flex;flex-direction:column;padding:14px 16px;gap:12px;overflow-y:auto}
+    .intro{background:#111827;border:1px solid #1f2937;border-radius:10px;padding:12px 14px;color:#cbd5e1;font-size:13.5px;line-height:1.45}
+    .mic-wrap{display:flex;flex-direction:column;align-items:center;padding:24px 0 10px}
+    .mic{width:140px;height:140px;border-radius:50%;background:#1d4ed8;color:#fff;border:0;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;font-weight:700;font-size:13px;letter-spacing:.04em;transition:all .15s;box-shadow:0 6px 20px rgba(29,78,216,.35)}
+    .mic.listening{background:#22c55e;box-shadow:0 0 0 6px rgba(34,197,94,.2),0 6px 20px rgba(34,197,94,.35);animation:pulse 1.6s ease-in-out infinite}
+    .mic.thinking{background:#a855f7;animation:none}
+    .mic.speaking{background:#f97316;animation:pulse 1.4s ease-in-out infinite}
+    .mic .icon{font-size:40px;line-height:1}
+    @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
+    .status{text-align:center;color:#94a3b8;font-size:13px;min-height:18px}
+    .live-transcript{text-align:center;color:#e2e8f0;font-size:15px;min-height:22px;padding:0 8px;font-style:italic}
+    .messages{display:flex;flex-direction:column;gap:8px;padding:4px 0}
+    .msg{padding:10px 12px;border-radius:12px;max-width:88%;word-wrap:break-word;font-size:14px}
+    .msg.user{background:#1e293b;align-self:flex-end}
+    .msg.bot{background:#0f1c33;border:1px solid #1e293b;align-self:flex-start}
+    .msg .meta{font-size:10.5px;color:#64748b;margin-top:6px;letter-spacing:.04em}
+    .tools{font-size:10px;color:#a855f7;letter-spacing:.06em;text-transform:uppercase}
+    .diag{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:8px 10px;font:10.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:#94a3b8;white-space:pre-wrap;max-height:120px;overflow-y:auto}
+    footer{padding:10px 14px;border-top:1px solid #1e293b;color:#64748b;font-size:10.5px;text-align:center}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>EW</h1>
+    <div class="sub">Voice · Conversation Mode · build 20260522-d2</div>
+  </header>
+
+  <main>
+    <div class="intro">
+      Tap once to start. Just talk naturally — I'll detect when you've
+      finished, answer, and listen for your next question. Tap again to end.
+    </div>
+
+    <div class="mic-wrap">
+      <button id="mic" class="mic">
+        <div class="icon">🎙️</div>
+        <div id="mic-label">TAP TO START</div>
+      </button>
+    </div>
+
+    <div id="status" class="status">Ready</div>
+    <div id="live" class="live-transcript"></div>
+    <div id="msgs" class="messages"></div>
+    <div id="diag" class="diag"></div>
+  </main>
+
+  <footer>experience-wholesale.net/voice · Silero VAD · Sonnet 4.6 · EW MCP</footer>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const micBtn = $('mic');
+  const micLabel = $('mic-label');
+  const statusEl = $('status');
+  const liveEl = $('live');
+  const msgsEl = $('msgs');
+  const diagEl = $('diag');
+
+  function dlog(s){
+    const ts = new Date().toLocaleTimeString();
+    diagEl.textContent = ts + ' ' + s + '\n' + diagEl.textContent;
+    if (diagEl.textContent.length > 3000) diagEl.textContent = diagEl.textContent.slice(0, 3000);
+  }
+  function setStatus(s){ statusEl.textContent = s; }
+  function setLive(s){ liveEl.textContent = s || ''; }
+  function appendMsg(text, role, opts){
+    const d = document.createElement('div');
+    d.className = 'msg ' + role;
+    const txt = document.createElement('div'); txt.textContent = text; d.appendChild(txt);
+    if (opts && opts.tools && opts.tools.length){
+      const t = document.createElement('div');
+      t.className = 'tools';
+      t.textContent = '🛠 ' + opts.tools.map(x => x.name || x).join(', ');
+      d.appendChild(t);
+    }
+    if (opts && opts.elapsed_ms){
+      const m = document.createElement('div');
+      m.className = 'meta';
+      m.textContent = opts.elapsed_ms + 'ms';
+      d.appendChild(m);
+    }
+    msgsEl.appendChild(d);
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+    return d;
+  }
+
+  const _USE_CEREBRAS = location.pathname.startsWith("/v-fast");
+  const _EW_VOICE_BASE = _USE_CEREBRAS ? "/api/ew-voice-fast" : "/api/ew-voice";
+  if (_USE_CEREBRAS){ document.title = "EW · Fast (Cerebras)"; }
+  const sessionId = 'ew-' + (Math.random().toString(36).slice(2,10));
+  // Pre-warm Anthropic + ElevenLabs on page load so first turn is fast
+  // Also pre-open the WS so TLS+handshake is done before tap.
+  let _preOpenedWs = null;
+  // VISIBILITY_2026_05_22 — iOS suspends WS in background; auto-recover
+  // on return so the bot isn't frozen when user comes back to the app.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    dlog('page visible again');
+    // If we were in conv mode and the WS is gone or stale, restart it.
+    const wsDead = (!ws || ws.readyState !== WebSocket.OPEN);
+    if (convMode && wsDead){
+      dlog('WS dead after return — restarting conv');
+      endConvo().then(() => startConvo()).catch(e => dlog('restart err: ' + e));
+    } else if (!convMode){
+      // Just refresh the pre-open if it's stale
+      const preDead = (!_preOpenedWs || _preOpenedWs.readyState !== WebSocket.OPEN);
+      if (preDead) openSttWs();
+    }
+  });
+  // Also catch unexpected WS closes mid-conv and reconnect
+  function _autoRestartConv(){
+    if (convMode && !askInFlight){
+      dlog('WS unexpectedly closed during conv — restarting');
+      endConvo().then(() => startConvo()).catch(e => dlog('autorestart err: ' + e));
+    }
+  }
+  function openSttWs(){
+    try {
+      const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/api/voice/stt/ws/v2';
+      const w = new WebSocket(wsUrl);
+      w.binaryType = 'arraybuffer';
+      w.addEventListener('open', () => {
+        try { w.send(JSON.stringify({ type: 'start', sample_rate: 16000 })); } catch(_){}
+        dlog('pre-WS open');
+      });
+      w.addEventListener('close', () => {
+        if (_preOpenedWs === w) _preOpenedWs = null;
+        dlog('pre-WS closed');
+      });
+      w.addEventListener('error', () => {
+        if (_preOpenedWs === w) _preOpenedWs = null;
+        dlog('pre-WS error');
+      });
+      _preOpenedWs = w;
+    } catch(e){ dlog('openSttWs err: ' + e); }
+  }
+  (async () => {
+    try { await fetch(_EW_VOICE_BASE + '/warmup'); } catch(e){}
+    try { await fetch('/api/voice/tts/warmup'); } catch(e){}
+    openSttWs();
+    dlog('warmup + pre-WS done');
+  })();
+  let convMode = false;
+  let ws = null;
+  let micStream = null;
+  let capCtx = null;
+  let playCtx = null;
+  let audioSrc = null;
+  let processor = null;
+  let capGain = null;
+  let currentBotSrc = null;  // For barge-in: stop bot if user speaks
+  let interimBuf = '';
+  let finalBuf = '';
+  let askInFlight = false;
+
+  function _downsample(buffer, srcRate, dstRate){
+    if (dstRate === srcRate) return buffer;
+    const ratio = srcRate / dstRate;
+    const newLen = Math.round(buffer.length / ratio);
+    const out = new Float32Array(newLen);
+    let oi = 0, bi = 0;
+    while (oi < newLen){
+      const next = Math.round((oi + 1) * ratio);
+      let sum = 0, n = 0;
+      for (let i = bi; i < next && i < buffer.length; i++){ sum += buffer[i]; n++; }
+      out[oi++] = n ? sum / n : 0;
+      bi = next;
+    }
+    return out;
+  }
+  function _float32ToI16LE(f32){
+    const buf = new ArrayBuffer(f32.length * 2);
+    const view = new DataView(buf);
+    for (let i = 0; i < f32.length; i++){
+      let s = Math.max(-1, Math.min(1, f32[i]));
+      view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+    return buf;
+  }
+
+  async function ensurePlayCtx(){
+    if (!playCtx || playCtx.state === 'closed'){
+      playCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (playCtx.state === 'suspended') await playCtx.resume();
+    return playCtx;
+  }
+
+  micBtn.addEventListener('click', async () => {
+    await ensurePlayCtx();  // unlock audio inside user gesture
+    if (convMode){
+      await endConvo();
+    } else {
+      await startConvo();
+    }
+  });
+
+  async function startConvo(){
+    convMode = true;
+    micBtn.classList.add('listening');
+    // FAST_FIRST_2026_05_22 — drop the 1s 'WARMING UP' overlay so
+    // perceived start is instant. Silero server-side threshold stays
+    // low for first 45 frames to catch quiet utterances during iOS AGC ramp.
+    micLabel.textContent = 'TAP TO END';
+    setStatus('Listening — just talk');
+    try {
+      // BARGE_IN_2026_05_22 — echoCancellation must be ON for barge-in
+      // (otherwise bot audio bleeds into mic, causing fake speech detection)
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: {
+        echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+      }});
+      // Separate capture context to avoid iOS attenuating mic when playback happens
+      capCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (capCtx.state === 'suspended') await capCtx.resume();
+
+      // Reuse pre-opened WS if available (saves ~500ms TLS+handshake)
+      if (_preOpenedWs && _preOpenedWs.readyState === WebSocket.OPEN){
+        ws = _preOpenedWs;
+        _preOpenedWs = null;
+        dlog('WS reused from pre-open');
+      } else {
+        const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/api/voice/stt/ws/v2';
+        ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
+        const opened = new Promise((resolve, reject) => {
+          const t = setTimeout(() => reject(new Error('WS open timeout')), 5000);
+          ws.addEventListener('open', () => { clearTimeout(t); resolve(); });
+          ws.addEventListener('error', () => { clearTimeout(t); reject(new Error('WS error')); });
+        });
+        await opened;
+        ws.send(JSON.stringify({ type: 'start', sample_rate: 16000 }));
+        dlog('WS open fresh');
+      }
+      ws.addEventListener('message', onWsMessage);
+      ws.addEventListener('close', () => {
+        dlog('WS closed');
+        // If still in conv mode, this was unexpected — try to restart
+        if (convMode && !askInFlight) {
+          setTimeout(_autoRestartConv, 300);
+        }
+      });
+
+      // Set up PCM tap
+      audioSrc = capCtx.createMediaStreamSource(micStream);
+      capGain = capCtx.createGain(); capGain.gain.value = 3.0;
+      processor = capCtx.createScriptProcessor(4096, 1, 1);
+      const srcRate = capCtx.sampleRate;
+      processor.onaudioprocess = (e) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        // ECHO_FIX_2026_05_22 — pause mic while bot speaks (true barge-in
+        // caused bot to cut itself off due to iOS echo cancellation imperfection)
+        if (askInFlight || ttsPlaying || ttsQueue.length > 0) return;
+        const input = e.inputBuffer.getChannelData(0);
+        const ds = _downsample(input, srcRate, 16000);
+        const i16 = _float32ToI16LE(ds);
+        try { ws.send(i16); } catch(_){}
+      };
+      audioSrc.connect(capGain);
+      capGain.connect(processor);
+      const sink = capCtx.createGain(); sink.gain.value = 0;
+      processor.connect(sink);
+      sink.connect(capCtx.destination);
+
+      finalBuf = ''; interimBuf = '';
+      setStatus('Listening — just talk');
+    } catch(e){
+      dlog('startConvo err: ' + (e && e.message ? e.message : e));
+      setStatus('Failed: ' + (e && e.message ? e.message : 'unknown'));
+      await endConvo();
+    }
+  }
+
+  // PREDICTIVE_ENDPOINT_2026_05_22 — track interim stability + fire
+  // Anthropic call early when the user is clearly mid-pause.
+  let _lastInterim = '';
+  let _lastInterimAt = 0;
+  let _predictiveTimer = null;
+  const FILLER_END = new Set(['with','and','or','the','a','an','to','of','for',
+                              'on','in','at','is','was','that','this','my','your',
+                              'we','what','how','i','can','do','about']);
+  function _maybeFirePredictive(){
+    if (askInFlight) return;
+    const txt = (finalBuf + ' ' + interimBuf).trim();
+    if (!txt) return;
+    const words = txt.toLowerCase().split(/\s+/).filter(Boolean);
+    if (words.length < 6) return;
+    if (FILLER_END.has(words[words.length-1])) return;
+    if (Date.now() - _lastInterimAt < 700) return;
+    dlog('predictive fire on stable interim: ' + txt.slice(0,60));
+    commitAndAsk(txt);
+  }
+
+  function onWsMessage(ev){
+    let m; try { m = JSON.parse(ev.data); } catch(_){ return; }
+    if (m.type === 'interim'){
+      const txt = m.transcript || '';
+      if (txt !== _lastInterim){
+        _lastInterim = txt;
+        _lastInterimAt = Date.now();
+        if (_predictiveTimer) clearTimeout(_predictiveTimer);
+        // _predictiveTimer = setTimeout(_maybeFirePredictive, 720);  // PREDICTIVE_DISABLED_2026_05_22
+      }
+      interimBuf = txt;
+      setLive((finalBuf + ' ' + interimBuf).trim());
+    } else if (m.type === 'final'){
+      finalBuf = (finalBuf + ' ' + (m.transcript || '')).trim();
+      interimBuf = '';
+      setLive(finalBuf);
+    } else if (m.type === 'utterance_end' || m.type === 'speech_end'){
+      // Google decided user stopped talking. Commit transcript and ask EW.
+      const txt = (finalBuf || interimBuf || '').trim();
+      finalBuf = ''; interimBuf = '';
+      setLive('');
+      if (txt){
+        commitAndAsk(txt);
+      }
+    } else if (m.type === 'error'){
+      dlog('WS error msg: ' + (m.message || '?'));
+    }
+  }
+
+  // Per-sentence TTS queue. Streamed sentences are TTS'd in parallel
+  // but PLAYED in order so the conversation sounds natural.
+  let ttsQueue = [];          // pending {text, audioBufPromise}
+  let ttsPlaying = false;
+  let ttsCanceled = false;
+
+  async function _ttsFetch(text){
+    const r = await fetch('/api/voice/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok) throw new Error('TTS http ' + r.status);
+    return await r.arrayBuffer();
+  }
+
+  async function _playNextTts(){
+    if (ttsPlaying || ttsCanceled || ttsQueue.length === 0) return;
+    ttsPlaying = true;
+    const item = ttsQueue.shift();
+    try {
+      const arrayBuf = await item.audioBufPromise;
+      if (ttsCanceled) { ttsPlaying = false; return; }
+      const ctx = await ensurePlayCtx();
+      const audioBuf = await new Promise((resolve, reject) => {
+        const p = ctx.decodeAudioData(arrayBuf.slice(0), resolve, reject);
+        if (p && p.then) p.then(resolve, reject);
+      });
+      currentBotSrc = ctx.createBufferSource();
+      currentBotSrc.buffer = audioBuf;
+      // VOLUME_BOOST_2026_05_22 — 2x gain on TTS playback (iOS web audio
+      // playback is conservative; ElevenLabs default output is also low)
+      const _gain = ctx.createGain();
+      _gain.gain.value = 2.5;
+      currentBotSrc.connect(_gain);
+      _gain.connect(ctx.destination);
+      await new Promise((resolve) => {
+        currentBotSrc.onended = () => { currentBotSrc = null; resolve(); };
+        currentBotSrc.start(0);
+      });
+    } catch(e){
+      dlog('tts play err: ' + (e && e.message ? e.message : e));
+    } finally {
+      ttsPlaying = false;
+      _playNextTts();
+    }
+  }
+
+  // Serialize TTS fetches: prevents bursting N parallel POSTs at the
+  // main gunicorn (caused 502s on long replies). Each fetch waits for
+  // the prior to complete; play queue still drains smoothly because the
+  // next fetch overlaps with current audio playback.
+  let _ttsFetchChain = Promise.resolve();
+  function enqueueSentence(text){
+    if (!text) return;
+    const audioBufPromise = _ttsFetchChain.then(async () => {
+      try { return await _ttsFetch(text); }
+      catch(e){ dlog('tts fetch err: ' + e); return null; }
+    });
+    _ttsFetchChain = audioBufPromise.catch(() => null);
+    ttsQueue.push({ text, audioBufPromise });
+    _playNextTts();
+  }
+
+  function cancelTtsQueue(){
+    ttsCanceled = true;
+    ttsQueue.length = 0;
+    try { if (currentBotSrc) currentBotSrc.stop(0); } catch(_){}
+    currentBotSrc = null;
+    ttsPlaying = false;
+  }
+
+  let _watchdogTimer = null;
+  function _armWatchdog(){
+    if (_watchdogTimer) clearTimeout(_watchdogTimer);
+    _watchdogTimer = setTimeout(() => {
+      if (askInFlight){
+        dlog('watchdog fired — forcing reset');
+        cancelTtsQueue();
+        askInFlight = false;
+        if (convMode) resumeListening();
+      }
+    }, 30000);
+  }
+  function _disarmWatchdog(){
+    if (_watchdogTimer){ clearTimeout(_watchdogTimer); _watchdogTimer = null; }
+  }
+
+  async function commitAndAsk(transcript){
+    if (askInFlight) return;
+    askInFlight = true;
+    _armWatchdog();
+    appendMsg(transcript, 'user');
+    dlog('user: ' + transcript);
+    micBtn.classList.remove('listening');
+    micBtn.classList.add('thinking');
+    micLabel.textContent = 'THINKING…';
+    setStatus('EW is thinking…');
+
+    ttsCanceled = false;
+    ttsQueue = [];
+    let botMsgEl = null;
+    let botMsgText = '';
+    let finalData = null;
+    const t0 = performance.now();
+
+    try {
+      const r = await fetch(_EW_VOICE_BASE + '/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+        body: JSON.stringify({ transcript, session_id: sessionId }),
+      });
+      if (!r.ok || !r.body){
+        appendMsg('Error: HTTP ' + r.status, 'bot');
+        askInFlight = false;
+        resumeListening();
+        return;
+      }
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let sseBuf = '';
+      while (true){
+        const { value, done } = await reader.read();
+        if (done) break;
+        sseBuf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = sseBuf.indexOf('\n\n')) !== -1){
+          const raw = sseBuf.slice(0, idx); sseBuf = sseBuf.slice(idx + 2);
+          if (!raw.startsWith('data: ')) continue;
+          let m; try { m = JSON.parse(raw.slice(6)); } catch(_){ continue; }
+          if (m.type === 'first_text_ms'){
+            dlog('first text @ ' + m.ms + 'ms');
+            micBtn.classList.remove('thinking');
+            micBtn.classList.add('speaking');
+            micLabel.textContent = 'EW SPEAKING…';
+            setStatus('EW speaking…');
+          } else if (m.type === 'tool_call'){
+            dlog('tool: ' + m.name);
+          } else if (m.type === 'sentence'){
+            if (!botMsgEl) botMsgEl = appendMsg('', 'bot');
+            botMsgText += (botMsgText ? ' ' : '') + m.text;
+            botMsgEl.firstChild.textContent = botMsgText;
+            msgsEl.scrollTop = msgsEl.scrollHeight;
+            enqueueSentence(m.text);
+          } else if (m.type === 'speech_start'){
+      // BARGE_IN_2026_05_22 — user started talking. If the bot is mid-reply,
+      // cancel TTS queue + stop current audio + restart listening.
+      if (askInFlight || ttsPlaying || ttsQueue.length > 0){
+        dlog('BARGE-IN — user spoke while bot replying');
+        cancelTtsQueue();
+        askInFlight = false;
+        setStatus('Listening — go ahead');
+        micBtn.classList.remove('thinking','speaking');
+        micBtn.classList.add('listening');
+        micLabel.textContent = 'TAP TO END';
+      }
+    } else if (m.type === 'speech_end'){
+            // SPEECH_END_NO_TX_2026_05_22 — Google may not return a final if
+            // audio was too brief/quiet. If no transcript came back, flash
+            // a hint so user knows to try again louder.
+            const hadTx = !!(finalBuf || interimBuf || '').trim();
+            if (!hadTx){
+              setStatus("Didn't catch that — speak a touch louder.");
+              setTimeout(() => { if (!askInFlight) setStatus('Listening — just talk'); }, 2200);
+              dlog('speech_end with empty transcript — user spoke too quietly or briefly');
+            }
+          } else if (m.type === 'final'){
+            finalData = m;
+            dlog('final ' + m.elapsed_ms + 'ms · tools=' +
+                 (m.tool_calls || []).map(t => t.name).join(','));
+          } else if (m.type === 'error'){
+            appendMsg('Error: ' + (m.message || '?'), 'bot');
+            dlog('stream err: ' + m.message);
+          }
+        }
+      }
+    } catch(e){
+      dlog('stream fetch threw: ' + e);
+    }
+
+    // Wait for TTS queue to drain before re-listening
+    while (ttsQueue.length > 0 || ttsPlaying){
+      await new Promise(r => setTimeout(r, 100));
+      if (ttsCanceled) break;
+    }
+
+    _disarmWatchdog();
+    askInFlight = false;
+    if (convMode) resumeListening();
+  }
+
+  function resumeListening(){
+    if (!convMode) return;
+    micBtn.classList.remove('thinking','speaking');
+    micBtn.classList.add('listening');
+    micLabel.textContent = 'TAP TO END';
+    setStatus('Listening — just talk');
+  }
+
+  async function speakReply(text){
+    micBtn.classList.remove('thinking');
+    micBtn.classList.add('speaking');
+    micLabel.textContent = 'EW SPEAKING…';
+    setStatus('EW speaking…');
+    try {
+      const r = await fetch('/api/voice/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!r.ok){ dlog('TTS http ' + r.status); return; }
+      const arrayBuf = await r.arrayBuffer();
+      const ctx = await ensurePlayCtx();
+      const audioBuf = await new Promise((resolve, reject) => {
+        const p = ctx.decodeAudioData(arrayBuf.slice(0), resolve, reject);
+        if (p && p.then) p.then(resolve, reject);
+      });
+      currentBotSrc = ctx.createBufferSource();
+      currentBotSrc.buffer = audioBuf;
+      currentBotSrc.connect(ctx.destination);
+      await new Promise((resolve) => {
+        currentBotSrc.onended = () => { currentBotSrc = null; resolve(); };
+        currentBotSrc.start(0);
+      });
+    } catch(e){
+      dlog('TTS err: ' + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function endConvo(){
+    convMode = false;
+    setStatus('Ending…');
+    try { if (currentBotSrc) currentBotSrc.stop(0); } catch(_){}
+    currentBotSrc = null;
+    try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:'stop'})); } catch(_){}
+    try { if (ws) ws.close(); } catch(_){}
+    ws = null;
+    try { if (processor) processor.disconnect(); } catch(_){}
+    try { if (capGain) capGain.disconnect(); } catch(_){}
+    try { if (audioSrc) audioSrc.disconnect(); } catch(_){}
+    processor = null; capGain = null; audioSrc = null;
+    try { if (capCtx) await capCtx.close(); } catch(_){}
+    capCtx = null;
+    if (micStream){ micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    micBtn.classList.remove('listening','thinking','speaking');
+    micLabel.textContent = 'TAP TO START';
+    setStatus('Ready');
+    setLive('');
+  }
+})();
+</script>
+</body>
+</html>

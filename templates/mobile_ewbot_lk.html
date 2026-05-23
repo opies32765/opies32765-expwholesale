@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>EW · Voice (LiveKit)</title>
+  <style>
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;height:100%;background:#0b1220;color:#e5e7eb;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+    body{display:flex;flex-direction:column;min-height:100dvh}
+    header{padding:18px 16px 10px;text-align:center;border-bottom:1px solid #1e293b}
+    header h1{margin:0;font-size:18px;letter-spacing:.04em}
+    header .sub{font-size:11px;color:#64748b;margin-top:4px;letter-spacing:.08em;text-transform:uppercase}
+    main{flex:1;display:flex;flex-direction:column;padding:14px 16px;gap:12px;overflow-y:auto}
+    .intro{background:#111827;border:1px solid #1f2937;border-radius:10px;padding:12px 14px;color:#cbd5e1;font-size:13.5px;line-height:1.45}
+    .mic-wrap{display:flex;flex-direction:column;align-items:center;padding:16px 0 8px}
+    .mic{width:120px;height:120px;border-radius:50%;background:#1d4ed8;color:#fff;border:0;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;font-weight:700;font-size:13px;letter-spacing:.04em;transition:all .15s;box-shadow:0 6px 20px rgba(29,78,216,.35)}
+    .mic.connecting{background:#475569;box-shadow:none}
+    .mic.connected{background:#22c55e;box-shadow:0 0 0 6px rgba(34,197,94,.18),0 6px 20px rgba(34,197,94,.35)}
+    .mic.speaking{background:#f97316;animation:pulse 1.4s ease-in-out infinite}
+    .mic .icon{font-size:32px;line-height:1}
+    @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
+    .status{text-align:center;color:#94a3b8;font-size:13px;min-height:18px}
+    .messages{display:flex;flex-direction:column;gap:8px;padding:4px 0}
+    .msg{padding:8px 12px;border-radius:10px;max-width:88%;word-wrap:break-word}
+    .msg.user{background:#1e293b;align-self:flex-end}
+    .msg.bot{background:#0f1c33;border:1px solid #1e293b;align-self:flex-start}
+    .diag{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:8px 10px;font:10.5px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:#94a3b8;white-space:pre-wrap;max-height:160px;overflow-y:auto}
+    footer{padding:10px 14px;border-top:1px solid #1e293b;color:#64748b;font-size:10.5px;text-align:center}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>EW</h1>
+    <div class="sub">Voice · LiveKit · build 20260522-lk1</div>
+  </header>
+
+  <main>
+    <div class="intro">
+      Tap once to start a hands-free conversation over WebRTC. Just talk —
+      I'll listen, answer, and the mic stays open. Tap again to end.
+    </div>
+
+    <div class="mic-wrap">
+      <button id="mic" class="mic">
+        <div class="icon">🎙️</div>
+        <div id="mic-label">TAP TO START</div>
+      </button>
+    </div>
+
+    <div id="status" class="status">Ready</div>
+    <div id="msgs" class="messages"></div>
+    <div id="diag" class="diag"></div>
+  </main>
+
+  <footer>experience-wholesale.net · WebRTC · LiveKit + Google STT/TTS + Claude Sonnet 4.6</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const micBtn = $('mic');
+  const micLabel = $('mic-label');
+  const statusEl = $('status');
+  const msgsEl = $('msgs');
+  const diagEl = $('diag');
+
+  function dlog(s){
+    const ts = new Date().toLocaleTimeString();
+    diagEl.textContent = ts + ' ' + s + '\n' + diagEl.textContent;
+    if (diagEl.textContent.length > 4000) diagEl.textContent = diagEl.textContent.slice(0, 4000);
+    console.log('[ewbot-lk]', s);
+  }
+  function setStatus(s){ statusEl.textContent = s; }
+  function appendMsg(text, role){
+    const d = document.createElement('div');
+    d.className = 'msg ' + role;
+    d.textContent = text;
+    msgsEl.appendChild(d);
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+    return d;
+  }
+
+  let room = null;
+  let localMicTrack = null;
+  let connected = false;
+
+  micBtn.addEventListener('click', async () => {
+    if (connected){
+      await endSession();
+    } else {
+      await startSession();
+    }
+  });
+
+  async function fetchToken(){
+    const id = 'user-' + (Math.random().toString(36).slice(2,8));
+    const r = await fetch('/api/livekit/token', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({identity: id})
+    });
+    if (!r.ok) throw new Error('token http ' + r.status);
+    return await r.json();
+  }
+
+  async function startSession(){
+    try {
+      micBtn.classList.add('connecting');
+      micLabel.textContent = 'CONNECTING…';
+      setStatus('Fetching access token…');
+
+      const tok = await fetchToken();
+      dlog('token ok; url=' + tok.url + ' room=' + tok.room + ' identity=' + tok.identity);
+
+      room = new LivekitClient.Room({
+        adaptiveStream: true,
+        dynacast: true,
+        audioCaptureDefaults: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      room.on(LivekitClient.RoomEvent.Connected, () => {
+        connected = true;
+        micBtn.classList.remove('connecting');
+        micBtn.classList.add('connected');
+        micLabel.textContent = 'TAP TO END';
+        setStatus('Connected — say hi');
+        dlog('room connected sid=' + room.sid);
+      });
+
+      room.on(LivekitClient.RoomEvent.Disconnected, (reason) => {
+        connected = false;
+        micBtn.classList.remove('connecting','connected','speaking');
+        micLabel.textContent = 'TAP TO START';
+        setStatus('Disconnected' + (reason ? ' (' + reason + ')' : ''));
+        dlog('disconnected: ' + reason);
+      });
+
+      room.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+        dlog('track subscribed: ' + track.kind + ' from ' + participant.identity);
+        if (track.kind === 'audio'){
+          const el = track.attach();
+          el.autoplay = true;
+          el.playsInline = true;
+          document.body.appendChild(el);
+        }
+      });
+
+      room.on(LivekitClient.RoomEvent.ActiveSpeakersChanged, (speakers) => {
+        const agentSpeaking = speakers.some(s => s.identity !== room.localParticipant.identity);
+        if (agentSpeaking){
+          micBtn.classList.add('speaking');
+          setStatus('EW speaking…');
+        } else {
+          micBtn.classList.remove('speaking');
+          if (connected) setStatus('Listening…');
+        }
+      });
+
+      // Transcription events for the chat panel
+      room.on(LivekitClient.RoomEvent.TranscriptionReceived, (segments, participant) => {
+        for (const seg of segments){
+          if (seg.final){
+            const who = (participant && participant.identity === room.localParticipant.identity) ? 'user' : 'bot';
+            appendMsg(seg.text, who);
+            dlog('[' + who + '] ' + seg.text.slice(0,80));
+          }
+        }
+      });
+
+      await room.connect(tok.url, tok.token);
+
+      // Publish microphone
+      localMicTrack = await LivekitClient.createLocalAudioTrack({
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      });
+      await room.localParticipant.publishTrack(localMicTrack);
+      dlog('mic published');
+
+    } catch(e){
+      dlog('startSession failed: ' + (e && e.message ? e.message : e));
+      setStatus('Failed: ' + (e && e.message ? e.message : 'unknown'));
+      micBtn.classList.remove('connecting','connected');
+      micLabel.textContent = 'TAP TO START';
+      connected = false;
+    }
+  }
+
+  async function endSession(){
+    setStatus('Disconnecting…');
+    try { if (localMicTrack) { localMicTrack.stop(); localMicTrack = null; } } catch(e){}
+    try { if (room) await room.disconnect(); } catch(e){}
+    room = null;
+  }
+})();
+</script>
+</body>
+</html>
