@@ -1,0 +1,18 @@
+[Unit]
+Description=Experience Wholesale — Carfax/AutoCheck Vision extractor (Gemini Flash → JSON)
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/expwholesale
+Environment=DATABASE_URL=postgresql://expuser:ExpWholesale2026!@127.0.0.1:5433/expwholesale
+Environment=CARFAX_VISION_DISABLED=0
+ExecStart=/opt/expwholesale/venv/bin/python /opt/expwholesale/carfax_vision_worker.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/var/log/carfax-vision-worker.log
+StandardError=append:/var/log/carfax-vision-worker.log
+
+[Install]
+WantedBy=multi-user.target
