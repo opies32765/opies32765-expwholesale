@@ -1,0 +1,28 @@
+Hybrid Filter Report
+====================
+
+Raw sims loaded: 817
+After heuristic filter: 733 (90%)
+After Hermes scoring (success): 733 (100%)
+Hermes scoring failed on: 0
+
+Score distribution:
+  3: 9
+  4: 9
+  5: 8
+  6: 88
+  7: 225
+  8: 387
+  9: 7
+
+>=7/10: 619 (recommended for SFT)
+>=8/10: 394
+>=9/10: 7
+
+Drop reasons:
+  no_ymm_in_opener: 83
+  too_short: 2
+  has_: 1
+  bill_too_short: 1
+
+Wall time: 677s

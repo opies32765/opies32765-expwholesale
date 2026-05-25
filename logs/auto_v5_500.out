@@ -1,0 +1,5 @@
+  File "<stdin>", line 17
+    transcripts += f"\n\n=== TRANSCRIPT {i}/{len(sample)} archetype={sim.get(\"archetype\")} partner={sim.get(\"partner_name\")} turns={sim.get(\"n_turns\")} ===\n"
+                                                                              ^
+SyntaxError: unexpected character after line continuation character
+/opt/expwholesale/auto_v5_500.sh: line 109: /opt/expwholesale/logs/sim_results_v5_coach.md: No such file or directory

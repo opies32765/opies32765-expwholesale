@@ -1246,7 +1246,13 @@ async def lsl_deals_booked(
     """OWNER-GATED. Returns LSL deals booked + profit stats for a period.
     period: "yesterday" | "today" | "last_7_days" | "last_30_days" |
             "this_month" | "last_month" | "this_quarter" | "last_quarter" |
-            "ytd" / "year_to_date" / "this_year" | "last_year" | "all_time".
+            "ytd" / "year_to_date" / "this_year" | "last_year" | "all_time" |
+            ISO date "2026-05-22" |
+            ISO range "2026-04-01:2026-04-24" (PREFER for multi-day questions) |
+            Month name "april" / "april_2026" / "april_mtd" (month-to-date) |
+            Weekday "friday" / "last_monday".
+    
+    For comparing periods, use RANGES — do NOT loop one day at a time.
 
     caller_name MUST be one of the four owner first names (Oscar, Gregg,
     Joe, Todd). If not in the whitelist, returns an error — do NOT
@@ -1266,26 +1272,123 @@ async def lsl_deals_booked(
     if not _os.path.exists(path):
         return {"error": "lsl crm not available"}
 
-    p = period.lower().strip().replace("-", "_").replace(" ", "_")
+    p_raw = period.lower().strip()
+    p = p_raw.replace("-", "_").replace(" ", "_")
+    # EDT-aware date boundaries (operator timezone) — fixes "yesterday" returning UTC-yesterday
+    from datetime import datetime as _dt, timedelta as _td
+    try:
+        from zoneinfo import ZoneInfo as _Z
+        _now_et = _dt.now(_Z("America/New_York"))
+    except Exception:
+        _now_et = _dt.now()
+    _today_iso     = _now_et.strftime("%Y-%m-%d")
+    _yesterday_iso = (_now_et - _td(days=1)).strftime("%Y-%m-%d")
+    _seven_iso     = (_now_et - _td(days=7)).strftime("%Y-%m-%d")
+    _thirty_iso    = (_now_et - _td(days=30)).strftime("%Y-%m-%d")
+    _ninety_iso    = (_now_et - _td(days=90)).strftime("%Y-%m-%d")
+    _month_start   = _now_et.replace(day=1).strftime("%Y-%m-%d")
+    _prev_month_end = _now_et.replace(day=1).strftime("%Y-%m-%d")
+    _prev_month_start = (_now_et.replace(day=1) - _td(days=1)).replace(day=1).strftime("%Y-%m-%d")
+    _year_start    = _now_et.replace(month=1, day=1).strftime("%Y-%m-%d")
+    _prev_year_start = _now_et.replace(year=_now_et.year-1, month=1, day=1).strftime("%Y-%m-%d")
+    _prev_year_end  = _now_et.replace(month=1, day=1).strftime("%Y-%m-%d")
+
     period_sql = {
-        "yesterday":     "sold_at >= date(\'now\', \'-1 day\') AND sold_at < date(\'now\')",
-        "today":         "sold_at >= date(\'now\')",
-        "last_7_days":   "sold_at >= date(\'now\', \'-7 days\')",
-        "last_30_days":  "sold_at >= date(\'now\', \'-30 days\')",
-        "this_month":    "sold_at >= date(\'now\', \'start of month\')",
-        "last_month":    ("sold_at >= date(\'now\', \'start of month\', \'-1 month\') "
-                          "AND sold_at < date(\'now\', \'start of month\')"),
-        "this_quarter":  "sold_at >= date(\'now\', \'-90 days\')",
-        "last_quarter":  "sold_at >= date(\'now\', \'-90 days\')",
-        "this_year":     "sold_at >= date(\'now\', \'start of year\')",
-        "ytd":           "sold_at >= date(\'now\', \'start of year\')",
-        "year_to_date":  "sold_at >= date(\'now\', \'start of year\')",
-        "last_year":     ("sold_at >= date(\'now\', \'start of year\', \'-1 year\') "
-                          "AND sold_at < date(\'now\', \'start of year\')"),
+        "yesterday":     f"sold_at >= '{_yesterday_iso}' AND sold_at < '{_today_iso}'",
+        "today":         f"sold_at >= '{_today_iso}'",
+        "last_7_days":   f"sold_at >= '{_seven_iso}'",
+        "last_30_days":  f"sold_at >= '{_thirty_iso}'",
+        "this_month":    f"sold_at >= '{_month_start}'",
+        "last_month":    f"sold_at >= '{_prev_month_start}' AND sold_at < '{_prev_month_end}'",
+        "this_quarter":  f"sold_at >= '{_ninety_iso}'",
+        "last_quarter":  f"sold_at >= '{_ninety_iso}'",
+        "this_year":     f"sold_at >= '{_year_start}'",
+        "ytd":           f"sold_at >= '{_year_start}'",
+        "year_to_date":  f"sold_at >= '{_year_start}'",
+        "last_year":     f"sold_at >= '{_prev_year_start}' AND sold_at < '{_prev_year_end}'",
         "all_time":      "1=1",
     }.get(p)
+
+    # ISO single date: "2026-05-22" (use p_raw before underscore-replace)
+    if not period_sql and len(p_raw) == 10 and p_raw[4] == "-" and p_raw[7] == "-":
+        try:
+            from datetime import datetime as _dt
+            _dt.strptime(p_raw, "%Y-%m-%d")
+            period_sql = f"sold_at >= '{p_raw}' AND sold_at < date('{p_raw}', '+1 day')"
+        except Exception:
+            pass
+
+    # ISO range: '2026-04-01:2026-04-24' or '2026-04-01_to_2026-04-24'
     if not period_sql:
-        return {"error": f"unsupported period {period!r}; use yesterday/today/last_7_days/last_30_days/this_month/last_month/this_year/ytd/last_year/last_quarter/all_time"}
+        _range_sep = None
+        for _sep in (":", "_to_", "..", " to "):
+            if _sep in p_raw:
+                _range_sep = _sep
+                break
+        if _range_sep:
+            try:
+                from datetime import datetime as _dt
+                _a, _b = p_raw.split(_range_sep, 1)
+                _a = _a.strip(); _b = _b.strip()
+                _dt.strptime(_a, "%Y-%m-%d"); _dt.strptime(_b, "%Y-%m-%d")
+                period_sql = f"sold_at >= '{_a}' AND sold_at < date('{_b}', '+1 day')"
+            except Exception:
+                pass
+
+    # Month name: 'april', 'april_2026', 'may_mtd' (1st through today), 'last_month'
+    if not period_sql:
+        _months = {"january":1, "february":2, "march":3, "april":4, "may":5, "june":6,
+                   "july":7, "august":8, "september":9, "october":10, "november":11, "december":12}
+        _mtd = p.endswith("_mtd")
+        _p_month = p.replace("_mtd", "")
+        # parse 'april' or 'april_2026'
+        _parts = _p_month.split("_")
+        _mname = _parts[0]
+        if _mname in _months:
+            from datetime import datetime as _dt
+            try:
+                from zoneinfo import ZoneInfo as _Z
+                _now = _dt.now(_Z("America/New_York"))
+            except Exception:
+                _now = _dt.now()
+            _m = _months[_mname]
+            _y = int(_parts[1]) if len(_parts) > 1 and _parts[1].isdigit() else _now.year
+            _start = f"{_y}-{_m:02d}-01"
+            if _mtd:
+                # Month-to-date "of THAT month" — cap day at MIN(today_day, last_day_of_month).
+                # When today is May 24 and user asks "april_mtd", return April 1 through April 24.
+                import calendar as _cal
+                _last_day_of_month = _cal.monthrange(_y, _m)[1]
+                _capped_day = min(_now.day, _last_day_of_month)
+                _end_iso = f"{_y}-{_m:02d}-{_capped_day:02d}"
+                period_sql = f"sold_at >= '{_start}' AND sold_at < date('{_end_iso}', '+1 day')"
+            else:
+                _next_m = _m + 1 if _m < 12 else 1
+                _next_y = _y if _m < 12 else _y + 1
+                _end = f"{_next_y}-{_next_m:02d}-01"
+                period_sql = f"sold_at >= '{_start}' AND sold_at < '{_end}'"
+
+    # Weekday name: "friday", "last_friday", "this_friday" → most recent matching day
+    if not period_sql:
+        _weekday_map = {"monday":0, "tuesday":1, "wednesday":2, "thursday":3,
+                        "friday":4, "saturday":5, "sunday":6}
+        _p_norm = p.replace("last_", "").replace("this_", "")
+        if _p_norm in _weekday_map:
+            from datetime import datetime as _dt, timedelta as _td
+            try:
+                from zoneinfo import ZoneInfo as _Z
+                _now = _dt.now(_Z("America/New_York"))
+            except Exception:
+                _now = _dt.now()
+            target_wd = _weekday_map[_p_norm]
+            days_back = (_now.weekday() - target_wd) % 7
+            if days_back == 0:
+                days_back = 7   # "friday" said on Friday means LAST Friday
+            target = (_now - _td(days=days_back)).strftime("%Y-%m-%d")
+            period_sql = f"sold_at >= '{target}' AND sold_at < date('{target}', '+1 day')"
+
+    if not period_sql:
+        return {"error": f"unsupported period {period!r}; supported: yesterday/today/last_7_days/last_30_days/this_month/last_month/this_year/ytd/last_year/last_quarter/all_time, ISO date '2026-05-22', ISO range '2026-04-01:2026-04-24', month 'april' / 'april_2026' / 'april_mtd', weekday 'friday'/'last_monday'"}
 
     try:
         c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
@@ -1538,14 +1641,30 @@ async def get_bid(bid_id: int) -> dict:
         if out.get("carfax_damage"):    damage_flags.append("Carfax shows damage")
         if out.get("autocheck_damage"): damage_flags.append("AutoCheck shows damage")
         if out.get("damage_signal"):    damage_flags.append(out["damage_signal"])
-        # Discrepancies — odometer mismatch between bid and Carfax
+        # Discrepancies — REAL odometer flag is when stated miles are LESS
+        # than Carfax (possible rollback). Stated > Carfax is normal
+        # accumulation since the last record — NOT a discrepancy.
+        # Per operator 2026-05-24.
         if out.get("mileage") and out.get("miles_carfax"):
             try:
-                gap = abs(int(out["mileage"]) - int(out["miles_carfax"]))
-                if gap > 500:
+                bid_mi = int(out["mileage"])
+                cfx_mi = int(out["miles_carfax"])
+                if bid_mi < cfx_mi - 500:
                     damage_flags.append(
-                        f"odometer mismatch: bid={out['mileage']:,} vs carfax={out['miles_carfax']:,}"
+                        f"odometer rollback risk: bid={bid_mi:,} BELOW carfax={cfx_mi:,}"
                     )
+            except Exception:
+                pass
+        # Suppress miles_carfax exposure when stated > carfax (normal accumulation).
+        # Otherwise Bill re-derives a false "discrepancy" conclusion from the raw field.
+        # Per operator 2026-05-24.
+        _bid_mi = out.get("mileage")
+        _cfx_mi = out.get("miles_carfax")
+        _expose_carfax_miles = True
+        if _bid_mi and _cfx_mi:
+            try:
+                if int(_bid_mi) >= int(_cfx_mi) - 500:
+                    _expose_carfax_miles = False
             except Exception:
                 pass
         out["damage_audit"] = {
@@ -1554,9 +1673,11 @@ async def get_bid(bid_id: int) -> dict:
             "autocheck_damage": bool(out.get("autocheck_damage")),
             "damage_signal":    out.get("damage_signal"),
             "miles_bid":        out.get("mileage"),
-            "miles_carfax":     out.get("miles_carfax"),
+            **({"miles_carfax": out.get("miles_carfax")} if _expose_carfax_miles else {}),
             "carfax_share_url": out.get("carfax_share_url"),
         }
+        if not _expose_carfax_miles:
+            out.pop("miles_carfax", None)
         # Extract options + Monroney sticker text from raw_json
         _ip_raw = out.get("ipacket_raw_json") or {}
         _ip_options = _ip_raw.get("options") or []
@@ -2666,6 +2787,106 @@ async def lsl_query(
             "customer_history | dealer_intel | service_requests | "
             "payments | appraisal_history | customer_lookup | "
             "recent_bids | top_grosses | lookup_sale"}
+
+
+
+
+@mcp.tool()
+async def send_partner_bid_card(
+    bid_id: int,
+    partner_phone: str,
+    partner_name: str = "",
+    offer_amount: float = 0,
+    note: str = "",
+) -> dict:
+    """Send the bid card summary to a partner dealer via SMS and record
+    the verbal interest. Used by the outbound voice bot when a partner
+    expresses interest on a call.
+
+    Composes an SMS with year/make/model/miles/color/MMR/target buy and
+    a link to the full bid card. Fires via the existing Twilio number
+    (+17542471123). Also inserts a row into partner_bid_requests so the
+    offer shows up on the EW dashboard."""
+    import os as _os
+    sid   = _os.environ.get("TWILIO_ACCOUNT_SID")
+    tok   = _os.environ.get("TWILIO_AUTH_TOKEN")
+    frm   = _os.environ.get("TWILIO_PHONE")
+    if not (sid and tok and frm):
+        return {"ok": False, "error": "twilio creds missing"}
+    if not partner_phone or not bid_id:
+        return {"ok": False, "error": "partner_phone and bid_id required"}
+
+    # Normalize phone to E.164
+    p = "".join(c for c in str(partner_phone) if c.isdigit() or c == "+")
+    if not p.startswith("+"):
+        p = "+1" + p.lstrip("1")
+
+    try:
+        bid = await get_bid(int(bid_id))
+        if bid.get("error"):
+            return {"ok": False, "error": f"bid lookup: {bid['error']}"}
+    except Exception as e:
+        return {"ok": False, "error": f"bid lookup failed: {e}"}
+
+    # Compose SMS
+    yr = bid.get("year") or ""
+    mk = bid.get("make") or ""
+    md = bid.get("model") or ""
+    tr = bid.get("trim") or ""
+    mi = bid.get("mileage") or 0
+    color = bid.get("color") or ""
+    mmr = bid.get("vauto_mmr")
+    target = bid.get("ai_price") or bid.get("vauto_rbook")
+    sticker = (bid.get("ipacket") or {}).get("total_msrp")
+
+    lines = [f"EW: {yr} {mk} {md}".strip() + (f" {tr}" if tr else "")]
+    if mi:     lines[0] += f" / {int(mi):,} mi"
+    if color:  lines[0] += f" / {color}"
+    if sticker:lines.append(f"MSRP ${int(sticker):,}")
+    if mmr:    lines.append(f"MMR ${int(mmr):,}")
+    if target: lines.append(f"Target ${int(target):,}")
+    if offer_amount and offer_amount > 0:
+        lines.append(f"YOUR INTEREST: ${int(offer_amount):,}")
+    if note:
+        lines.append(note[:120])
+    lines.append(f"Full card: https://experience-wholesale.net/bid/{int(bid_id)}")
+    body = "\n".join(lines)
+
+    try:
+        from twilio.rest import Client
+        client = Client(sid, tok)
+        msg = client.messages.create(to=p, from_=frm, body=body)
+        log.info(f"send_partner_bid_card sms_sid={msg.sid} to={p} bid={bid_id}")
+    except Exception as e:
+        log.exception("twilio sms failed")
+        return {"ok": False, "error": f"twilio: {type(e).__name__}: {e}",
+                "body_would_have_sent": body}
+
+    # Record the verbal offer in partner_bid_requests (best-effort)
+    recorded = False
+    try:
+        import psycopg2, psycopg2.extras
+        db_url = _os.environ.get("DATABASE_URL",
+            "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+        with psycopg2.connect(db_url) as c, c.cursor() as cur:
+            cur.execute("""INSERT INTO partner_bid_requests
+                (bid_id, target_price, submitted_at)
+                VALUES (%s, %s, NOW()) RETURNING id""",
+                (int(bid_id), float(offer_amount) if offer_amount else None))
+            row_id = cur.fetchone()[0]
+            c.commit()
+            recorded = True
+            log.info(f"partner_bid_requests row {row_id} inserted")
+    except Exception as e:
+        log.warning(f"partner_bid_requests insert failed: {e}")
+
+    return {
+        "ok": True,
+        "sms_sid": msg.sid,
+        "partner_phone": p,
+        "sms_body": body,
+        "offer_recorded": recorded,
+    }
 
 
 @mcp.tool()
