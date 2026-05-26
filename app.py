@@ -2545,7 +2545,9 @@ def dashboard():
             cur.execute("""SELECT id, name, portal_slug, buy_profile
                              FROM dealers
                             WHERE portal_slug IS NOT NULL
-                              AND buy_profile IS NOT NULL""")
+                              AND buy_profile IS NOT NULL
+                              AND portal_slug != ALL(%s)""",
+                        (list(BUY_PROFILE_MATCH_EXCLUDED_SLUGS),))
         _dealers_with_profiles = [dict(r) for r in cur.fetchall()]
         _vins_by_dealer = _load_dealer_vins_owned(cur)
         for _b in bids:
@@ -6906,7 +6908,9 @@ def api_bids():
         else:
             cur.execute("""SELECT id, name, portal_slug, buy_profile
                              FROM dealers
-                            WHERE portal_slug IS NOT NULL AND buy_profile IS NOT NULL""")
+                            WHERE portal_slug IS NOT NULL AND buy_profile IS NOT NULL
+                              AND portal_slug != ALL(%s)""",
+                        (list(BUY_PROFILE_MATCH_EXCLUDED_SLUGS),))
         _ds_api = [dict(r) for r in cur.fetchall()]
         _vbd_api = _load_dealer_vins_owned(cur)
         for _b in bids:
@@ -17255,6 +17259,11 @@ def _bp_resolve_model_entry(models, bid_model):
 # if a specific dealer's profile produces noise.
 BUY_PROFILE_MATCH_ENABLED_SLUGS = ()
 
+# YMMT_MATCH_EXCLUDE_2026_05_26: per-dealer match-routing exclude list. Slugs
+# here are skipped in bid-card buyer-match AND partner SMS push gating.
+# Reason: ECT marketplace platform is a re-seller, not a buyer.
+BUY_PROFILE_MATCH_EXCLUDED_SLUGS = ('ect',)
+
 def _bp_score(bid, dealer_id, profile, vins_owned=None):
     """Score one bid against one dealer's buy_profile JSONB.
     vins_owned: optional set/list of UPPER VINs the dealer currently has on lot.
@@ -17365,32 +17374,46 @@ def _bp_score(bid, dealer_id, profile, vins_owned=None):
 
     # YMMT_MATCH_2026_05_26: velocity scoring uses TRIM entry when available
     # (more accurate signal) — falls back to model-level for untagged bids.
+    # Reason text always surfaces "X active, Y sold @ Zd" so operator sees
+    # the truth at a glance — no more "no recent sales" with no context.
     v_src = trim_entry or model_entry
     v_label = f"{model.title()} {ymmt_trim}" if trim_entry else model.title()
     v_colors = v_src.get('colors') or {}
     mc = v_colors.get(color) if color else None
     velocity_reason = None
+    _active_n = v_src.get('active_n') or 0
+    _sold_n = v_src.get('sold_n') or 0
+    _days = v_src.get('avg_days_on_lot') or 0
+    _stock = f"{_active_n} active"
 
     if mc and (mc.get('sold_n') or 0) >= 2 and 0 < (mc.get('avg_days_on_lot') or 0) < 10:
         score += 30
         velocity_reason = (f"{make.title()} {v_label} {color.title()}: "
-                           f"{mc['sold_n']} sold @ {mc['avg_days_on_lot']}d (color prime)")
-    elif (v_src.get('sold_n') or 0) >= 2 \
-            and 0 < (v_src.get('avg_days_on_lot') or 0) < 10:
+                           f"{_stock}, {mc['sold_n']} sold @ {mc['avg_days_on_lot']}d (color prime)")
+    elif _sold_n >= 2 and 0 < _days < 10:
         score += 25
-        velocity_reason = (f"{make.title()} {v_label}: "
-                           f"{v_src['sold_n']} sold @ {v_src['avg_days_on_lot']}d "
+        velocity_reason = (f"{make.title()} {v_label}: {_stock}, "
+                           f"{_sold_n} sold @ {_days}d "
                            f"({'trim' if trim_entry else 'model'} prime)")
-    elif (v_src.get('sold_n') or 0) >= 2 \
-            and 0 < (v_src.get('avg_days_on_lot') or 0) < 20:
+    elif _sold_n >= 2 and 0 < _days < 20:
         score += 15
-        velocity_reason = (f"{make.title()} {v_label}: "
-                           f"{v_src['sold_n']} sold @ {v_src['avg_days_on_lot']}d")
-    elif (v_src.get('sold_n') or 0) >= 1 \
-            and 0 < (v_src.get('avg_days_on_lot') or 0) < 45:
+        velocity_reason = (f"{make.title()} {v_label}: {_stock}, "
+                           f"{_sold_n} sold @ {_days}d")
+    elif _sold_n >= 1 and 0 < _days < 45:
         score += 5
-        velocity_reason = (f"{make.title()} {v_label}: "
-                           f"{v_src['sold_n']} sold @ {v_src['avg_days_on_lot']}d")
+        velocity_reason = (f"{make.title()} {v_label}: {_stock}, "
+                           f"{_sold_n} sold @ {_days}d")
+    elif _sold_n >= 1:
+        # Has prior sales but slow DOL — no score bonus, but mention it
+        velocity_reason = (f"{make.title()} {v_label}: {_stock}, "
+                           f"{_sold_n} sold @ {_days}d (slow)")
+    elif _active_n > 0:
+        # Stocks the variant but has not sold one — honest fallback
+        velocity_reason = f"{make.title()} {v_label}: {_stock}, 0 sold"
+    else:
+        # Trim/model line in profile but currently 0 active + 0 sold (stale).
+        # Surface the zero counts so the operator sees the truth.
+        velocity_reason = f"{make.title()} {v_label}: 0 active, 0 sold"
     # else: model in history but no sale yet (only active stock) — no velocity bonus
 
     # Price reasonableness — use TRIM avg_price when available, else model
@@ -17418,7 +17441,7 @@ def _bp_score(bid, dealer_id, profile, vins_owned=None):
             score -= 5
 
     return score, (velocity_reason or
-                   f"{make.title()} {(ymmt_trim or model).title() if ymmt_trim else model.title()} (no recent sales)")
+                   f"{make.title()} {v_label} (profile match, no activity)")
 
 
 def _bp_tier(score):

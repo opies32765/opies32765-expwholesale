@@ -1514,7 +1514,8 @@ def _push_bid_to_subscribed_partners(bid_id: int) -> None:
                        buy_profile
                   FROM dealers
                  WHERE receive_inbound_pushes = TRUE AND active = TRUE
-            """)
+                   AND portal_slug != ALL(%s)
+            """, (['ect'],))  # YMMT_MATCH_EXCLUDE_2026_05_26: ECT excluded from SMS push too
             subscribers = cur.fetchall()
             if not subscribers:
                 return
