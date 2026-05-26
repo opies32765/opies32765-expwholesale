@@ -1270,11 +1270,36 @@ def get_valuation_context(
             return ('accutrade:err', f'{type(e).__name__}: {e}')
 
     from concurrent.futures import ThreadPoolExecutor as _TPE
+    from concurrent.futures import wait as _futwait, FIRST_EXCEPTION as _FE
     _workers = [_w_live, _w_partner_inv, _w_prior_recent, _w_lsl_recent,
                 _w_mmr_cache, _w_prior_full, _w_lsl_full, _w_accutrade,
                 _w_lsl_vs_mmr]
-    with _TPE(max_workers=len(_workers)) as _ex:
-        results = list(_ex.map(lambda fn: fn(), _workers))
+    # HARD 8s budget: any worker that hasn't returned by then is abandoned
+    # (returns ("<key>:timeout", None) so the rest of the pipeline still
+    # gets the data that DID come back). Fixes the 60s "stacked timeouts"
+    # on cold cache misses (e.g. 2026-05-25 Toyota Highlander Platinum).
+    import time as _tperf
+    _t_fanout = _tperf.monotonic()
+    _ex = _TPE(max_workers=len(_workers))
+    _futs = {_ex.submit(fn): fn for fn in _workers}
+    done, not_done = _futwait(_futs.keys(), timeout=8.0)
+    results = []
+    for f in done:
+        try:
+            results.append(f.result())
+        except Exception as e:
+            results.append(("worker_exception", f"{type(e).__name__}: {e}"))
+    for f in not_done:
+        # Worker didn't finish in 8s. Try to cancel; collect a sentinel.
+        worker_name = getattr(_futs[f], "__name__", "?")
+        try:
+            f.cancel()
+        except Exception:
+            pass
+        results.append((f"{worker_name}:timeout", None))
+    _ex.shutdown(wait=False)
+    _elapsed_ms = int((_tperf.monotonic() - _t_fanout) * 1000)
+    out.setdefault("errors", []).append(f"fanout_elapsed_ms={_elapsed_ms}, abandoned={len(not_done)}")
     for key, value in results:
         if ':err' in key:
             out['errors'].append(f'{key}: {value}')

@@ -381,3 +381,234 @@ def reset_history():
     if sid and sid in _HISTORY:
         del _HISTORY[sid]
     return jsonify({"ok": True})
+
+
+# ─── Carvana worker pool endpoints (added 2026-05-25) ─────────────────────
+
+@bp.route("/api/carvana/poll", methods=["GET", "POST"])
+def carvana_poll():
+    """Worker pulls the next queued job. Atomic SELECT FOR UPDATE SKIP LOCKED.
+    Returns {} if no work, or {job_id, vin, miles}.
+
+    Auth: bearer == MCP_BEARER_TOKEN or special CARVANA_WORKER_TOKEN.
+    Worker passes ?worker=<id> so we record who claimed it.
+    """
+    import os as _os, psycopg2, psycopg2.extras
+    bearer = (request.headers.get("Authorization", "")
+              .replace("Bearer ", "").strip())
+    expected = _os.environ.get("MCP_BEARER_TOKEN", "")
+    worker_token = _os.environ.get("CARVANA_WORKER_TOKEN", "")
+    if not bearer or bearer not in (expected, worker_token) or not expected:
+        return jsonify({"error": "unauthorized"}), 401
+    worker = (request.args.get("worker", "") or
+              request.json.get("worker", "")
+              if request.is_json else request.args.get("worker", ""))[:40]
+    db_url = _os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    try:
+        with psycopg2.connect(db_url, connect_timeout=3) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Expire stale claims (>30s old, still 'claimed')
+                cur.execute("""
+                    UPDATE carvana_queue
+                       SET status = 'queued', claimed_by = NULL, claimed_at = NULL
+                     WHERE status = 'claimed'
+                       AND claimed_at < NOW() - INTERVAL '30 seconds'
+                """)
+                # Claim oldest queued job
+                cur.execute("""
+                    UPDATE carvana_queue
+                       SET status = 'claimed', claimed_by = %s, claimed_at = NOW()
+                     WHERE id = (
+                         SELECT id FROM carvana_queue
+                          WHERE status = 'queued'
+                            AND requested_at > NOW() - INTERVAL '5 minutes'
+                          ORDER BY requested_at ASC
+                          FOR UPDATE SKIP LOCKED LIMIT 1
+                     )
+                     RETURNING id, vin, miles
+                """, (worker or "anon",))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({})
+                return jsonify({
+                    "job_id": row["id"],
+                    "vin": row["vin"],
+                    "miles": row["miles"],
+                })
+    except Exception as e:
+        log.exception("carvana_poll failed")
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@bp.route("/api/carvana/result", methods=["POST"])
+def carvana_result():
+    """Worker posts back result.
+    Body: {job_id, status: 'done'|'failed'|'no_offer',
+           offer_amount?, offer_expires?, raw?, error?}
+    """
+    import os as _os, psycopg2, json as _json
+    bearer = (request.headers.get("Authorization", "")
+              .replace("Bearer ", "").strip())
+    expected = _os.environ.get("MCP_BEARER_TOKEN", "")
+    worker_token = _os.environ.get("CARVANA_WORKER_TOKEN", "")
+    if not bearer or bearer not in (expected, worker_token) or not expected:
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    job_id = data.get("job_id")
+    status = data.get("status", "done")
+    if not job_id or status not in ("done", "failed", "no_offer"):
+        return jsonify({"error": "bad payload"}), 400
+    db_url = _os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    try:
+        with psycopg2.connect(db_url, connect_timeout=3) as c:
+            with c.cursor() as cur:
+                cur.execute("""
+                    UPDATE carvana_queue
+                       SET status = %s,
+                           offer_amount = %s,
+                           offer_expires = %s,
+                           raw_response = %s,
+                           error_msg = %s,
+                           completed_at = NOW()
+                     WHERE id = %s
+                     RETURNING vin, miles
+                """, (
+                    status,
+                    data.get("offer_amount"),
+                    data.get("offer_expires"),
+                    _json.dumps(data.get("raw")) if data.get("raw") else None,
+                    data.get("error"),
+                    int(job_id),
+                ))
+                row = cur.fetchone()
+                # If done, also write to cache
+                if row and status == "done" and data.get("offer_amount"):
+                    cur.execute("""
+                        INSERT INTO carvana_offer_cache
+                          (vin, miles_bucket, offer_amount, offer_expires, raw_response)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (vin, miles_bucket) DO UPDATE
+                          SET offer_amount=EXCLUDED.offer_amount,
+                              offer_expires=EXCLUDED.offer_expires,
+                              cached_at=NOW(),
+                              raw_response=EXCLUDED.raw_response
+                    """, (row[0], int(row[1] or 0),
+                          data.get("offer_amount"),
+                          data.get("offer_expires"),
+                          _json.dumps(data.get("raw")) if data.get("raw") else None))
+        return jsonify({"ok": True})
+    except Exception as e:
+        log.exception("carvana_result failed")
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+# ─── end Carvana worker endpoints ─────────────────────────────────────────
+
+
+# ─── AutoTrader worker pool endpoints (added 2026-05-25) ──────────────────
+
+@bp.route("/api/autotrader/poll", methods=["GET", "POST"])
+def autotrader_poll():
+    """VM worker pulls the next queued AutoTrader scrape job."""
+    import os as _os, psycopg2, psycopg2.extras
+    bearer = (request.headers.get("Authorization", "")
+              .replace("Bearer ", "").strip())
+    expected = _os.environ.get("MCP_BEARER_TOKEN", "")
+    worker_token = _os.environ.get("CARVANA_WORKER_TOKEN", "")  # reuse same token
+    if not bearer or bearer not in (expected, worker_token) or not expected:
+        return jsonify({"error": "unauthorized"}), 401
+    worker = (request.args.get("worker", "") or "")[:40]
+    db_url = _os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    try:
+        with psycopg2.connect(db_url, connect_timeout=3) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    UPDATE autotrader_queue
+                       SET status = 'queued', claimed_by = NULL, claimed_at = NULL
+                     WHERE status = 'claimed'
+                       AND claimed_at < NOW() - INTERVAL '60 seconds'
+                """)
+                cur.execute("""
+                    UPDATE autotrader_queue
+                       SET status = 'claimed', claimed_by = %s, claimed_at = NOW()
+                     WHERE id = (
+                         SELECT id FROM autotrader_queue
+                          WHERE status = 'queued'
+                            AND requested_at > NOW() - INTERVAL '5 minutes'
+                          ORDER BY requested_at ASC
+                          FOR UPDATE SKIP LOCKED LIMIT 1
+                     )
+                     RETURNING id, year, make, model, trim, miles
+                """, (worker or "anon",))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({})
+                return jsonify({
+                    "job_id": row["id"], "year": row["year"],
+                    "make": row["make"], "model": row["model"],
+                    "trim": row["trim"] or "", "miles": row["miles"] or 0,
+                })
+    except Exception as e:
+        log.exception("autotrader_poll failed")
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@bp.route("/api/autotrader/result", methods=["POST"])
+def autotrader_result():
+    """VM posts back result: {job_id, status, found_vin?, found_trim?, raw?, error?}"""
+    import os as _os, psycopg2, json as _json
+    bearer = (request.headers.get("Authorization", "")
+              .replace("Bearer ", "").strip())
+    expected = _os.environ.get("MCP_BEARER_TOKEN", "")
+    worker_token = _os.environ.get("CARVANA_WORKER_TOKEN", "")
+    if not bearer or bearer not in (expected, worker_token) or not expected:
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    job_id = data.get("job_id")
+    status = data.get("status", "done")
+    if not job_id or status not in ("done", "failed", "no_match"):
+        return jsonify({"error": "bad payload"}), 400
+    db_url = _os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    try:
+        with psycopg2.connect(db_url, connect_timeout=3) as c:
+            with c.cursor() as cur:
+                cur.execute("""
+                    UPDATE autotrader_queue
+                       SET status = %s,
+                           found_vin = %s,
+                           found_trim = %s,
+                           found_year = %s,
+                           raw_response = %s,
+                           error_msg = %s,
+                           completed_at = NOW()
+                     WHERE id = %s
+                     RETURNING year, make, model, trim
+                """, (
+                    status, data.get("found_vin"),
+                    data.get("found_trim"), data.get("found_year"),
+                    _json.dumps(data.get("raw")) if data.get("raw") else None,
+                    data.get("error"), int(job_id),
+                ))
+                row = cur.fetchone()
+                if row and status == "done" and data.get("found_vin"):
+                    cur.execute("""
+                        INSERT INTO autotrader_vin_cache
+                          (year, make, model, trim_norm, vin, actual_trim)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (year, make, model, trim_norm) DO UPDATE
+                          SET vin = EXCLUDED.vin,
+                              actual_trim = EXCLUDED.actual_trim,
+                              cached_at = NOW()
+                    """, (row[0], row[1], row[2],
+                          (row[3] or "").strip().lower(),
+                          data.get("found_vin"),
+                          data.get("found_trim")))
+        return jsonify({"ok": True})
+    except Exception as e:
+        log.exception("autotrader_result failed")
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+# ─── end AutoTrader worker endpoints ──────────────────────────────────────

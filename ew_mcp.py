@@ -923,10 +923,32 @@ async def get_vehicle_valuation(
         _va._fetch_live_vauto_for_ymm = _live_or_cache
         try:
             _ts_a = _t.monotonic()
-            ctx = get_valuation_context(
-                year=year, make=make, model=model,
-                trim=trim, miles=miles, msrp=msrp,
-            )
+            # HARD 15s CAP on the synchronous valuation pipeline. Slow upstream
+            # APIs (AccuTrade, rBook, MMR) can stack timeouts past 60s on cold
+            # cache misses. Better to return what we have than block Bill.
+            import asyncio as _aio
+            try:
+                ctx = await _aio.wait_for(
+                    _aio.to_thread(
+                        get_valuation_context,
+                        year=year, make=make, model=model,
+                        trim=trim, miles=miles, msrp=msrp,
+                    ),
+                    timeout=15.0,
+                )
+            except _aio.TimeoutError:
+                log.warning(f"get_valuation_context HARD TIMEOUT @15s for {year} {make} {model} trim={trim}")
+                return {
+                    "warning": "upstream comps slow on this vehicle - returning limited data",
+                    "year": year, "make": make, "model": model, "trim": trim,
+                    "miles": miles, "comps_count": {"live_rbook": 0, "lsl_history": 0,
+                        "mmr_recent": 0, "prior_bids": 0},
+                    "accutrade_30day_all": None, "accutrade_30day_trim": None,
+                    "live_mmr": None, "live_rbook": None,
+                    "lsl_30day": {"deals": [], "n": 0},
+                    "elapsed_ms": 15000, "timed_out": True,
+                    "advice": "no fresh comps came back in 15s. Tell operator AccuTrade/rBook is slow on this YMM right now. Suggest a quick gut number based on common knowledge or ask them to retry in a minute.",
+                }
             log.info(f"[TIMING] get_valuation_context: {(_t.monotonic()-_ts_a)*1000:.0f}ms")
         finally:
             _va._fetch_live_vauto_for_ymm = _orig_live
@@ -2789,6 +2811,913 @@ async def lsl_query(
             "recent_bids | top_grosses | lookup_sale"}
 
 
+
+
+
+
+
+
+
+
+
+# ─── carvana_offer (added 2026-05-25) ──────────────────────────────────────
+
+def _carvana_cache_get(vin: str, miles: int) -> Optional[dict]:
+    """Return cached offer if <24h old."""
+    import psycopg2, psycopg2.extras, os as _os
+    try:
+        with psycopg2.connect(_os.environ.get("DATABASE_URL",
+            "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale"),
+            connect_timeout=2) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT vin, miles_bucket, offer_amount, offer_expires,
+                           cached_at, raw_response
+                      FROM carvana_offer_cache
+                     WHERE vin = %s
+                       AND ABS(miles_bucket - %s) <= 2500
+                       AND cached_at > NOW() - INTERVAL '24 hours'
+                     ORDER BY cached_at DESC LIMIT 1
+                """, (vin.upper(), int(miles or 0)))
+                row = cur.fetchone()
+                if row:
+                    return dict(row)
+    except Exception as e:
+        log.warning(f"_carvana_cache_get: {e}")
+    return None
+
+
+def _carvana_cache_put(vin: str, miles: int, offer_amount, offer_expires, raw) -> None:
+    import psycopg2, json, os as _os
+    try:
+        with psycopg2.connect(_os.environ.get("DATABASE_URL",
+            "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale"),
+            connect_timeout=2) as c:
+            with c.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO carvana_offer_cache
+                      (vin, miles_bucket, offer_amount, offer_expires, raw_response)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (vin, miles_bucket) DO UPDATE
+                      SET offer_amount=EXCLUDED.offer_amount,
+                          offer_expires=EXCLUDED.offer_expires,
+                          cached_at=NOW(),
+                          raw_response=EXCLUDED.raw_response
+                """, (vin.upper(), int(miles or 0), offer_amount, offer_expires,
+                      json.dumps(raw) if raw else None))
+    except Exception as e:
+        log.warning(f"_carvana_cache_put: {e}")
+
+
+@mcp.tool()
+async def carvana_offer(vin: str, miles: int = 0) -> dict:
+    """Carvana instant-offer for a specific VIN. Uses our verifier-VM-pool
+    workers to bypass Cloudflare via real-browser scrape of value.carvana.com.
+
+    Hot path: 24h cache hit returns in <100ms.
+    Cold path: enqueue job, poll queue up to 8s for worker response.
+
+    Returns: {vin, offer_amount, offer_expires, status, source, elapsed_ms}
+    status is one of: 'cached', 'fresh', 'pending' (no worker picked it up),
+                      'failed' (worker error), 'no_offer' (Carvana declined)
+    """
+    import time as _t, asyncio as _aio
+    import psycopg2, psycopg2.extras, os as _os
+    t0 = _t.monotonic()
+    vin_u = (vin or "").upper().strip()
+    if len(vin_u) != 17:
+        return {"error": "invalid VIN length", "vin": vin_u}
+
+    # Cache check first
+    cached = _carvana_cache_get(vin_u, miles)
+    if cached:
+        return {
+            "vin": vin_u,
+            "offer_amount": float(cached["offer_amount"]) if cached.get("offer_amount") else None,
+            "offer_expires": str(cached["offer_expires"]) if cached.get("offer_expires") else None,
+            "status": "cached", "source": "carvana",
+            "elapsed_ms": int((_t.monotonic() - t0) * 1000),
+        }
+
+    db_url = _os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    # Enqueue
+    job_id = None
+    try:
+        with psycopg2.connect(db_url, connect_timeout=2) as c:
+            with c.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO carvana_queue (vin, miles, status)
+                    VALUES (%s, %s, 'queued')
+                    RETURNING id
+                """, (vin_u, int(miles or 0)))
+                job_id = cur.fetchone()[0]
+    except Exception as e:
+        return {"error": f"enqueue failed: {type(e).__name__}: {e}",
+                "elapsed_ms": int((_t.monotonic() - t0) * 1000)}
+
+    # Poll for result up to 8 seconds
+    deadline = _t.monotonic() + 8.0
+    while _t.monotonic() < deadline:
+        await _aio.sleep(0.4)
+        try:
+            with psycopg2.connect(db_url, connect_timeout=2) as c:
+                with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT status, offer_amount, offer_expires, error_msg
+                          FROM carvana_queue WHERE id = %s
+                    """, (job_id,))
+                    row = cur.fetchone()
+                    if row and row["status"] in ("done", "failed", "no_offer"):
+                        if row["status"] == "done":
+                            return {
+                                "vin": vin_u,
+                                "offer_amount": float(row["offer_amount"]) if row["offer_amount"] else None,
+                                "offer_expires": str(row["offer_expires"]) if row["offer_expires"] else None,
+                                "status": "fresh", "source": "carvana",
+                                "job_id": job_id,
+                                "elapsed_ms": int((_t.monotonic() - t0) * 1000),
+                            }
+                        return {
+                            "vin": vin_u, "status": row["status"],
+                            "error": row.get("error_msg"),
+                            "elapsed_ms": int((_t.monotonic() - t0) * 1000),
+                        }
+        except Exception:
+            pass
+
+    return {
+        "vin": vin_u, "status": "pending", "job_id": job_id,
+        "warning": "no worker picked up in 8s",
+        "elapsed_ms": int((_t.monotonic() - t0) * 1000),
+    }
+
+# ─── end carvana_offer ─────────────────────────────────────────────────────
+
+@mcp.tool()
+async def find_vin_for_ymm(
+    year: int,
+    make: str,
+    model: str,
+    trim: str = "",
+    miles: int = 0,
+) -> dict:
+    """Discover a VIN for a YMM you don't have in your system. Use when
+    valuation_precheck returned confidence='none' so you can drive a live
+    vAuto/AccuTrade lookup. Tries our DB first (fast), then AutoTrader
+    scrape (slower, ~2-3s).
+
+    Returns: {vin, source, vehicle, vehicle_year, found, elapsed_ms}
+    source is one of: 'db_bids', 'db_deals', 'autotrader', or null if not found.
+    """
+    import psycopg2, psycopg2.extras, os as _os, sqlite3, time as _t
+    import urllib.request, urllib.error, re as _re
+    t0 = _t.monotonic()
+    make_u = (make or "").upper().strip()
+    model_u = (model or "").upper().strip()
+    out = {"vin": None, "source": None, "vehicle": None, "vehicle_year": None,
+           "found": False, "elapsed_ms": 0,
+           "trim_match": None, "actual_trim": None}
+
+    # ── 1. DB scan: closest-mile match from bids
+    try:
+        db_url = _os.environ.get("DATABASE_URL",
+            "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+        with psycopg2.connect(db_url, connect_timeout=2) as c:
+            with c.cursor() as cur:
+                # TRIM-PREFER 2026-05-25 — try exact trim match first,
+                # fall back to any trim if nothing found.
+                trim_norm = (trim or "").strip().lower()
+                if trim_norm:
+                    cur.execute("""
+                        SELECT vin, year, make, model, trim, mileage
+                          FROM bids
+                         WHERE year = %s
+                           AND UPPER(make)  = %s
+                           AND UPPER(model) LIKE %s
+                           AND LOWER(COALESCE(trim, '')) LIKE %s
+                           AND vin IS NOT NULL
+                           AND length(vin) = 17
+                         ORDER BY ABS(COALESCE(mileage, 0) - %s) ASC,
+                                  created_at DESC
+                         LIMIT 1
+                    """, (year, make_u, f"%{model_u}%", f"%{trim_norm}%",
+                          int(miles or 0)))
+                    row = cur.fetchone()
+                else:
+                    row = None
+                if not row:
+                    cur.execute("""
+                        SELECT vin, year, make, model, trim, mileage
+                          FROM bids
+                         WHERE year = %s
+                           AND UPPER(make)  = %s
+                           AND UPPER(model) LIKE %s
+                           AND vin IS NOT NULL
+                           AND length(vin) = 17
+                         ORDER BY ABS(COALESCE(mileage, 0) - %s) ASC,
+                                  created_at DESC
+                         LIMIT 1
+                    """, (year, make_u, f"%{model_u}%", int(miles or 0)))
+                    row = cur.fetchone()
+                if row and row[0]:
+                    out["vin"] = row[0]
+                    out["source"] = "db_bids"
+                    out["vehicle"] = f"{row[1]} {row[2]} {row[3]} {row[4] or ''}".strip()
+                    out["vehicle_year"] = row[1]
+                    out["actual_trim"] = row[4]
+                    t_req = (trim or "").strip().lower()
+                    t_got = (row[4] or "").strip().lower()
+                    if t_req and t_got and t_req in t_got:
+                        out["trim_match"] = "exact"
+                    elif t_req:
+                        out["trim_match"] = "fallthrough"
+                    out["found"] = True
+                    out["elapsed_ms"] = int((_t.monotonic() - t0) * 1000)
+                    return out
+    except Exception as e:
+        out.setdefault("errors", []).append(f"db_bids: {type(e).__name__}: {e}")
+
+    # ── 1.5 dealer_inventory (live partner-lot VINs — added 2026-05-25)
+    try:
+        with psycopg2.connect(db_url, connect_timeout=2) as c:
+            with c.cursor() as cur:
+                trim_norm = (trim or "").strip().lower()
+                row = None
+                if trim_norm:
+                    cur.execute("""
+                        SELECT vin, year, make, model, trim, mileage
+                          FROM dealer_inventory
+                         WHERE year = %s
+                           AND UPPER(make)  = %s
+                           AND UPPER(model) LIKE %s
+                           AND LOWER(COALESCE(trim, '')) LIKE %s
+                           AND status = 'active'
+                           AND vin IS NOT NULL
+                           AND length(vin) = 17
+                         ORDER BY ABS(COALESCE(mileage, 0) - %s) ASC,
+                                  last_seen_at DESC
+                         LIMIT 1
+                    """, (year, make_u, f"%{model_u}%",
+                          f"%{trim_norm}%", int(miles or 0)))
+                    row = cur.fetchone()
+                if not row:
+                    cur.execute("""
+                        SELECT vin, year, make, model, trim, mileage
+                          FROM dealer_inventory
+                         WHERE year = %s
+                           AND UPPER(make)  = %s
+                           AND UPPER(model) LIKE %s
+                           AND status = 'active'
+                           AND vin IS NOT NULL
+                           AND length(vin) = 17
+                         ORDER BY ABS(COALESCE(mileage, 0) - %s) ASC,
+                                  last_seen_at DESC
+                         LIMIT 1
+                    """, (year, make_u, f"%{model_u}%", int(miles or 0)))
+                    row = cur.fetchone()
+                if row and row[0]:
+                    out["vin"] = row[0]
+                    out["source"] = "dealer_inventory"
+                    out["vehicle"] = f"{row[1]} {row[2]} {row[3]} {row[4] or ''}".strip()
+                    out["vehicle_year"] = row[1]
+                    out["actual_trim"] = row[4]
+                    t_req = (trim or "").strip().lower()
+                    t_got = (row[4] or "").strip().lower()
+                    if t_req and t_got and t_req in t_got:
+                        out["trim_match"] = "exact"
+                    elif t_req:
+                        out["trim_match"] = "fallthrough"
+                    out["found"] = True
+                    out["elapsed_ms"] = int((_t.monotonic() - t0) * 1000)
+                    return out
+    except Exception as e:
+        out.setdefault("errors", []).append(f"dealer_inv: {type(e).__name__}: {e}")
+
+    # ── 2. LSL deals scan
+    try:
+        lsl_path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+        if _os.path.exists(lsl_path):
+            lc = sqlite3.connect(f"file:{lsl_path}?mode=ro", uri=True, timeout=2)
+            lcur = lc.cursor()
+            trim_norm = (trim or "").strip().lower()
+            r = None
+            if trim_norm:
+                lcur.execute("""
+                    SELECT vin_no, vehicle_info
+                      FROM deals
+                     WHERE UPPER(make_name)    LIKE UPPER(?)
+                       AND UPPER(vehicle_info) LIKE UPPER(?)
+                       AND UPPER(vehicle_info) LIKE UPPER(?)
+                       AND vehicle_info        LIKE ?
+                       AND vin_no IS NOT NULL
+                       AND length(vin_no) = 17
+                     ORDER BY sold_at DESC
+                     LIMIT 1
+                """, (f"%{make_u}%", f"%{model_u}%",
+                      f"%{trim_norm}%", f"%{year}%"))
+                r = lcur.fetchone()
+            if not r:
+                lcur.execute("""
+                    SELECT vin_no, vehicle_info
+                      FROM deals
+                     WHERE UPPER(make_name)    LIKE UPPER(?)
+                       AND UPPER(vehicle_info) LIKE UPPER(?)
+                       AND vehicle_info        LIKE ?
+                       AND vin_no IS NOT NULL
+                       AND length(vin_no) = 17
+                     ORDER BY sold_at DESC
+                     LIMIT 1
+                """, (f"%{make_u}%", f"%{model_u}%", f"%{year}%"))
+                r = lcur.fetchone()
+            lc.close()
+            if r and r[0]:
+                out["vin"] = r[0]
+                out["source"] = "db_deals"
+                out["vehicle"] = r[1]
+                out["vehicle_year"] = year
+                t_req = (trim or "").strip().lower()
+                vi = (r[1] or "").lower()
+                if t_req and t_req in vi:
+                    out["trim_match"] = "exact"
+                    out["actual_trim"] = trim
+                elif t_req:
+                    out["trim_match"] = "fallthrough"
+                out["found"] = True
+                out["elapsed_ms"] = int((_t.monotonic() - t0) * 1000)
+                return out
+    except Exception as e:
+        out.setdefault("errors", []).append(f"db_deals: {type(e).__name__}: {e}")
+
+    # ── 3.5 AutoTrader via VM worker pool (residential IP — 2026-05-25)
+    # The direct AutoTrader URL from C1 is blocked (datacenter IP). Route
+    # through vm-carvana-worker (vmid 140, 192.168.1.151) which has a
+    # residential IP and polls autotrader_queue every 3s.
+    try:
+        import psycopg2, psycopg2.extras, time as _at_t, asyncio as _at_aio
+        trim_norm = (trim or "").strip().lower()
+        # Cache check
+        with psycopg2.connect(db_url, connect_timeout=2) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT vin, actual_trim, cached_at
+                      FROM autotrader_vin_cache
+                     WHERE year = %s
+                       AND UPPER(make) = UPPER(%s)
+                       AND UPPER(model) = UPPER(%s)
+                       AND trim_norm = %s
+                       AND cached_at > NOW() - INTERVAL '7 days'
+                     LIMIT 1
+                """, (year, make_u, model_u, trim_norm))
+                cache_row = cur.fetchone()
+        if cache_row:
+            out["vin"] = cache_row["vin"]
+            out["source"] = "autotrader_cache"
+            out["vehicle"] = f"{year} {make} {model} {cache_row['actual_trim'] or ''}".strip() + " (AutoTrader)"
+            out["vehicle_year"] = year
+            out["actual_trim"] = cache_row["actual_trim"]
+            out["trim_match"] = "exact" if (trim_norm and (cache_row["actual_trim"] or "").strip().lower() == trim_norm) else ("fallthrough" if trim_norm else None)
+            out["found"] = True
+            out["elapsed_ms"] = int((_t.monotonic() - t0) * 1000)
+            return out
+        # Enqueue + poll
+        job_id = None
+        with psycopg2.connect(db_url, connect_timeout=2) as c:
+            with c.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO autotrader_queue (year, make, model, trim, miles, status)
+                    VALUES (%s, %s, %s, %s, %s, 'queued')
+                    RETURNING id
+                """, (year, make, model, trim, int(miles or 0)))
+                job_id = cur.fetchone()[0]
+        # Poll for up to 6 seconds
+        deadline = _at_t.monotonic() + 12.0
+        while _at_t.monotonic() < deadline:
+            await _at_aio.sleep(0.4)
+            with psycopg2.connect(db_url, connect_timeout=2) as c:
+                with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT status, found_vin, found_trim, found_year, error_msg
+                          FROM autotrader_queue WHERE id = %s
+                    """, (job_id,))
+                    qr = cur.fetchone()
+                    if qr and qr["status"] == "done" and qr["found_vin"]:
+                        out["vin"] = qr["found_vin"]
+                        out["source"] = "autotrader_vm"
+                        out["vehicle"] = f"{qr['found_year'] or year} {make} {model} {qr['found_trim'] or ''}".strip() + " (AutoTrader)"
+                        out["vehicle_year"] = qr["found_year"] or year
+                        out["actual_trim"] = qr["found_trim"]
+                        out["trim_match"] = "exact" if (trim_norm and (qr["found_trim"] or "").strip().lower() == trim_norm) else ("fallthrough" if trim_norm else None)
+                        out["found"] = True
+                        out["elapsed_ms"] = int((_t.monotonic() - t0) * 1000)
+                        return out
+                    if qr and qr["status"] in ("failed", "no_match"):
+                        break
+        out.setdefault("errors", []).append(f"autotrader_vm: pending or no_match (job {job_id})")
+    except Exception as e:
+        out.setdefault("errors", []).append(f"autotrader_vm: {type(e).__name__}: {e}")
+
+    # ── 3. AutoTrader JSON search (trim-filtered client-side — 2026-05-25)
+    # AutoTrader's trimCodeList wants their internal trim codes, not free
+    # text. So we ask for 25 listings, parse the JSON, and pick the first
+    # VIN whose trim field matches our requested trim. Fall through to
+    # first VIN if no trim match.
+    try:
+        import json as _json
+        url = (f"https://www.autotrader.com/rest/searchresults/base"
+               f"?makeCodeList={make_u}&modelCodeList={model_u}"
+               f"&startYear={year}&endYear={year}&listingTypes=USED"
+               f"&numRecords=25&sortBy=relevance")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/115.0",
+            "Accept": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = resp.read(800000).decode("utf-8", errors="ignore")
+        listings = []
+        try:
+            j = _json.loads(data)
+            listings = j.get("listings") or j.get("results") or []
+        except Exception:
+            listings = []
+        trim_norm = (trim or "").strip().lower()
+        picked = None
+        if trim_norm and listings:
+            for L in listings:
+                lvin = (L.get("vin") or "").strip().upper()
+                ltrim = (L.get("trim") or L.get("trimName") or "").strip().lower()
+                if len(lvin) == 17 and trim_norm in ltrim:
+                    picked = {"vin": lvin, "trim": L.get("trim") or L.get("trimName")}
+                    break
+        if not picked and listings:
+            for L in listings:
+                lvin = (L.get("vin") or "").strip().upper()
+                if len(lvin) == 17:
+                    picked = {"vin": lvin, "trim": L.get("trim") or L.get("trimName")}
+                    break
+        # Last-resort regex fallback if JSON shape unexpected
+        if not picked:
+            vin_matches = _re.findall(r'"vin"\s*:\s*"([A-HJ-NPR-Z0-9]{17})"', data)
+            if vin_matches:
+                picked = {"vin": vin_matches[0], "trim": None}
+        if picked:
+            out["vin"] = picked["vin"]
+            out["source"] = "autotrader"
+            picked_trim = picked.get("trim") or trim or ""
+            out["vehicle"] = f"{year} {make} {model} {picked_trim} (AutoTrader nationwide)".strip()
+            out["vehicle_year"] = year
+            out["found"] = True
+            out["elapsed_ms"] = int((_t.monotonic() - t0) * 1000)
+            return out
+    except Exception as e:
+        out.setdefault("errors", []).append(f"autotrader: {type(e).__name__}: {e}")
+
+    out["elapsed_ms"] = int((_t.monotonic() - t0) * 1000)
+    return out
+
+
+@mcp.tool()
+async def live_valuation_by_vin(
+    vin: str,
+    miles: int = 0,
+    year: int = 0,
+    make: str = "",
+    model: str = "",
+    trim: str = "",
+) -> dict:
+    """Fire a LIVE vAuto + AccuTrade lookup for a SPECIFIC VIN. Use after
+    find_vin_for_ymm gave you a VIN. Returns within ~5-10s. Includes MMR,
+    rBook, AccuTrade guaranteed offer/retail, and miles-adjusted comps
+    centered on THIS VIN.
+
+    Different from get_vehicle_valuation which is YMM-only and returns
+    aggregate comps. This one anchors on a specific VIN and is faster
+    when the VIN is known."""
+    import time as _t
+    t0 = _t.monotonic()
+    from voice_agent import _fetch_live_vauto_with_vin
+    try:
+        import asyncio as _aio
+        try:
+            result = await _aio.wait_for(
+                _aio.to_thread(_fetch_live_vauto_with_vin, vin, miles),
+                timeout=10.0,
+            )
+        except _aio.TimeoutError:
+            return {
+                "vin": vin, "timed_out": True,
+                "warning": "live vAuto did not respond in 10s for this VIN",
+                "elapsed_ms": 10000,
+            }
+        if result:
+            result["vin"] = vin
+            result["elapsed_ms"] = int((_t.monotonic() - t0) * 1000)
+            return result
+        return {"vin": vin, "warning": "no live data returned",
+                "elapsed_ms": int((_t.monotonic() - t0) * 1000)}
+    except Exception as e:
+        return {"vin": vin, "error": f"{type(e).__name__}: {e}",
+                "elapsed_ms": int((_t.monotonic() - t0) * 1000)}
+
+
+@mcp.tool()
+async def valuation_precheck(
+    year: int,
+    make: str,
+    model: str,
+    trim: str = "",
+) -> dict:
+    """FAST (~200-500ms) precheck. Call this BEFORE get_vehicle_valuation
+    so you can tell the operator whether this YMM is familiar to us. Returns
+    counts of prior bids, prior deals, and current dealer inventory for the
+    YMM. Use the response to craft an appropriate filler line WHILE you
+    then call get_vehicle_valuation in the next turn.
+
+    Args:
+        year: 4-digit model year
+        make: brand
+        model: base model
+        trim: optional trim hint
+
+    Returns:
+        {
+          in_our_system: bool,     # any prior data anywhere
+          n_prior_bids: int,       # how many bids we've appraised
+          n_deals_sold: int,       # how many we've actually transacted
+          n_dealer_inv: int,       # currently live on partner lots
+          last_seen_iso: str|null, # most recent touch
+          confidence: 'strong' | 'thin' | 'none',
+        }
+    """
+    import psycopg2, psycopg2.extras, os as _os, time as _t
+    db_url = _os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    t0 = _t.monotonic()
+    out = {
+        "in_our_system": False, "n_prior_bids": 0, "n_deals_sold": 0,
+        "n_dealer_inv": 0, "last_seen_iso": None, "confidence": "none",
+        "elapsed_ms": 0,
+    }
+    try:
+        make_u = (make or "").upper().strip()
+        model_u = (model or "").upper().strip()
+        with psycopg2.connect(db_url, connect_timeout=2) as c:
+            with c.cursor() as cur:
+                # Prior bids on this YMM (last 365 days)
+                cur.execute("""
+                    SELECT COUNT(*), MAX(created_at)::date
+                      FROM bids
+                     WHERE year = %s
+                       AND UPPER(make)  = %s
+                       AND UPPER(model) LIKE %s
+                       AND created_at > NOW() - INTERVAL '365 days'
+                """, (year, make_u, f"%{model_u}%"))
+                row = cur.fetchone()
+                out["n_prior_bids"] = int(row[0] or 0)
+                last_seen = row[1]
+                # Live dealer inventory
+                cur.execute("""
+                    SELECT COUNT(*)
+                      FROM dealer_inventory
+                     WHERE year = %s
+                       AND UPPER(make)  = %s
+                       AND UPPER(model) LIKE %s
+                       AND status = 'active'
+                """, (year, make_u, f"%{model_u}%"))
+                out["n_dealer_inv"] = int(cur.fetchone()[0] or 0)
+        # LSL sold deals (sqlite)
+        import sqlite3
+        lsl_path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+        if _os.path.exists(lsl_path):
+            try:
+                lc = sqlite3.connect(f"file:{lsl_path}?mode=ro", uri=True, timeout=2)
+                lcur = lc.cursor()
+                lcur.execute("""
+                    SELECT COUNT(*), MAX(sold_at)
+                      FROM deals
+                     WHERE UPPER(make_name)    LIKE UPPER(?)
+                       AND UPPER(vehicle_info) LIKE UPPER(?)
+                       AND vehicle_info        LIKE ?
+                       AND sold_at > date('now', '-365 days')
+                """, (f"%{make_u}%", f"%{model_u}%", f"%{year}%"))
+                r = lcur.fetchone()
+                out["n_deals_sold"] = int(r[0] or 0)
+                lsl_last = r[1]
+                if lsl_last and (last_seen is None or str(lsl_last)[:10] > str(last_seen)[:10]):
+                    last_seen = lsl_last
+                lc.close()
+            except Exception:
+                pass
+        out["last_seen_iso"] = str(last_seen)[:10] if last_seen else None
+        total_signals = out["n_prior_bids"] + out["n_deals_sold"] + out["n_dealer_inv"]
+        out["in_our_system"] = total_signals > 0
+        # ANCHOR_VIN_DISCIPLINE 2026-05-25 — require a VIN we can actually
+        # re-lookup (dealer_inv or prior_bids) for thin/strong. Historical
+        # deals alone produce no anchor, AccuTrade/MMR return empty.
+        has_anchor = (out["n_dealer_inv"] + out["n_prior_bids"]) > 0
+        out["has_anchor_vin"] = has_anchor
+        if total_signals >= 5 and has_anchor:
+            out["confidence"] = "strong"
+        elif total_signals >= 1 and has_anchor:
+            out["confidence"] = "thin"
+        elif total_signals >= 1 and not has_anchor:
+            # Historical-only signals; tell Bill to go through find_vin_for_ymm.
+            out["confidence"] = "none"
+            out["note"] = "historical deals only, no anchor VIN — use find_vin_for_ymm"
+        else:
+            out["confidence"] = "none"
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    out["elapsed_ms"] = int((_t.monotonic() - t0) * 1000)
+    return out
+
+
+# --- lsl_make_volume + lsl_top_makes (added 2026-05-25) -----------------
+
+def _lsl_resolve_period(period: str):
+    """Return (start_iso, end_iso) for a period string. EDT-aware."""
+    import re as _re
+    from datetime import datetime as _dt, timedelta as _td
+    try:
+        from zoneinfo import ZoneInfo as _Z
+        now = _dt.now(_Z("America/New_York"))
+    except Exception:
+        now = _dt.now()
+    today = now.strftime("%Y-%m-%d")
+    p = (period or "").lower().strip().replace("-", "_").replace(" ", "_")
+    m = _re.match(r'^(\d{4}_\d{2}_\d{2}):(\d{4}_\d{2}_\d{2})$', p)
+    if m:
+        return (m.group(1).replace("_", "-"), m.group(2).replace("_", "-"))
+    m = _re.match(r'^(\d{4}_\d{2}_\d{2})$', p)
+    if m:
+        d = m.group(1).replace("_", "-")
+        return (d, d)
+    if p == "today":
+        return (today, today)
+    if p == "yesterday":
+        d = (now - _td(days=1)).strftime("%Y-%m-%d")
+        return (d, d)
+    if p == "last_7_days":
+        return ((now - _td(days=7)).strftime("%Y-%m-%d"), today)
+    if p == "last_30_days":
+        return ((now - _td(days=30)).strftime("%Y-%m-%d"), today)
+    if p == "last_90_days":
+        return ((now - _td(days=90)).strftime("%Y-%m-%d"), today)
+    if p == "this_month":
+        return (now.replace(day=1).strftime("%Y-%m-%d"), today)
+    if p == "last_month":
+        first = now.replace(day=1)
+        prev_end = (first - _td(days=1))
+        prev_start = prev_end.replace(day=1)
+        return (prev_start.strftime("%Y-%m-%d"), prev_end.strftime("%Y-%m-%d"))
+    if p in ("ytd", "year_to_date", "this_year"):
+        return (str(now.year) + "-01-01", today)
+    if p == "last_year":
+        return (str(now.year - 1) + "-01-01", str(now.year - 1) + "-12-31")
+    if p == "all_time":
+        return ("2000-01-01", today)
+    months = {"january": 1, "february": 2, "march": 3, "april": 4, "may": 5,
+              "june": 6, "july": 7, "august": 8, "september": 9,
+              "october": 10, "november": 11, "december": 12}
+    m = _re.match(r'^([a-z]+)(?:_(\d{4}))?(_mtd)?$', p)
+    if m and m.group(1) in months:
+        mo = months[m.group(1)]
+        yr = int(m.group(2)) if m.group(2) else now.year
+        from calendar import monthrange
+        last_day = monthrange(yr, mo)[1]
+        start = "%04d-%02d-01" % (yr, mo)
+        if m.group(3) == "_mtd":
+            cap = now.day if (now.year == yr and now.month == mo) else last_day
+            cap = min(cap, last_day)
+            end = "%04d-%02d-%02d" % (yr, mo, cap)
+        else:
+            end = "%04d-%02d-%02d" % (yr, mo, last_day)
+        return (start, end)
+    return ((now - _td(days=30)).strftime("%Y-%m-%d"), today)
+
+
+@mcp.tool()
+async def lsl_make_volume(
+    caller_name: str,
+    make: str,
+    period: str = "ytd",
+    caller_pin: str = "",
+) -> dict:
+    """OWNER-GATED. Count + summarize deals of a specific MAKE in a period.
+    USE THIS when operator asks "how many BMWs / Mercedes / Fords did we
+    buy this month / this year / last year" - a make-aware aggregation
+    that lsl_deals_booked cannot do (lsl_deals_booked returns top 3 only).
+
+    Args:
+        caller_name: owner first name (Oscar, Gregg, Joe, Todd)
+        make: canonical brand string (case-insensitive partial match)
+        period: today, yesterday, this_month, last_month, ytd, last_year,
+                last_30_days, "april", "april_mtd", "2026-04-01:2026-04-24"
+
+    Returns: {make, period, start, end, n_deals, total_profit, avg_pvr,
+              total_revenue, top_models}
+    """
+    if not _is_owner(caller_name, caller_pin):
+        return {"error": "owner-only", "owner_required": True}
+    import sqlite3, os as _os
+    path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+    if not _os.path.exists(path):
+        return {"error": "lsl crm not available"}
+    start, end = _lsl_resolve_period(period)
+    try:
+        c = sqlite3.connect("file:" + path + "?mode=ro", uri=True, timeout=10)
+        c.row_factory = sqlite3.Row
+        rows = c.execute("""
+            SELECT make_name, vehicle_info, sale_price, front_value, sold_at
+              FROM deals
+             WHERE LOWER(make_name) LIKE LOWER(?)
+               AND date(sold_at) BETWEEN ? AND ?
+        """, ("%" + make + "%", start, end)).fetchall()
+        c.close()
+        n = len(rows)
+        total_profit = sum((r["front_value"] or 0) for r in rows)
+        total_revenue = sum((r["sale_price"] or 0) for r in rows)
+        avg_pvr = (total_profit / n) if n else 0
+        from collections import Counter
+        model_counts = Counter()
+        model_profit = {}
+        for r in rows:
+            vi = (r["vehicle_info"] or "").strip()
+            parts = vi.split()
+            if len(parts) >= 3:
+                model = " ".join(parts[2:5])
+            else:
+                model = vi
+            if model:
+                model_counts[model] += 1
+                model_profit[model] = model_profit.get(model, 0) + (r["front_value"] or 0)
+        top_models = [
+            {"model": m, "n": cnt, "total_profit": round(model_profit[m], 2)}
+            for m, cnt in model_counts.most_common(8)
+        ]
+        return {
+            "make_filter": make,
+            "period": period,
+            "start": start, "end": end,
+            "n_deals": n,
+            "total_profit": round(total_profit, 2),
+            "total_revenue": round(total_revenue, 2),
+            "avg_pvr": round(avg_pvr, 2),
+            "top_models": top_models,
+        }
+    except Exception as e:
+        log.exception("lsl_make_volume failed")
+        return {"error": type(e).__name__ + ": " + str(e)}
+
+
+@mcp.tool()
+async def lsl_top_makes(
+    caller_name: str,
+    period: str = "ytd",
+    limit: int = 10,
+    caller_pin: str = "",
+) -> dict:
+    """OWNER-GATED. Top N makes by deal count in a period. USE THIS when
+    operator asks "what did we buy most of", "top makes this year",
+    "what brand is our biggest volume".
+
+    Args:
+        caller_name: owner first name
+        period: same vocab as lsl_make_volume
+        limit: number of top makes (1-30, default 10)
+
+    Returns: {period, start, end, total_deals, makes[{make, n, total_profit, avg_pvr}]}
+    """
+    if not _is_owner(caller_name, caller_pin):
+        return {"error": "owner-only", "owner_required": True}
+    if limit < 1:
+        limit = 1
+    if limit > 30:
+        limit = 30
+    import sqlite3, os as _os
+    path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+    if not _os.path.exists(path):
+        return {"error": "lsl crm not available"}
+    start, end = _lsl_resolve_period(period)
+    try:
+        c = sqlite3.connect("file:" + path + "?mode=ro", uri=True, timeout=10)
+        rows = c.execute("""
+            SELECT COALESCE(make_name, '(unknown)') AS make,
+                   COUNT(*) AS n,
+                   COALESCE(SUM(front_value), 0) AS total_profit,
+                   COALESCE(AVG(front_value), 0) AS avg_pvr
+              FROM deals
+             WHERE date(sold_at) BETWEEN ? AND ?
+             GROUP BY make_name
+             ORDER BY n DESC
+             LIMIT ?
+        """, (start, end, int(limit))).fetchall()
+        total = c.execute("""
+            SELECT COUNT(*) FROM deals WHERE date(sold_at) BETWEEN ? AND ?
+        """, (start, end)).fetchone()[0]
+        c.close()
+        makes = [{
+            "make": r[0],
+            "n": r[1],
+            "total_profit": round(r[2] or 0, 2),
+            "avg_pvr": round(r[3] or 0, 2),
+        } for r in rows]
+        return {
+            "period": period,
+            "start": start, "end": end,
+            "total_deals": total,
+            "makes": makes,
+        }
+    except Exception as e:
+        log.exception("lsl_top_makes failed")
+        return {"error": type(e).__name__ + ": " + str(e)}
+
+# --- end lsl_make_volume / lsl_top_makes -----------------------------------
+
+@mcp.tool()
+async def search_bids(
+    make: str = "",
+    model: str = "",
+    year: int = 0,
+    since_days: int = 30,
+    submitter: str = "",
+    limit: int = 25,
+) -> dict:
+    """USE THIS when the operator asks about bids over a window WIDER than
+    the last 20, or when they want to know who SUBMITTED a bid for a
+    particular vehicle. Filters: make/model/year (case-insensitive partial
+    match on make+model), since_days (1-365, default 30), submitter (substring
+    match on contact name OR company), limit (max 100). Returns list of bids
+    with year/make/model/mileage/prices/status/submitter_name/submitter_company/
+    created_at. Different from recent_bids (which is only last 20, no filters,
+    no submitter).
+    """
+    if since_days < 1: since_days = 1
+    if since_days > 365: since_days = 365
+    if limit < 1: limit = 1
+    if limit > 100: limit = 100
+    import psycopg2, psycopg2.extras, os as _os
+    db_url = _os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    where = ["b.created_at >= now() - (%s || ' days')::interval"]
+    params = [str(since_days)]
+    if make:
+        where.append("LOWER(b.make) LIKE LOWER(%s)")
+        params.append(f"%{make}%")
+    if model:
+        where.append("LOWER(b.model) LIKE LOWER(%s)")
+        params.append(f"%{model}%")
+    if year and year > 1900:
+        where.append("b.year = %s")
+        params.append(int(year))
+    if submitter:
+        where.append("(LOWER(COALESCE(c.name,'')) LIKE LOWER(%s) OR LOWER(COALESCE(c.company,'')) LIKE LOWER(%s))")
+        params.append(f"%{submitter}%")
+        params.append(f"%{submitter}%")
+    params.append(int(limit))
+    sql = f"""
+        SELECT b.id, b.vin, b.year, b.make, b.model, b.trim, b.mileage,
+               b.status, b.ai_price, b.asking_price, b.bid_amount,
+               b.created_at,
+               c.name AS submitter_name, c.company AS submitter_company, b.phone AS submitter_phone
+          FROM bids b
+          LEFT JOIN contacts c ON c.id = b.contact_id
+         WHERE {' AND '.join(where)}
+         ORDER BY b.created_at DESC
+         LIMIT %s
+    """
+    try:
+        with psycopg2.connect(db_url) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, params)
+                rows = [dict(r) for r in cur.fetchall()]
+        bids = []
+        for r in rows:
+            bids.append({
+                "bid_id": r.get("id"),
+                "year": r.get("year"),
+                "make": r.get("make"),
+                "model": r.get("model"),
+                "trim": r.get("trim"),
+                "mileage": r.get("mileage"),
+                "status": r.get("status"),
+                "asking_price": (float(r["asking_price"]) if r.get("asking_price") is not None else None),
+                "ai_price": (float(r["ai_price"]) if r.get("ai_price") is not None else None),
+                "bid_amount": (float(r["bid_amount"]) if r.get("bid_amount") is not None else None),
+                "submitter_name": r.get("submitter_name"),
+                "submitter_company": r.get("submitter_company"),
+                "submitter_phone": r.get("submitter_phone"),
+                "created_at": (r["created_at"].isoformat() if r.get("created_at") else None),
+            })
+        return {
+            "filters": {"make": make or None, "model": model or None,
+                        "year": year or None, "since_days": since_days,
+                        "submitter": submitter or None},
+            "n": len(bids), "bids": bids,
+        }
+    except Exception as e:
+        log.exception("search_bids failed")
+        return {"error": f"{type(e).__name__}: {e}"}
 
 
 @mcp.tool()
