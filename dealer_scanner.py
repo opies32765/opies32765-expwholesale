@@ -2354,7 +2354,16 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
                 source_added_at = COALESCE(source_added_at, %s::timestamptz),
                 last_seen_at = NOW(),
                 missing_scans = 0,
-                status       = CASE WHEN status IN ('missing','active') THEN 'active' ELSE status END,
+                -- PHANTOM_SOLD_FIX_2026_05_26: a row reappearing in the
+                -- current scan is alive by definition. Flip back to active
+                -- and clear stale sold-evidence, regardless of prior status.
+                -- This handles upstream misfire cascades (e.g. 5/12 batch
+                -- of 19 Bentley Denver units wrongly transitioned to sold
+                -- while still on the live feed).
+                status         = 'active',
+                sold_at        = NULL,
+                sold_confidence= NULL,
+                sold_signals   = NULL,
                 updated_at   = NOW()
             WHERE id = %s
         ''', (

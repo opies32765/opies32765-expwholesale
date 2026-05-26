@@ -8490,7 +8490,8 @@ def api_admin_bulk_upload_parse():
         return jsonify({'error': 'file required'}), 400
     try:
         from bulk_upload import parse_upload
-        rows = parse_upload(f.filename, f.read())
+        require_price = (request.form.get('require_price') or '').strip() in ('1','true','on','yes')
+        rows = parse_upload(f.filename, f.read(), require_price=require_price)
     except Exception as e:
         return jsonify({'error': f'parse failed: {type(e).__name__}: {e}'}), 400
     if not rows:
@@ -17374,27 +17375,39 @@ def _bp_score(bid, dealer_id, profile, vins_owned=None):
 
     # YMMT_MATCH_2026_05_26: velocity scoring uses TRIM entry when available
     # (more accurate signal) — falls back to model-level for untagged bids.
-    # Reason text always surfaces "X active, Y sold @ Zd" so operator sees
-    # the truth at a glance — no more "no recent sales" with no context.
+    # Reason ALWAYS surfaces trim + color + in-stock + sold so the operator
+    # can verify YMMT is matching correctly at a glance.
     v_src = trim_entry or model_entry
-    v_label = f"{model.title()} {ymmt_trim}" if trim_entry else model.title()
+    # Label: prefer canonical trim, fall back to raw bid.trim in parens if
+    # the bid wasn't ymmt-tagged. Always include color when bid has one.
+    _raw_bid_trim = (bid.get('trim') or '').strip()
+    if ymmt_trim:
+        _trim_label = ymmt_trim
+    elif _raw_bid_trim:
+        _trim_label = f"{model.title()} ({_raw_bid_trim})"
+    else:
+        _trim_label = model.title()
+    _color_suffix = f" / {color.title()}" if color else ''
+    v_label = f"{_trim_label}{_color_suffix}"
+
     v_colors = v_src.get('colors') or {}
     mc = v_colors.get(color) if color else None
     velocity_reason = None
     _active_n = v_src.get('active_n') or 0
     _sold_n = v_src.get('sold_n') or 0
     _days = v_src.get('avg_days_on_lot') or 0
-    _stock = f"{_active_n} active"
+    _stock = f"{_active_n} in stock"
 
     if mc and (mc.get('sold_n') or 0) >= 2 and 0 < (mc.get('avg_days_on_lot') or 0) < 10:
         score += 30
-        velocity_reason = (f"{make.title()} {v_label} {color.title()}: "
-                           f"{_stock}, {mc['sold_n']} sold @ {mc['avg_days_on_lot']}d (color prime)")
+        # Color-specific counts when color-prime fires
+        velocity_reason = (f"{make.title()} {v_label}: "
+                           f"{mc.get('active_n') or 0} in stock, "
+                           f"{mc['sold_n']} sold @ {mc['avg_days_on_lot']}d (hot color)")
     elif _sold_n >= 2 and 0 < _days < 10:
         score += 25
         velocity_reason = (f"{make.title()} {v_label}: {_stock}, "
-                           f"{_sold_n} sold @ {_days}d "
-                           f"({'trim' if trim_entry else 'model'} prime)")
+                           f"{_sold_n} sold @ {_days}d (quick turn)")
     elif _sold_n >= 2 and 0 < _days < 20:
         score += 15
         velocity_reason = (f"{make.title()} {v_label}: {_stock}, "
@@ -17411,9 +17424,8 @@ def _bp_score(bid, dealer_id, profile, vins_owned=None):
         # Stocks the variant but has not sold one — honest fallback
         velocity_reason = f"{make.title()} {v_label}: {_stock}, 0 sold"
     else:
-        # Trim/model line in profile but currently 0 active + 0 sold (stale).
-        # Surface the zero counts so the operator sees the truth.
-        velocity_reason = f"{make.title()} {v_label}: 0 active, 0 sold"
+        # Trim/model line in profile but currently 0 in stock + 0 sold (stale).
+        velocity_reason = f"{make.title()} {v_label}: 0 in stock, 0 sold"
     # else: model in history but no sale yet (only active stock) — no velocity bonus
 
     # Price reasonableness — use TRIM avg_price when available, else model
