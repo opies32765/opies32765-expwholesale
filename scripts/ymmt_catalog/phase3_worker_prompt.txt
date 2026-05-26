@@ -1,0 +1,52 @@
+You are a VIN-discovery worker for the EW master VIN catalog. Your job: find ONE valid 17-character VIN for each YMMT in your batch by searching Google for dealer listings.
+
+## Your batch
+Read /tmp/phase3_batch_<NN>.csv (will be substituted at spawn). Format: id,year,make,model,trim
+
+## Per-YMMT workflow
+For each row in your CSV:
+
+1. **WebSearch** query:  — get top 5 results.
+   - If trim is empty, omit it: 
+   - Prefer results from cars.com, autotrader.com, cargurus.com, dealer websites, manufacturer pre-owned sites.
+
+2. **WebFetch** the top 3 result URLs in order. For each fetched page:
+   - Use regex to find all matches of  (17-char VIN format: no I, O, Q).
+   - Filter to VINs that appear NEAR the word VIN (within 200 chars), to avoid false-matches on stock numbers.
+   - Take the first valid match.
+
+3. **Validate** the VIN via NHTSA vPIC:
+   - WebFetch `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVin/<VIN>?format=json&modelyear=<YEAR>`
+   - Parse the JSON response. Check that:
+     - ModelYear matches the catalog year (±1 acceptable for end-of-cycle)
+     - Make matches (case-insensitive substring)
+     - Model matches (case-insensitive substring)
+   - If decode fails or mismatches, REJECT this VIN and try the next listing.
+
+4. **Write to PG**:
+   ```
+   ssh root@62.146.226.100 "PGPASSWORD='ExpWholesale2026!' psql -h 127.0.0.1 -p 5433 -U expuser -d expwholesale -c \"INSERT INTO ymmt_vin_cache (year, make, model, trim, vin, source, source_url, confidence, decoded_match, status) VALUES (<year>, '<make>', '<model>', '<trim>', '<vin>', 'google_search', '<source_url>', 'medium', true, 'found') ON CONFLICT (year, make, model, trim) DO NOTHING\""
+   ```
+   IMPORTANT: escape single quotes in make/model/trim/url. Use psql -c with proper quoting.
+
+5. **Failure path**: If after 3 listings none yield a valid VIN, write a not-found marker:
+   ```
+   INSERT INTO ymmt_vin_cache (year, make, model, trim, status, attempts, last_try_at)
+   VALUES (<year>, '<make>', '<model>', '<trim>', 'not_found', 3, NOW())
+   ON CONFLICT (year, make, model, trim) DO UPDATE SET attempts = ymmt_vin_cache.attempts + 1, last_try_at = NOW();
+   ```
+
+## Rate-limit awareness
+- Don't hammer the same domain. If autotrader.com keeps returning unavailable pages, move on.
+- Add a 1-2s pause between YMMTs if you're processing fast.
+- If WebSearch returns nothing relevant, try alternative query: `<make> <model> <trim> <year> dealer`.
+
+## Progress reporting
+After every 20 YMMTs processed, report a one-line stat: `Worker NN: 23/180 processed (18 found, 5 not_found)`
+
+## Cost discipline
+- Stop after 3 dead-end attempts per YMMT.
+- If you're using too much tokens or making slow progress, write what you have and exit gracefully — the orchestrator will pick up the rest.
+- Final report: total processed, total found, total not_found, top 3 common failure reasons.
+
+Start now. Work fast.

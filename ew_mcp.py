@@ -1431,6 +1431,8 @@ async def lsl_deals_booked(
             SELECT d.stock_no, d.vin_no, d.vehicle_info,
                    d.customer_name, d.supplier_name,
                    COALESCE(i.source, d.supplier_name) AS true_purchased_from,
+                   COALESCE(i.customer_name, d.customer_name) AS true_sold_to,
+                   i.sale_status AS inv_sale_status,
                    d.sales_person, d.sale_price, d.purchase_cost,
                    d.total_supp_costs,
                    {_LSL_PROFIT_SQL.replace("sale_price","d.sale_price").replace("purchase_cost","d.purchase_cost").replace("total_supp_costs","d.total_supp_costs")} AS profit,
@@ -1464,7 +1466,8 @@ async def lsl_deals_booked(
                 {"stock_no": r.get("stock_no"),
                  "vin": r.get("vin_no"),
                  "vehicle": r.get("vehicle_info"),
-                 "sold_to": r.get("customer_name"),
+                 "sold_to": (None if (r.get("true_sold_to") == r.get("true_purchased_from")) else r.get("true_sold_to")),
+                 "sold_to_note": ("not yet sold — still in inventory" if r.get("inv_sale_status") == "Not Sold" else ("customer not yet booked in LSL — only supplier known" if (r.get("true_sold_to") == r.get("true_purchased_from")) else None)),
                  "bought_from": r.get("true_purchased_from"),
                  "salesperson": r.get("sales_person"),
                  "sale_price": r.get("sale_price"),
@@ -1476,7 +1479,8 @@ async def lsl_deals_booked(
                 {"stock_no": r.get("stock_no"),
                  "vin": r.get("vin_no"),
                  "vehicle": r.get("vehicle_info"),
-                 "sold_to": r.get("customer_name"),
+                 "sold_to": (None if (r.get("true_sold_to") == r.get("true_purchased_from")) else r.get("true_sold_to")),
+                 "sold_to_note": ("not yet sold — still in inventory" if r.get("inv_sale_status") == "Not Sold" else ("customer not yet booked in LSL — only supplier known" if (r.get("true_sold_to") == r.get("true_purchased_from")) else None)),
                  "bought_from": r.get("true_purchased_from"),
                  "salesperson": r.get("sales_person"),
                  "sale_price": r.get("sale_price"),
@@ -2800,11 +2804,8 @@ async def lsl_query(
         )
     if qt in ("lookup_sale", "sale_lookup", "stock_lookup"):
         v = (target or "").strip()
-        if len(v) == 17 and v.replace(" ","").isalnum():
-            return await lsl_lookup_sale(
-                caller_name=caller_name, vin=v, stock_no="")
         return await lsl_lookup_sale(
-            caller_name=caller_name, vin="", stock_no=v)
+            caller_name=caller_name, stock_or_vin=v)
     return {"error": f"unknown query_type {query_type!r}. Valid: "
             "customer_history | dealer_intel | service_requests | "
             "payments | appraisal_history | customer_lookup | "
@@ -2978,6 +2979,61 @@ async def find_vin_for_ymm(
     out = {"vin": None, "source": None, "vehicle": None, "vehicle_year": None,
            "found": False, "elapsed_ms": 0,
            "trim_match": None, "actual_trim": None}
+
+    # ── 0. ymmt_vin_cache (master catalog, sub-10ms — added 2026-05-26)
+    # First check our pre-populated master VIN catalog. If we have a cached
+    # VIN for this exact YMMT, return instantly. Built by overnight catalog
+    # job + ongoing learning cache.
+    try:
+        db_url = _os.environ.get("DATABASE_URL",
+            "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+        trim_norm = (trim or "").strip()
+        with psycopg2.connect(db_url, connect_timeout=2) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Try exact trim first
+                cur.execute("""
+                    SELECT vin, source, source_url
+                      FROM ymmt_vin_cache
+                     WHERE year = %s
+                       AND UPPER(make)  = UPPER(%s)
+                       AND UPPER(model) = UPPER(%s)
+                       AND LOWER(trim) = LOWER(%s)
+                       AND status = 'found'
+                       AND vin IS NOT NULL
+                     LIMIT 1
+                """, (year, make_u, model_u, trim_norm))
+                row = cur.fetchone()
+                if not row and trim_norm:
+                    # Fall through to any trim (different YMMT but same YMM)
+                    cur.execute("""
+                        SELECT vin, source, source_url, trim AS actual_trim
+                          FROM ymmt_vin_cache
+                         WHERE year = %s
+                           AND UPPER(make)  = UPPER(%s)
+                           AND UPPER(model) = UPPER(%s)
+                           AND status = 'found'
+                           AND vin IS NOT NULL
+                         ORDER BY found_at DESC
+                         LIMIT 1
+                    """, (year, make_u, model_u))
+                    row = cur.fetchone()
+                    if row:
+                        out["trim_match"] = "fallthrough"
+                        out["actual_trim"] = row.get("actual_trim")
+                if row:
+                    out["vin"] = row["vin"]
+                    out["source"] = "ymmt_cache"
+                    out["vehicle"] = f"{year} {make} {model} {out['actual_trim'] or trim_norm}".strip()
+                    out["vehicle_year"] = year
+                    if out["trim_match"] is None and trim_norm:
+                        out["trim_match"] = "exact"
+                    if out["actual_trim"] is None and trim_norm:
+                        out["actual_trim"] = trim_norm
+                    out["found"] = True
+                    out["elapsed_ms"] = int((_t.monotonic() - t0) * 1000)
+                    return out
+    except Exception as e:
+        out.setdefault("errors", []).append(f"ymmt_cache: {type(e).__name__}: {e}")
 
     # ── 1. DB scan: closest-mile match from bids
     try:
@@ -3926,3 +3982,68 @@ app = Starlette(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=9004, log_level="info")
+
+
+# ─── vin_cache_batch_insert (added 2026-05-26) ───────────────────────────
+
+@mcp.tool()
+async def vin_cache_batch_insert(entries: list) -> dict:
+    """Batch-insert YMMT VIN cache entries. Used by Phase 3 backfill agents.
+
+    entries: list of dicts, each with keys:
+      year (int), make (str), model (str), trim (str),
+      vin (str or null), source (str), source_url (str, optional),
+      decoded_match (bool, optional), status ('found' | 'not_found')
+
+    Returns: {inserted: int, skipped: int, errors: list}
+    """
+    import psycopg2, os as _os
+    if not isinstance(entries, list):
+        return {"error": "entries must be a list"}
+    if len(entries) > 200:
+        return {"error": "max 200 entries per batch"}
+    db_url = _os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    inserted = 0
+    skipped = 0
+    errors = []
+    try:
+        with psycopg2.connect(db_url, connect_timeout=3) as c:
+            with c.cursor() as cur:
+                for e in entries:
+                    try:
+                        year = int(e["year"])
+                        make = str(e["make"]).strip()
+                        model = str(e["model"]).strip()
+                        trim = str(e.get("trim", "") or "").strip()
+                        vin = e.get("vin")
+                        source = str(e.get("source", "google_search"))
+                        source_url = e.get("source_url")
+                        decoded_match = bool(e.get("decoded_match", False))
+                        status = str(e.get("status", "found"))
+                        if status not in ("found", "not_found"):
+                            errors.append(f"{year} {make} {model} {trim}: bad status")
+                            continue
+                        if status == "found" and (not vin or len(str(vin)) != 17):
+                            errors.append(f"{year} {make} {model} {trim}: bad vin")
+                            continue
+                        cur.execute("""
+                            INSERT INTO ymmt_vin_cache
+                              (year, make, model, trim, vin, source, source_url,
+                               confidence, decoded_match, status)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, 'medium', %s, %s)
+                            ON CONFLICT (year, make, model, trim) DO NOTHING
+                            RETURNING vin
+                        """, (year, make, model, trim, vin, source, source_url,
+                              decoded_match, status))
+                        if cur.fetchone():
+                            inserted += 1
+                        else:
+                            skipped += 1
+                    except Exception as e2:
+                        errors.append(f"{e.get('year')} {e.get('make')} {e.get('model')}: {type(e2).__name__}: {e2}")
+        return {"inserted": inserted, "skipped": skipped, "errors": errors[:10]}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+# ─── end vin_cache_batch_insert ───────────────────────────────────────────
