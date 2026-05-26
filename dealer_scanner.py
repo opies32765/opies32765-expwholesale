@@ -2394,6 +2394,23 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
                        VALUES (%s, %s, %s, %s, %s, %s, %s)''',
                     (dealer_id, inv_id, vin or None, url, veh.get('price'),
                      veh.get('mileage'), scan_id))
+        # YMMT_MATCH_2026_05_26: tag the new row with its canonical catalog
+        # row. Failure is non-fatal — keeps scrape moving even if Anthropic
+        # or the catalog is unreachable. A nightly drift-catcher fills gaps.
+        try:
+            from ymmt_match import resolve_ymmt
+            _r = resolve_ymmt(veh.get('year'), veh.get('make'),
+                              veh.get('model'), veh.get('trim'),
+                              db_conn=cur.connection)
+            cur.execute("""UPDATE dealer_inventory
+                              SET ymmt_id=%s, ymmt_resolved_at=NOW(),
+                                  ymmt_confidence=%s
+                            WHERE id=%s""",
+                        (_r.get('ymmt_id'),
+                         float(_r.get('confidence') or 0), inv_id))
+        except Exception as _yerr:
+            print(f'[ymmt_match] scraper tag failed inv_id={inv_id}: {_yerr}',
+                  flush=True)
         return (inv_id, True, None)
 
 

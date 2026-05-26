@@ -2447,11 +2447,14 @@ def dashboard():
                dl.reserve_met         AS dc_reserve_met,
                dl.detail_url          AS dc_detail_url,
                dl.status              AS dc_status,
-               dl.closed_at           AS dc_closed_at
+               dl.closed_at           AS dc_closed_at,
+               yc.model AS ymmt_model,
+               yc.trim  AS ymmt_trim
         FROM bids b
         LEFT JOIN contacts c ON b.contact_id = c.id
         LEFT JOIN dealers d ON b.partner_dealer_id = d.id
         LEFT JOIN dealerclub_lots dl ON dl.bid_id = b.id
+        LEFT JOIN ymmt_catalog yc ON yc.id = b.ymmt_id
         {where}
         ORDER BY b.created_at DESC LIMIT 200
     """
@@ -2529,9 +2532,8 @@ def dashboard():
             'completed': r.get('completed_at') is not None,
         })
 
-    # BUY_PROFILE_MATCH_2026_05_22: attach matches to each bid. ZERO DB hits during
-    # scoring — pre-fetched dealer profiles + VIN-owned sets used in-memory.
-    # Allowlist-gated: only scores against BUY_PROFILE_MATCH_ENABLED_SLUGS.
+    # YMMT_MATCH_2026_05_26: scores ALL portal dealers by default. Kill-switch:
+    # set BUY_PROFILE_MATCH_ENABLED_SLUGS to a non-empty tuple to re-gate.
     try:
         if BUY_PROFILE_MATCH_ENABLED_SLUGS:
             cur.execute("""SELECT id, name, portal_slug, buy_profile
@@ -2539,17 +2541,22 @@ def dashboard():
                             WHERE portal_slug = ANY(%s)
                               AND buy_profile IS NOT NULL""",
                         (list(BUY_PROFILE_MATCH_ENABLED_SLUGS),))
-            _dealers_with_profiles = [dict(r) for r in cur.fetchall()]
-            _vins_by_dealer = _load_dealer_vins_owned(cur)
-            for _b in bids:
-                if not isinstance(_b, dict):
-                    continue
-                try:
-                    _b['match_dealers'] = _compute_bid_matches(_b, _dealers_with_profiles,
-                                                              vins_by_dealer=_vins_by_dealer)
-                except Exception as _ie:
-                    _b['match_dealers'] = []
-                    print(f"[buy-profile-match] bid={_b.get('id')} err: {_ie}", flush=True)
+        else:
+            cur.execute("""SELECT id, name, portal_slug, buy_profile
+                             FROM dealers
+                            WHERE portal_slug IS NOT NULL
+                              AND buy_profile IS NOT NULL""")
+        _dealers_with_profiles = [dict(r) for r in cur.fetchall()]
+        _vins_by_dealer = _load_dealer_vins_owned(cur)
+        for _b in bids:
+            if not isinstance(_b, dict):
+                continue
+            try:
+                _b['match_dealers'] = _compute_bid_matches(_b, _dealers_with_profiles,
+                                                          vins_by_dealer=_vins_by_dealer)
+            except Exception as _ie:
+                _b['match_dealers'] = []
+                print(f"[buy-profile-match] bid={_b.get('id')} err: {_ie}", flush=True)
     except Exception as _e:
         print(f"[buy-profile-match] dashboard attach failed: {_e}", flush=True)
 
@@ -2676,11 +2683,15 @@ def bid_detail(bid_id):
                dl.transport_eta_min     AS dc_transport_eta_min,
                dl.transport_eta_max     AS dc_transport_eta_max,
                dl.transport_enclosed    AS dc_transport_enclosed,
-               dl.closed_at             AS dc_closed_at
+               dl.closed_at             AS dc_closed_at,
+               b.ymmt_id,
+               yc.model AS ymmt_model,
+               yc.trim  AS ymmt_trim
         FROM bids b
         LEFT JOIN contacts c ON b.contact_id = c.id
         LEFT JOIN dealers d ON b.partner_dealer_id = d.id
         LEFT JOIN dealerclub_lots dl ON dl.bid_id = b.id
+        LEFT JOIN ymmt_catalog yc ON yc.id = b.ymmt_id
         WHERE b.id = %s
     """, (bid_id,))
     bid = cur.fetchone()
@@ -3117,22 +3128,27 @@ def bid_detail(bid_id):
     _mark('partner_offers')
 
     # BUY_PROFILE_MATCH_2026_05_22: compute matches for this bid (in-memory),
-    # gated by BUY_PROFILE_MATCH_ENABLED_SLUGS. Uses a fresh DB connection
-    # because the request's `cur` may have been closed earlier in the handler.
+    # YMMT_MATCH_2026_05_26: scores ALL portal dealers by default. Uses a fresh
+    # DB connection because the request's `cur` may have been closed earlier.
     match_dealers = []
     try:
+        _md_db = get_db()
+        _md_cur = _md_db.cursor()
         if BUY_PROFILE_MATCH_ENABLED_SLUGS:
-            _md_db = get_db()
-            _md_cur = _md_db.cursor()
             _md_cur.execute("""SELECT id, name, portal_slug, buy_profile
                                  FROM dealers
                                 WHERE portal_slug = ANY(%s)
                                   AND buy_profile IS NOT NULL""",
                             (list(BUY_PROFILE_MATCH_ENABLED_SLUGS),))
-            _ds = [dict(r) for r in _md_cur.fetchall()]
-            _vins = _load_dealer_vins_owned(_md_cur)
-            _md_db.close()
-            match_dealers = _compute_bid_matches(dict(bid), _ds, vins_by_dealer=_vins)
+        else:
+            _md_cur.execute("""SELECT id, name, portal_slug, buy_profile
+                                 FROM dealers
+                                WHERE portal_slug IS NOT NULL
+                                  AND buy_profile IS NOT NULL""")
+        _ds = [dict(r) for r in _md_cur.fetchall()]
+        _vins = _load_dealer_vins_owned(_md_cur)
+        _md_db.close()
+        match_dealers = _compute_bid_matches(dict(bid), _ds, vins_by_dealer=_vins)
     except Exception as _mm_err:
         print(f'[bid_detail] match_dealers err: {_mm_err}', flush=True)
     _mark('match_dealers')
@@ -6728,6 +6744,9 @@ def api_bids():
                b.needs_verification_reason,  -- BADGE_NEEDS_VERIFY_API_2026_05_15
                b.damage_signal,  -- DAMAGE_BADGE_API_2026_05_15
                b.carfax_damage, b.autocheck_damage,
+               b.ymmt_id,
+               yc.model AS ymmt_model,
+               yc.trim  AS ymmt_trim,
                c.name as contact_name, c.company as contact_company, c.role as contact_role,
                d.name as partner_dealer_name,
                dl.current_price       AS dc_current_price,
@@ -6740,6 +6759,7 @@ def api_bids():
         LEFT JOIN contacts c ON b.contact_id = c.id
         LEFT JOIN dealers d ON b.partner_dealer_id = d.id
         LEFT JOIN dealerclub_lots dl ON dl.bid_id = b.id
+        LEFT JOIN ymmt_catalog yc ON yc.id = b.ymmt_id
         {where}
         ORDER BY b.created_at DESC LIMIT 200
     """
@@ -6779,6 +6799,10 @@ def api_bids():
             'make': r['make'],
             'model': r['model'],
             'color': r.get('color'),  # BUY_PROFILE_MATCH_2026_05_22: color-aware scoring
+            # YMMT_MATCH_2026_05_26: canonical model+trim for trim-aware scoring
+            'ymmt_id': r.get('ymmt_id'),
+            'ymmt_model': r.get('ymmt_model'),
+            'ymmt_trim': r.get('ymmt_trim'),
             'mileage': r['mileage'],
             'raw_message': r['raw_message'],
             'status': r['status'],
@@ -6872,22 +6896,25 @@ def api_bids():
     except Exception as _poc_err:
         print(f'[api/bids] partner_offer_counts err: {_poc_err}', flush=True)
 
-    # BUY_PROFILE_MATCH_2026_05_22: attach matches to each /api/bids response so the
-    # JS row-refresh keeps the green tint + dealer badges between server-rendered loads.
+    # YMMT_MATCH_2026_05_26: scores ALL portal dealers by default.
     try:
         if BUY_PROFILE_MATCH_ENABLED_SLUGS:
             cur.execute("""SELECT id, name, portal_slug, buy_profile
                              FROM dealers
                             WHERE portal_slug = ANY(%s) AND buy_profile IS NOT NULL""",
                         (list(BUY_PROFILE_MATCH_ENABLED_SLUGS),))
-            _ds_api = [dict(r) for r in cur.fetchall()]
-            _vbd_api = _load_dealer_vins_owned(cur)
-            for _b in bids:
-                try:
-                    _b['match_dealers'] = _compute_bid_matches(_b, _ds_api,
-                                                              vins_by_dealer=_vbd_api)
-                except Exception as _ie:
-                    _b['match_dealers'] = []
+        else:
+            cur.execute("""SELECT id, name, portal_slug, buy_profile
+                             FROM dealers
+                            WHERE portal_slug IS NOT NULL AND buy_profile IS NOT NULL""")
+        _ds_api = [dict(r) for r in cur.fetchall()]
+        _vbd_api = _load_dealer_vins_owned(cur)
+        for _b in bids:
+            try:
+                _b['match_dealers'] = _compute_bid_matches(_b, _ds_api,
+                                                          vins_by_dealer=_vbd_api)
+            except Exception as _ie:
+                _b['match_dealers'] = []
     except Exception as _e:
         print(f"[api/bids] match attach failed: {_e}", flush=True)
 
@@ -17222,9 +17249,11 @@ def _bp_resolve_model_entry(models, bid_model):
             return v, k
     return None, None
 
-# BUY_PROFILE_MATCH_ALLOWLIST_2026_05_22: gate matches to specific dealer slugs
-# while we tune. Empty tuple = all onboarded dealers. To expand: add the slug.
-BUY_PROFILE_MATCH_ENABLED_SLUGS = ('txtcharlie', 'nuccioautogroup')
+# YMMT_MATCH_2026_05_26: allowlist removed. All 15 portal dealers now participate
+# in bid-card buyer-match scoring (was gated to txtcharlie + nuccioautogroup).
+# Tuple kept as an empty-by-default kill-switch — set to a slug list to re-gate
+# if a specific dealer's profile produces noise.
+BUY_PROFILE_MATCH_ENABLED_SLUGS = ()
 
 def _bp_score(bid, dealer_id, profile, vins_owned=None):
     """Score one bid against one dealer's buy_profile JSONB.
@@ -17270,17 +17299,36 @@ def _bp_score(bid, dealer_id, profile, vins_owned=None):
         if rule.get('make') == make:
             return 100, "override always"
 
-    # MODEL_MATCH_REQUIRED_2026_05_22: bid model MUST appear in dealer's history.
-    # Now uses fuzzy normalization so 'GLE-Class' matches 'Gle', 'Escalade ESV'
-    # matches 'Escalade', etc. Sierra HD still won't match because Charlie's GMC
-    # entries are Hummer-only.
+    # YMMT_MATCH_2026_05_26: prefer canonical catalog (model, trim) when bid is
+    # ymmt-tagged. Falls back to fuzzy model match for legacy/untagged bids so
+    # nothing regresses while backfill catches up. Bid is "tagged" when the
+    # bid SELECT has JOINed ymmt_catalog and ymmt_model/ymmt_trim are present.
     models = m.get('models') or {}
-    model_entry, matched_model_key = _bp_resolve_model_entry(models, model)
-    if not model_entry:
-        return None, (f"never stocked {make.title()} "
-                      f"{model.title() if model else '(model unknown)'}")
-    # Use the dealer's actual model key in reason strings (less confusing).
+    ymmt_model = (bid.get('ymmt_model') or '').strip()
+    ymmt_trim  = (bid.get('ymmt_trim')  or '').strip()
+    if ymmt_model:
+        model_entry = models.get(ymmt_model)
+        if not model_entry:
+            return None, f"never stocked {make.title()} {ymmt_model}"
+        matched_model_key = ymmt_model
+    else:
+        # MODEL_MATCH_REQUIRED_2026_05_22 fuzzy path for untagged bids.
+        model_entry, matched_model_key = _bp_resolve_model_entry(models, model)
+        if not model_entry:
+            return None, (f"never stocked {make.title()} "
+                          f"{model.title() if model else '(model unknown)'}")
     model = matched_model_key
+
+    # YMMT_MATCH_2026_05_26: trim check — if bid has a canonical trim, the dealer
+    # MUST stock that specific trim. Fixes the bid-2025 bug where TXTC matched
+    # "GLS 450" against his 3 sold units which were actually 63 AMGs and Maybachs.
+    trim_entry = None
+    if ymmt_trim:
+        trims = model_entry.get('trims') or {}
+        if ymmt_trim not in trims:
+            return None, (f"stocks {make.title()} {model} but not "
+                          f"{ymmt_trim} specifically")
+        trim_entry = trims[ymmt_trim]
 
     # LEARNED_TIER_CAP_v4_2026_05_22: cap = max(dealer's observed peak in this
     # price tier + 1, hardcoded tier default). Each dealer learns its own cap
@@ -17315,34 +17363,39 @@ def _bp_score(bid, dealer_id, profile, vins_owned=None):
         if bid['year'] < ymin - 2 or bid['year'] > ymax + 2:
             score -= 25
 
-    # Velocity from model entry (model match already required upstream)
-    model_colors = model_entry.get('colors') or {}
-    mc = model_colors.get(color) if color else None
+    # YMMT_MATCH_2026_05_26: velocity scoring uses TRIM entry when available
+    # (more accurate signal) — falls back to model-level for untagged bids.
+    v_src = trim_entry or model_entry
+    v_label = f"{model.title()} {ymmt_trim}" if trim_entry else model.title()
+    v_colors = v_src.get('colors') or {}
+    mc = v_colors.get(color) if color else None
     velocity_reason = None
 
     if mc and (mc.get('sold_n') or 0) >= 2 and 0 < (mc.get('avg_days_on_lot') or 0) < 10:
         score += 30
-        velocity_reason = (f"{make.title()} {model.title()} {color.title()}: "
+        velocity_reason = (f"{make.title()} {v_label} {color.title()}: "
                            f"{mc['sold_n']} sold @ {mc['avg_days_on_lot']}d (color prime)")
-    elif (model_entry.get('sold_n') or 0) >= 2 \
-            and 0 < (model_entry.get('avg_days_on_lot') or 0) < 10:
+    elif (v_src.get('sold_n') or 0) >= 2 \
+            and 0 < (v_src.get('avg_days_on_lot') or 0) < 10:
         score += 25
-        velocity_reason = (f"{make.title()} {model.title()}: "
-                           f"{model_entry['sold_n']} sold @ {model_entry['avg_days_on_lot']}d (model prime)")
-    elif (model_entry.get('sold_n') or 0) >= 2 \
-            and 0 < (model_entry.get('avg_days_on_lot') or 0) < 20:
+        velocity_reason = (f"{make.title()} {v_label}: "
+                           f"{v_src['sold_n']} sold @ {v_src['avg_days_on_lot']}d "
+                           f"({'trim' if trim_entry else 'model'} prime)")
+    elif (v_src.get('sold_n') or 0) >= 2 \
+            and 0 < (v_src.get('avg_days_on_lot') or 0) < 20:
         score += 15
-        velocity_reason = (f"{make.title()} {model.title()}: "
-                           f"{model_entry['sold_n']} sold @ {model_entry['avg_days_on_lot']}d")
-    elif (model_entry.get('sold_n') or 0) >= 1 \
-            and 0 < (model_entry.get('avg_days_on_lot') or 0) < 45:
+        velocity_reason = (f"{make.title()} {v_label}: "
+                           f"{v_src['sold_n']} sold @ {v_src['avg_days_on_lot']}d")
+    elif (v_src.get('sold_n') or 0) >= 1 \
+            and 0 < (v_src.get('avg_days_on_lot') or 0) < 45:
         score += 5
-        velocity_reason = (f"{make.title()} {model.title()}: "
-                           f"{model_entry['sold_n']} sold @ {model_entry['avg_days_on_lot']}d")
+        velocity_reason = (f"{make.title()} {v_label}: "
+                           f"{v_src['sold_n']} sold @ {v_src['avg_days_on_lot']}d")
     # else: model in history but no sale yet (only active stock) — no velocity bonus
 
-    # Price reasonableness — use MODEL avg_price ±50% (more accurate than make-wide bands)
-    _model_p = model_entry.get('avg_price')
+    # Price reasonableness — use TRIM avg_price when available, else model
+    _model_p = (trim_entry.get('avg_price') if trim_entry else None) \
+               or model_entry.get('avg_price')
     if price and _model_p:
         ratio = price / _model_p
         if 0.7 <= ratio <= 1.3:
@@ -17364,7 +17417,8 @@ def _bp_score(bid, dealer_id, profile, vins_owned=None):
         elif miles > mp90 * 1.5:
             score -= 5
 
-    return score, (velocity_reason or f"{make.title()} {model.title()} (no recent sales)")
+    return score, (velocity_reason or
+                   f"{make.title()} {(ymmt_trim or model).title() if ymmt_trim else model.title()} (no recent sales)")
 
 
 def _bp_tier(score):

@@ -1423,6 +1423,24 @@ def _score_bid_for_dealer(bid: dict, profile: dict | None, dealer_id: int | None
         return None, f'never stocks {make.title()}'
 
     m = makes[make]
+
+    # YMMT_MATCH_2026_05_26: if bid is canonically tagged, require the dealer
+    # to stock that specific (model, trim). Prevents SMS-pushing a GLS 450 to
+    # a dealer whose only GLS units are 63 AMGs. Falls back to make-level for
+    # untagged bids so legacy behavior is preserved.
+    ymmt_model = (bid.get('ymmt_model') or '').strip()
+    ymmt_trim  = (bid.get('ymmt_trim')  or '').strip()
+    if ymmt_model:
+        _models = m.get('models') or {}
+        _me = _models.get(ymmt_model)
+        if not _me:
+            return None, f'never stocked {make.title()} {ymmt_model}'
+        if ymmt_trim:
+            _trims = _me.get('trims') or {}
+            if ymmt_trim not in _trims:
+                return None, (f'stocks {make.title()} {ymmt_model} but not '
+                              f'{ymmt_trim} specifically')
+
     s = 50
     share = m.get('share') or 0
     if share >= 20:   s += 15
@@ -1473,10 +1491,15 @@ def _push_bid_to_subscribed_partners(bid_id: int) -> None:
     try:
         with _db() as conn, conn.cursor() as cur:
             cur.execute("""
-                SELECT id, phone, status, year, make, model, trim, mileage, vin,
-                       creation_ip, creation_source,
-                       COALESCE(asking_price, ai_price, bid_amount) AS asking_price
-                  FROM bids WHERE id = %s
+                SELECT b.id, b.phone, b.status, b.year, b.make, b.model, b.trim, b.mileage, b.vin,
+                       b.creation_ip, b.creation_source,
+                       COALESCE(b.asking_price, b.ai_price, b.bid_amount) AS asking_price,
+                       b.ymmt_id,
+                       yc.model AS ymmt_model,
+                       yc.trim  AS ymmt_trim
+                  FROM bids b
+                  LEFT JOIN ymmt_catalog yc ON yc.id = b.ymmt_id
+                 WHERE b.id = %s
             """, (bid_id,))
             bid = cur.fetchone()
             if not bid:
