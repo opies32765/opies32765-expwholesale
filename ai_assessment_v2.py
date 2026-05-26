@@ -94,13 +94,16 @@ def _vehicle_summary(bid: dict, nhtsa: dict | None = None,
     color = bid.get('color')
     vin = bid.get('vin')
     notes = bid.get('notes')
-    asking = bid.get('asking_price')
+    # ASKING_PRICE_OUT_2026_05_26: deliberately do NOT surface bid.asking_price
+    # to the LLM. Bid 2027 (2025 Lexus RC F Track Edition, asking $2K — clearly
+    # garbage) returned ai_price=$2K because the LLM anchored to it. Valuation
+    # now comes purely from MMR + rBook + market intel. The asking-vs-AI
+    # comparison happens externally in app.py post-LLM.
 
     lines = [f"VEHICLE: {head}"]
     lines.append(f"VIN: {vin or 'N/A'}")
     lines.append(f"Mileage: {f'{miles:,}' if miles else 'unknown'}")
     if color: lines.append(f"Color: {color}")
-    if asking: lines.append(f"Asking price (from seller): ${asking:,}")
     if notes: lines.append(f"Notes: {notes}")
 
     if nhtsa:
@@ -488,12 +491,10 @@ def build_prompt(bid: dict, *, vauto: dict | None = None,
                  thalist_asks: dict | None = None) -> str:
     """Compose the v2 assessment prompt. All inputs optional; sections render
     with placeholders when data is missing."""
-    asking = bid.get('asking_price')
-    asking_constraint = (
-        f"Seller is asking ${asking:,}. Use this as a CEILING — your target buy MUST be at or below asking."
-        if asking else
-        "No asking price stated — set target_buy purely from the data."
-    )
+    # ASKING_PRICE_OUT_2026_05_26: never feed asking_price to the LLM. Set
+    # target_buy purely from market data (MMR + rBook + comps + LSL history).
+    # Garbage asks (bid 2027 = $2K on a $90K car) used to anchor the LLM.
+    asking_constraint = "Set target_buy purely from the market data above. Do NOT consider any asking price; the seller's number is intentionally withheld."
 
     return PROMPT_TEMPLATE_V2.format(
         vehicle_summary=_vehicle_summary(bid, nhtsa, tesla),

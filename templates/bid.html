@@ -926,13 +926,16 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
       </div>
       {% else %}
-      {# BUY_PROFILE_MATCH_2026_05_22: replaced Push-to-Network card with auto-computed Buyer Match list. #}
+      {# YMMT_MATCH_2026_05_26: unified Buyer Match card.
+         Replaces both the old buyer-match list AND the Dealer Network Intel
+         card. Per-dealer in-stock + sold-90d pulled from dealer_inventory
+         in app.py:_load_match_detail. Rows click to expand. #}
       <div class="card" id="buyer-match-card" style="border-color:{% if match_dealers %}#22c55e{% else %}#334155{% endif %};flex-shrink:0">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
           Buyer Match
           {% if match_dealers %}
             <span style="font-size:10px;font-weight:700;color:#86efac;background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.5);border-radius:4px;padding:2px 8px;letter-spacing:.4px">
-              {{ match_dealers|length }} DEALER{% if match_dealers|length != 1 %}S{% endif %}
+              {{ match_dealers|length }} CANDIDATE{% if match_dealers|length != 1 %}S{% endif %}
             </span>
           {% endif %}
         </div>
@@ -940,26 +943,110 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           {% if not match_dealers %}
             <div style="font-size:13px;color:#64748b;line-height:1.5">
               No onboarded dealers match this bid right now.<br>
-              <span style="color:#475569;font-size:12px">Auto-scored against each partner's nightly buy_profile (make + model + color velocity, with VIN-on-lot and overstock exclusion).</span>
+              <span style="color:#475569;font-size:12px">Auto-scored against each partner's nightly buy_profile (trim + color velocity + in-stock + 90d/12mo sales, with VIN-on-lot and overstock exclusion).</span>
             </div>
           {% else %}
-            <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;flex-direction:column;gap:7px">
               {% for _m in match_dealers %}
-                <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:#0f172a;border:1px solid {% if _m.tier=='T1' %}rgba(34,197,94,.55){% else %}rgba(34,197,94,.30){% endif %};border-radius:8px">
-                  <div style="display:flex;flex-direction:column;align-items:center;min-width:46px">
-                    <span style="display:inline-block;padding:3px 8px;background:{% if _m.tier=='T1' %}rgba(34,197,94,.28);color:#86efac;border:1px solid rgba(34,197,94,.6){% else %}rgba(34,197,94,.14);color:#86efac;border:1px solid rgba(34,197,94,.45){% endif %};border-radius:4px;font-size:10px;font-weight:800;letter-spacing:.5px;line-height:1">{{ _m.tier }}</span>
-                    <span style="margin-top:2px;font-size:11px;font-weight:700;color:#64748b">{{ _m.score }}</span>
+              {% set _d = match_detail.get(_m.dealer_id) if match_detail else None %}
+              {% set _light = (_d.stock_light if _d else 'gray') %}
+              {% set _light_color = {'green':'#22c55e','yellow':'#fbbf24','gray':'#475569'}[_light] %}
+              <div class="bm-row" data-dealer-id="{{ _m.dealer_id }}" style="background:#0f172a;border:1px solid {% if _m.tier=='T1' %}rgba(34,197,94,.55){% else %}rgba(34,197,94,.30){% endif %};border-radius:8px;overflow:hidden">
+                <div class="bm-summary" style="display:grid;grid-template-columns:50px 50px 1fr 18px;gap:11px;align-items:center;padding:10px 12px;cursor:pointer" onclick="this.parentElement.classList.toggle('bm-expanded')">
+                  <span style="display:inline-block;padding:3px 7px;background:{% if _m.tier=='T1' %}rgba(34,197,94,.28);color:#86efac;border:1px solid rgba(34,197,94,.6){% else %}rgba(34,197,94,.14);color:#86efac;border:1px solid rgba(34,197,94,.45){% endif %};border-radius:4px;font-size:10px;font-weight:800;letter-spacing:.5px;text-align:center;line-height:1.4">{{ _m.tier }}</span>
+                  <span style="font-size:18px;font-weight:800;color:#86efac;text-align:center;font-variant-numeric:tabular-nums">{{ _m.score }}</span>
+                  <div style="min-width:0">
+                    <div style="font-size:15px;font-weight:700;color:#e2e8f0;display:flex;align-items:center;gap:8px">
+                      <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:{{ _light_color }};{% if _light=='green' %}box-shadow:0 0 6px rgba(34,197,94,.6){% endif %}"></span>
+                      {{ _m.name }}
+                    </div>
+                    <div style="margin-top:3px;font-size:12px;color:#94a3b8;line-height:1.4">
+                      {% if _d %}
+                        {% set _n_stock = _d.in_stock|length %}
+                        {% set _n_sold_90d = _d.sold_90d|length %}
+                        {% if _n_stock %}<span style="color:#86efac;font-weight:700">{{ _n_stock }}</span> in stock{% else %}<span style="color:#94a3b8">0 in stock now</span>{% endif %}
+                        {% if _n_sold_90d %} · <span style="color:#cbd5e1;font-weight:700">{{ _n_sold_90d }}</span> sold 90d{% endif %}
+                        {% if _d.sold_12mo_count > _n_sold_90d %} · <span style="color:#64748b">{{ _d.sold_12mo_count }} sold 12mo</span>{% endif %}
+                      {% else %}{{ _m.reason }}{% endif %}
+                    </div>
                   </div>
-                  <div style="flex:1;min-width:0">
-                    <div style="font-size:15px;font-weight:700;color:#e2e8f0;line-height:1.2">{{ _m.name }}</div>
-                    <div style="margin-top:4px;font-size:12px;color:#94a3b8;line-height:1.4">{{ _m.reason }}</div>
+                  <span class="bm-chev" style="color:#475569;font-size:16px;font-weight:700;text-align:center;line-height:1;transition:transform .15s">›</span>
+                </div>
+                <div class="bm-detail" style="display:none;padding:0 12px 12px 73px;border-top:1px solid #1a2235">
+                  {% if _d and _d.fit %}
+                  {% set _f = _d.fit %}
+                  <div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:5px">
+                    {% if _f.trim_match %}<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:10px;letter-spacing:.3px;text-transform:uppercase;color:#86efac;background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.35)">✓ Trim match</span>{% else %}<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:10px;letter-spacing:.3px;text-transform:uppercase;color:#fbbf24;background:rgba(251,191,36,.15);border:1px solid rgba(251,191,36,.35)">~ Model match (no canonical trim)</span>{% endif %}
+                    {% if _f.year_exact_stock %}<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:10px;letter-spacing:.3px;text-transform:uppercase;color:#86efac;background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.35)">✓ Has {{ bid.year }} in stock</span>{% endif %}
+                    {% if _f.color_match %}<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:10px;letter-spacing:.3px;text-transform:uppercase;color:#86efac;background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.35)">✓ Color match</span>{% elif bid.color and _d.color_pattern_12mo %}<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:10px;letter-spacing:.3px;text-transform:uppercase;color:#fbbf24;background:rgba(251,191,36,.15);border:1px solid rgba(251,191,36,.35)">~ Color off-pattern</span>{% endif %}
+                    {% if _f.velocity == 'quick' %}<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:10px;letter-spacing:.3px;text-transform:uppercase;color:#86efac;background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.35)">✓ Quick turn</span>{% elif _f.velocity == 'normal' %}<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:10px;letter-spacing:.3px;text-transform:uppercase;color:#86efac;background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.35)">✓ Normal turn</span>{% elif _f.velocity == 'slow' %}<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:10px;letter-spacing:.3px;text-transform:uppercase;color:#fbbf24;background:rgba(251,191,36,.15);border:1px solid rgba(251,191,36,.35)">~ Slow turn</span>{% elif _f.velocity == 'history_only' %}<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:10px;letter-spacing:.3px;text-transform:uppercase;color:#94a3b8;background:rgba(148,163,184,.12);border:1px solid rgba(148,163,184,.25)">~ Historical buyer</span>{% else %}<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:10px;letter-spacing:.3px;text-transform:uppercase;color:#94a3b8;background:rgba(148,163,184,.12);border:1px solid rgba(148,163,184,.25)">✗ No recent sales</span>{% endif %}
+                  </div>
+                  {% endif %}
+                  {% if _d and _d.in_stock %}
+                  <div style="margin-top:10px;padding:10px 12px;background:#0a1020;border:1px solid #1a2235;border-radius:7px">
+                    <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px">
+                      In stock now <span style="color:#86efac;background:rgba(34,197,94,.15);padding:1px 6px;border-radius:8px;font-size:9px">{{ _d.in_stock|length }}</span>
+                    </div>
+                    {% for u in _d.in_stock %}
+                    <div style="display:grid;grid-template-columns:50px 1fr 80px 75px 65px;gap:8px;align-items:center;padding:5px 7px;border-radius:5px;background:#0b0f19;font-size:12px;margin-bottom:4px;font-variant-numeric:tabular-nums">
+                      <span style="font-weight:700;color:{% if u.exact_year %}#86efac{% else %}#cbd5e1{% endif %}">{{ u.year }}</span>
+                      <span style="color:#a8c0d6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ u.color or '—' }}</span>
+                      <span style="color:#64748b;font-size:11px;text-align:right">{% if u.mileage %}{{ '{:,}'.format(u.mileage) }} mi{% else %}—{% endif %}</span>
+                      <span style="color:#86efac;font-weight:700;text-align:right">{% if u.price %}${{ '{:,}'.format(u.price|int) }}{% else %}—{% endif %}</span>
+                      <span style="color:#64748b;font-size:11px;text-align:right">{{ u.dol }}d</span>
+                    </div>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                  {% if _d and _d.sold_90d %}
+                  <div style="margin-top:8px;padding:10px 12px;background:#0a1020;border:1px solid #1a2235;border-radius:7px">
+                    <div style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px">
+                      Sold last 90d <span style="color:#86efac;background:rgba(34,197,94,.15);padding:1px 6px;border-radius:8px;font-size:9px">{{ _d.sold_90d|length }}</span>
+                      {% if _d.sold_12mo_count > _d.sold_90d|length %}<span style="color:#94a3b8;font-size:10px;margin-left:6px">· {{ _d.sold_12mo_count }} sold in 12mo</span>{% endif %}
+                    </div>
+                    {% for u in _d.sold_90d %}
+                    <div style="display:grid;grid-template-columns:50px 1fr 80px 75px 65px;gap:8px;align-items:center;padding:5px 7px;border-radius:5px;background:#0b0f19;font-size:12px;margin-bottom:4px;font-variant-numeric:tabular-nums">
+                      <span style="font-weight:700;color:#cbd5e1">{{ u.year }}</span>
+                      <span style="color:#a8c0d6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ u.color or '—' }}</span>
+                      <span style="color:#64748b;font-size:11px;text-align:right">{% if u.mileage %}{{ '{:,}'.format(u.mileage) }} mi{% else %}—{% endif %}</span>
+                      <span style="color:#3b82f6;font-weight:700;text-align:right">{% if u.price %}${{ '{:,}'.format(u.price|int) }}{% else %}—{% endif %}</span>
+                      <span style="color:#3b82f6;font-weight:600;text-align:right">{{ u.dol }}d</span>
+                    </div>
+                    {% endfor %}
+                    {% if _d.color_pattern_12mo %}
+                    <div style="margin-top:6px;font-size:11px;color:#94a3b8;font-style:italic;line-height:1.5">
+                      12mo color: {% for c, n in _d.color_pattern_12mo %}{{ c.title() }} ({{ n }}{% if loop.first %} #1{% endif %}){% if not loop.last %}, {% endif %}{% endfor %}
+                    </div>
+                    {% endif %}
+                  </div>
+                  {% endif %}
+                  {% if not (_d and (_d.in_stock or _d.sold_90d)) %}
+                  <div style="margin-top:10px;padding:10px 14px;background:#0a1020;border:1px dashed #334155;border-radius:7px;font-size:12px;color:#94a3b8;line-height:1.5">
+                    No exact-fit stock or recent sales. Buy-profile fit comes from historical pattern.
+                    {% if _d and _d.sold_12mo_count %} ({{ _d.sold_12mo_count }} sold in last 12 months){% endif %}
+                  </div>
+                  {% endif %}
+                  <div style="margin-top:10px;padding:9px 12px;background:rgba(34,197,94,.06);border-left:3px solid rgba(34,197,94,.5);border-radius:0 6px 6px 0;font-size:12px;color:#bbf7d0;line-height:1.5">
+                    <span style="font-weight:700;color:#86efac;font-size:10px;letter-spacing:.4px;text-transform:uppercase;margin-right:6px">Why match</span>
+                    {{ _m.reason }}
                   </div>
                 </div>
+              </div>
               {% endfor %}
+            </div>
+            <div style="margin-top:10px;display:flex;gap:14px;font-size:10px;color:#64748b">
+              <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;margin-right:4px"></span>Stock + active sales</span>
+              <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#fbbf24;margin-right:4px"></span>Active buyer, partial fit</span>
+              <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#475569;margin-right:4px"></span>Historical buyer</span>
             </div>
           {% endif %}
         </div>
       </div>
+      <style>
+      .bm-row.bm-expanded .bm-detail{display:block !important}
+      .bm-row.bm-expanded .bm-chev{transform:rotate(90deg);color:#86efac}
+      .bm-row .bm-summary:hover{background:rgba(34,197,94,.04)}
+      </style>
       {% endif %}
 
       <script>
@@ -1108,8 +1195,13 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
       </div>
       {% endif %}
 
-      {# ─────────────────── Dealer Network Intel ─────────────────── #}
-      {# Lives directly below AI Assessment so all AI / decisioning signal is in one column. #}
+      {# YMMT_MATCH_2026_05_26: Dealer Network Intel card REMOVED.
+         Its data (active partner inventory, recent sales, pitch dealers) is
+         now folded into the unified Buyer Match card above — per-dealer
+         in-stock and sold-90d lists, with stock-light indicators.
+         The {% if false %} guard below preserves the markup for easy
+         rollback during the transition window. #}
+      {% if false %}
       {% set di = (ai_log.dealer_intel if ai_log else None) or None %}
       {% if di and (di.active or di.recent_sales or di.top_pitch) %}
       <div class="card" style="border-color:#d97706;flex-shrink:0" id="dealer-intel-card">
@@ -1201,6 +1293,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         {% endif %}
       </div>
       {% endif %}
+      {% endif %}{# YMMT_MATCH_2026_05_26: end dealer-network rollback guard #}
 
       {# ─────────────────── Past Deals — Same Make/Model (LSL Sales Ledger) ─────────────────── #}
       {# Raw rows from /opt/livesaleslog/crm.db (mirror of LSL deals).  All columns mirror

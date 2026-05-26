@@ -2700,6 +2700,32 @@ def bid_detail(bid_id):
     if not bid:
         db.close()
         return 'Not found', 404
+    # YMMT_MATCH_AUTO_TAG_2026_05_26: any bid with ymmt_id IS NULL gets tagged
+    # on first view. Fast cache hit (~ms) for repeated views; one LLM call
+    # at most (~$0.001) for genuinely new bids. Self-heals the intake gap —
+    # we don't have to chase every bid-creation path to add a hook.
+    if not bid.get('ymmt_id') and bid.get('year') and bid.get('make'):
+        try:
+            from ymmt_match import resolve_ymmt
+            _r = resolve_ymmt(bid.get('year'), bid.get('make'),
+                              bid.get('model'), bid.get('trim'), db_conn=db)
+            if _r.get('ymmt_id'):
+                cur.execute("""UPDATE bids
+                                  SET ymmt_id=%s, ymmt_resolved_at=NOW(),
+                                      ymmt_confidence=%s
+                                WHERE id=%s""",
+                            (_r['ymmt_id'], float(_r.get('confidence') or 0),
+                             bid_id))
+                db.commit()
+                bid = dict(bid)
+                bid['ymmt_id'] = _r['ymmt_id']
+                bid['ymmt_model'] = _r.get('model')
+                bid['ymmt_trim'] = _r.get('trim')
+                print(f'[ymmt] auto-tagged bid={bid_id} -> id={_r["ymmt_id"]} '
+                      f'({_r.get("model")} / {_r.get("trim")}) src={_r.get("source")}',
+                      flush=True)
+        except Exception as _yerr:
+            print(f'[ymmt] auto-tag bid={bid_id} err: {_yerr}', flush=True)
     # Compute live opportunity for DealerClub bids so the template can
     # render the prominent green/yellow/red card.
     if bid.get('dc_current_price'):
@@ -3149,10 +3175,21 @@ def bid_detail(bid_id):
                                   AND buy_profile IS NOT NULL""")
         _ds = [dict(r) for r in _md_cur.fetchall()]
         _vins = _load_dealer_vins_owned(_md_cur)
-        _md_db.close()
         match_dealers = _compute_bid_matches(dict(bid), _ds, vins_by_dealer=_vins)
+        # YMMT_MATCH_2026_05_26: load per-dealer in-stock + sold detail for the
+        # unified buyer-match card. Reuses _md_cur connection (still open).
+        match_detail = {}
+        if match_dealers:
+            try:
+                match_detail = _load_match_detail(
+                    _md_cur, dict(bid),
+                    [m['dealer_id'] for m in match_dealers])
+            except Exception as _det_err:
+                print(f'[bid_detail] match_detail err: {_det_err}', flush=True)
+        _md_db.close()
     except Exception as _mm_err:
         print(f'[bid_detail] match_dealers err: {_mm_err}', flush=True)
+        match_detail = {}
     _mark('match_dealers')
 
     _handler_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
@@ -3174,7 +3211,9 @@ def bid_detail(bid_id):
                                 ml_prediction=ml_prediction,
                                 partner_offers=partner_offers,
                                 bid_network_claim=bid_network_claim,
-                                match_dealers=match_dealers, time_ago=time_ago)
+                                match_dealers=match_dealers,
+                                match_detail=match_detail,
+                                time_ago=time_ago)
     _total_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
     _render_ms = _total_ms - _handler_ms
     # PHASE_TIMERS_2026_05_20: deltas between marks so we can see which
@@ -8490,8 +8529,7 @@ def api_admin_bulk_upload_parse():
         return jsonify({'error': 'file required'}), 400
     try:
         from bulk_upload import parse_upload
-        require_price = (request.form.get('require_price') or '').strip() in ('1','true','on','yes')
-        rows = parse_upload(f.filename, f.read(), require_price=require_price)
+        rows = parse_upload(f.filename, f.read())
     except Exception as e:
         return jsonify({'error': f'parse failed: {type(e).__name__}: {e}'}), 400
     if not rows:
@@ -17478,6 +17516,175 @@ def _load_dealer_vins_owned(cur):
     except Exception as _e:
         print(f"[buy-profile-match] load_dealer_vins err: {_e}", flush=True)
         return {}
+
+
+def _load_match_detail(cur, bid, dealer_ids):
+    """YMMT_MATCH_2026_05_26: per-dealer in-stock + sold-90d + 12mo-color
+    pattern + fit flags for the unified buyer-match card. Returns:
+      {dealer_id: {
+         'in_stock':  [{vin, year, color, mileage, price, dol, exact_year}, ...],
+         'sold_90d':  [{vin, year, color, mileage, price, sold_at, dol}, ...],
+         'sold_12mo_count': int,
+         'color_pattern_12mo': [(color, sold_count), ...],  # top 5 sorted desc
+         'stock_light': 'green' | 'yellow' | 'gray',
+         'fit': {trim_match, year_exact_stock, color_match, velocity, has_history}
+      }}
+    Lists capped at 5 entries. Falls back to make+model for untagged bids.
+    """
+    if not dealer_ids:
+        return {}
+    out = {d: {'in_stock': [], 'sold_90d': [], 'sold_12mo_count': 0,
+               'color_pattern_12mo': [], 'stock_light': 'gray',
+               'fit': {'trim_match': False, 'year_exact_stock': False,
+                       'color_match': False, 'velocity': None, 'has_history': False}}
+           for d in dealer_ids}
+
+    bid_ymmt = bid.get('ymmt_id') if isinstance(bid, dict) else None
+    bid_year = bid.get('year') if isinstance(bid, dict) else None
+    bid_make = (bid.get('make') or '').strip().upper() if isinstance(bid, dict) else ''
+    bid_model = (bid.get('model') or '').strip() if isinstance(bid, dict) else ''
+
+    # YMMT_MATCH_2026_05_26 v2: match on canonical (model, trim) across ALL
+    # years — a dealer who has a 2024 G63 IS a candidate buyer for a 2025
+    # G63. Year-exactness is surfaced via the exact_year flag on each row
+    # (template highlights it). Trim discipline still strict.
+    if bid_ymmt:
+        # Resolve bid's canonical (model, trim) from the catalog
+        cur.execute("SELECT model, trim FROM ymmt_catalog WHERE id=%s", (bid_ymmt,))
+        _yrow = cur.fetchone()
+        if not _yrow:
+            return out
+        canon_model = _yrow['model']
+        canon_trim = _yrow['trim']
+
+        # IN-STOCK — any year matching (model, trim)
+        cur.execute("""
+            SELECT di.dealer_id, di.vin, di.year, di.ext_color, di.mileage,
+                   di.price, di.first_seen_at, di.last_seen_at,
+                   (CASE WHEN di.year=%s THEN true ELSE false END) AS exact_year,
+                   EXTRACT(DAY FROM NOW() - di.first_seen_at)::int AS dol
+              FROM dealer_inventory di
+              JOIN ymmt_catalog yc ON yc.id = di.ymmt_id
+             WHERE di.dealer_id = ANY(%s::int[])
+               AND di.status = 'active'
+               AND yc.model = %s AND yc.trim = %s
+             ORDER BY di.dealer_id, exact_year DESC NULLS LAST, di.year DESC, di.first_seen_at DESC
+        """, (bid_year, list(dealer_ids), canon_model, canon_trim))
+        for r in cur.fetchall():
+            slot = out.get(r['dealer_id'])
+            if slot and len(slot['in_stock']) < 5:
+                slot['in_stock'].append({
+                    'vin': r['vin'], 'year': r['year'],
+                    'color': r['ext_color'] or '',
+                    'mileage': r['mileage'], 'price': r['price'],
+                    'dol': r['dol'] or 0, 'exact_year': bool(r['exact_year']),
+                })
+
+        # SOLD last 90d — any year matching (model, trim)
+        cur.execute("""
+            SELECT di.dealer_id, di.vin, di.year, di.ext_color, di.mileage,
+                   di.price, di.sold_at,
+                   EXTRACT(DAY FROM di.sold_at - di.first_seen_at)::int AS dol
+              FROM dealer_inventory di
+              JOIN ymmt_catalog yc ON yc.id = di.ymmt_id
+             WHERE di.dealer_id = ANY(%s::int[])
+               AND di.status = 'sold' AND di.sold_at IS NOT NULL
+               AND di.sold_at >= NOW() - INTERVAL '90 days'
+               AND yc.model = %s AND yc.trim = %s
+             ORDER BY di.dealer_id, di.sold_at DESC
+        """, (list(dealer_ids), canon_model, canon_trim))
+        for r in cur.fetchall():
+            slot = out.get(r['dealer_id'])
+            if slot and len(slot['sold_90d']) < 5:
+                slot['sold_90d'].append({
+                    'vin': r['vin'], 'year': r['year'],
+                    'color': r['ext_color'] or '',
+                    'mileage': r['mileage'], 'price': r['price'],
+                    'sold_at': r['sold_at'], 'dol': r['dol'] or 0,
+                })
+
+        # SOLD 12-month count + color breakdown — any year matching (model, trim)
+        cur.execute("""
+            SELECT di.dealer_id, UPPER(di.ext_color) AS color, COUNT(*) AS n
+              FROM dealer_inventory di
+              JOIN ymmt_catalog yc ON yc.id = di.ymmt_id
+             WHERE di.dealer_id = ANY(%s::int[])
+               AND di.status = 'sold' AND di.sold_at IS NOT NULL
+               AND di.sold_at >= NOW() - INTERVAL '365 days'
+               AND yc.model = %s AND yc.trim = %s
+             GROUP BY di.dealer_id, UPPER(di.ext_color)
+        """, (list(dealer_ids), canon_model, canon_trim))
+        _color_acc = {}
+        for r in cur.fetchall():
+            slot = out.get(r['dealer_id'])
+            if slot:
+                slot['sold_12mo_count'] += int(r['n'] or 0)
+                if r['color']:
+                    _color_acc.setdefault(r['dealer_id'], []).append((r['color'], int(r['n'])))
+        for d, colors in _color_acc.items():
+            colors.sort(key=lambda x: -x[1])
+            out[d]['color_pattern_12mo'] = colors[:5]
+    else:
+        # Untagged bid — fuzzy fallback on make+model substring
+        # (best effort, less accurate; usually only hits on new bids before backfill)
+        if bid_make and bid_model:
+            cur.execute("""
+                SELECT di.dealer_id, di.vin, di.year, di.ext_color, di.mileage,
+                       di.price, di.status,
+                       EXTRACT(DAY FROM NOW() - di.first_seen_at)::int AS dol
+                  FROM dealer_inventory di
+                 WHERE di.dealer_id = ANY(%s::int[])
+                   AND UPPER(di.make) = %s
+                   AND di.model ILIKE %s
+                   AND di.status = 'active'
+                 ORDER BY di.dealer_id, di.year DESC NULLS LAST
+            """, (list(dealer_ids), bid_make, f"%{bid_model}%"))
+            for r in cur.fetchall():
+                slot = out.get(r['dealer_id'])
+                if slot and len(slot['in_stock']) < 5:
+                    slot['in_stock'].append({
+                        'vin': r['vin'], 'year': r['year'],
+                        'color': r['ext_color'] or '',
+                        'mileage': r['mileage'], 'price': r['price'],
+                        'dol': r['dol'] or 0, 'exact_year': r['year'] == bid_year,
+                    })
+
+    # Stock-light + fit flags. bid_color used to decide color-match flag.
+    bid_color = (bid.get('color') or '').strip().upper() if isinstance(bid, dict) else ''
+    for d, slot in out.items():
+        has_stock = bool(slot['in_stock'])
+        has_sales = bool(slot['sold_90d']) or slot['sold_12mo_count'] > 0
+        if has_stock and has_sales:
+            slot['stock_light'] = 'green'
+        elif has_stock or has_sales:
+            slot['stock_light'] = 'yellow'
+        else:
+            slot['stock_light'] = 'gray'
+
+        # Fit flags
+        fit = slot['fit']
+        fit['trim_match'] = bool(bid_ymmt)  # tagged bid passed scoring
+        fit['has_history'] = slot['sold_12mo_count'] > 0
+        fit['year_exact_stock'] = any(u.get('exact_year') for u in slot['in_stock'])
+        # Color match: bid color appears in dealer's top-3 sold colors OR
+        # in active in-stock units
+        top3 = {c for c, _ in slot['color_pattern_12mo'][:3]}
+        active_colors = {(u.get('color') or '').upper() for u in slot['in_stock']}
+        if bid_color:
+            fit['color_match'] = bid_color in top3 or bid_color in active_colors
+        # Velocity bucket
+        n90 = len(slot['sold_90d'])
+        avg_dol_90 = (sum(u.get('dol') or 0 for u in slot['sold_90d']) / n90) if n90 else 0
+        if n90 >= 2 and 0 < avg_dol_90 < 10:
+            fit['velocity'] = 'quick'
+        elif n90 >= 1 and 0 < avg_dol_90 < 30:
+            fit['velocity'] = 'normal'
+        elif n90 >= 1:
+            fit['velocity'] = 'slow'
+        elif slot['sold_12mo_count']:
+            fit['velocity'] = 'history_only'
+
+    return out
 
 
 def _compute_bid_matches(bid, dealers, vins_by_dealer=None, min_score=60):
