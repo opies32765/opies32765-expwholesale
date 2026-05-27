@@ -5512,10 +5512,12 @@ async def ai_critique(
 
     http = await _ensure_http()
     try:
+        import aiohttp as _aio
+        _t = _aio.ClientTimeout(total=90)
         async with http.post(url, json={
             "bid_id": int(bid_id),
             "question": str(question)[:600],
-        }) as r:
+        }, timeout=_t) as r:
             data = await r.json()
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
