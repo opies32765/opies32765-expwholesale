@@ -637,11 +637,13 @@ def select_vins_to_scrape(snapshot_date: str | None = None,
     Excludes URIs that previously bounced as sold/gone (sold_out=TRUE) so
     we don't waste an LLM call on a known dead listing.
     """
+    # Params order MUST match placeholder order in SQL.
     snap_clause = ''
-    params: list = [RESCRAPE_AFTER_DAYS, limit]
     if snapshot_date:
         snap_clause = 'AND c.snapshot_date = %s::date'
-        params = [RESCRAPE_AFTER_DAYS, snapshot_date, limit]
+        params: list = [snapshot_date, str(RESCRAPE_AFTER_DAYS), limit]
+    else:
+        params = [str(RESCRAPE_AFTER_DAYS), limit]
     with conn() as c, c.cursor() as cur:
         cur.execute(f"""
             SELECT c.subject_vin, c.detail_uri,
@@ -660,7 +662,7 @@ def select_vins_to_scrape(snapshot_date: str | None = None,
                )
              ORDER BY sc DESC NULLS LAST
              LIMIT %s
-        """, params if snapshot_date else [RESCRAPE_AFTER_DAYS, limit])
+        """, params)
         return [(r[0], r[1]) for r in cur.fetchall()]
 
 

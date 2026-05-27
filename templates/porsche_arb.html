@@ -111,6 +111,29 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
 .explain li:before{content:"›";position:absolute;left:0;color:#64748b;font-weight:700}
 .explain pre{background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:8px;font-size:10.5px;color:#94a3b8;overflow-x:auto;white-space:pre-wrap;word-break:break-all;max-height:160px}
 
+/* PORSCHE_ARB_PHASE2_2026_05_27 — comp cars expansion + photo + chip strip */
+.comps-panel{background:#0a0f1c;border:1px solid #1e293b;border-radius:10px;padding:10px 12px;margin-bottom:10px;display:none}
+.comps-panel.open{display:block}
+.comps-panel .section-title{font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px;display:flex;align-items:center;gap:8px}
+.comps-panel .section-title.home{color:#c084fc}
+.comps-panel .section-title.away{color:#4ade80}
+.comp-row{display:flex;align-items:center;justify-content:space-between;gap:8px;background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:6px 8px;margin-bottom:5px;font-size:11px}
+.comp-row .meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.comp-row .yt{color:#e2e8f0;font-weight:600;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.comp-row .det{color:#64748b;font-family:'JetBrains Mono','Consolas',monospace;font-size:10.5px}
+.comp-row .px{color:#fbbf24;font-weight:700;font-family:'JetBrains Mono','Consolas',monospace;font-size:12px;text-align:right;min-width:80px}
+.comp-row a.btn-mini{padding:3px 8px;border:1px solid #334155;border-radius:5px;font-size:10.5px;color:#94a3b8;text-decoration:none;background:transparent}
+.comp-row a.btn-mini:hover{color:#4ade80;border-color:#4ade80}
+.comp-row.no-comps{justify-content:center;color:#64748b;font-style:italic;border-style:dashed}
+.subject-photo{position:relative;margin-bottom:10px;border-radius:8px;overflow:hidden;background:#0f172a;border:1px solid #1e293b}
+.subject-photo img{display:block;width:100%;max-height:160px;object-fit:cover}
+.subject-photo .photo-overlay{position:absolute;left:8px;bottom:6px;background:rgba(0,0,0,.6);color:#fff;padding:3px 8px;border-radius:4px;font-size:10.5px;font-weight:600;letter-spacing:.4px}
+.open-listing-btn{display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#22c55e,#15803d);color:#fff!important;border:none;font-weight:700;padding:9px 12px;border-radius:8px;text-decoration:none;font-size:12px;letter-spacing:.4px;text-transform:uppercase;margin-bottom:10px;gap:6px}
+.open-listing-btn:hover{filter:brightness(1.1)}
+.why-deal-strip{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px;padding:6px 8px;background:rgba(168,85,247,.06);border:1px solid rgba(168,85,247,.25);border-radius:8px}
+.why-deal-strip .lbl{font-size:9.5px;color:#c084fc;text-transform:uppercase;letter-spacing:.5px;font-weight:700;margin-right:4px}
+.why-deal-strip .opt-chip{background:rgba(34,197,94,.15);color:#86efac;border:1px solid rgba(34,197,94,.4);font-size:11px;padding:2px 8px;border-radius:5px;font-weight:600}
+
 .actions{display:flex;gap:6px;align-items:center}
 .status-form{display:flex;gap:6px;flex:1}
 .status-form select{flex:1;background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:6px 8px;border-radius:6px;font-size:11px;font-family:inherit;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
@@ -163,6 +186,17 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
       {% endif %}
     </div>
   </div>
+  <div class="metric purple">
+    <div class="label">Top Score v3</div>
+    <div class="value">
+      {% if top_score_v3 is not none %}{{ '%.0f'|format(top_score_v3) }}{% else %}—{% endif %}
+      <span style="font-size:11px;color:#64748b;font-weight:600">({{ v3_scored_count or 0 }} scored)</span>
+    </div>
+  </div>
+  <div class="metric gray">
+    <div class="label">Detail Scraped</div>
+    <div class="value">{{ detail_scraped_count or 0 }}</div>
+  </div>
   <div class="metric gray">
     <div class="label">v2 Scored</div>
     <div class="value">{{ v2_scored_count or 0 }}</div>
@@ -211,6 +245,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
   <div class="sort">
     <span class="filter-label">Sort</span>
     <select id="sortSel">
+      <option value="arb_score_v3">Arb Score v3 (loadout-aware)</option>
       <option value="arb_score_v2">Arb Score v2 (like-filtered)</option>
       <option value="arb_score">Arb Score v1 (raw regional)</option>
       <option value="like_filtered_net_spread">Like-Filtered Spread</option>
@@ -244,6 +279,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
          data-region="{{ (r.home_region or '')|lower }}"
          data-arb-score="{{ r.arb_score or 0 }}"
          data-arb-score-v2="{{ r.arb_score_v2 or 0 }}"
+         data-arb-score-v3="{{ r.arb_score_v3 or 0 }}"
          data-days-on-lot="{{ r.days_on_lot or 0 }}"
          data-anchor-vin="{{ r.anchor_vin or '' }}">
 
@@ -263,9 +299,12 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
           <div class="vin">VIN {{ r.subject_vin }}</div>
         </div>
         <div class="score-badge {{ score_class }}">
-          <div class="n">{% if r.arb_score_v2 is not none %}{{ '%.0f'|format(r.arb_score_v2) }}{% elif r.arb_score is not none %}{{ '%.0f'|format(r.arb_score) }}{% else %}—{% endif %}</div>
+          <div class="n">{% if r.arb_score_v3 is not none %}{{ '%.0f'|format(r.arb_score_v3) }}{% elif r.arb_score_v2 is not none %}{{ '%.0f'|format(r.arb_score_v2) }}{% elif r.arb_score is not none %}{{ '%.0f'|format(r.arb_score) }}{% else %}—{% endif %}</div>
           <div class="l">
-            {% if r.arb_score_v2 is not none %}
+            {% if r.arb_score_v3 is not none %}
+              Score v3
+              <span style="color:#64748b;font-weight:600">(v2: {{ '%.0f'|format(r.arb_score_v2 or 0) }} · v1: {{ '%.0f'|format(r.arb_score or 0) }})</span>
+            {% elif r.arb_score_v2 is not none %}
               Score v2
               {% if r.arb_score is not none and (r.arb_score|float)|round(0) != (r.arb_score_v2|float)|round(0) %}
                 <span style="color:#64748b;font-weight:600">(v1: {{ '%.0f'|format(r.arb_score) }})</span>
@@ -276,6 +315,32 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
           </div>
         </div>
       </div>
+
+      {# PORSCHE_ARB_PHASE2_2026_05_27 — subject photo if we scraped one #}
+      {% set ds = r.detail_scrape or {} %}
+      {% if ds.top3 and ds.top3|length > 0 %}
+      <a class="subject-photo" href="{{ r.detail_uri }}" target="_blank" rel="noopener">
+        <img src="{{ ds.top3[0] }}" alt="listing photo" loading="lazy"
+             onerror="this.parentNode.style.display='none'">
+        <div class="photo-overlay">{{ ds.uri_host or '' }}{% if ds.sold_out %} · SOLD{% endif %}</div>
+      </a>
+      {% endif %}
+
+      {% if r.detail_uri %}
+      <a class="open-listing-btn" href="{{ r.detail_uri }}" target="_blank" rel="noopener">
+        Open Listing ↗
+      </a>
+      {% endif %}
+
+      {# Why this is a deal — only show chips actually confirmed by the classifier #}
+      {% if ds.options and ds.options|length > 0 %}
+      <div class="why-deal-strip">
+        <span class="lbl">Confirmed</span>
+        {% for okey in ds.options %}
+          <span class="opt-chip">{{ okey.replace('_', ' ') }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
 
       <div class="spread-strip">
         <div>
@@ -384,6 +449,51 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
         {% endif %}
       </div>
 
+      {# PORSCHE_ARB_PHASE2_2026_05_27 — what we compared this against #}
+      <div class="comps-panel" id="comps-{{ r.id }}">
+        <div class="section-title home">
+          {{ r.home_region or 'Home' }} region · listed here
+          ({{ r.home_region_count or (r.comps_home|length) }})
+        </div>
+        {% if r.comps_home and r.comps_home|length > 0 %}
+          {% for c in r.comps_home %}
+          <div class="comp-row">
+            <div class="meta">
+              <div class="yt">{{ c.year or '—' }} {{ c.model or '' }} {{ c.trim or '' }}{% if c.is_certified %} · CPO{% endif %}{% if c.pending_sale %} · PENDING{% endif %}</div>
+              <div class="det">
+                {% if c.mileage %}{{ '{:,}'.format(c.mileage|int) }} mi · {% endif %}{{ c.dealer_name or '—' }} · {{ c.dealer_city or '' }}, {{ c.dealer_state or '' }}{% if c.days_on_lot is not none %} · {{ c.days_on_lot }}d{% endif %}
+              </div>
+            </div>
+            <div class="px">${{ '{:,.0f}'.format(c.price) }}</div>
+            {% if c.detail_uri %}<a class="btn-mini" href="{{ c.detail_uri }}" target="_blank" rel="noopener">View ↗</a>{% endif %}
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="comp-row no-comps">no comp rows in home region (preserve_comps not yet run)</div>
+        {% endif %}
+
+        <div class="section-title away" style="margin-top:10px">
+          {{ r.best_other_region or 'Best Other' }} region · sets the higher median
+          ({{ r.best_other_count or (r.comps_away|length) }})
+        </div>
+        {% if r.comps_away and r.comps_away|length > 0 %}
+          {% for c in r.comps_away %}
+          <div class="comp-row">
+            <div class="meta">
+              <div class="yt">{{ c.year or '—' }} {{ c.model or '' }} {{ c.trim or '' }}{% if c.is_certified %} · CPO{% endif %}{% if c.pending_sale %} · PENDING{% endif %}</div>
+              <div class="det">
+                {% if c.mileage %}{{ '{:,}'.format(c.mileage|int) }} mi · {% endif %}{{ c.dealer_name or '—' }} · {{ c.dealer_city or '' }}, {{ c.dealer_state or '' }}{% if c.days_on_lot is not none %} · {{ c.days_on_lot }}d{% endif %}
+              </div>
+            </div>
+            <div class="px">${{ '{:,.0f}'.format(c.price) }}</div>
+            {% if c.detail_uri %}<a class="btn-mini" href="{{ c.detail_uri }}" target="_blank" rel="noopener">View ↗</a>{% endif %}
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="comp-row no-comps">no comp rows in best-other region</div>
+        {% endif %}
+      </div>
+
       <div class="actions">
         <form method="POST" action="/porsche-arb/{{ r.id }}/status" class="status-form">
           <select name="status">
@@ -396,6 +506,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
           </select>
           <button type="submit" class="btn primary">Save</button>
         </form>
+        <button type="button" class="btn ghost" data-toggle-comps="{{ r.id }}">Compare ↕</button>
         <button type="button" class="btn ghost" data-toggle-explain="{{ r.id }}">Explain</button>
         {% if r.detail_uri %}<a class="btn success" href="{{ r.detail_uri }}" target="_blank" rel="noopener">View ↗</a>{% endif %}
       </div>
@@ -420,7 +531,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
   // ── Filters + sort ────────────────────────────────────────────────────
   const grid = document.getElementById('grid');
   const filterState = {status: 'active', spread: 0, model: 'all', region: 'all'};
-  let sortKey = 'arb_score_v2';
+  let sortKey = 'arb_score_v3';
   // sortKey → dataset attribute name (camelCase)
   const SORT_KEY_MAP = {
     'arb_score_v2': 'arbScoreV2',
@@ -428,6 +539,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
     'net_spread': 'spread',
     'like_filtered_net_spread': 'likeFilteredNetSpread',
     'days_on_lot': 'daysOnLot',
+    'arb_score_v3': 'arbScoreV3',
   };
 
   document.getElementById('filters').addEventListener('click', function(e){
@@ -479,6 +591,15 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
     if(!t) return;
     const id = t.dataset.toggleExplain;
     const box = document.getElementById('explain-' + id);
+    if(box) box.classList.toggle('open');
+  });
+
+  // ── Compare (comp cars) toggle — PORSCHE_ARB_PHASE2_2026_05_27 ────────
+  document.body.addEventListener('click', function(e){
+    const t = e.target.closest('[data-toggle-comps]');
+    if(!t) return;
+    const id = t.dataset.toggleComps;
+    const box = document.getElementById('comps-' + id);
     if(box) box.classList.toggle('open');
   });
 

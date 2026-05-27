@@ -2,9 +2,8 @@
 """inventory_gap_scan.py — nightly EW inventory holes vs surplus per portal dealer.
 
 Compares each portal dealer's CURRENT active inventory against a 90-day
-SALES VELOCITY baseline (distinct VINs sold in the last 90 days, per YMM
-bucket) and sends a single Telegram digest. Cron: 02:30 EDT, after
-scan_all_dealers.py.
+rolling baseline (avg daily distinct-VIN count, per YMM bucket) and sends
+a single Telegram digest. Cron: 02:30 EDT, after scan_all_dealers.py.
 
 Usage:
   python3 inventory_gap_scan.py            # live (Telegram)
@@ -46,6 +45,8 @@ def year_bucket(yr):
         yr = int(yr)
     except (TypeError, ValueError):
         return "older"
+    # current year on box; use a fixed cutoff = anything older than 5y -> "older"
+    # 2026 today; bucket exact for 2021+
     if yr >= 2021:
         return str(yr)
     return "older"
@@ -61,7 +62,7 @@ def fetch_portal_dealers(cur):
 
 
 def fetch_current_inventory(cur, dealer_ids):
-    """Return dict[dealer_id] -> dict[(yb, make, model)] = current count."""
+    """Return dict[dealer_id] -> Counter[(yb, make, model)] = current count."""
     cur.execute(
         """
         SELECT dealer_id, year, make, model
@@ -83,32 +84,46 @@ def fetch_current_inventory(cur, dealer_ids):
 
 
 def fetch_baseline(cur, dealer_ids):
-    """90-day sales velocity baseline: distinct VINs SOLD per (dealer, yb, make, model)
-    in the last 90 days. Value = raw sold count (magnitude of "how many they move")."""
+    """90-day avg daily distinct-VIN count per (dealer, yb, make, model).
+
+    For each VIN we approximate "days active in window" as:
+      min(last_seen_at, now) - max(first_seen_at, window_start)
+    in days, clamped >=0. Sum that across VINs, divide by 90 = avg daily count.
+    """
     cur.execute(
         """
+        WITH w AS (
+          SELECT NOW() - INTERVAL '90 days' AS start_ts,
+                 NOW()                       AS end_ts
+        )
         SELECT di.dealer_id,
                di.year,
                di.make,
                di.model,
-               COUNT(DISTINCT di.vin) AS sold_count
-          FROM dealer_inventory di
+               SUM(
+                 GREATEST(0,
+                   EXTRACT(EPOCH FROM (
+                     LEAST(COALESCE(di.sold_at, di.last_seen_at, w.end_ts), w.end_ts)
+                     - GREATEST(di.first_seen_at, w.start_ts)
+                   )) / 86400.0
+                 )
+               ) AS vin_days
+          FROM dealer_inventory di, w
          WHERE di.dealer_id = ANY(%s)
            AND di.make IS NOT NULL
            AND di.model IS NOT NULL
-           AND di.vin IS NOT NULL
-           AND di.sold_at IS NOT NULL
-           AND di.sold_at >= NOW() - INTERVAL '90 days'
+           AND COALESCE(di.sold_at, di.last_seen_at, w.end_ts) >= w.start_ts
+           AND di.first_seen_at <= w.end_ts
          GROUP BY di.dealer_id, di.year, di.make, di.model
         """,
         (dealer_ids,),
     )
-    out = defaultdict(lambda: defaultdict(int))
-    for d_id, yr, mk, md, sold_count in cur.fetchall():
+    out = defaultdict(lambda: defaultdict(float))
+    for d_id, yr, mk, md, vin_days in cur.fetchall():
         key = (year_bucket(yr), (mk or "").strip().upper(), (md or "").strip().upper())
         if not key[1] or not key[2]:
             continue
-        out[d_id][key] += int(sold_count or 0)
+        out[d_id][key] += float(vin_days or 0) / 90.0
     return out
 
 
@@ -118,19 +133,17 @@ def format_ymm(key):
 
 
 def analyze_dealer(current, baseline):
-    """Return (holes, surpluses) lists of (key, baseline_sold, current_count).
-
-    HOLE:    baseline_sold >= 3 AND current <= 1  (moved >=3 in 90d, holding <=1 now)
-    SURPLUS: current >= 4 AND (baseline_sold == 0 OR current >= baseline_sold * 2)
-    """
+    """Return (holes, surpluses) lists of (key, baseline_avg, current_count)."""
     all_keys = set(current.keys()) | set(baseline.keys())
     holes, surplus = [], []
     for k in all_keys:
         cur_n = current.get(k, 0)
-        base = baseline.get(k, 0)
-        if base >= 3 and cur_n <= 1:
+        base = baseline.get(k, 0.0)
+        # Hole
+        if base >= 2 and cur_n <= max(0, base * 0.3):
             holes.append((k, base, cur_n))
-        if cur_n >= 4 and (base == 0 or cur_n >= base * 2):
+        # Surplus
+        if cur_n >= max(3, base * 1.5) and cur_n >= base + 2:
             surplus.append((k, base, cur_n))
     holes.sort(key=lambda x: -x[1])
     surplus.sort(key=lambda x: -(x[2] - x[1]))
@@ -138,7 +151,7 @@ def analyze_dealer(current, baseline):
 
 
 def build_message(dealers, results):
-    lines = ["EW Inventory Gap Scan (90d sales velocity)", ""]
+    lines = ["EW Inventory Gap Scan (90d baseline)", ""]
     any_content = False
     for d_id, d_name in dealers:
         holes, surplus = results.get(d_id, ([], []))
@@ -147,9 +160,9 @@ def build_message(dealers, results):
         any_content = True
         lines.append(f"— {d_name} —")
         for key, base, cur_n in holes:
-            lines.append(f"  HOLE  {format_ymm(key)}: in stock {cur_n}, sold {base} in last 90d")
+            lines.append(f"  HOLE  {format_ymm(key)}: now {cur_n} (baseline {base:.1f})")
         for key, base, cur_n in surplus:
-            lines.append(f"  SURP  {format_ymm(key)}: in stock {cur_n}, sold {base} in last 90d")
+            lines.append(f"  SURP  {format_ymm(key)}: now {cur_n} (baseline {base:.1f}, +{cur_n - base:.1f})")
         lines.append("")
     if not any_content:
         lines.append("(no holes or surpluses crossed thresholds)")
@@ -158,6 +171,7 @@ def build_message(dealers, results):
 
 def send_telegram(message):
     import requests
+    # Telegram cap ~4096 chars; chunk if needed.
     chunks = [message[i:i + 3800] for i in range(0, len(message), 3800)] or [""]
     for chunk in chunks:
         r = requests.post(
@@ -175,6 +189,7 @@ def main():
     args = ap.parse_args()
 
     if not args.dry_run:
+        # also tee logs to file
         fh = logging.FileHandler(LOG_FILE)
         fh.setFormatter(logging.Formatter("%(asctime)s [gap-scan] %(message)s"))
         logging.getLogger().addHandler(fh)

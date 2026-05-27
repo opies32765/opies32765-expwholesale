@@ -54,6 +54,61 @@ DEFAULT_AVAILABLE_GUIDES = ['Radar', 'BlackBook', 'KelleyBlueBook',
                             'KbbOnline', 'Manheim', 'Nada']
 
 
+# ── Porsche trim parser ────────────────────────────────────────────────
+# PORSCHE_ARB_PHASE2_2026_05_27
+# Greedy longest-match against the canonical Porsche trim list — fixes the
+# pre-Phase-2 bug where `title.split(None, 3)` truncated "Carrera 4 GTS"
+# into just "Carrera 4", causing a Carrera 4 GTS anchor to score against
+# a Carrera (stripper) comp set. The 911 GT3 / Cayman / Boxster / Macan /
+# Taycan trims are all listed here. Order matters: longer/more-specific
+# trims come first so "GT3 RS" beats "GT3", "Carrera 4 GTS" beats
+# "Carrera GTS" beats "Carrera 4".
+
+PORSCHE_TRIMS_ORDERED = [
+    # 911 high-end performance trims
+    'GT3 RS', 'GT2 RS', 'GT4 RS', 'GT3 Touring', 'GT3', 'GT4',
+    'GT2', 'Speedster',
+    # 911 Carrera ladder
+    'Carrera 4 GTS', 'Carrera GTS', 'Carrera 4S', 'Carrera S',
+    'Carrera 4', 'Carrera T', 'Carrera',
+    # 911 Turbo ladder
+    'Turbo S Cabriolet', 'Turbo Cabriolet', 'Turbo S', 'Turbo',
+    # 911 Targa ladder
+    'Targa 4 GTS', 'Targa 4S', 'Targa 4',
+    # 718 Cayman / Boxster
+    'Cayman GT4 RS', 'Cayman GT4', 'Cayman GTS 4.0', 'Cayman GTS',
+    'Cayman S', 'Cayman T', 'Cayman',
+    'Boxster Spyder RS', 'Spyder RS', 'Boxster Spyder', 'Spyder',
+    'Boxster GTS 4.0', 'Boxster GTS', 'Boxster S', 'Boxster T', 'Boxster',
+    # Off-roady / heritage variants
+    'Dakar', 'America', 'Heritage Design Edition',
+    # Cayenne / Macan / Panamera / Taycan generic high-end qualifiers
+    'Coupe Turbo GT', 'Turbo GT', 'Turbo S E-Hybrid',
+    'GTS Sport Turismo', 'GTS', 'S E-Hybrid', '4S Sport Turismo',
+    '4 E-Hybrid', '4S E-Hybrid', '4S',
+    'Cross Turismo Turbo', 'Cross Turismo 4S', 'Cross Turismo',
+    'Sport Turismo', 'Executive', 'Platinum Edition',
+    # Generic / fallback trims
+    'GTS 4.0', 'S', 'Base',
+]
+
+
+def _parse_porsche_trim(title: str) -> str:
+    """Pick the LONGEST matching canonical Porsche trim from a vehicleTitle
+    string. Returns '' when no canonical trim matches.
+
+    The greedy walk handles overlap properly because PORSCHE_TRIMS_ORDERED
+    is sorted longest/most-specific first. e.g. for
+    "2024 Porsche 911 Carrera 4 GTS Coupe" → "Carrera 4 GTS"."""
+    if not title:
+        return ''
+    tl = title.lower()
+    for trim in PORSCHE_TRIMS_ORDERED:
+        if trim.lower() in tl:
+            return trim
+    return ''
+
+
 # ── Exceptions ─────────────────────────────────────────────────────────
 
 class VAutoAuthError(Exception):
@@ -251,6 +306,15 @@ def _parse_competition_json(body: dict) -> list[dict]:
         make = title_parts[1] if len(title_parts) > 1 else None
         model = title_parts[2] if len(title_parts) > 2 else None
         trim = title_parts[3] if len(title_parts) > 3 else None
+
+        # PORSCHE_ARB_PHASE2_2026_05_27: greedy longest-match Porsche trim
+        # parser so "Carrera 4 GTS" doesn't get truncated to "Carrera 4"
+        # by split(None,3). Critical for like-pool — a stripper Carrera
+        # comp set anchored against a Carrera 4 GTS wrecks the spread.
+        if make and make.lower() == 'porsche' and title:
+            porsche_trim = _parse_porsche_trim(title)
+            if porsche_trim:
+                trim = porsche_trim
 
         rows.append({
             'vin':                  vin,

@@ -311,6 +311,88 @@ def upsert_regional_history(snapshot_date, anchor, stats):
     return n
 
 
+def upsert_regional_comps(snapshot_date, anchor, rows):
+    """PORSCHE_ARB_PHASE2_2026_05_27: persist every individual comp row
+    that fed the regional median. Operator clicks through to "the cars
+    we compared this against" — previously only the median was kept and
+    individual comps were thrown away.
+
+    UNIQUE on (anchor_vin, snapshot_date, comp_vin) so re-runs of the
+    same day idempotently update prices/days. ~50K rows/day at full fleet.
+    """
+    if not rows:
+        return 0
+    n = 0
+    anchor_vin = anchor['vin']
+    with conn() as c, c.cursor() as cur:
+        for r in rows:
+            vin = (r.get('vin') or '').strip().upper()
+            if not vin:
+                continue
+            st = (r.get('dealer_state') or '').strip().upper()
+            region = REGION_MAP.get(st)
+            try:
+                cur.execute("""
+                    INSERT INTO porsche_arb_regional_comps
+                      (anchor_vin, snapshot_date, comp_vin,
+                       year, make, model, trim,
+                       body_style, drivetrain, transmission,
+                       exterior_color, interior, mileage,
+                       price, effective_price, days_on_lot,
+                       is_certified, pending_sale,
+                       carfax_one_owner, carfax_clean_title,
+                       dealer_name, dealer_city, dealer_state,
+                       dealer_postal, distance, region, detail_uri)
+                    VALUES (%s,%s,%s, %s,%s,%s,%s,
+                            %s,%s,%s, %s,%s,%s,
+                            %s,%s,%s, %s,%s,
+                            %s,%s, %s,%s,%s,
+                            %s,%s,%s,%s)
+                    ON CONFLICT (anchor_vin, snapshot_date, comp_vin) DO UPDATE SET
+                      year = EXCLUDED.year,
+                      make = EXCLUDED.make,
+                      model = EXCLUDED.model,
+                      trim = EXCLUDED.trim,
+                      body_style = EXCLUDED.body_style,
+                      drivetrain = EXCLUDED.drivetrain,
+                      transmission = EXCLUDED.transmission,
+                      exterior_color = EXCLUDED.exterior_color,
+                      interior = EXCLUDED.interior,
+                      mileage = EXCLUDED.mileage,
+                      price = EXCLUDED.price,
+                      effective_price = EXCLUDED.effective_price,
+                      days_on_lot = EXCLUDED.days_on_lot,
+                      is_certified = EXCLUDED.is_certified,
+                      pending_sale = EXCLUDED.pending_sale,
+                      carfax_one_owner = EXCLUDED.carfax_one_owner,
+                      carfax_clean_title = EXCLUDED.carfax_clean_title,
+                      dealer_name = EXCLUDED.dealer_name,
+                      dealer_city = EXCLUDED.dealer_city,
+                      dealer_state = EXCLUDED.dealer_state,
+                      dealer_postal = EXCLUDED.dealer_postal,
+                      distance = EXCLUDED.distance,
+                      region = EXCLUDED.region,
+                      detail_uri = EXCLUDED.detail_uri
+                """, (
+                    anchor_vin, snapshot_date, vin,
+                    r.get('year'), r.get('make'), r.get('model'), r.get('trim'),
+                    r.get('body'), r.get('drivetrain'), r.get('transmission'),
+                    r.get('color'), r.get('interior'), r.get('mileage'),
+                    r.get('price'), r.get('effective_price'),
+                    r.get('days_on_lot'),
+                    r.get('is_certified'), r.get('pending_sale'),
+                    r.get('carfax_one_owner'), r.get('carfax_clean_title'),
+                    r.get('dealer'), r.get('dealer_city'), r.get('dealer_state'),
+                    r.get('dealer_postal'), r.get('distance'), region,
+                    r.get('detail_uri'),
+                ))
+                n += 1
+            except Exception as e:
+                log.warning('regional_comps upsert failed for %s: %s', vin, e)
+        c.commit()
+    return n
+
+
 def build_candidates(anchor, rows, stats, min_spread, min_region_n):
     """For each comp = candidate, compute spread vs the best other region."""
     out = []
@@ -599,7 +681,7 @@ def upsert_candidates(snapshot_date, candidates):
                    option_jaccard_to_anchor,
                    like_filtered_other_region, like_filtered_other_median,
                    like_filtered_other_count, like_filtered_net_spread,
-                   like_filtered_spread_pct, arb_score_v2)
+                   like_filtered_spread_pct, arb_score_v2, arb_score_v3)
                 VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,
                         %s,%s,%s, %s,%s,
                         %s,%s,%s,%s,%s, %s,%s,
@@ -607,7 +689,7 @@ def upsert_candidates(snapshot_date, candidates):
                         %s,%s,%s,%s,
                         %s::jsonb,%s,%s::jsonb,
                         %s,%s,%s,'new',
-                        %s, %s,%s,%s, %s,%s, %s)
+                        %s, %s,%s,%s, %s,%s, %s, %s)
                 ON CONFLICT (snapshot_date, subject_vin) DO UPDATE SET
                   anchor_vin = EXCLUDED.anchor_vin,
                   anchor_year = EXCLUDED.anchor_year,
@@ -655,6 +737,7 @@ def upsert_candidates(snapshot_date, candidates):
                   like_filtered_net_spread = EXCLUDED.like_filtered_net_spread,
                   like_filtered_spread_pct = EXCLUDED.like_filtered_spread_pct,
                   arb_score_v2 = EXCLUDED.arb_score_v2,
+                  arb_score_v3 = EXCLUDED.arb_score_v3,
                   updated_at = NOW()
             """, (
                 snapshot_date, anchor['vin'], anchor.get('year'),
@@ -687,6 +770,7 @@ def upsert_candidates(snapshot_date, candidates):
                 cand.get('like_filtered_net_spread'),
                 cand.get('like_filtered_spread_pct'),
                 cand.get('arb_score_v2'),
+                cand.get('arb_score_v3'),
             ))
             n += 1
         c.commit()
@@ -1280,6 +1364,310 @@ def rescore_candidates(all_candidates: list[dict],
     return rescored
 
 
+# Phase 8 (PORSCHE_ARB_PHASE2_2026_05_27): v3 rescore using
+# union(KBB + comp_row + detail_scrape). The detail-scrape classifier
+# recovers the high-impact options (PCCB, Sport Chrono, Burmester, PDCC,
+# carbon roof, PTS, Weissach, Clubsport, Lightweight) that the comp-row
+# signals can't see.
+#
+# Like-pool gate is identical math to v2 but operates on the merged
+# option set. The home/best-other comp pool is sourced from
+# porsche_arb_regional_comps which now contains every comp row, not just
+# the regional median.
+
+V3_HIGH_IMPACT_KEYS = (
+    'pccb', 'sport_chrono', 'pdcc', 'burmester', 'carbon_roof',
+    'pts_paint', 'weissach', 'clubsport', 'lightweight_package',
+)
+V3_HIGH_IMPACT_JACC = 0.6  # task-spec gate
+
+
+def _v3_jaccard_high_impact(a: dict, b: dict) -> float:
+    """Jaccard on HIGH-IMPACT options only (PCCB, Sport Chrono, PDCC,
+    Burmester, carbon_roof, PTS, Weissach, Clubsport, Lightweight).
+
+    If neither side has ANY high-impact key set → 1.0 (no info to
+    discriminate — better than penalizing every comp at 0.0).
+    """
+    keys_a = {k for k in V3_HIGH_IMPACT_KEYS if (a or {}).get(k)}
+    keys_b = {k for k in V3_HIGH_IMPACT_KEYS if (b or {}).get(k)}
+    union = keys_a | keys_b
+    if not union:
+        return 1.0
+    return round(len(keys_a & keys_b) / len(union), 3)
+
+
+def _load_options_full_merged(vins: list[str]) -> dict[str, dict]:
+    """Union all sources (kbb_equipment + comp_row_signals + detail_scrape)
+    for each VIN, returning {VIN_UPPER: {option_key: True, ...}}."""
+    if not vins:
+        return {}
+    upper = list({v.upper() for v in vins if v})
+    out: dict[str, dict] = {}
+    with conn() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT subject_vin, source, options_jsonb
+              FROM porsche_arb_options
+             WHERE subject_vin = ANY(%s)
+        """, (upper,))
+        for row in cur.fetchall():
+            v = row['subject_vin'].upper()
+            existing = out.get(v, {})
+            opts = row['options_jsonb'] or {}
+            out[v] = merge_option_sets(existing, opts)
+    return out
+
+
+def _load_regional_comp_rows_for_anchor(
+        anchor_vin: str, snapshot_date) -> list[dict]:
+    """Pull all regional comp rows for a given anchor and snapshot from
+    porsche_arb_regional_comps. Returns list of dicts with comp_vin +
+    pricing + region."""
+    with conn() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT comp_vin AS vin, year, make, model, trim,
+                   body_style, drivetrain, transmission,
+                   exterior_color AS color, interior, mileage,
+                   price, effective_price, days_on_lot,
+                   is_certified, pending_sale,
+                   dealer_name AS dealer, dealer_city, dealer_state,
+                   dealer_postal, region, detail_uri
+              FROM porsche_arb_regional_comps
+             WHERE anchor_vin = %s AND snapshot_date = %s
+        """, (anchor_vin, snapshot_date))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def compute_score_v3(cand: dict) -> int | None:
+    """Same formula as compute_score_v2 but reads v3_like_filtered_*
+    fields. Falls back to v2 if v3 wasn't computed."""
+    median = cand.get('v3_like_filtered_other_median')
+    if median is None:
+        return None
+    asking = (cand.get('comp_row', {}).get('effective_price')
+              or cand.get('comp_row', {}).get('price') or 0)
+    if not asking:
+        return None
+    like_spread = float(median) - float(asking)
+    transport = cand.get('transport_estimate') or 1500.0
+    like_net = like_spread - transport
+    like_pct = like_net / float(asking) * 100.0 if asking else 0.0
+    like_count = cand.get('v3_like_filtered_other_count') or 0
+    home_avg_dol = cand.get('home_avg_dol')
+
+    if like_pct <= 0:
+        pts_pct = 0
+    elif like_pct >= 20:
+        pts_pct = 35
+    elif like_pct >= 10:
+        pts_pct = 20 + (like_pct - 10) * 15 / 10
+    elif like_pct >= 5:
+        pts_pct = 10 + (like_pct - 5) * 10 / 5
+    else:
+        pts_pct = like_pct * 10 / 5
+    pts_pct = max(0, min(35, pts_pct))
+
+    if like_net <= 0:
+        pts_abs = 0
+    elif like_net >= 40000:
+        pts_abs = 15
+    elif like_net >= 20000:
+        pts_abs = 10 + (like_net - 20000) * 5 / 20000
+    elif like_net >= 10000:
+        pts_abs = 5 + (like_net - 10000) * 5 / 10000
+    else:
+        pts_abs = like_net * 5 / 10000
+    pts_abs = max(0, min(15, pts_abs))
+
+    if like_count >= 25:
+        pts_cert = 10
+    elif like_count >= 10:
+        pts_cert = 5 + (like_count - 10) * 5 / 15
+    elif like_count >= 5:
+        pts_cert = 2 + (like_count - 5) * 3 / 5
+    else:
+        pts_cert = like_count * 2 / 5
+    pts_cert = max(0, min(10, pts_cert))
+
+    if home_avg_dol is None:
+        pts_dol = 0
+    elif home_avg_dol < 30:
+        pts_dol = 10
+    elif home_avg_dol < 60:
+        pts_dol = 5
+    else:
+        pts_dol = 0
+
+    cf = cand.get('carfax') or {}
+    if cf and cf.get('clean_title') and cf.get('accidents', 0) == 0:
+        pts_cf = 10
+    elif cf and cf.get('clean_title'):
+        pts_cf = 5
+    else:
+        pts_cf = 0
+
+    lsl = cand.get('lsl_anchor') or {}
+    g365 = lsl.get('avg_gross_365') or 0
+    if g365 >= 5000:
+        pts_lsl = 10
+    elif g365 >= 2500:
+        pts_lsl = 5
+    elif g365 > 0:
+        pts_lsl = 2
+    else:
+        pts_lsl = 0
+
+    score = pts_pct + pts_abs + pts_cert + pts_dol + pts_cf + pts_lsl
+    score -= cand.get('carfax_penalty') or 0
+    return max(0, min(100, int(round(score))))
+
+
+def rescore_candidates_v3(all_candidates: list[dict],
+                           results: list[dict],
+                           anchor_options_by_vin: dict[str, dict],
+                           snapshot_date_override=None) -> int:
+    """Phase 8 — v3 rescore.
+
+    Uses merged option set (KBB + comp_row + detail_scrape) and filters
+    the like-pool by HIGH-IMPACT Jaccard >= 0.6. Pool is sourced from
+    porsche_arb_regional_comps (populated by upsert_regional_comps in
+    Phase 3), so it sees ALL comps not just those from this run's
+    anchors.
+
+    Returns count of candidates that got an arb_score_v3.
+    """
+    t0 = time.monotonic()
+
+    # Bulk-load the merged option set for every anchor + flagged
+    # candidate (one DB hit per side).
+    cand_vins = [(c.get('comp_row') or {}).get('vin')
+                  for c in all_candidates if c.get('flagged')]
+    cand_vins = [v for v in cand_vins if v]
+    cand_options_by_vin = _load_options_full_merged(cand_vins)
+    log.info('phase 8: loaded merged options for %d candidate VINs',
+             len(cand_options_by_vin))
+
+    # Pre-resolve snapshot date once (use today's by default; tests can override)
+    if snapshot_date_override is not None:
+        snapshot_date = snapshot_date_override
+    else:
+        from datetime import date as _date
+        snapshot_date = _date.today()
+
+    # Cache regional comp rows per anchor (lots of candidates share an
+    # anchor — only fetch once per anchor).
+    anchor_comps_cache: dict[str, list[dict]] = {}
+    # Bulk load anchor → comp_vins map for all anchors in one shot, then
+    # bulk-load all comp options in one query. Saves ~2 minutes vs the
+    # naive per-anchor option load on a 2,800-candidate run.
+    flagged_anchor_vins = list({
+        (c['anchor'].get('vin') or '').upper()
+        for c in all_candidates if c.get('flagged')
+    })
+    with conn() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT anchor_vin, comp_vin AS vin, year, make, model, trim,
+                   body_style, drivetrain, transmission,
+                   exterior_color AS color, interior, mileage,
+                   price, effective_price, days_on_lot,
+                   is_certified, pending_sale,
+                   dealer_name AS dealer, dealer_city, dealer_state,
+                   dealer_postal, region, detail_uri
+              FROM porsche_arb_regional_comps
+             WHERE anchor_vin = ANY(%s) AND snapshot_date = %s
+        """, ([v for v in flagged_anchor_vins if v], snapshot_date))
+        for r in cur.fetchall():
+            anchor_comps_cache.setdefault(r['anchor_vin'], []).append(dict(r))
+    log.info('phase 8: loaded %d total regional comps across %d anchors',
+             sum(len(v) for v in anchor_comps_cache.values()),
+             len(anchor_comps_cache))
+
+    # Bulk-load comp option sets for every distinct comp VIN
+    all_comp_vins_global = list({
+        (r.get('vin') or '').upper()
+        for rows in anchor_comps_cache.values() for r in rows
+        if r.get('vin')
+    })
+    comp_options_by_vin = _load_options_full_merged(all_comp_vins_global)
+    log.info('phase 8: loaded option sets for %d unique comp VINs',
+             len(comp_options_by_vin))
+
+    rescored = 0
+    thin_pool = 0
+    for cand in all_candidates:
+        if not cand.get('flagged'):
+            continue
+        comp_row = cand.get('comp_row') or {}
+        cand_vin = (comp_row.get('vin') or '').upper()
+        anchor_vin = (cand['anchor'].get('vin') or '').upper()
+
+        # Anchor + candidate merged option sets
+        anchor_options = anchor_options_by_vin.get(anchor_vin, {})
+        cand_options = cand_options_by_vin.get(cand_vin, {})
+
+        # Always compute jaccard vs anchor (high-impact gate metric for v3)
+        cand['option_jaccard_to_anchor_v3'] = _v3_jaccard_high_impact(
+            cand_options, anchor_options)
+
+        anchor_comps = anchor_comps_cache.get(anchor_vin) or []
+        if not anchor_comps:
+            continue
+
+        # Bucket by region for the best-other-median calc
+        by_region: dict[str, list[float]] = {}
+        for r in anchor_comps:
+            region = r.get('region')
+            if not region:
+                continue
+            if region == cand.get('home_region'):
+                continue
+            price = r.get('effective_price') or r.get('price')
+            if not price:
+                continue
+            comp_vin = (r.get('vin') or '').upper()
+            comp_opts = comp_options_by_vin.get(comp_vin, {})
+            jacc = _v3_jaccard_high_impact(cand_options, comp_opts)
+            if jacc < V3_HIGH_IMPACT_JACC:
+                continue
+            by_region.setdefault(region, []).append(float(price))
+
+        best_region = None
+        best_median = None
+        best_count = 0
+        for region, prices in by_region.items():
+            if len(prices) < LIKE_MIN_POOL:
+                continue
+            med = _percentiles(prices)[1]
+            if best_median is None or med > best_median:
+                best_region = region
+                best_median = med
+                best_count = len(prices)
+
+        if best_region is None:
+            thin_pool += 1
+            continue
+
+        cand['v3_like_filtered_other_region'] = best_region
+        cand['v3_like_filtered_other_median'] = best_median
+        cand['v3_like_filtered_other_count'] = best_count
+
+        asking = (comp_row.get('effective_price') or comp_row.get('price'))
+        if asking:
+            transport = cand.get('transport_estimate') or 1500.0
+            v3_net = float(best_median) - float(asking) - transport
+            cand['v3_like_filtered_net_spread'] = v3_net
+            if asking > 0:
+                cand['v3_like_filtered_spread_pct'] = round(
+                    v3_net / float(asking) * 100.0, 3)
+
+        cand['arb_score_v3'] = compute_score_v3(cand)
+        if cand['arb_score_v3'] is not None:
+            rescored += 1
+    log.info('phase 8: done in %.1fs — rescored_v3=%d thin_pool=%d',
+             time.monotonic() - t0, rescored, thin_pool)
+    return rescored
+
+
 # Main
 
 def main():
@@ -1305,6 +1693,12 @@ def main():
     p.add_argument('--rescore-only', action='store_true',
                    help='re-run Phase 3.5 + 6.5 against today\'s existing '
                         'candidates without doing a fresh rBook sweep')
+    # PORSCHE_ARB_PHASE2_2026_05_27
+    p.add_argument('--skip-detail-scrape', action='store_true',
+                   help='skip Phase 6.6 per-VIN detail-page scrape')
+    p.add_argument('--detail-scrape-cap', type=int, default=200,
+                   help='hard cap on detail-page scrapes per run (default 200)')
+    p.add_argument('--detail-scrape-concurrency', type=int, default=4)
     args = p.parse_args()
 
     anchors = load_anchors(args.limit)
@@ -1358,8 +1752,11 @@ def main():
         log.warning('rBook err buckets: %s', err_buckets)
 
     # Phase 3: regional aggregation + candidate enumeration
+    # PORSCHE_ARB_PHASE2_2026_05_27: also persist every comp row to
+    # porsche_arb_regional_comps so the dashboard can click through.
     all_candidates = []
     regional_rows_written = 0
+    regional_comps_written = 0
     for r in results:
         if r.get('err') or not r.get('rows'):
             continue
@@ -1368,11 +1765,13 @@ def main():
         if not args.dry_run:
             regional_rows_written += upsert_regional_history(
                 snapshot_date, anchor, stats)
+            regional_comps_written += upsert_regional_comps(
+                snapshot_date, anchor, r['rows'])
         cands = build_candidates(anchor, r['rows'], stats,
                                  args.min_spread, args.min_region_n)
         all_candidates.extend(cands)
-    log.info('regional_rows=%d candidates_total=%d',
-             regional_rows_written, len(all_candidates))
+    log.info('regional_rows=%d regional_comps=%d candidates_total=%d',
+             regional_rows_written, regional_comps_written, len(all_candidates))
 
     # Phase 3.5: option enrichment for anchor + flagged candidate VINs
     # (PORSCHE_ARB_OPTIONS_2026_05_26). See porsche_options.py.
@@ -1470,6 +1869,64 @@ def main():
         rescored_v2 = rescore_candidates(all_candidates, results, anchor_options_db)
         log.info('phase 6.5 done: %d candidates got arb_score_v2', rescored_v2)
 
+    # Phase 6.6: per-VIN detail-page scrape + Haiku classifier
+    # (PORSCHE_ARB_PHASE2_2026_05_27). The classifier output is mirrored
+    # into porsche_arb_options(source='detail_scrape') so phase 8 below
+    # can fold it into the union for v3 scoring. Hard cap 200 scrapes.
+    detail_stats = {'total': 0, 'classified': 0, 'sold_out': 0,
+                    'blocked': 0, 'errors': 0, 'avg_conf': 0.0,
+                    'tier_buckets': {}}
+    if (not args.skip_options and not args.skip_detail_scrape
+            and not args.dry_run):
+        try:
+            from porsche_detail_scraper import (
+                select_vins_to_scrape as _scrape_select,
+                run_bulk as _scrape_run,
+            )
+            vins_to_scrape = _scrape_select(
+                snapshot_date=str(snapshot_date),
+                limit=args.detail_scrape_cap,
+            )
+            if vins_to_scrape:
+                log.info('phase 6.6: scraping %d detail URLs '
+                         '(cap=%d, concurrency=%d)',
+                         len(vins_to_scrape), args.detail_scrape_cap,
+                         args.detail_scrape_concurrency)
+                t0 = time.monotonic()
+                detail_stats = _scrape_run(
+                    vins_to_scrape,
+                    concurrency=args.detail_scrape_concurrency,
+                )
+                log.info('phase 6.6 done in %.1fs: classified=%d sold=%d '
+                         'blocked=%d errors=%d avg_conf=%.2f tiers=%s',
+                         time.monotonic() - t0,
+                         detail_stats.get('classified', 0),
+                         detail_stats.get('sold_out', 0),
+                         detail_stats.get('blocked', 0),
+                         detail_stats.get('errors', 0),
+                         detail_stats.get('avg_conf', 0.0),
+                         detail_stats.get('tier_buckets', {}))
+            else:
+                log.info('phase 6.6: nothing to scrape (all flagged VINs '
+                         'have recent detail_scrape rows)')
+        except Exception as e:
+            log.warning('phase 6.6 error (continuing): %s', e)
+
+    # Phase 8: v3 re-score using union(KBB + comp_row + detail_scrape)
+    # PORSCHE_ARB_PHASE2_2026_05_27. Same scoring formula as v2 but the
+    # like-pool Jaccard now sees the high-impact options recovered by the
+    # detail-page classifier.
+    rescored_v3 = 0
+    if not args.skip_options:
+        anchor_vins_all = list({(a or {}).get('vin')
+                                 for a in [r.get('anchor') for r in results]
+                                 if a})
+        anchor_options_v3 = _load_options_from_db(
+            [v for v in anchor_vins_all if v])
+        rescored_v3 = rescore_candidates_v3(
+            all_candidates, results, anchor_options_v3)
+        log.info('phase 8 done: %d candidates got arb_score_v3', rescored_v3)
+
     flagged_count = sum(1 for c in all_candidates if c.get('flagged'))
     unique_vin_count = len({(c['comp_row'].get('vin') or '').upper()
                             for c in all_candidates
@@ -1493,11 +1950,14 @@ def main():
                      c.get('like_filtered_other_region'),
                      c.get('like_filtered_other_median'),
                      int(c.get('like_filtered_net_spread') or 0))
-        log.info('SUMMARY: anchors=%d total_comps=%d flagged=%d '
-                 'would_write=%d carfax=%d lsl=%d options_a=%d options_c=%d v2_scored=%d',
-                 len(anchors), total_comps, flagged_count,
-                 unique_vin_count, carfax_pulls, lsl_hits,
-                 options_anchor_count, options_cand_count, rescored_v2)
+        log.info('SUMMARY: anchors=%d total_comps=%d regional_comps=%d '
+                 'flagged=%d would_write=%d carfax=%d lsl=%d '
+                 'options_a=%d options_c=%d v2_scored=%d '
+                 'detail_classified=%d v3_scored=%d',
+                 len(anchors), total_comps, regional_comps_written,
+                 flagged_count, unique_vin_count, carfax_pulls, lsl_hits,
+                 options_anchor_count, options_cand_count, rescored_v2,
+                 detail_stats.get('classified', 0), rescored_v3)
         return 0
 
     upserted = upsert_candidates(snapshot_date, all_candidates)
@@ -1508,16 +1968,22 @@ def main():
                total_comps=total_comps, flagged=flagged_count,
                carfax_pulls=carfax_pulls,
                note=f'regional_rows={regional_rows_written} '
+                    f'regional_comps={regional_comps_written} '
                     f'rbook_err_buckets={err_buckets} '
                     f'lsl_hits={lsl_hits} '
                     f'options_a={options_anchor_count} '
                     f'options_c={options_cand_count} '
-                    f'v2_scored={rescored_v2}')
-    log.info('SUMMARY: anchors=%d ok=%d total_comps=%d candidates=%d '
-             'flagged=%d carfax=%d lsl=%d options_a=%d options_c=%d v2_scored=%d upserted=%d',
-             len(anchors), succeeded, total_comps, len(all_candidates),
-             flagged_count, carfax_pulls, lsl_hits,
-             options_anchor_count, options_cand_count, rescored_v2, upserted)
+                    f'v2_scored={rescored_v2} '
+                    f'detail_classified={detail_stats.get("classified", 0)} '
+                    f'v3_scored={rescored_v3}')
+    log.info('SUMMARY: anchors=%d ok=%d total_comps=%d regional_comps=%d '
+             'candidates=%d flagged=%d carfax=%d lsl=%d '
+             'options_a=%d options_c=%d v2_scored=%d '
+             'detail_classified=%d v3_scored=%d upserted=%d',
+             len(anchors), succeeded, total_comps, regional_comps_written,
+             len(all_candidates), flagged_count, carfax_pulls, lsl_hits,
+             options_anchor_count, options_cand_count, rescored_v2,
+             detail_stats.get('classified', 0), rescored_v3, upserted)
     return 0
 
 

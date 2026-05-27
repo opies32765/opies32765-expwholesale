@@ -55,16 +55,19 @@ def _normalize_row(r: dict) -> dict:
     return out
 
 
-def _fetch_today_candidates(cur) -> list[dict]:
+def _fetch_today_candidates(cur) -> tuple[list[dict], object]:
     """Today's candidates. If today has no rows yet (early-morning before
     the pipeline runs), fall back to the most-recent snapshot_date so the
-    operator can still review yesterday's picks."""
+    operator can still review yesterday's picks.
+
+    Returns (rows, snapshot_date). PORSCHE_ARB_PHASE2_2026_05_27 — sorts
+    by arb_score_v3 first so the option-aware ranking surfaces."""
     cur.execute("""
         SELECT MAX(snapshot_date) AS d FROM porsche_arb_candidates
     """)
     latest = (cur.fetchone() or {}).get("d")
     if not latest:
-        return []
+        return [], None
 
     # Cap server-render at top 100 — page choked on 2,800+ cards before this.
     cur.execute("""
@@ -72,7 +75,8 @@ def _fetch_today_candidates(cur) -> list[dict]:
           FROM porsche_arb_candidates
          WHERE snapshot_date = %s
            AND flagged = TRUE
-         ORDER BY arb_score_v2 DESC NULLS LAST,
+         ORDER BY arb_score_v3 DESC NULLS LAST,
+                  arb_score_v2 DESC NULLS LAST,
                   arb_score DESC NULLS LAST,
                   net_spread DESC NULLS LAST
          LIMIT 100
@@ -82,10 +86,27 @@ def _fetch_today_candidates(cur) -> list[dict]:
     # Attach per-VIN merged option canonical set for chip display.
     vins = [r.get('subject_vin') for r in rows if r.get('subject_vin')]
     options_by_vin = _fetch_options(cur, vins)
+    # Attach detail-scrape (photos + classifier flags + msrp)
+    detail_by_vin = _fetch_detail_scrapes(cur, vins)
+    # Build the set of regions we'll need to query comps for
+    regions_of_interest: set = set()
+    for r in rows:
+        if r.get('home_region'):
+            regions_of_interest.add(r['home_region'])
+        if r.get('best_other_region'):
+            regions_of_interest.add(r['best_other_region'])
+    anchor_vins = list({r.get('anchor_vin') for r in rows if r.get('anchor_vin')})
+    comps_by_anchor = _fetch_comp_breakdown(
+        cur, anchor_vins, regions_of_interest, latest)
     for r in rows:
         v = (r.get('subject_vin') or '').upper()
         r['options'] = options_by_vin.get(v, {})
-    return rows
+        r['detail_scrape'] = detail_by_vin.get(v) or {}
+        anchor = r.get('anchor_vin')
+        all_comps_for_anchor = comps_by_anchor.get(anchor) or {}
+        r['comps_home'] = all_comps_for_anchor.get(r.get('home_region')) or []
+        r['comps_away'] = all_comps_for_anchor.get(r.get('best_other_region')) or []
+    return rows, latest
 
 
 def _fetch_options(cur, vins: list[str]) -> dict[str, dict]:
@@ -106,6 +127,99 @@ def _fetch_options(cur, vins: list[str]) -> dict[str, dict]:
         for k, val in (r['options_jsonb'] or {}).items():
             if val:
                 merged[k] = True
+    return out
+
+
+def _fetch_detail_scrapes(cur, vins: list[str]) -> dict[str, dict]:
+    """Bulk-fetch porsche_arb_detail_scrape rows for the subject VINs.
+    PORSCHE_ARB_PHASE2_2026_05_27. Returns
+    {VIN_UPPER: {photos: [...], top3: [...], options: {...},
+                  msrp: int|None, confidence: float|None,
+                  uri_host: str|None, sold_out: bool}}.
+    """
+    if not vins:
+        return {}
+    upper = list({v.upper() for v in vins if v})
+    cur.execute("""
+        SELECT subject_vin, uri_host, photos_jsonb, classifier_jsonb,
+               classifier_confidence, msrp_estimate, sold_out,
+               LENGTH(raw_text) AS raw_text_len
+          FROM porsche_arb_detail_scrape
+         WHERE subject_vin = ANY(%s)
+    """, (upper,))
+    out: dict[str, dict] = {}
+    for r in cur.fetchall():
+        photos = r.get('photos_jsonb') or {}
+        cls = r.get('classifier_jsonb') or {}
+        # Only retain the TRUE flags from classifier_jsonb for the chip strip
+        true_flags = {k: True for k, v in cls.items()
+                       if isinstance(v, bool) and v is True}
+        out[r['subject_vin'].upper()] = {
+            'photos': photos.get('urls') or [],
+            'top3': photos.get('top3') or [],
+            'options': true_flags,
+            'msrp': float(r['msrp_estimate']) if r.get('msrp_estimate') else None,
+            'confidence': float(r['classifier_confidence']) if r.get('classifier_confidence') else None,
+            'uri_host': r.get('uri_host'),
+            'sold_out': bool(r.get('sold_out')),
+            'raw_text_len': r.get('raw_text_len') or 0,
+        }
+    return out
+
+
+def _fetch_comp_breakdown(cur, anchor_vins: list[str],
+                           regions_of_interest: set,
+                           snapshot_date) -> dict[str, dict]:
+    """For each anchor VIN, return {region: [comp rows sorted by price]}
+    restricted to the regions any candidate cares about (home +
+    best_other across the whole page). Capped to 8 comps per (anchor,
+    region) so the page doesn't blow up.
+
+    Returns {anchor_vin: {region_name: [...comps]}}.
+    """
+    out: dict[str, dict] = {}
+    if not anchor_vins or not regions_of_interest or not snapshot_date:
+        return out
+    cur.execute("""
+        SELECT anchor_vin, comp_vin, year, model, trim, mileage,
+               price, effective_price, days_on_lot, is_certified,
+               exterior_color, dealer_name, dealer_city, dealer_state,
+               region, detail_uri, pending_sale
+          FROM porsche_arb_regional_comps
+         WHERE anchor_vin = ANY(%s)
+           AND snapshot_date = %s
+           AND region = ANY(%s)
+           AND COALESCE(price, effective_price) IS NOT NULL
+         ORDER BY anchor_vin, region, price
+    """, (anchor_vins, snapshot_date, list(regions_of_interest)))
+    counts: dict[tuple, int] = {}
+    for r in cur.fetchall():
+        anchor_vin = r['anchor_vin']
+        region = r['region']
+        # Cap 8 per anchor+region (keep cheapest 8)
+        key = (anchor_vin, region)
+        if counts.get(key, 0) >= 8:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        bucket = out.setdefault(anchor_vin, {}).setdefault(region, [])
+        bucket.append({
+            'vin': r['comp_vin'],
+            'year': r['year'],
+            'model': r['model'],
+            'trim': r['trim'],
+            'mileage': r['mileage'],
+            'price': float(r['price']) if r['price'] is not None else None,
+            'effective_price': float(r['effective_price']) if r['effective_price'] else None,
+            'days_on_lot': r['days_on_lot'],
+            'is_certified': bool(r['is_certified']) if r['is_certified'] is not None else None,
+            'pending_sale': bool(r['pending_sale']) if r['pending_sale'] is not None else None,
+            'exterior_color': r['exterior_color'],
+            'dealer_name': r['dealer_name'],
+            'dealer_city': r['dealer_city'],
+            'dealer_state': r['dealer_state'],
+            'region': r['region'],
+            'detail_uri': r['detail_uri'],
+        })
     return out
 
 
@@ -160,7 +274,7 @@ def _fetch_recent_runs(cur, limit: int = 5) -> list[dict]:
 def porsche_arb_page():
     """Render the operator dashboard."""
     with _conn() as c, c.cursor() as cur:
-        today = _fetch_today_candidates(cur)
+        today, snapshot_date = _fetch_today_candidates(cur)
         anchor_vins = list({r["anchor_vin"] for r in today if r.get("anchor_vin")})
         history = _fetch_regional_history(cur, anchor_vins)
         runs = _fetch_recent_runs(cur, limit=5)
@@ -172,8 +286,13 @@ def porsche_arb_page():
         (r.get("arb_score_v2") or 0) for r in flagged
         if r.get("arb_score_v2") is not None
     ) if any(r.get("arb_score_v2") is not None for r in flagged) else None
+    top_score_v3 = max(
+        (r.get("arb_score_v3") or 0) for r in flagged
+        if r.get("arb_score_v3") is not None
+    ) if any(r.get("arb_score_v3") is not None for r in flagged) else None
     v2_scored = sum(1 for r in today if r.get("arb_score_v2") is not None)
-    snapshot_date = today[0]["snapshot_date"] if today else None
+    v3_scored = sum(1 for r in today if r.get("arb_score_v3") is not None)
+    detail_scraped = sum(1 for r in today if (r.get('detail_scrape') or {}).get('confidence') is not None)
 
     # Unique models + regions for filter chips
     models = sorted({(r.get("subject_model") or "").strip()
@@ -188,10 +307,13 @@ def porsche_arb_page():
         total_count_today=len(today),
         top_score_today=top_score,
         top_score_v2=top_score_v2,
+        top_score_v3=top_score_v3,
         v2_scored_count=v2_scored,
+        v3_scored_count=v3_scored,
+        detail_scraped_count=detail_scraped,
         recent_runs=runs,
         regional_history=history,
-        snapshot_date=snapshot_date,
+        snapshot_date=snapshot_date.isoformat() if snapshot_date else None,
         models=models,
         regions=regions,
     )
