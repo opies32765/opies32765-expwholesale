@@ -1139,6 +1139,10 @@ def _is_vdp_url(url):
     if any(x in u for x in NON_VEHICLE_HINTS):
         return False
     path = _path_of(url)
+    # DIA is used-only by design — reject any new-car VDP path globally.
+    # Dealer.com / Dealer Inspire already filter upstream; this catches DealerOn.
+    if path.startswith('/new-') or '/new-' in path or '/new/' in path or '/new-vehicles/' in path:
+        return False
     # Quick wins — unambiguous VDP patterns
     if '/vehicle-details/' in path or '/vdp/' in path:
         return True

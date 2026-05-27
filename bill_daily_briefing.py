@@ -207,6 +207,7 @@ def gather(target_date: date) -> dict:
         out["overnight_top_bids"] = [dict(r) for r in cur.fetchall()]
 
         # 2. Porsche arb picks — today's flagged, top 3 by score.
+        # Use the most recent snapshot that actually has v2-scored data
         cur.execute("""
             SELECT id, subject_year, subject_make, subject_model,
                    subject_trim, asking_price,
@@ -215,32 +216,36 @@ def gather(target_date: date) -> dict:
                    COALESCE(like_filtered_other_region, best_other_region) AS best_other_region,
                    home_region,
                    COALESCE(like_filtered_spread_pct, spread_pct) AS spread_pct,
-                   dealer_state
+                   dealer_state, snapshot_date
               FROM porsche_arb_candidates
-             WHERE snapshot_date = %s
+             WHERE snapshot_date = (
+                     SELECT MAX(snapshot_date) FROM porsche_arb_candidates
+                      WHERE flagged = TRUE AND arb_score_v2 IS NOT NULL
+                   )
                AND flagged = TRUE
                AND COALESCE(arb_score_v2, 0) >= 50
              ORDER BY arb_score_v2 DESC NULLS LAST,
                       like_filtered_net_spread DESC NULLS LAST
              LIMIT 3
-        """, (target_date,))
+        """)
         out["arb_picks"] = [dict(r) for r in cur.fetchall()]
 
         cur.execute("""
             SELECT COUNT(*) AS n
               FROM porsche_arb_candidates
-             WHERE snapshot_date = %s
+             WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM porsche_arb_candidates WHERE flagged = TRUE)
                AND flagged = TRUE
-        """, (target_date,))
+        """)
         out["arb_total_flagged"] = int(cur.fetchone()["n"] or 0)
 
         # 3. Dealer-watch opportunities — latest snapshot, top 3 by score.
         cur.execute("""
             SELECT o.year, o.make, o.model, o.trim, o.asking_price,
-                   o.dollars_under_mmr, o.score, d.name AS dealer_name
+                   o.dollars_under_mmr, o.score, d.name AS dealer_name,
+                   o.snapshot_date
               FROM dealer_opportunities o
               JOIN dealers d ON d.id = o.dealer_id
-             WHERE o.snapshot_date = %s
+             WHERE o.snapshot_date = (SELECT MAX(snapshot_date) FROM dealer_opportunities)
              ORDER BY o.score DESC NULLS LAST
              LIMIT 3
         """, (target_date,))

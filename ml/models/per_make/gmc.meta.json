@@ -1,6 +1,6 @@
 {
   "make_name": "GMC",
-  "trained_at": "2026-05-26T08:31:39.405542Z",
+  "trained_at": "2026-05-27T08:31:32.206296Z",
   "n_total": 795,
   "n_train": 727,
   "n_test": 68,
@@ -217,9 +217,9 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2768.0,
-    "mape_pct": 6.42,
-    "r2": 0.9711,
+    "mae_dollars": 2772.0,
+    "mape_pct": 6.43,
+    "r2": 0.9709,
     "within_5pct": 48.5,
     "within_10pct": 88.2
   },

@@ -66,13 +66,16 @@ def _fetch_today_candidates(cur) -> list[dict]:
     if not latest:
         return []
 
+    # Cap server-render at top 100 — page choked on 2,800+ cards before this.
     cur.execute("""
         SELECT *
           FROM porsche_arb_candidates
          WHERE snapshot_date = %s
+           AND flagged = TRUE
          ORDER BY arb_score_v2 DESC NULLS LAST,
                   arb_score DESC NULLS LAST,
                   net_spread DESC NULLS LAST
+         LIMIT 100
     """, (latest,))
     rows = [_normalize_row(r) for r in cur.fetchall()]
 
