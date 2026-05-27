@@ -612,3 +612,74 @@ def autotrader_result():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 # ─── end AutoTrader worker endpoints ──────────────────────────────────────
+
+
+# ─── Bill proactive notifications endpoint (Phase C 2026-05-26) ────────
+# Edge agent polls this every few seconds during an active session.
+# Returns any unsent watchlist hits for the user.
+
+@bp.route("/api/ew-voice/pending", methods=["GET"])
+def voice_pending_notifications():
+    """Return pending (un-notified) watchlist hits for a user.
+
+    Auth: bearer token in Authorization header OR ?bearer= query param.
+    Args: ?user=oscar (defaults to oscar)
+          ?ack=hit_id1,hit_id2  to mark previously fetched hits as notified
+    """
+    import os as _os
+    _bearer_hdr = request.headers.get("Authorization", "")
+    _bearer_q = request.args.get("bearer", "")
+    expected = _os.environ.get("MCP_BEARER_TOKEN", "")
+    auth = (_bearer_hdr if _bearer_hdr.startswith("Bearer ")
+            else f"Bearer {_bearer_q}" if _bearer_q else "")
+    if not expected or auth != f"Bearer {expected}":
+        return jsonify({"error": "unauthorized"}), 401
+
+    user = (request.args.get("user") or "oscar").strip().lower()
+    ack_csv = request.args.get("ack", "").strip()
+
+    import psycopg2, psycopg2.extras
+    db_url = _os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    pending = []
+    try:
+        with psycopg2.connect(db_url) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if ack_csv:
+                    try:
+                        ids = [int(x) for x in ack_csv.split(",") if x.strip().isdigit()]
+                        if ids:
+                            cur.execute("""UPDATE bill_watchlist_hits
+                                              SET notified_at = NOW(),
+                                                  notify_via = COALESCE(notify_via,'voice_session')
+                                            WHERE id = ANY(%s)
+                                              AND notified_at IS NULL""",
+                                        (ids,))
+                    except Exception:
+                        pass
+                cur.execute("""
+                    SELECT h.id, h.watchlist_id, h.bid_id, h.message,
+                           h.matched_at, w.created_by, w.pitch_for, w.name AS watch_name
+                      FROM bill_watchlist_hits h
+                      JOIN bill_watchlists w ON w.id = h.watchlist_id
+                     WHERE h.notified_at IS NULL
+                       AND lower(w.created_by) = %s
+                     ORDER BY h.matched_at ASC
+                     LIMIT 5
+                """, (user,))
+                for r in cur.fetchall():
+                    pending.append({
+                        "hit_id": r["id"],
+                        "watchlist_id": r["watchlist_id"],
+                        "bid_id": r["bid_id"],
+                        "message": r["message"] or "",
+                        "matched_at": r["matched_at"].isoformat() if r["matched_at"] else None,
+                        "pitch_for": r["pitch_for"],
+                        "watch_name": r["watch_name"],
+                    })
+    except Exception as e:
+        log.exception("voice_pending_notifications failed")
+        return jsonify({"error": f"{type(e).__name__}: {e}", "pending": []}), 500
+    return jsonify({"user": user, "pending": pending, "count": len(pending)})
+
+# ─── end pending notifications endpoint ────────────────────────────────

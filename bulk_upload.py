@@ -675,28 +675,41 @@ def parse_csv(file_bytes: bytes) -> list[dict]:
     return _parse_no_header(rows)
 
 
-def parse_upload(filename: str, file_bytes: bytes) -> list[dict]:
+def parse_upload(filename: str, file_bytes: bytes,
+                 require_price: bool = False) -> list[dict]:
     """Dispatch on extension. Returns [] for unrecognized types.
 
     The dispatcher is forgiving: if the extension is wrong or missing it
-    tries xlsx first, then csv on the raw bytes."""
+    tries xlsx first, then csv on the raw bytes.
+
+    require_price: if True, drop any row whose asking_price isn't a
+    positive number. Used for price-list sheets where unsold/no-price
+    rows should be skipped."""
     name = (filename or '').lower()
+    rows: list[dict] = []
     if name.endswith('.xlsx') or name.endswith('.xlsm'):
         try:
-            return parse_xlsx(file_bytes)
+            rows = parse_xlsx(file_bytes)
         except Exception:
             pass
-    if name.endswith('.csv') or name.endswith('.tsv') or name.endswith('.txt'):
+    elif name.endswith('.csv') or name.endswith('.tsv') or name.endswith('.txt'):
         try:
-            return parse_csv(file_bytes)
+            rows = parse_csv(file_bytes)
         except Exception:
             pass
-    # Unknown extension: try xlsx then csv
-    try:
-        return parse_xlsx(file_bytes)
-    except Exception:
-        pass
-    try:
-        return parse_csv(file_bytes)
-    except Exception:
-        return []
+    if not rows:
+        # Unknown extension or first attempt failed: try xlsx then csv
+        try:
+            rows = parse_xlsx(file_bytes)
+        except Exception:
+            pass
+    if not rows:
+        try:
+            rows = parse_csv(file_bytes)
+        except Exception:
+            rows = []
+    if require_price and rows:
+        rows = [r for r in rows
+                if isinstance(r.get('asking_price'), (int, float))
+                and r['asking_price'] > 0]
+    return rows

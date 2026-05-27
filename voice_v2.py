@@ -39,7 +39,7 @@ import onnxruntime as ort
 import secrets as _secrets
 import os as _os
 from flask import Flask, jsonify, render_template, request as _request
-from livekit.api import AccessToken, VideoGrants
+from livekit.api import AccessToken, VideoGrants, RoomConfiguration, RoomAgentDispatch
 from flask_sock import Sock
 
 # ── App + WS ────────────────────────────────────────────────────────────
@@ -137,12 +137,16 @@ def lk_token():
         room_join=True, room=room,
         can_publish=True, can_publish_data=True, can_subscribe=True,
     )
-    tok = (
-        AccessToken(api_key, api_secret)
-        .with_identity(identity)
-        .with_grants(grant)
-        .with_ttl(__import__("datetime").timedelta(hours=1))
-    ).to_jwt()
+    agent_name = (data.get("agent") or "").strip()
+    ab = (AccessToken(api_key, api_secret)
+          .with_identity(identity)
+          .with_grants(grant)
+          .with_ttl(__import__("datetime").timedelta(hours=1)))
+    if agent_name:
+        ab = ab.with_room_config(RoomConfiguration(
+            agents=[RoomAgentDispatch(agent_name=agent_name, metadata="")]
+        ))
+    tok = ab.to_jwt()
     return jsonify({"token": tok, "room": room, "identity": identity,
                     "url": "wss://experience-wholesale.net/livekit/"})
 
@@ -178,7 +182,9 @@ except Exception as _e:
 @app.route("/voice")
 @app.route("/v")
 def ew_voice_page():
-    return render_template("ew_voice.html")
+    # 2026-05-26: point main /voice URL at the LiveKit RTC page so it lands
+    # on the C3 agent path (Cerebras + all today's fixes), not the legacy Flask pipe.
+    return render_template("ew_voice_rtc.html")
 
 @app.route("/v-fast")
 def ew_voice_fast_page():
@@ -187,6 +193,11 @@ def ew_voice_fast_page():
 @app.route("/v-rtc")
 def ew_voice_rtc_page():
     return render_template("ew_voice_rtc.html")
+
+@app.route("/v-edge")
+def ew_voice_edge_page():
+    # Routes inbound rooms to the agent_name="edge" worker (edge-tts variant)
+    return render_template("ew_voice_rtc.html", agent_name="edge")
 
 
 # ── Silero VAD (loaded once at boot, shared across requests) ───────────

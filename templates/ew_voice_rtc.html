@@ -120,10 +120,11 @@ async function connect(){
   // Mint token
   let tokenData;
   try {
+    const _agentName = {{ (agent_name or '') | tojson }};
     const r = await fetch('/api/livekit/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify(_agentName ? { agent: _agentName } : {}),
     });
     tokenData = await r.json();
     if (!r.ok || !tokenData.token) throw new Error(tokenData.error || 'token failed');

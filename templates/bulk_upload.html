@@ -83,6 +83,12 @@
         <button id="btn-parse">Parse file</button>
       </div>
     </div>
+    <div style="margin-top:10px;">
+      <label style="font-weight:normal;">
+        <input type="checkbox" id="require_price" />
+        Only import rows that have a price in the last column (skip blanks / "SOLD")
+      </label>
+    </div>
     <div class="status-line" id="parse-status"></div>
   </div>
 
@@ -167,6 +173,9 @@ document.getElementById('btn-parse').onclick = async () => {
   const fd = new FormData();
   fd.append('file', f);
   fd.append('source_name', document.getElementById('source_name').value);
+  if (document.getElementById('require_price').checked) {
+    fd.append('require_price', '1');
+  }
   try {
     const { ok, data } = await safeJsonFetch('/api/admin/bulk_upload/parse',
       { method: 'POST', body: fd, credentials: 'same-origin' });

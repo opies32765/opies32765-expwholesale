@@ -4047,3 +4047,1317 @@ async def vin_cache_batch_insert(entries: list) -> dict:
         return {"error": f"{type(e).__name__}: {e}"}
 
 # ─── end vin_cache_batch_insert ───────────────────────────────────────────
+
+# ─── Bill personal SMS tools (added 2026-05-26) ─────────────────────────
+# Allows Bill to look up contacts from Oscar's personal directory
+# (bill_contacts table) and send SMS via the EW 754 number prefixed with
+# the speaker's name. Gated: bill_can_text=TRUE only.
+
+@mcp.tool()
+async def lookup_contact(caller_name: str, name_query: str) -> dict:
+    """OWNER-GATED. Look up a person Bill is allowed to text in Oscar's
+    personal contacts. Fuzzy ILIKE match on contact name.
+
+    USE WHEN the user says 'text X' or 'send a message to X' — call this
+    FIRST to resolve the name to a phone number. Only contacts that have
+    been explicitly enabled (bill_can_text=TRUE) are returned.
+
+    Returns: {matches: [{id, name, phone, role}], total: N,
+              note: 'multiple matches - ask which one' if >1}
+    """
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    q = (name_query or "").strip()
+    if not q:
+        return {"error": "name_query required", "matches": [], "total": 0}
+    import psycopg2
+    db_url = os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    try:
+        with psycopg2.connect(db_url) as c, c.cursor() as cur:
+            cur.execute("""
+                SELECT id, name, phone_e164, role
+                  FROM bill_contacts
+                 WHERE bill_can_text = TRUE
+                   AND lower(name) LIKE %s
+                 ORDER BY name
+                 LIMIT 8
+            """, (f"%{q.lower()}%",))
+            rows = cur.fetchall()
+    except Exception as e:
+        return {"error": f"db: {type(e).__name__}: {e}",
+                "matches": [], "total": 0}
+    matches = [{"id": r[0], "name": r[1], "phone": r[2],
+                "role": r[3] or ""} for r in rows]
+    out = {"matches": matches, "total": len(matches)}
+    if len(matches) == 0:
+        out["note"] = (f"no enabled contact matching {name_query!r}. "
+                       f"Bill cannot text people not pre-approved.")
+    elif len(matches) > 1:
+        out["note"] = (f"{len(matches)} matches — ask the user which one "
+                       f"by name or context")
+    return out
+
+
+@mcp.tool()
+async def send_sms_from_user(
+    caller_name: str,
+    sender: str,
+    recipient_phone_e164: str,
+    message: str,
+    confirm: bool = False,
+) -> dict:
+    """OWNER-GATED. Send an SMS from the EW 754 number, prepending
+    'From {sender}: ' to the body so the recipient knows it came from
+    the speaker, not from Bill or EW.
+
+    SAFETY RULES:
+    - Bill MUST read back the full message and recipient and get an
+      explicit verbal 'yes' / 'send it' BEFORE setting confirm=True.
+    - The recipient_phone_e164 MUST have come from a prior lookup_contact
+      call — i.e., the contact must have bill_can_text=TRUE.
+    - sender should match the speaker identity passed in caller_name.
+
+    Returns: {ok: bool, message_sid?, to, body_sent, error?}
+    """
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    if not confirm:
+        return {"error": "confirm=False — Bill must read back the message "
+                         "and message recipient, get verbal 'yes', THEN "
+                         "call again with confirm=True",
+                "ok": False}
+    s = (sender or caller_name or "").strip().capitalize()
+    if not s:
+        return {"error": "sender required (typically the caller's first name)",
+                "ok": False}
+    p = (recipient_phone_e164 or "").strip()
+    if not (p.startswith("+") and len(p) >= 8):
+        return {"error": f"recipient_phone_e164 must be E.164 (e.g. +1...); got {p!r}",
+                "ok": False}
+    msg = (message or "").strip()
+    if not msg:
+        return {"error": "message required", "ok": False}
+    # Verify the recipient is in bill_contacts AND bill_can_text=TRUE.
+    # Belt-and-braces: even if the LLM hallucinates a phone, we refuse
+    # to send to anyone not explicitly enabled in the DB.
+    import psycopg2
+    db_url = os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    contact_name = None
+    try:
+        with psycopg2.connect(db_url) as c, c.cursor() as cur:
+            cur.execute("""SELECT name, bill_can_text FROM bill_contacts
+                            WHERE phone_e164 = %s LIMIT 1""", (p,))
+            row = cur.fetchone()
+            if not row:
+                return {"error": f"phone {p} not in bill_contacts — "
+                                 f"call lookup_contact first",
+                        "ok": False}
+            contact_name, can_text = row
+            if not can_text:
+                return {"error": f"{contact_name} is in contacts but not "
+                                 f"approved for texting (bill_can_text=FALSE)",
+                        "ok": False}
+    except Exception as e:
+        return {"error": f"db check: {type(e).__name__}: {e}", "ok": False}
+    # Send the SMS via Twilio
+    sid = os.environ.get("TWILIO_ACCOUNT_SID")
+    tok = os.environ.get("TWILIO_AUTH_TOKEN")
+    frm = os.environ.get("TWILIO_PHONE")
+    if not (sid and tok and frm):
+        return {"error": "twilio env not configured", "ok": False}
+    body_sent = f"From {s}: {msg}"
+    try:
+        from twilio.rest import Client
+        client = Client(sid, tok)
+        tw_msg = client.messages.create(to=p, from_=frm, body=body_sent)
+        log.info(f"send_sms_from_user sender={s} to={contact_name} "
+                 f"({p}) sid={tw_msg.sid}")
+    except Exception as e:
+        log.exception("twilio send failed")
+        return {"ok": False, "to": p, "body_sent": body_sent,
+                "error": f"twilio: {type(e).__name__}: {e}"}
+    # Best-effort log
+    try:
+        with psycopg2.connect(db_url) as c, c.cursor() as cur:
+            cur.execute("""INSERT INTO bill_sms_log
+                (sender, contact_id, phone_e164, body, twilio_sid, sent_at)
+                VALUES (%s,
+                        (SELECT id FROM bill_contacts WHERE phone_e164 = %s),
+                        %s, %s, %s, NOW())""",
+                (s, p, p, body_sent, tw_msg.sid))
+    except Exception as e:
+        log.warning(f"bill_sms_log insert failed (non-fatal): {e}")
+    return {"ok": True, "to": p, "contact_name": contact_name,
+            "body_sent": body_sent, "message_sid": tw_msg.sid}
+
+
+# ─── end Bill personal SMS tools ────────────────────────────────────────
+
+# ─── Bill bid-awareness tools (added 2026-05-26) ────────────────────────
+# Allows Bill to:
+#   - list today's (or N-day) bids
+#   - score today's bids against a specific partner dealer
+#   - find best partner dealers for a specific bid
+# Re-uses the existing YMMT_MATCH_2026_05_26 scoring (app._compute_bid_matches)
+# plus the dealers.buy_profile rolodex.
+
+@mcp.tool()
+async def bids_today(caller_name: str, days_back: int = 0) -> dict:
+    """OWNER. List bids that came in today (or N days back). Use when the
+    operator asks "what came in today?", "show me today's bids", "what's
+    in the pipeline?". days_back=0 means today, 1=yesterday only,
+    7=last 7 days.
+
+    Returns: {count, bids: [{id, year, make, model, trim, mileage,
+                            color, ai_price, asking_price, status,
+                            created_at_human}]}"""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    import psycopg2, psycopg2.extras
+    db_url = os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    db = max(0, int(days_back or 0))
+    if db == 0:
+        # today only
+        where = ("created_at >= date_trunc('day', NOW() AT TIME ZONE 'America/New_York') "
+                 "AT TIME ZONE 'America/New_York'")
+    else:
+        where = (f"created_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/New_York') "
+                 f"- INTERVAL '{db} days') AT TIME ZONE 'America/New_York'")
+    try:
+        with psycopg2.connect(db_url) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(f"""
+                    SELECT id, year, make, model, trim, mileage, color, vin,
+                           ai_price, asking_price, status, created_at,
+                           phone
+                      FROM bids
+                     WHERE {where}
+                       AND COALESCE(status, '') NOT IN ('cancelled','archived','dead','duplicate')
+                     ORDER BY created_at DESC
+                     LIMIT 100
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        return {"error": f"db: {type(e).__name__}: {e}", "count": 0, "bids": []}
+    out = []
+    for r in rows:
+        out.append({
+            "id": r.get("id"),
+            "year": r.get("year"),
+            "make": r.get("make"),
+            "model": r.get("model"),
+            "trim": r.get("trim"),
+            "mileage": r.get("mileage"),
+            "color": r.get("color"),
+            "vin": r.get("vin"),
+            "ai_price": float(r["ai_price"]) if r.get("ai_price") else None,
+            "asking_price": float(r["asking_price"]) if r.get("asking_price") else None,
+            "status": r.get("status"),
+            "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+        })
+    return {"count": len(out), "bids": out, "period":
+            "today" if db == 0 else f"last_{db}_days"}
+
+
+@mcp.tool()
+async def partner_match_today(
+    caller_name: str, partner_name: str, days_back: int = 1,
+    top_n: int = 8,
+) -> dict:
+    """OWNER. For a specific partner dealer, score recent bids and return
+    the ones most worth pitching to that partner. Uses EW's existing
+    buy_profile scoring (YMMT_MATCH).
+
+    Use when operator asks: "what's good for Marino today?", "anything for
+    Ferrari Lauderdale?", "what should I push to TXT Charlie?".
+
+    partner_name: free-text dealer name. Fuzzy matched to dealers.name OR
+                  dealers.portal_slug.
+    days_back: window. 0=today, 1=yesterday+today, 7=last week. Default 1.
+    top_n: how many to return. Default 8.
+
+    Returns: {partner: {name, slug}, considered: N, matches:
+              [{bid_id, year, make, model, trim, mileage, color, score,
+                reasons}]}"""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    pq = (partner_name or "").strip()
+    if not pq:
+        return {"error": "partner_name required"}
+    import psycopg2, psycopg2.extras
+    import sys
+    sys.path.insert(0, "/opt/expwholesale")
+    db_url = os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    try:
+        with psycopg2.connect(db_url) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Fuzzy match dealer
+                cur.execute("""SELECT id, name, portal_slug, buy_profile, lsl_aliases
+                                 FROM dealers
+                                WHERE buy_profile IS NOT NULL
+                                  AND (lower(name) LIKE %s
+                                       OR lower(portal_slug) LIKE %s)
+                                ORDER BY length(name) ASC
+                                LIMIT 3""",
+                            (f"%{pq.lower()}%", f"%{pq.lower()}%"))
+                dealers = [dict(r) for r in cur.fetchall()]
+        if not dealers:
+            return {"error": f"no partner matching {partner_name!r} found",
+                    "matches": []}
+        if len(dealers) > 1:
+            # multiple matches — let user disambiguate
+            return {"note": "multiple partners match — be more specific",
+                    "candidates": [{"name": d["name"], "slug": d["portal_slug"]}
+                                   for d in dealers],
+                    "matches": []}
+        dealer = dealers[0]
+        # Pull recent bids
+        db = max(0, int(days_back or 1))
+        with psycopg2.connect(db_url) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(f"""
+                    SELECT id, year, make, model, trim, mileage, color, vin,
+                           ai_price, asking_price, status
+                      FROM bids
+                     WHERE created_at >= (NOW() AT TIME ZONE 'America/New_York'
+                                          - INTERVAL '{db} days')
+                                          AT TIME ZONE 'America/New_York'
+                       AND COALESCE(status, '') NOT IN ('cancelled','archived','dead','duplicate')
+                       AND year IS NOT NULL AND make IS NOT NULL AND model IS NOT NULL
+                     ORDER BY created_at DESC
+                     LIMIT 200
+                """)
+                bids = [dict(r) for r in cur.fetchall()]
+            with psycopg2.connect(db_url) as c2:
+                with c2.cursor() as cur2:
+                    from app import _load_dealer_vins_owned, _compute_bid_matches
+                    vins_by_dealer = _load_dealer_vins_owned(cur2)
+        # Score each bid against the single dealer
+        scored = []
+        for bid in bids:
+            matches = _compute_bid_matches(bid, [dealer], vins_by_dealer=vins_by_dealer,
+                                            min_score=0)
+            if not matches:
+                continue
+            m = matches[0]
+            scored.append({
+                "bid_id": bid["id"],
+                "year": bid.get("year"), "make": bid.get("make"),
+                "model": bid.get("model"), "trim": bid.get("trim"),
+                "mileage": bid.get("mileage"), "color": bid.get("color"),
+                "ai_price": float(bid["ai_price"]) if bid.get("ai_price") else None,
+                "score": m.get("score") or 0,
+                "reasons": m.get("reasons") or [],
+            })
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return {
+            "partner": {"name": dealer["name"], "slug": dealer["portal_slug"]},
+            "considered": len(bids),
+            "matches": scored[:top_n],
+        }
+    except Exception as e:
+        log.exception("partner_match_today failed")
+        return {"error": f"{type(e).__name__}: {e}", "matches": []}
+
+
+@mcp.tool()
+async def partners_for_bid(caller_name: str, bid_id: int,
+                            top_n: int = 5) -> dict:
+    """OWNER. For a SPECIFIC bid, return the partner dealers most likely
+    to want it (ranked by buy_profile match score).
+
+    Use when operator asks: "who should I pitch bid 1234 to?", "who'd
+    want this car?", "best buyers for this one".
+
+    Returns: {bid: {id, year, make, model, trim}, matches:
+              [{dealer, slug, score, reasons}]}"""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    try:
+        bid_id = int(bid_id)
+    except Exception:
+        return {"error": "bid_id required (int)"}
+    import psycopg2, psycopg2.extras
+    import sys
+    sys.path.insert(0, "/opt/expwholesale")
+    db_url = os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    try:
+        with psycopg2.connect(db_url) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""SELECT id, year, make, model, trim, mileage,
+                                      color, vin, ai_price, asking_price, status
+                                 FROM bids WHERE id = %s""", (bid_id,))
+                bid = cur.fetchone()
+                if not bid:
+                    return {"error": f"bid {bid_id} not found"}
+                bid = dict(bid)
+                cur.execute("""SELECT id, name, portal_slug, buy_profile, lsl_aliases
+                                 FROM dealers
+                                WHERE buy_profile IS NOT NULL""")
+                dealers = [dict(r) for r in cur.fetchall()]
+            with psycopg2.connect(db_url) as c2:
+                with c2.cursor() as cur2:
+                    from app import _load_dealer_vins_owned, _compute_bid_matches
+                    vins_by_dealer = _load_dealer_vins_owned(cur2)
+        matches = _compute_bid_matches(bid, dealers,
+                                        vins_by_dealer=vins_by_dealer, min_score=0)
+        matches.sort(key=lambda m: m.get("score") or 0, reverse=True)
+        out = []
+        for m in matches[:top_n]:
+            out.append({
+                "dealer": m.get("name"),
+                "slug": m.get("slug"),
+                "score": m.get("score") or 0,
+                "reasons": m.get("reasons") or [],
+            })
+        return {
+            "bid": {
+                "id": bid["id"], "year": bid.get("year"),
+                "make": bid.get("make"), "model": bid.get("model"),
+                "trim": bid.get("trim"), "mileage": bid.get("mileage"),
+            },
+            "matches": out,
+        }
+    except Exception as e:
+        log.exception("partners_for_bid failed")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+# ─── end Bill bid-awareness tools ───────────────────────────────────────
+
+# ─── Bill watchlist tools (added 2026-05-26) ────────────────────────────
+# Persistent "remind me when X comes in" memory. The voice agent stores
+# structured conditions; the bill_watcher daemon (Phase C) polls new bids
+# against these and proactively notifies.
+
+def _normalize_make(s):
+    return (s or "").strip().lower() if s else None
+
+def _list_lower(lst):
+    return [str(x).strip().lower() for x in (lst or []) if x]
+
+
+@mcp.tool()
+async def add_watchlist(
+    caller_name: str,
+    description: str,
+    make_any: list = None,
+    model_any: list = None,
+    color_any: list = None,
+    year_min: int = None,
+    year_max: int = None,
+    year_exact: int = None,
+    mileage_max: int = None,
+    price_max: int = None,
+    trim_contains: str = None,
+    pitch_for: str = None,
+    name: str = None,
+) -> dict:
+    """OWNER. Save a persistent watchlist. The bill_watcher cron checks
+    every new bid against active watchlists and proactively notifies the
+    user when a match arrives.
+
+    USE WHEN user says: "remind me if X comes in", "let me know when X
+    hits", "watch for X for [partner]", "tell me if a [year+make+model]
+    rolls through".
+
+    CRITICAL — ASK BEFORE SAVING:
+      - If the user's request is ambiguous (e.g. just "Corvette"), ASK to
+        clarify year range, color, who it's for, etc. Don't save something
+        that'll false-trigger on every Corvette.
+      - Always read the watchlist back BEFORE calling this tool, so the
+        user can correct. Example: "Got it — I'll flag any Corvette 2019
+        or older, for Nuchio. Save it?"
+
+    Args:
+      description: the raw verbal request, kept for context. E.g.
+                   "Corvette 2019 or older for Nuccio. Also Vipers and Lotuses."
+      make_any: list of makes to match (case-insensitive). E.g. ["chevrolet"].
+                A bid matches if its make is in this list.
+      model_any: list of models. E.g. ["corvette","z06"].
+      color_any: list of colors. E.g. ["red","crimson"].
+      year_min: lower bound (inclusive). 2015 means 2015+.
+      year_max: upper bound (inclusive). 2019 means 2019 or older.
+      year_exact: exact year. Overrides min/max if set.
+      mileage_max: max miles. 60000 means 60k or fewer.
+      price_max: max AI/asking price. 50000 means $50K or less.
+      trim_contains: substring match on trim (case-insensitive). E.g. "z06".
+      pitch_for: partner dealer this is for. E.g. "nuccio", "marino",
+                 "txt charlie". Optional but useful — the notification
+                 will read "...for Nuccio".
+      name: short human label. If omitted, auto-generated from conditions.
+
+    Returns: {ok, watchlist_id, summary}
+    """
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    if not description:
+        return {"error": "description required"}
+
+    conds = {}
+    if make_any:    conds["make_any"]    = _list_lower(make_any)
+    if model_any:   conds["model_any"]   = _list_lower(model_any)
+    if color_any:   conds["color_any"]   = _list_lower(color_any)
+    if year_min:    conds["year_min"]    = int(year_min)
+    if year_max:    conds["year_max"]    = int(year_max)
+    if year_exact:  conds["year_exact"]  = int(year_exact)
+    if mileage_max: conds["mileage_max"] = int(mileage_max)
+    if price_max:   conds["price_max"]   = int(price_max)
+    if trim_contains: conds["trim_contains"] = trim_contains.strip().lower()
+
+    if not conds:
+        return {"error": ("no concrete conditions — at least one of "
+                          "make_any, model_any, year_*, color_any, trim_contains "
+                          "must be set so we don't trigger on every bid")}
+
+    # Auto-name if not provided
+    if not name:
+        bits = []
+        if year_exact: bits.append(str(year_exact))
+        elif year_min or year_max:
+            if year_min and year_max:
+                bits.append(f"{year_min}-{year_max}")
+            elif year_min:
+                bits.append(f"{year_min}+")
+            elif year_max:
+                bits.append(f"≤{year_max}")
+        if color_any: bits.append("/".join(color_any))
+        if make_any:  bits.append("/".join(make_any))
+        if model_any: bits.append("/".join(model_any))
+        if pitch_for: bits.append(f"→ {pitch_for}")
+        name = " ".join(bits) if bits else description[:60]
+
+    import psycopg2, json as _json
+    db_url = os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    try:
+        with psycopg2.connect(db_url) as c, c.cursor() as cur:
+            cur.execute("""
+                INSERT INTO bill_watchlists
+                  (created_by, name, description, conditions, pitch_for, active)
+                VALUES (%s, %s, %s, %s::jsonb, %s, TRUE)
+                RETURNING id
+            """, (caller_name.lower(), name, description,
+                  _json.dumps(conds),
+                  (pitch_for or "").strip().lower() or None))
+            wid = cur.fetchone()[0]
+    except Exception as e:
+        log.exception("add_watchlist failed")
+        return {"error": f"db: {type(e).__name__}: {e}"}
+
+    return {
+        "ok": True,
+        "watchlist_id": wid,
+        "name": name,
+        "conditions": conds,
+        "pitch_for": pitch_for,
+        "summary": f"watching for: {name}" + (f" (for {pitch_for})" if pitch_for else ""),
+    }
+
+
+@mcp.tool()
+async def list_watchlists(caller_name: str, include_inactive: bool = False) -> dict:
+    """OWNER. List all active watchlists for the current user.
+
+    USE WHEN user asks: "what am I watching for?", "what reminders do
+    I have?", "what's on my watch list?", "anything pending?".
+
+    include_inactive: also show deleted/paused. Default False."""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    import psycopg2, psycopg2.extras
+    db_url = os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    where = "lower(created_by) = %s"
+    args = [caller_name.lower()]
+    if not include_inactive:
+        where += " AND active = TRUE"
+    try:
+        with psycopg2.connect(db_url) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(f"""
+                    SELECT id, name, description, conditions, pitch_for,
+                           active, match_count, last_matched_at, created_at
+                      FROM bill_watchlists
+                     WHERE {where}
+                     ORDER BY active DESC, created_at DESC
+                """, args)
+                rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        return {"error": f"db: {type(e).__name__}: {e}", "watchlists": []}
+    out = []
+    for r in rows:
+        out.append({
+            "id": r["id"],
+            "name": r["name"],
+            "description": r["description"],
+            "conditions": r["conditions"],
+            "pitch_for": r["pitch_for"],
+            "active": r["active"],
+            "match_count": r["match_count"],
+            "last_matched_at": r["last_matched_at"].isoformat() if r["last_matched_at"] else None,
+        })
+    return {"watchlists": out, "count": len(out)}
+
+
+@mcp.tool()
+async def delete_watchlist(
+    caller_name: str,
+    watchlist_id: int = None,
+    name_query: str = None,
+) -> dict:
+    """OWNER. Disable a watchlist so it stops matching. Soft-delete only
+    (sets active=FALSE; history preserved for hit log).
+
+    USE WHEN user says: "stop watching for X", "cancel the Corvette
+    reminder", "I don't need that one anymore".
+
+    Provide EITHER watchlist_id (from list_watchlists) OR name_query
+    (fuzzy match on name). If multiple match, returns the candidates
+    for the user to disambiguate.
+
+    Returns: {ok, disabled_id, name} on success, or {candidates: [...]}"""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    if not watchlist_id and not name_query:
+        return {"error": "provide watchlist_id or name_query"}
+    import psycopg2, psycopg2.extras
+    db_url = os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    try:
+        with psycopg2.connect(db_url) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if watchlist_id:
+                    cur.execute("""SELECT id, name, active FROM bill_watchlists
+                                    WHERE id = %s AND lower(created_by) = %s""",
+                                (int(watchlist_id), caller_name.lower()))
+                    row = cur.fetchone()
+                    if not row:
+                        return {"error": f"no watchlist {watchlist_id} for {caller_name}"}
+                    if not row["active"]:
+                        return {"ok": True, "note": "already disabled",
+                                "disabled_id": row["id"], "name": row["name"]}
+                    cur.execute("""UPDATE bill_watchlists
+                                      SET active=FALSE, updated_at=NOW()
+                                    WHERE id = %s""", (row["id"],))
+                    return {"ok": True, "disabled_id": row["id"],
+                            "name": row["name"]}
+                # name_query path
+                cur.execute("""SELECT id, name, description FROM bill_watchlists
+                                WHERE lower(created_by) = %s AND active=TRUE
+                                  AND (lower(name) LIKE %s
+                                       OR lower(description) LIKE %s)
+                                ORDER BY created_at DESC""",
+                            (caller_name.lower(),
+                             f"%{name_query.lower()}%",
+                             f"%{name_query.lower()}%"))
+                rows = [dict(r) for r in cur.fetchall()]
+                if len(rows) == 0:
+                    return {"error": f"no active watchlist matching {name_query!r}"}
+                if len(rows) > 1:
+                    return {"note": "multiple matches — disambiguate by id",
+                            "candidates": rows}
+                cur.execute("""UPDATE bill_watchlists
+                                  SET active=FALSE, updated_at=NOW()
+                                WHERE id = %s""", (rows[0]["id"],))
+                return {"ok": True, "disabled_id": rows[0]["id"],
+                        "name": rows[0]["name"]}
+    except Exception as e:
+        log.exception("delete_watchlist failed")
+        return {"error": f"db: {type(e).__name__}: {e}"}
+
+
+# ─── end Bill watchlist tools ───────────────────────────────────────────
+
+# ─── Bill away-mode tools (Phase D 2026-05-26) ──────────────────────────
+# When set, the bill_watcher routes notifications via the chosen channel
+# instead of the active /v-edge voice session. Used when operator is
+# stepping away from the desk.
+
+@mcp.tool()
+async def set_away_mode(
+    caller_name: str,
+    channel: str,
+    hours: float = 0,
+    phone_e164: str = "",
+) -> dict:
+    """OWNER. Switch proactive notifications from voice-session to a
+    different channel for a period (or until manually cleared).
+
+    USE WHEN user says: 'call me about anything that hits', 'I'm heading
+    out — text me', 'switch to phone calls', 'I'll be away for an hour',
+    'I'm leaving for the day'.
+
+    Args:
+      channel: 'call' (outbound voice call from EW number) | 'sms' (text
+               to phone_e164) | 'telegram' (push). Default 'call'.
+      hours: auto-clear after this many hours. 0 (default) = manual only,
+             stays on until clear_away_mode().
+      phone_e164: destination. If blank, defaults to Oscar's contact
+                  (+14074309675). Required for 'sms' if different.
+
+    Returns: {ok, channel, away_until, phone}
+    """
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    ch = (channel or "call").strip().lower()
+    if ch not in ("call", "sms", "telegram"):
+        return {"error": f"channel must be call/sms/telegram, got {channel!r}"}
+
+    p = (phone_e164 or "").strip()
+    if not p:
+        # default to Oscar's cell from bill_contacts (Oscar Pastrana, id 82)
+        p = "+14074309675"
+    if not (p.startswith("+") and len(p) >= 8):
+        return {"error": f"bad phone_e164 {p!r}"}
+
+    import psycopg2
+    db_url = os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    try:
+        with psycopg2.connect(db_url) as c, c.cursor() as cur:
+            if hours and float(hours) > 0:
+                cur.execute("""
+                    INSERT INTO bill_user_state
+                      (user_name, away_channel, away_phone, away_until, updated_at)
+                    VALUES (%s, %s, %s, NOW() + (%s || ' hours')::interval, NOW())
+                    ON CONFLICT (user_name) DO UPDATE
+                      SET away_channel = EXCLUDED.away_channel,
+                          away_phone   = EXCLUDED.away_phone,
+                          away_until   = EXCLUDED.away_until,
+                          updated_at   = NOW()
+                    RETURNING away_until
+                """, (caller_name.lower(), ch, p, str(float(hours))))
+            else:
+                cur.execute("""
+                    INSERT INTO bill_user_state
+                      (user_name, away_channel, away_phone, away_until, updated_at)
+                    VALUES (%s, %s, %s, NULL, NOW())
+                    ON CONFLICT (user_name) DO UPDATE
+                      SET away_channel = EXCLUDED.away_channel,
+                          away_phone   = EXCLUDED.away_phone,
+                          away_until   = NULL,
+                          updated_at   = NOW()
+                    RETURNING away_until
+                """, (caller_name.lower(), ch, p))
+            row = cur.fetchone()
+            away_until = row[0]
+    except Exception as e:
+        log.exception("set_away_mode failed")
+        return {"error": f"db: {type(e).__name__}: {e}"}
+
+    return {
+        "ok": True,
+        "channel": ch,
+        "phone": p,
+        "away_until": away_until.isoformat() if away_until else None,
+        "summary": (
+            f"away mode set: {ch} to {p}" +
+            (f" for {hours}h" if hours else " (manual clear)")
+        ),
+    }
+
+
+@mcp.tool()
+async def clear_away_mode(caller_name: str) -> dict:
+    """OWNER. Switch proactive notifications back to the live /v-edge
+    voice session.
+
+    USE WHEN user says: 'I'm back', 'stop calling me', 'cancel away mode',
+    'back at my desk'.
+
+    Returns: {ok, was_active}
+    """
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    import psycopg2
+    db_url = os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+    try:
+        with psycopg2.connect(db_url) as c, c.cursor() as cur:
+            cur.execute("""UPDATE bill_user_state
+                              SET away_channel = NULL,
+                                  away_phone   = NULL,
+                                  away_until   = NULL,
+                                  updated_at   = NOW()
+                            WHERE user_name = %s
+                              AND away_channel IS NOT NULL
+                            RETURNING away_channel""", (caller_name.lower(),))
+            row = cur.fetchone()
+    except Exception as e:
+        return {"error": f"db: {type(e).__name__}: {e}"}
+    return {"ok": True, "was_active": bool(row),
+            "summary": "back at desk — proactive notifications go to /v-edge"
+                       if row else "you weren't away"}
+
+
+# ─── end Bill away-mode tools ───────────────────────────────────────────
+
+
+# ─── PORSCHE_ARB_2026_05_26 — daily arbitrage scanner tools ─────────────
+# Source: porsche_arb_candidates (one row per snapshot_date/subject_vin).
+# Voice routing:
+#   "what's worth buying today" / "best arbs today" → daily_arb_picks
+#   "explain candidate 47"      / "why is that flagged"  → explain_arb
+
+@mcp.tool()
+async def daily_arb_picks(
+    caller_name: str,
+    make: str = "porsche",
+    min_spread: int = 10000,
+    top_n: int = 10,
+) -> dict:
+    """OWNER. Today's flagged Porsche (or make-filtered) arbitrage
+    candidates ranked by arb_score.
+
+    USE when the user asks 'what's worth buying today', 'best arbs',
+    'show today's arb picks', 'porsche arbs', 'cross-market deals'.
+
+    Args:
+      make: filter by subject_make (default 'porsche'). Pass '' or 'any'
+            to disable the make filter.
+      min_spread: minimum net_spread in dollars (default 10000).
+      top_n: return at most this many picks (default 10).
+
+    Returns: {as_of, count, total_flagged, picks:[{candidate_id, year,
+              model, trim, mileage, asking_price, home_region,
+              best_other_region, net_spread, spread_pct, arb_score,
+              dealer_name, dealer_state, carfax_clean, top_reasons}]}"""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+
+    import psycopg2, psycopg2.extras
+    db_url = os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+
+    mk = (make or "").strip().lower()
+    use_make_filter = bool(mk) and mk not in ("any", "all", "*")
+    spread_floor = max(0, int(min_spread or 0))
+    n = max(1, min(int(top_n or 10), 50))
+
+    try:
+        with psycopg2.connect(db_url) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # total flagged today (for context)
+                cur.execute("""
+                    SELECT COUNT(*) AS n
+                      FROM porsche_arb_candidates
+                     WHERE snapshot_date = CURRENT_DATE
+                       AND flagged = TRUE
+                """)
+                total_flagged = (cur.fetchone() or {}).get("n", 0)
+
+                where = ["snapshot_date = CURRENT_DATE",
+                         "flagged = TRUE",
+                         "COALESCE(net_spread, 0) >= %s"]
+                params = [spread_floor]
+                if use_make_filter:
+                    where.append("LOWER(COALESCE(subject_make, '')) = %s")
+                    params.append(mk)
+                params.append(n)
+
+                cur.execute(f"""
+                    SELECT id, subject_year, subject_make, subject_model,
+                           subject_trim, subject_mileage, asking_price,
+                           home_region, best_other_region,
+                           home_region_median, best_other_median,
+                           net_spread, spread_pct, arb_score,
+                           dealer_name, dealer_state,
+                           carfax_clean_title, flag_reasons
+                      FROM porsche_arb_candidates
+                     WHERE {' AND '.join(where)}
+                     ORDER BY arb_score DESC NULLS LAST,
+                              net_spread DESC NULLS LAST
+                     LIMIT %s
+                """, params)
+                rows = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        log.exception("daily_arb_picks failed")
+        return {"error": f"db: {type(e).__name__}: {e}",
+                "count": 0, "picks": []}
+
+    picks = []
+    for r in rows:
+        reasons = r.get("flag_reasons") or []
+        picks.append({
+            "candidate_id": r.get("id"),
+            "year": r.get("subject_year"),
+            "make": r.get("subject_make"),
+            "model": r.get("subject_model"),
+            "trim": r.get("subject_trim"),
+            "mileage": r.get("subject_mileage"),
+            "asking_price": float(r["asking_price"]) if r.get("asking_price") is not None else None,
+            "home_region": r.get("home_region"),
+            "home_region_median": float(r["home_region_median"]) if r.get("home_region_median") is not None else None,
+            "best_other_region": r.get("best_other_region"),
+            "best_other_median": float(r["best_other_median"]) if r.get("best_other_median") is not None else None,
+            "net_spread": float(r["net_spread"]) if r.get("net_spread") is not None else None,
+            "spread_pct": float(r["spread_pct"]) if r.get("spread_pct") is not None else None,
+            "arb_score": float(r["arb_score"]) if r.get("arb_score") is not None else None,
+            "dealer_name": r.get("dealer_name"),
+            "dealer_state": r.get("dealer_state"),
+            "carfax_clean": bool(r.get("carfax_clean_title")) if r.get("carfax_clean_title") is not None else None,
+            "top_reasons": list(reasons)[:3],
+        })
+
+    return {
+        "as_of": "today",
+        "count": len(picks),
+        "total_flagged": int(total_flagged or 0),
+        "make_filter": mk if use_make_filter else "any",
+        "min_spread": spread_floor,
+        "picks": picks,
+    }
+
+
+@mcp.tool()
+async def explain_arb(caller_name: str, candidate_id: int) -> dict:
+    """OWNER. Full breakdown for a specific arbitrage candidate. Returns
+    every column from the candidates row plus per-region median context
+    from porsche_arb_regional_history (last 30 days) and the LSL anchor
+    payload.
+
+    USE when the user asks 'tell me about candidate 47', 'why is that
+    flagged', 'walk me through the Cayenne', 'explain that arb',
+    'more detail on number 47'.
+
+    Returns: {candidate:{...full row...},
+              regional_history:[{region, snapshot_date, median, n}],
+              lsl_anchor: {...}}"""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+
+    import psycopg2, psycopg2.extras
+    db_url = os.environ.get("DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
+
+    try:
+        cid = int(candidate_id)
+    except Exception:
+        return {"error": f"bad candidate_id {candidate_id!r}"}
+
+    try:
+        with psycopg2.connect(db_url) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT *
+                      FROM porsche_arb_candidates
+                     WHERE id = %s
+                """, (cid,))
+                row = cur.fetchone()
+                if not row:
+                    return {"error": f"candidate {cid} not found"}
+                cand = dict(row)
+
+                # Last 30d of per-region medians for this anchor VIN
+                cur.execute("""
+                    SELECT snapshot_date, region, n, median_price,
+                           p25_price, p75_price, avg_dol
+                      FROM porsche_arb_regional_history
+                     WHERE anchor_vin = %s
+                       AND snapshot_date >= CURRENT_DATE - INTERVAL '30 days'
+                     ORDER BY snapshot_date DESC, region
+                """, (cand.get("anchor_vin"),))
+                hist = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        log.exception("explain_arb failed")
+        return {"error": f"db: {type(e).__name__}: {e}"}
+
+    # Normalize for JSON (timestamps, Decimals, jsonb)
+    def _norm(v):
+        if v is None:
+            return None
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        if isinstance(v, (int, float, bool, str, dict, list)):
+            return v
+        # psycopg2 numeric → Decimal
+        try:
+            return float(v)
+        except Exception:
+            return str(v)
+
+    cand_out = {k: _norm(v) for k, v in cand.items()}
+    flag_reasons = cand.get("flag_reasons") or []
+    if isinstance(flag_reasons, (list, tuple)):
+        cand_out["flag_reasons"] = list(flag_reasons)
+
+    hist_out = []
+    for r in hist:
+        hist_out.append({
+            "snapshot_date": r["snapshot_date"].isoformat() if r.get("snapshot_date") else None,
+            "region": r.get("region"),
+            "n": r.get("n"),
+            "median": _norm(r.get("median_price")),
+            "p25": _norm(r.get("p25_price")),
+            "p75": _norm(r.get("p75_price")),
+            "avg_dol": _norm(r.get("avg_dol")),
+        })
+
+    return {
+        "candidate": cand_out,
+        "regional_history": hist_out,
+        "lsl_anchor": cand.get("lsl_anchor_jsonb") or {},
+    }
+
+
+# ─── end PORSCHE_ARB_2026_05_26 tools ───────────────────────────────────
+
+
+# ─── BILL_BRIEFING_2026_05_26 — on-demand morning briefing ──────────────
+
+@mcp.tool()
+async def briefing_now(caller_name: str) -> dict:
+    """OWNER. Generate todays morning briefing on-demand and queue it
+    for delivery. Same content the 8 AM cron would produce: overnight
+    bid count + top vehicle, today flagged Porsche arbs, dealer-watch
+    top opportunity, stale-bid sweep, watchlist hits yesterday.
+
+    USE when the user says: "give me my briefing", "catch me up",
+    "whats the news", "morning brief", "give me the rundown", "whats
+    going on this morning".
+
+    The briefing message is inserted into the proactive notification
+    queue (bill_watchlist_hits with the Daily Briefing sentinel). The
+    next /v-edge poll picks it up and Bill speaks it. If the operator
+    is in away-mode, dispatch goes via that channel (call/sms/telegram).
+
+    Returns: {ok, message, word_count, hit_id, dispatch_via,
+              data_summary:{overnight_bids, arb_flagged, dealer_opps,
+                            stale_bids, watchlist_hits_yest}}
+    """
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+
+    # Re-use the script as a library — keep the logic in one place.
+    import importlib, sys
+    sys.path.insert(0, "/opt/expwholesale")
+    try:
+        if "bill_daily_briefing" in sys.modules:
+            mod = importlib.reload(sys.modules["bill_daily_briefing"])
+        else:
+            mod = importlib.import_module("bill_daily_briefing")
+    except Exception as e:
+        return {"error": f"import: {type(e).__name__}: {e}"}
+
+    try:
+        from datetime import date as _date
+        result = mod.run(caller_name.lower(), _date.today(), dry_run=False)
+    except Exception as e:
+        log.exception("briefing_now failed")
+        return {"error": f"run: {type(e).__name__}: {e}"}
+
+    if not result.get("ok"):
+        return {
+            "ok": False,
+            "duplicate": result.get("duplicate", False),
+            "message": result.get("message"),
+            "summary": "briefing already queued — check pending",
+        }
+
+    # Re-gather a tiny data summary for the caller so the spoken layer
+    # knows the headline numbers without re-parsing the message.
+    try:
+        data = mod.gather(_date.today())
+        summary = {
+            "overnight_bids": data["overnight_total"],
+            "arb_flagged": data["arb_total_flagged"],
+            "dealer_opps": data["dealer_opps_total"],
+            "stale_bids": data["stale_count"],
+            "watchlist_hits_yest": data["watchlist_hits_yest"],
+        }
+    except Exception:
+        summary = {}
+
+    return {
+        "ok": True,
+        "message": result["message"],
+        "word_count": result.get("word_count"),
+        "hit_id": result.get("hit_id"),
+        "dispatch_via": result.get("dispatch_via"),
+        "data_summary": summary,
+        "spoken_summary": "Briefing on the way — Bill will read it next.",
+    }
+
+
+# ─── end BILL_BRIEFING_2026_05_26 tool ──────────────────────────────────
+# ─── PARTNER_ACTIVITY_2026_05_26 tools — appended to ew_mcp.py ──────────
+# Two MCP tools for per-partner relationship activity:
+#   partner_activity_status — list aging partner dealers (silent N+ days)
+#   partner_detail          — full breakdown for one named partner
+#
+# Backed by partner_activity_summary (refreshed weekday 07:00 ET cron) +
+# live LSL crm.db lookup for the "recent purchases" rows in partner_detail.
+# Both tools are OWNER-gated (caller_name must be in OWNER_WHITELIST).
+
+@mcp.tool()
+async def partner_activity_status(
+    caller_name: str,
+    days_silent: int = 7,
+    top_n: int = 5,
+) -> dict:
+    """OWNER. List partner dealers we haven't transacted with in a while.
+
+    USE when the operator asks: 'who haven't I talked to lately',
+    'cold partners', 'who needs attention', 'partner pipeline status',
+    'who's gone quiet'.
+
+    days_silent: minimum days since the most recent push, offer, or
+                 purchase. Default 7.
+    top_n:       max rows returned (default 5, capped at 16).
+
+    Returns:
+      {as_of, count, partners:[{dealer_name, silent_days, last_push_at,
+                                last_purchase_at, purchases_365d,
+                                total_gross_365d, profile_summary}]}
+    """
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+
+    import psycopg2, psycopg2.extras
+    db_url = os.environ.get(
+        "DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale",
+    )
+    try:
+        top_n = max(1, min(int(top_n or 5), 16))
+        days_silent = max(0, int(days_silent or 7))
+    except Exception:
+        return {"error": "bad days_silent/top_n"}
+
+    try:
+        with psycopg2.connect(db_url, connect_timeout=3) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT s.dealer_id, s.dealer_name, s.silent_days,
+                           s.last_push_at, s.last_offer_at, s.last_purchase_at,
+                           s.pushes_30d, s.offers_30d,
+                           s.purchases_30d, s.purchases_90d,
+                           s.purchases_365d, s.total_gross_365d,
+                           s.computed_at,
+                           d.buy_profile
+                      FROM partner_activity_summary s
+                      LEFT JOIN dealers d ON d.id = s.dealer_id
+                     WHERE s.silent_days IS NOT NULL
+                       AND s.silent_days >= %s
+                     ORDER BY s.silent_days DESC NULLS LAST
+                     LIMIT %s
+                """, (days_silent, top_n))
+                rows = cur.fetchall()
+                cur.execute(
+                    "SELECT MAX(computed_at) AS as_of FROM partner_activity_summary"
+                )
+                as_of_row = cur.fetchone() or {}
+    except Exception as e:
+        log.exception("partner_activity_status failed")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    def _summarize_profile(bp):
+        if not bp or not isinstance(bp, dict):
+            return None
+        # Best-effort short text — pulls a couple of human-readable hints
+        bits = []
+        for k in ("primary_makes", "preferred_makes", "makes",
+                  "tagline", "summary", "notes"):
+            v = bp.get(k)
+            if v:
+                if isinstance(v, list):
+                    bits.append(f"{k}: {', '.join(str(x) for x in v[:5])}")
+                else:
+                    bits.append(f"{k}: {str(v)[:80]}")
+                break
+        return "; ".join(bits) if bits else None
+
+    partners = []
+    for r in rows:
+        partners.append({
+            "dealer_id":        r["dealer_id"],
+            "dealer_name":      r["dealer_name"],
+            "silent_days":      r["silent_days"],
+            "last_push_at":     r["last_push_at"].isoformat() if r["last_push_at"] else None,
+            "last_offer_at":    r["last_offer_at"].isoformat() if r["last_offer_at"] else None,
+            "last_purchase_at": r["last_purchase_at"].isoformat() if r["last_purchase_at"] else None,
+            "pushes_30d":       r["pushes_30d"],
+            "offers_30d":       r["offers_30d"],
+            "purchases_30d":    r["purchases_30d"],
+            "purchases_90d":    r["purchases_90d"],
+            "purchases_365d":   r["purchases_365d"],
+            "total_gross_365d": float(r["total_gross_365d"] or 0),
+            "profile_summary":  _summarize_profile(r.get("buy_profile")),
+        })
+
+    return {
+        "as_of": as_of_row["as_of"].isoformat() if as_of_row.get("as_of") else None,
+        "days_silent_threshold": days_silent,
+        "count": len(partners),
+        "partners": partners,
+    }
+
+
+@mcp.tool()
+async def partner_detail(
+    caller_name: str,
+    partner_name: str,
+) -> dict:
+    """OWNER. Full activity breakdown for ONE partner dealer by name.
+
+    USE when the operator asks: 'what's the deal with Marino',
+    'tell me about Charlie', 'when did we last talk to Manheim',
+    'how are we doing with Marshall Goldman'.
+
+    Matches partner_name as a case-insensitive substring against
+    dealer name + lsl_aliases. Returns:
+      - summary row from partner_activity_summary
+      - last 5 LSL purchases (vehicle, sold_at, sale_price)
+      - active candidates from porsche_arb_candidates that might fit them
+    """
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    name = (partner_name or "").strip()
+    if len(name) < 2:
+        return {"error": "partner_name too short"}
+
+    import psycopg2, psycopg2.extras, sqlite3, os as _os
+    db_url = _os.environ.get(
+        "DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale",
+    )
+    lsl_path = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+
+    try:
+        with psycopg2.connect(db_url, connect_timeout=3) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Resolve the partner: try the activity summary first
+                # (16-row table) by dealer_name ILIKE, then by alias match.
+                cur.execute("""
+                    SELECT s.*, d.lsl_aliases, d.buy_profile, d.city, d.state,
+                           d.phone, d.notes
+                      FROM partner_activity_summary s
+                      JOIN dealers d ON d.id = s.dealer_id
+                     WHERE s.dealer_name ILIKE %s
+                        OR EXISTS (
+                            SELECT 1 FROM jsonb_array_elements_text(
+                                          COALESCE(d.lsl_aliases, '[]'::jsonb)) a
+                             WHERE a ILIKE %s
+                        )
+                     ORDER BY (s.dealer_name ILIKE %s) DESC NULLS LAST,
+                              s.purchases_365d DESC NULLS LAST
+                     LIMIT 1
+                """, (f"%{name}%", f"%{name}%", f"{name}%"))
+                row = cur.fetchone()
+                if not row:
+                    return {"error": f"no partner matching {name!r}"}
+                summary = dict(row)
+                aliases = summary.pop("lsl_aliases", None) or []
+                if isinstance(aliases, str):
+                    import json as _json
+                    try:
+                        aliases = _json.loads(aliases)
+                    except Exception:
+                        aliases = []
+                buy_profile = summary.pop("buy_profile", None)
+
+                # Active arb candidates (if porsche_arb_candidates exists) —
+                # surface vehicles that match the dealer's buy_profile
+                # primary_makes. Heuristic only; best-effort.
+                arb_candidates = []
+                try:
+                    makes_hint = None
+                    if isinstance(buy_profile, dict):
+                        for k in ("primary_makes", "preferred_makes", "makes"):
+                            v = buy_profile.get(k)
+                            if v:
+                                makes_hint = [str(x).strip().lower() for x in
+                                              (v if isinstance(v, list) else [v])]
+                                break
+                    if makes_hint:
+                        cur.execute("""
+                            SELECT id, subject_year AS year, subject_make AS make,
+                                   subject_model AS model, subject_trim AS trim,
+                                   asking_price, effective_price, dealer_name,
+                                   dealer_city, dealer_state, snapshot_date
+                              FROM porsche_arb_candidates
+                             WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days'
+                               AND lower(subject_make) = ANY(%s)
+                             ORDER BY snapshot_date DESC, asking_price ASC
+                             LIMIT 5
+                        """, (makes_hint,))
+                        arb_candidates = [dict(r) for r in cur.fetchall()]
+                except Exception as _e:
+                    log.warning("partner_detail arb lookup err: %s", _e)
+    except Exception as e:
+        log.exception("partner_detail failed (pg)")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    # Pull last 5 LSL purchases for this dealer
+    recent_purchases = []
+    if _os.path.exists(lsl_path) and aliases:
+        try:
+            lsl = sqlite3.connect(f"file:{lsl_path}?mode=ro", uri=True, timeout=5)
+            lsl.row_factory = sqlite3.Row
+            cur = lsl.cursor()
+            like_clauses = " OR ".join(
+                ["UPPER(customer_name) LIKE UPPER(?)"] * len(aliases)
+            )
+            cur.execute(
+                f"""
+                SELECT stock_no, vehicle_info, customer_name, sale_price,
+                       purchase_cost, sold_at, sales_person
+                  FROM deals
+                 WHERE ({like_clauses})
+                   AND sale_price IS NOT NULL AND sale_price > 0
+                 ORDER BY sold_at DESC
+                 LIMIT 5
+                """,
+                [f"%{a}%" for a in aliases],
+            )
+            for r in cur.fetchall():
+                recent_purchases.append({
+                    "stock_no":     r["stock_no"],
+                    "vehicle":      r["vehicle_info"],
+                    "sold_at":      r["sold_at"],
+                    "sale_price":   r["sale_price"],
+                    "purchase_cost": r["purchase_cost"],
+                    "salesperson":  r["sales_person"],
+                })
+            lsl.close()
+        except Exception as e:
+            log.warning("partner_detail lsl lookup err: %s", e)
+
+    # Normalize timestamps for JSON
+    for k in ("last_push_at", "last_offer_at", "last_purchase_at", "computed_at"):
+        v = summary.get(k)
+        if hasattr(v, "isoformat"):
+            summary[k] = v.isoformat()
+    if summary.get("total_gross_365d") is not None:
+        summary["total_gross_365d"] = float(summary["total_gross_365d"])
+
+    # Profile hint (one-line)
+    profile_summary = None
+    if isinstance(buy_profile, dict):
+        for k in ("primary_makes", "preferred_makes", "makes",
+                  "tagline", "summary", "notes"):
+            v = buy_profile.get(k)
+            if v:
+                if isinstance(v, list):
+                    profile_summary = f"{k}: {', '.join(str(x) for x in v[:5])}"
+                else:
+                    profile_summary = f"{k}: {str(v)[:120]}"
+                break
+
+    return {
+        "matched_partner": summary.get("dealer_name"),
+        "summary":         summary,
+        "aliases":         aliases,
+        "profile_summary": profile_summary,
+        "recent_purchases": recent_purchases,
+        "arb_candidates":   arb_candidates,
+    }
+
+
+# ─── end PARTNER_ACTIVITY_2026_05_26 tools ──────────────────────────────

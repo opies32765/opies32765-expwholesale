@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Porsche Arb Scanner — Experience Wholesale</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;min-height:100vh;padding:24px}
+.wrap{max-width:1600px;margin:0 auto}
+
+.head{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;gap:16px;flex-wrap:wrap}
+.title-wrap{display:flex;align-items:center;gap:12px}
+.logo-mark{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;background:linear-gradient(135deg,#22c55e,#15803d);border-radius:8px;font-size:16px;font-weight:800;color:#fff}
+.title{font-size:18px;font-weight:700;color:#f1f5f9}
+.title-sub{font-size:12px;color:#64748b;margin-top:2px}
+.nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.nav a{font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px}
+.nav a:hover{color:#e2e8f0;border-color:#334155}
+.nav a.active{color:#4ade80;border-color:rgba(34,197,94,.4);background:rgba(34,197,94,.08)}
+
+.summary{display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+.metric{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:12px 16px;min-width:130px}
+.metric .label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.6px;font-weight:700;margin-bottom:4px}
+.metric .value{font-size:20px;font-weight:700;color:#f1f5f9;font-family:'JetBrains Mono','Consolas',monospace}
+.metric.green .value{color:#4ade80}
+.metric.purple .value{color:#c084fc}
+.metric.yellow .value{color:#fbbf24}
+.metric.gray .value{color:#94a3b8;font-size:13px}
+
+.filters{display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;align-items:center}
+.filter-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.6px;font-weight:700;margin-right:6px}
+.chip{padding:5px 12px;border:1px solid #1e293b;border-radius:16px;background:transparent;color:#94a3b8;font-size:12px;font-weight:500;cursor:pointer;font-family:inherit}
+.chip:hover{color:#e2e8f0;border-color:#334155}
+.chip.active{color:#4ade80;border-color:rgba(34,197,94,.4);background:rgba(34,197,94,.08)}
+.sort{margin-left:auto;display:flex;gap:6px;align-items:center}
+.sort select{background:#111827;border:1px solid #1e293b;color:#e2e8f0;padding:5px 10px;border-radius:6px;font-size:12px;font-family:inherit}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:14px}
+
+.card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:16px;position:relative;transition:border-color .15s}
+.card:hover{border-color:#334155}
+.card.s-pursuing{border-color:rgba(59,130,246,.4);background:linear-gradient(180deg,rgba(59,130,246,.04),#111827)}
+.card.s-passed{opacity:.5}
+.card.s-acquired{border-color:rgba(34,197,94,.4);background:linear-gradient(180deg,rgba(34,197,94,.04),#111827)}
+.card.s-snoozed{opacity:.6}
+
+.card-head{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px;gap:12px}
+.vehicle{flex:1;min-width:0}
+.vehicle .ymm{font-size:15px;font-weight:700;color:#f1f5f9;margin-bottom:2px}
+.vehicle .trim{font-size:12px;color:#94a3b8;margin-bottom:4px}
+.vehicle .vin{font-size:10.5px;color:#64748b;font-family:'JetBrains Mono','Consolas',monospace;word-break:break-all}
+.cid{display:inline-block;background:#0f172a;border:1px solid #334155;border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;color:#94a3b8;font-family:'JetBrains Mono','Consolas',monospace;margin-right:6px}
+
+.score-badge{display:flex;flex-direction:column;align-items:center;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:6px 12px;min-width:60px;flex-shrink:0}
+.score-badge .n{font-size:22px;font-weight:800;color:#c084fc;font-family:'JetBrains Mono','Consolas',monospace;line-height:1}
+.score-badge .l{font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:.6px;margin-top:2px}
+.score-badge.hot .n{color:#f87171}
+.score-badge.warm .n{color:#fbbf24}
+.score-badge.mid .n{color:#c084fc}
+.score-badge.cool .n{color:#94a3b8}
+
+.status-tag{position:absolute;top:10px;right:74px;font-size:10px;font-weight:700;padding:3px 8px;border-radius:6px;text-transform:uppercase;letter-spacing:.4px}
+.st-new{background:rgba(100,116,139,.2);color:#94a3b8}
+.st-called{background:rgba(245,158,11,.15);color:#fbbf24}
+.st-pursuing{background:rgba(59,130,246,.15);color:#93c5fd}
+.st-passed{background:rgba(100,116,139,.2);color:#64748b}
+.st-acquired{background:rgba(34,197,94,.15);color:#4ade80}
+.st-snoozed{background:rgba(100,116,139,.15);color:#94a3b8}
+
+.spread-strip{background:linear-gradient(135deg,rgba(34,197,94,.10),rgba(34,197,94,.02));border:1px solid rgba(34,197,94,.3);border-radius:10px;padding:10px 14px;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.spread-strip .sl{font-size:10px;color:#86efac;text-transform:uppercase;letter-spacing:.6px;font-weight:700}
+.spread-strip .sv{font-size:24px;font-weight:800;color:#4ade80;font-family:'JetBrains Mono','Consolas',monospace;line-height:1}
+.spread-strip .sp{font-size:12px;color:#86efac;font-family:'JetBrains Mono','Consolas',monospace}
+
+.pricing-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+.pcol{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:8px 10px;text-align:center}
+.pcol .pl{font-size:9.5px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;font-weight:700;margin-bottom:3px}
+.pcol .pv{font-size:14px;font-weight:700;color:#e2e8f0;font-family:'JetBrains Mono','Consolas',monospace}
+.pcol .pv.asking{color:#fbbf24}
+.pcol .pv.home{color:#c084fc}
+.pcol .pv.away{color:#4ade80}
+.pcol .pd{font-size:10px;color:#64748b;margin-top:2px}
+
+.chart-wrap{margin-bottom:10px}
+.chart-title{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;font-weight:700;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center}
+.chart-legend{display:flex;gap:10px;font-size:10px;font-weight:600}
+.chart-legend .lg{display:flex;align-items:center;gap:4px}
+.chart-legend .lg-dot{width:8px;height:2px;display:inline-block}
+.chart-legend .home{color:#c084fc}
+.chart-legend .away{color:#4ade80}
+.chart-box{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:6px;height:90px;position:relative}
+.chart-placeholder{display:flex;align-items:center;justify-content:center;height:100%;color:#475569;font-size:10px;font-style:italic}
+
+.signals{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;font-size:11px}
+.sig{background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:3px 8px;color:#94a3b8;font-family:'JetBrains Mono','Consolas',monospace}
+.sig.green{color:#4ade80;border-color:rgba(34,197,94,.3)}
+.sig.red{color:#f87171;border-color:rgba(239,68,68,.3)}
+.sig.yellow{color:#fbbf24;border-color:rgba(245,158,11,.3)}
+.sig.purple{color:#c084fc;border-color:rgba(168,85,247,.3)}
+
+.dealer{font-size:12px;color:#cbd5e1;margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.dealer .dn{font-weight:600;color:#f1f5f9}
+.dealer .dol{font-size:11px;color:#94a3b8;margin-left:auto;font-family:'JetBrains Mono','Consolas',monospace}
+
+.explain{background:#0a0f1c;border:1px dashed #334155;border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:12px;color:#cbd5e1;line-height:1.55;display:none}
+.explain.open{display:block}
+.explain h4{font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px}
+.explain ul{list-style:none;padding-left:0;margin-bottom:8px}
+.explain li{margin-bottom:3px;padding-left:14px;position:relative}
+.explain li:before{content:"›";position:absolute;left:0;color:#64748b;font-weight:700}
+.explain pre{background:#0f172a;border:1px solid #1e293b;border-radius:6px;padding:8px;font-size:10.5px;color:#94a3b8;overflow-x:auto;white-space:pre-wrap;word-break:break-all;max-height:160px}
+
+.actions{display:flex;gap:6px;align-items:center}
+.status-form{display:flex;gap:6px;flex:1}
+.status-form select{flex:1;background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:6px 8px;border-radius:6px;font-size:11px;font-family:inherit;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
+.btn{padding:7px 10px;border-radius:6px;border:1px solid #334155;background:transparent;color:#94a3b8;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;text-transform:uppercase;letter-spacing:.4px;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
+.btn:hover{color:#e2e8f0;border-color:#475569;background:#1e293b}
+.btn.primary{color:#93c5fd;border-color:rgba(59,130,246,.3)}
+.btn.primary:hover{background:rgba(59,130,246,.1);border-color:rgba(59,130,246,.5)}
+.btn.success{color:#4ade80;border-color:rgba(34,197,94,.3)}
+.btn.success:hover{background:rgba(34,197,94,.1);border-color:rgba(34,197,94,.5)}
+.btn.ghost{color:#64748b;border:1px dashed #334155}
+
+.empty-state{background:#111827;border:1px dashed #1e293b;border-radius:12px;padding:48px 24px;text-align:center;color:#64748b;font-size:13px;grid-column:1/-1}
+.empty-state .ico{font-size:32px;margin-bottom:8px}
+
+.run-info{display:flex;gap:14px;font-size:11px;color:#64748b;font-family:'JetBrains Mono','Consolas',monospace;align-items:center;flex-wrap:wrap;margin-top:24px;padding-top:16px;border-top:1px solid #1e293b}
+.run-info .live-dot{width:8px;height:8px;border-radius:50%;background:#4ade80}
+.run-info .dot-fail{background:#f87171}
+.run-info .dot-warm{background:#fbbf24}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="head">
+  <div class="title-wrap">
+    <div class="logo-mark">PA</div>
+    <div>
+      <div class="title">Porsche Arb Scanner</div>
+      <div class="title-sub">Cross-market arbitrage candidates — daily snapshot{% if snapshot_date %} · {{ snapshot_date }}{% endif %}</div>
+    </div>
+  </div>
+  <div class="nav">
+    <a href="/">Dashboard</a>
+    <a href="/opportunities">Opportunities</a>
+    <a href="/porsche-arb" class="active">Porsche Arb</a>
+  </div>
+</div>
+
+<div class="summary">
+  <div class="metric green">
+    <div class="label">Flagged Today</div>
+    <div class="value">{{ flagged_count_today }}</div>
+  </div>
+  <div class="metric purple">
+    <div class="label">Top Score v2</div>
+    <div class="value">
+      {% if top_score_v2 is not none %}{{ '%.0f'|format(top_score_v2) }}{% elif top_score_today is not none %}{{ '%.0f'|format(top_score_today) }}{% else %}—{% endif %}
+      {% if top_score_today is not none and top_score_v2 is not none %}
+        <span style="font-size:11px;color:#64748b;font-weight:600">v1: {{ '%.0f'|format(top_score_today) }}</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="metric gray">
+    <div class="label">v2 Scored</div>
+    <div class="value">{{ v2_scored_count or 0 }}</div>
+  </div>
+  <div class="metric gray">
+    <div class="label">Last Run</div>
+    <div class="value">
+      {% if recent_runs and recent_runs[0].started_at_h %}
+        {{ recent_runs[0].started_at_h }} · {{ recent_runs[0].status }}
+      {% else %}no runs yet{% endif %}
+    </div>
+  </div>
+  <div class="metric yellow">
+    <div class="label">Total Reviewed</div>
+    <div class="value">{{ total_count_today }}</div>
+  </div>
+</div>
+
+<div class="filters" id="filters">
+  <span class="filter-label">Status</span>
+  <button class="chip active" data-filter="status" data-value="active">Active</button>
+  <button class="chip" data-filter="status" data-value="new">New</button>
+  <button class="chip" data-filter="status" data-value="pursuing">Pursuing</button>
+  <button class="chip" data-filter="status" data-value="acquired">Acquired</button>
+  <button class="chip" data-filter="status" data-value="passed">Passed</button>
+  <button class="chip" data-filter="status" data-value="all">All</button>
+
+  <span class="filter-label" style="margin-left:14px">Min Spread</span>
+  <button class="chip active" data-filter="spread" data-value="0">Any</button>
+  <button class="chip" data-filter="spread" data-value="5000">≥ $5K</button>
+  <button class="chip" data-filter="spread" data-value="10000">≥ $10K</button>
+  <button class="chip" data-filter="spread" data-value="20000">≥ $20K</button>
+
+  {% if models %}
+  <span class="filter-label" style="margin-left:14px">Model</span>
+  <button class="chip active" data-filter="model" data-value="all">All</button>
+  {% for m in models %}<button class="chip" data-filter="model" data-value="{{ m|lower }}">{{ m }}</button>{% endfor %}
+  {% endif %}
+
+  {% if regions %}
+  <span class="filter-label" style="margin-left:14px">Region</span>
+  <button class="chip active" data-filter="region" data-value="all">All</button>
+  {% for r in regions %}<button class="chip" data-filter="region" data-value="{{ r|lower }}">{{ r }}</button>{% endfor %}
+  {% endif %}
+
+  <div class="sort">
+    <span class="filter-label">Sort</span>
+    <select id="sortSel">
+      <option value="arb_score_v2">Arb Score v2 (like-filtered)</option>
+      <option value="arb_score">Arb Score v1 (raw regional)</option>
+      <option value="like_filtered_net_spread">Like-Filtered Spread</option>
+      <option value="net_spread">Net Spread (high→low)</option>
+      <option value="days_on_lot">Days on Lot (high→low)</option>
+    </select>
+  </div>
+</div>
+
+<div class="grid" id="grid">
+  {% if today_candidates|length == 0 %}
+    <div class="empty-state">
+      <div class="ico">○</div>
+      No candidates in the database yet. The daily pipeline will populate
+      <code>porsche_arb_candidates</code> on its next run.
+    </div>
+  {% endif %}
+
+  {% for r in today_candidates %}
+    {% set st = r.status or 'new' %}
+    {% set score = r.arb_score or 0 %}
+    {% set score_class = 'hot' if score >= 80 else ('warm' if score >= 60 else ('mid' if score >= 40 else 'cool')) %}
+    {% set is_flagged = r.flagged %}
+    <div class="card s-{{ st }}"
+         data-cid="{{ r.id }}"
+         data-status="{{ st }}"
+         data-flagged="{{ '1' if is_flagged else '0' }}"
+         data-spread="{{ r.net_spread or 0 }}"
+         data-like-filtered-net-spread="{{ r.like_filtered_net_spread or 0 }}"
+         data-model="{{ (r.subject_model or '')|lower }}"
+         data-region="{{ (r.home_region or '')|lower }}"
+         data-arb-score="{{ r.arb_score or 0 }}"
+         data-arb-score-v2="{{ r.arb_score_v2 or 0 }}"
+         data-days-on-lot="{{ r.days_on_lot or 0 }}"
+         data-anchor-vin="{{ r.anchor_vin or '' }}">
+
+      <span class="status-tag st-{{ st }}">{{ st }}</span>
+
+      <div class="card-head">
+        <div class="vehicle">
+          <div class="ymm">
+            <span class="cid">#{{ r.id }}</span>
+            {{ r.subject_year or '—' }} {{ r.subject_make or '' }} {{ r.subject_model or '' }}
+          </div>
+          <div class="trim">
+            {{ r.subject_trim or '—' }}
+            {% if r.subject_mileage %} · {{ '{:,}'.format(r.subject_mileage|int) }} mi{% endif %}
+            {% if r.subject_color %} · {{ r.subject_color }}{% endif %}
+          </div>
+          <div class="vin">VIN {{ r.subject_vin }}</div>
+        </div>
+        <div class="score-badge {{ score_class }}">
+          <div class="n">{% if r.arb_score_v2 is not none %}{{ '%.0f'|format(r.arb_score_v2) }}{% elif r.arb_score is not none %}{{ '%.0f'|format(r.arb_score) }}{% else %}—{% endif %}</div>
+          <div class="l">
+            {% if r.arb_score_v2 is not none %}
+              Score v2
+              {% if r.arb_score is not none and (r.arb_score|float)|round(0) != (r.arb_score_v2|float)|round(0) %}
+                <span style="color:#64748b;font-weight:600">(v1: {{ '%.0f'|format(r.arb_score) }})</span>
+              {% endif %}
+            {% else %}
+              Score v1
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <div class="spread-strip">
+        <div>
+          <div class="sl">Net Spread (after transport)</div>
+          <div class="sv">{% if r.net_spread is not none %}${{ '{:,.0f}'.format(r.net_spread) }}{% else %}—{% endif %}</div>
+        </div>
+        <div class="sp">
+          {% if r.spread_pct is not none %}{{ '%.1f'|format(r.spread_pct * (100 if r.spread_pct|abs < 1 else 1)) }}%{% endif %}
+          {% if r.transport_estimate %}<br><span style="color:#64748b">−${{ '{:,.0f}'.format(r.transport_estimate) }} transport</span>{% endif %}
+        </div>
+      </div>
+
+      <div class="pricing-grid">
+        <div class="pcol">
+          <div class="pl">Asking</div>
+          <div class="pv asking">{% if r.asking_price %}${{ '{:,.0f}'.format(r.asking_price) }}{% else %}—{% endif %}</div>
+          <div class="pd">{% if r.dealer_state %}{{ r.dealer_state }}{% endif %}{% if r.days_on_lot is not none %} · {{ r.days_on_lot }}d{% endif %}</div>
+        </div>
+        <div class="pcol">
+          <div class="pl">{{ r.home_region or 'Home' }}</div>
+          <div class="pv home">{% if r.home_region_median %}${{ '{:,.0f}'.format(r.home_region_median) }}{% else %}—{% endif %}</div>
+          <div class="pd">{% if r.home_region_count %}n={{ r.home_region_count }}{% endif %}</div>
+        </div>
+        <div class="pcol">
+          <div class="pl">{{ r.best_other_region or 'Best Other' }}</div>
+          <div class="pv away">{% if r.best_other_median %}${{ '{:,.0f}'.format(r.best_other_median) }}{% else %}—{% endif %}</div>
+          <div class="pd">{% if r.best_other_count %}n={{ r.best_other_count }}{% endif %}</div>
+        </div>
+      </div>
+
+      {% set hist = regional_history.get(r.anchor_vin) or [] %}
+      <div class="chart-wrap">
+        <div class="chart-title">
+          <span>30-Day Regional Median</span>
+          <span class="chart-legend">
+            <span class="lg home"><span class="lg-dot" style="background:#c084fc"></span>{{ r.home_region or 'Home' }}</span>
+            <span class="lg away"><span class="lg-dot" style="background:#4ade80"></span>{{ r.best_other_region or 'Other' }}</span>
+          </span>
+        </div>
+        <div class="chart-box trend-chart"
+             data-history='{{ hist|tojson }}'
+             data-home="{{ r.home_region or '' }}"
+             data-away="{{ r.best_other_region or '' }}">
+          {% if hist|length < 2 %}
+            <div class="chart-placeholder">first run today — no trend yet</div>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if r.like_filtered_other_median is not none %}
+      <div class="spread-strip" style="background:linear-gradient(135deg,rgba(168,85,247,.10),rgba(168,85,247,.02));border-color:rgba(168,85,247,.3);margin-top:-6px">
+        <div>
+          <div class="sl" style="color:#c4b5fd">Like-Filtered Net Spread (after transport)</div>
+          <div class="sv" style="color:#c084fc">{% if r.like_filtered_net_spread is not none %}${{ '{:,.0f}'.format(r.like_filtered_net_spread) }}{% else %}—{% endif %}</div>
+        </div>
+        <div class="sp" style="color:#c4b5fd">
+          {% if r.like_filtered_spread_pct is not none %}{{ '%.1f'|format(r.like_filtered_spread_pct) }}%{% endif %}
+          <br>
+          <span style="color:#94a3b8">{{ r.like_filtered_other_region or '—' }}@${{ '{:,.0f}'.format(r.like_filtered_other_median) }}{% if r.like_filtered_other_count %} (n={{ r.like_filtered_other_count }}){% endif %}</span>
+        </div>
+      </div>
+      {% endif %}
+
+      <div class="signals">
+        {% if r.option_jaccard_to_anchor is not none %}
+          {% set jpct = (r.option_jaccard_to_anchor * 100)|int %}
+          {% set jcls = 'green' if jpct >= 70 else ('yellow' if jpct >= 40 else 'red') %}
+          <span class="sig {{ jcls }}">loadout match {{ jpct }}%</span>
+        {% endif %}
+        {% if r.options %}
+          {% for okey in r.options %}
+            <span class="sig purple">{{ okey.replace('_', ' ') }}</span>
+          {% endfor %}
+        {% endif %}
+        {% if r.is_certified %}<span class="sig green">CPO</span>{% endif %}
+        {% if r.carfax_one_owner %}<span class="sig green">1-owner</span>{% endif %}
+        {% if r.carfax_clean_title %}<span class="sig green">clean title</span>
+        {% else %}<span class="sig red">title issue</span>{% endif %}
+        {% if r.carfax_penalty and r.carfax_penalty > 0 %}<span class="sig yellow">carfax −{{ r.carfax_penalty }}</span>{% endif %}
+        {% if r.pending_sale %}<span class="sig yellow">pending sale</span>{% endif %}
+        {% if r.flag_reasons %}
+          {% for fr in r.flag_reasons[:3] %}<span class="sig purple">{{ fr }}</span>{% endfor %}
+        {% endif %}
+      </div>
+
+      <div class="dealer">
+        <span class="dn">{{ r.dealer_name or '—' }}</span>
+        <span>{% if r.dealer_city %}{{ r.dealer_city }}, {% endif %}{{ r.dealer_state or '' }}</span>
+        {% if r.days_on_lot is not none %}<span class="dol">{{ r.days_on_lot }} DOL</span>{% endif %}
+      </div>
+
+      <div class="explain" id="explain-{{ r.id }}">
+        {% if r.flag_reasons %}
+          <h4>Flag Reasons</h4>
+          <ul>
+            {% for fr in r.flag_reasons %}<li>{{ fr }}</li>{% endfor %}
+          </ul>
+        {% endif %}
+        {% if r.status_note %}
+          <h4>Status Note</h4>
+          <div style="margin-bottom:8px">{{ r.status_note }}</div>
+        {% endif %}
+        {% if r.lsl_anchor_jsonb %}
+          <h4>LSL Anchor</h4>
+          <pre>{{ r.lsl_anchor_jsonb|tojson(indent=2) }}</pre>
+        {% endif %}
+      </div>
+
+      <div class="actions">
+        <form method="POST" action="/porsche-arb/{{ r.id }}/status" class="status-form">
+          <select name="status">
+            <option value="new" {% if st == 'new' %}selected{% endif %}>New</option>
+            <option value="called" {% if st == 'called' %}selected{% endif %}>Called</option>
+            <option value="pursuing" {% if st == 'pursuing' %}selected{% endif %}>Pursuing</option>
+            <option value="acquired" {% if st == 'acquired' %}selected{% endif %}>Acquired</option>
+            <option value="passed" {% if st == 'passed' %}selected{% endif %}>Passed</option>
+            <option value="snoozed" {% if st == 'snoozed' %}selected{% endif %}>Snoozed</option>
+          </select>
+          <button type="submit" class="btn primary">Save</button>
+        </form>
+        <button type="button" class="btn ghost" data-toggle-explain="{{ r.id }}">Explain</button>
+        {% if r.detail_uri %}<a class="btn success" href="{{ r.detail_uri }}" target="_blank" rel="noopener">View ↗</a>{% endif %}
+      </div>
+    </div>
+  {% endfor %}
+</div>
+
+<div class="run-info">
+  <span class="live-dot {% if recent_runs and recent_runs[0].status not in ('ok','success','finished','completed') %}dot-warm{% endif %}"></span>
+  <span>recent runs:</span>
+  {% for run in recent_runs %}
+    <span>{{ run.started_at_h or '—' }} {{ run.status }}{% if run.candidates_flagged is not none %} ({{ run.candidates_flagged }} flagged){% endif %}</span>{% if not loop.last %} · {% endif %}
+  {% else %}
+    <span>none yet</span>
+  {% endfor %}
+</div>
+
+</div>
+
+<script>
+(function(){
+  // ── Filters + sort ────────────────────────────────────────────────────
+  const grid = document.getElementById('grid');
+  const filterState = {status: 'active', spread: 0, model: 'all', region: 'all'};
+  let sortKey = 'arb_score_v2';
+  // sortKey → dataset attribute name (camelCase)
+  const SORT_KEY_MAP = {
+    'arb_score_v2': 'arbScoreV2',
+    'arb_score': 'arbScore',
+    'net_spread': 'spread',
+    'like_filtered_net_spread': 'likeFilteredNetSpread',
+    'days_on_lot': 'daysOnLot',
+  };
+
+  document.getElementById('filters').addEventListener('click', function(e){
+    const c = e.target.closest('.chip');
+    if(!c) return;
+    const f = c.dataset.filter, v = c.dataset.value;
+    if(!f) return;
+    document.querySelectorAll('.chip[data-filter="' + f + '"]').forEach(x => x.classList.remove('active'));
+    c.classList.add('active');
+    filterState[f] = (f === 'spread') ? parseInt(v, 10) : v;
+    apply();
+  });
+  document.getElementById('sortSel').addEventListener('change', function(e){
+    sortKey = e.target.value;
+    apply();
+  });
+
+  function apply(){
+    const cards = Array.from(grid.querySelectorAll('.card'));
+    cards.forEach(card => {
+      let show = true;
+      const st = card.dataset.status || 'new';
+      if (filterState.status === 'active') {
+        if (['passed','acquired','snoozed'].includes(st)) show = false;
+      } else if (filterState.status !== 'all') {
+        if (st !== filterState.status) show = false;
+      }
+      if (show && filterState.spread > 0) {
+        if (parseFloat(card.dataset.spread || 0) < filterState.spread) show = false;
+      }
+      if (show && filterState.model !== 'all') {
+        if ((card.dataset.model || '') !== filterState.model) show = false;
+      }
+      if (show && filterState.region !== 'all') {
+        if ((card.dataset.region || '') !== filterState.region) show = false;
+      }
+      card.style.display = show ? '' : 'none';
+    });
+    // sort
+    const visible = cards.filter(c => c.style.display !== 'none');
+    const attr = SORT_KEY_MAP[sortKey] || sortKey;
+    visible.sort((a, b) => parseFloat(b.dataset[attr] || 0) - parseFloat(a.dataset[attr] || 0));
+    visible.forEach(c => grid.appendChild(c));
+  }
+
+  // ── Explain toggle ────────────────────────────────────────────────────
+  document.body.addEventListener('click', function(e){
+    const t = e.target.closest('[data-toggle-explain]');
+    if(!t) return;
+    const id = t.dataset.toggleExplain;
+    const box = document.getElementById('explain-' + id);
+    if(box) box.classList.toggle('open');
+  });
+
+  // ── Inline SVG trend chart ────────────────────────────────────────────
+  // Two lines: home_region median (purple dashed) + best_other_region
+  // median (green dashed). Style mirrors partner_dashboard.html's
+  // dashed-comp pattern.
+  function drawChart(container){
+    let series;
+    try { series = JSON.parse(container.getAttribute('data-history') || '[]'); }
+    catch(e){ series = []; }
+    if (!series.length) return;
+    const home = container.getAttribute('data-home') || '';
+    const away = container.getAttribute('data-away') || '';
+    if (!home || !away) return;
+
+    // Bucket by date
+    const byDate = {};
+    series.forEach(p => {
+      if (!p.d || p.median == null) return;
+      if (!byDate[p.d]) byDate[p.d] = {};
+      byDate[p.d][p.region] = p.median;
+    });
+    const dates = Object.keys(byDate).sort();
+    if (dates.length < 2) return;
+
+    const homePts = [], awayPts = [];
+    dates.forEach(d => {
+      const t = new Date(d).getTime();
+      if (byDate[d][home] != null) homePts.push({x: t, y: byDate[d][home]});
+      if (byDate[d][away] != null) awayPts.push({x: t, y: byDate[d][away]});
+    });
+    const all = homePts.concat(awayPts);
+    if (!all.length) return;
+
+    const W = container.clientWidth || 380, H = 78, padL = 36, padR = 6, padT = 4, padB = 14;
+    let xMin = Math.min.apply(null, all.map(p => p.x));
+    let xMax = Math.max.apply(null, all.map(p => p.x));
+    if (xMin === xMax) { xMin -= 86400000; xMax += 86400000; }
+    let yMin = Math.min.apply(null, all.map(p => p.y));
+    let yMax = Math.max.apply(null, all.map(p => p.y));
+    const yPad = (yMax - yMin) * 0.15 || yMax * 0.05 || 1000;
+    yMin -= yPad; yMax += yPad;
+
+    const sx = x => padL + (x - xMin)/(xMax - xMin) * (W - padL - padR);
+    const sy = y => padT + (1 - (y - yMin)/(yMax - yMin)) * (H - padT - padB);
+    const path = arr => arr.length ? arr.map((p,i) => (i?'L':'M') + sx(p.x).toFixed(1) + ',' + sy(p.y).toFixed(1)).join(' ') : '';
+    const fmt = n => '$' + Math.round(n/1000) + 'k';
+
+    // y-axis ticks
+    const ticks = [yMin + (yMax-yMin)*0.2, (yMin+yMax)/2, yMin + (yMax-yMin)*0.8];
+    const grid = ticks.map(t => {
+      const y = sy(t).toFixed(1);
+      return '<line x1="' + padL + '" y1="' + y + '" x2="' + (W-padR) + '" y2="' + y + '" stroke="#1e293b" stroke-dasharray="2,3"/>' +
+             '<text x="' + (padL-3) + '" y="' + (parseFloat(y)+3) + '" fill="#94a3b8" font-size="9" text-anchor="end" font-family="ui-monospace,monospace">' + fmt(t) + '</text>';
+    }).join('');
+
+    const d0 = new Date(xMin), d1 = new Date(xMax);
+    const dlbl = d => (d.getMonth()+1) + '/' + d.getDate();
+
+    const svg = '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
+      grid +
+      '<path d="' + path(homePts) + '" fill="none" stroke="#c084fc" stroke-width="1.8" stroke-dasharray="5,3"/>' +
+      '<path d="' + path(awayPts) + '" fill="none" stroke="#4ade80" stroke-width="1.8" stroke-dasharray="5,3"/>' +
+      homePts.map(p => '<circle cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) + '" r="2.5" fill="#c084fc"/>').join('') +
+      awayPts.map(p => '<circle cx="' + sx(p.x).toFixed(1) + '" cy="' + sy(p.y).toFixed(1) + '" r="2.5" fill="#4ade80"/>').join('') +
+      '<text x="' + padL + '" y="' + (H-3) + '" fill="#94a3b8" font-size="9">' + dlbl(d0) + '</text>' +
+      '<text x="' + (W-padR) + '" y="' + (H-3) + '" fill="#94a3b8" font-size="9" text-anchor="end">' + dlbl(d1) + '</text>' +
+      '</svg>';
+    container.innerHTML = svg;
+  }
+  document.querySelectorAll('.trend-chart').forEach(drawChart);
+  window.addEventListener('resize', () => {
+    document.querySelectorAll('.trend-chart').forEach(drawChart);
+  });
+
+  apply();
+})();
+</script>
+</body>
+</html>
