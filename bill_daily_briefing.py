@@ -206,38 +206,6 @@ def gather(target_date: date) -> dict:
         """)
         out["overnight_top_bids"] = [dict(r) for r in cur.fetchall()]
 
-        # 2. Porsche arb picks — today's flagged, top 3 by score.
-        # Use the most recent snapshot that actually has v2-scored data
-        cur.execute("""
-            SELECT id, subject_year, subject_make, subject_model,
-                   subject_trim, asking_price,
-                   COALESCE(arb_score_v2, arb_score) AS arb_score,
-                   COALESCE(like_filtered_net_spread, net_spread) AS net_spread,
-                   COALESCE(like_filtered_other_region, best_other_region) AS best_other_region,
-                   home_region,
-                   COALESCE(like_filtered_spread_pct, spread_pct) AS spread_pct,
-                   dealer_state, snapshot_date
-              FROM porsche_arb_candidates
-             WHERE snapshot_date = (
-                     SELECT MAX(snapshot_date) FROM porsche_arb_candidates
-                      WHERE flagged = TRUE AND arb_score_v2 IS NOT NULL
-                   )
-               AND flagged = TRUE
-               AND COALESCE(arb_score_v2, 0) >= 50
-             ORDER BY arb_score_v2 DESC NULLS LAST,
-                      like_filtered_net_spread DESC NULLS LAST
-             LIMIT 3
-        """)
-        out["arb_picks"] = [dict(r) for r in cur.fetchall()]
-
-        cur.execute("""
-            SELECT COUNT(*) AS n
-              FROM porsche_arb_candidates
-             WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM porsche_arb_candidates WHERE flagged = TRUE)
-               AND flagged = TRUE
-        """)
-        out["arb_total_flagged"] = int(cur.fetchone()["n"] or 0)
-
         # 3. Dealer-watch opportunities — latest snapshot, top 3 by score.
         cur.execute("""
             SELECT o.year, o.make, o.model, o.trim, o.asking_price,
@@ -343,32 +311,6 @@ def render(data: dict) -> str:
                     f"{yr} {mk} {md} marked at {say_money(price)}."
                 )
 
-    # 2. Porsche arb picks.
-    arbs = data["arb_picks"]
-    total_arb = data["arb_total_flagged"]
-    if arbs:
-        parts.append(
-            f"On Porsche arb, {say_int(total_arb)} "
-            f"{'candidates are' if total_arb != 1 else 'candidate is'} flagged today."
-        )
-        top = arbs[0]
-        yr = top.get("subject_year") or ""
-        md = _safe_model(top.get("subject_model") or "")
-        trim = (top.get("subject_trim") or "").strip()
-        spread = top.get("net_spread")
-        best = top.get("best_other_region") or ""
-        sentence = f"Top pick is a {yr} Porsche {md}"
-        if trim:
-            sentence += f" {trim}"
-        if spread is not None:
-            sentence += f", net spread of {say_money(spread)}"
-        if best:
-            sentence += f" shipping to {_say_region(best)}"
-        sentence += "."
-        parts.append(sentence)
-    elif total_arb == 0:
-        # Skip if no arbs — don't pad the briefing.
-        pass
 
     # 3. Dealer opportunities.
     opps = data["dealer_opps"]
@@ -624,7 +566,6 @@ def run(user: str, target_date: date, dry_run: bool) -> dict:
             "word_count": word_count,
             "data_summary": {
                 "overnight_bids": data["overnight_total"],
-                "arb_flagged": data["arb_total_flagged"],
                 "dealer_opps": data["dealer_opps_total"],
                 "stale_bids": data["stale_count"],
                 "watchlist_hits_yest": data["watchlist_hits_yest"],

@@ -99,14 +99,6 @@ try:
 except Exception as _e:
     print(f'[network_push] blueprint not loaded: {_e}', flush=True)
 
-# PORSCHE_ARB_2026_05_26 — operator-facing dashboard for the Porsche
-# cross-market arbitrage scanner. Read-only except for a single status
-# POST. Schema: porsche_arb_candidates / _regional_history / _runs.
-try:
-    pass  # porsche_arb_bp disabled 2026-05-27 (broken try block fixed)
-except Exception as _e:
-    print(f'[porsche_arb] blueprint not loaded: {_e}', flush=True)
-
 # VOICE_AGENT_2026_05_20 — EW voice bot ("EW") for YMM-based valuation.
 # Read-only on shared tables, writes only to voice_valuations. Comment
 # this block to disable the bot without touching anything else.
@@ -675,7 +667,7 @@ def inventory_gaps_page():
     from flask import render_template
     from inventory_gap_lib import (
         fetch_portal_dealers, fetch_current_inventory, fetch_baseline,
-        analyze_dealer, format_ymm,
+        analyze_dealer, format_ymm, format_config,
     )
     t0 = _t.time()
     conn = psycopg2.connect(DB_URL)
@@ -698,8 +690,20 @@ def inventory_gaps_page():
         total_surp += len(surplus)
         dealer_cards.append({
             'name': d_name,
-            'holes': holes,
-            'surplus': surplus,
+            'holes': [{
+                'ymm': format_ymm(k),
+                'base': base,
+                'cur_n': cur_n,
+                'sold_cfgs': [(format_config(c), n) for c, n in scfg],
+                'cur_cfgs': [(format_config(c), n) for c, n in ccfg],
+            } for (k, base, cur_n, scfg, ccfg) in holes],
+            'surplus': [{
+                'ymm': format_ymm(k),
+                'base': base,
+                'cur_n': cur_n,
+                'sold_cfgs': [(format_config(c), n) for c, n in scfg],
+                'cur_cfgs': [(format_config(c), n) for c, n in ccfg],
+            } for (k, base, cur_n, scfg, ccfg) in surplus],
         })
     dealer_cards.sort(key=lambda d: (0 if (d['holes'] or d['surplus']) else 1, d['name'].lower()))
 

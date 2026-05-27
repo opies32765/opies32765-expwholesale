@@ -4798,224 +4798,11 @@ async def clear_away_mode(caller_name: str) -> dict:
 
 # ─── end Bill away-mode tools ───────────────────────────────────────────
 
-
-# ─── PORSCHE_ARB_2026_05_26 — daily arbitrage scanner tools ─────────────
-# Source: porsche_arb_candidates (one row per snapshot_date/subject_vin).
-# Voice routing:
-#   "what's worth buying today" / "best arbs today" → daily_arb_picks
-#   "explain candidate 47"      / "why is that flagged"  → explain_arb
-
-@mcp.tool()
-async def daily_arb_picks(
-    caller_name: str,
-    make: str = "porsche",
-    min_spread: int = 10000,
-    top_n: int = 10,
-) -> dict:
-    """OWNER. Today's flagged Porsche (or make-filtered) arbitrage
-    candidates ranked by arb_score.
-
-    USE when the user asks 'what's worth buying today', 'best arbs',
-    'show today's arb picks', 'porsche arbs', 'cross-market deals'.
-
-    Args:
-      make: filter by subject_make (default 'porsche'). Pass '' or 'any'
-            to disable the make filter.
-      min_spread: minimum net_spread in dollars (default 10000).
-      top_n: return at most this many picks (default 10).
-
-    Returns: {as_of, count, total_flagged, picks:[{candidate_id, year,
-              model, trim, mileage, asking_price, home_region,
-              best_other_region, net_spread, spread_pct, arb_score,
-              dealer_name, dealer_state, carfax_clean, top_reasons}]}"""
-    if not _is_owner(caller_name):
-        return {"error": "owner-only", "owner_required": True}
-
-    import psycopg2, psycopg2.extras
-    db_url = os.environ.get("DATABASE_URL",
-        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
-
-    mk = (make or "").strip().lower()
-    use_make_filter = bool(mk) and mk not in ("any", "all", "*")
-    spread_floor = max(0, int(min_spread or 0))
-    n = max(1, min(int(top_n or 10), 50))
-
-    try:
-        with psycopg2.connect(db_url) as c:
-            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # total flagged today (for context)
-                cur.execute("""
-                    SELECT COUNT(*) AS n
-                      FROM porsche_arb_candidates
-                     WHERE snapshot_date = CURRENT_DATE
-                       AND flagged = TRUE
-                """)
-                total_flagged = (cur.fetchone() or {}).get("n", 0)
-
-                where = ["snapshot_date = CURRENT_DATE",
-                         "flagged = TRUE",
-                         "COALESCE(net_spread, 0) >= %s"]
-                params = [spread_floor]
-                if use_make_filter:
-                    where.append("LOWER(COALESCE(subject_make, '')) = %s")
-                    params.append(mk)
-                params.append(n)
-
-                cur.execute(f"""
-                    SELECT id, subject_year, subject_make, subject_model,
-                           subject_trim, subject_mileage, asking_price,
-                           home_region, best_other_region,
-                           home_region_median, best_other_median,
-                           net_spread, spread_pct, arb_score,
-                           dealer_name, dealer_state,
-                           carfax_clean_title, flag_reasons
-                      FROM porsche_arb_candidates
-                     WHERE {' AND '.join(where)}
-                     ORDER BY arb_score DESC NULLS LAST,
-                              net_spread DESC NULLS LAST
-                     LIMIT %s
-                """, params)
-                rows = [dict(r) for r in cur.fetchall()]
-    except Exception as e:
-        log.exception("daily_arb_picks failed")
-        return {"error": f"db: {type(e).__name__}: {e}",
-                "count": 0, "picks": []}
-
-    picks = []
-    for r in rows:
-        reasons = r.get("flag_reasons") or []
-        picks.append({
-            "candidate_id": r.get("id"),
-            "year": r.get("subject_year"),
-            "make": r.get("subject_make"),
-            "model": r.get("subject_model"),
-            "trim": r.get("subject_trim"),
-            "mileage": r.get("subject_mileage"),
-            "asking_price": float(r["asking_price"]) if r.get("asking_price") is not None else None,
-            "home_region": r.get("home_region"),
-            "home_region_median": float(r["home_region_median"]) if r.get("home_region_median") is not None else None,
-            "best_other_region": r.get("best_other_region"),
-            "best_other_median": float(r["best_other_median"]) if r.get("best_other_median") is not None else None,
-            "net_spread": float(r["net_spread"]) if r.get("net_spread") is not None else None,
-            "spread_pct": float(r["spread_pct"]) if r.get("spread_pct") is not None else None,
-            "arb_score": float(r["arb_score"]) if r.get("arb_score") is not None else None,
-            "dealer_name": r.get("dealer_name"),
-            "dealer_state": r.get("dealer_state"),
-            "carfax_clean": bool(r.get("carfax_clean_title")) if r.get("carfax_clean_title") is not None else None,
-            "top_reasons": list(reasons)[:3],
-        })
-
-    return {
-        "as_of": "today",
-        "count": len(picks),
-        "total_flagged": int(total_flagged or 0),
-        "make_filter": mk if use_make_filter else "any",
-        "min_spread": spread_floor,
-        "picks": picks,
-    }
-
-
-@mcp.tool()
-async def explain_arb(caller_name: str, candidate_id: int) -> dict:
-    """OWNER. Full breakdown for a specific arbitrage candidate. Returns
-    every column from the candidates row plus per-region median context
-    from porsche_arb_regional_history (last 30 days) and the LSL anchor
-    payload.
-
-    USE when the user asks 'tell me about candidate 47', 'why is that
-    flagged', 'walk me through the Cayenne', 'explain that arb',
-    'more detail on number 47'.
-
-    Returns: {candidate:{...full row...},
-              regional_history:[{region, snapshot_date, median, n}],
-              lsl_anchor: {...}}"""
-    if not _is_owner(caller_name):
-        return {"error": "owner-only", "owner_required": True}
-
-    import psycopg2, psycopg2.extras
-    db_url = os.environ.get("DATABASE_URL",
-        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
-
-    try:
-        cid = int(candidate_id)
-    except Exception:
-        return {"error": f"bad candidate_id {candidate_id!r}"}
-
-    try:
-        with psycopg2.connect(db_url) as c:
-            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT *
-                      FROM porsche_arb_candidates
-                     WHERE id = %s
-                """, (cid,))
-                row = cur.fetchone()
-                if not row:
-                    return {"error": f"candidate {cid} not found"}
-                cand = dict(row)
-
-                # Last 30d of per-region medians for this anchor VIN
-                cur.execute("""
-                    SELECT snapshot_date, region, n, median_price,
-                           p25_price, p75_price, avg_dol
-                      FROM porsche_arb_regional_history
-                     WHERE anchor_vin = %s
-                       AND snapshot_date >= CURRENT_DATE - INTERVAL '30 days'
-                     ORDER BY snapshot_date DESC, region
-                """, (cand.get("anchor_vin"),))
-                hist = [dict(r) for r in cur.fetchall()]
-    except Exception as e:
-        log.exception("explain_arb failed")
-        return {"error": f"db: {type(e).__name__}: {e}"}
-
-    # Normalize for JSON (timestamps, Decimals, jsonb)
-    def _norm(v):
-        if v is None:
-            return None
-        if hasattr(v, "isoformat"):
-            return v.isoformat()
-        if isinstance(v, (int, float, bool, str, dict, list)):
-            return v
-        # psycopg2 numeric → Decimal
-        try:
-            return float(v)
-        except Exception:
-            return str(v)
-
-    cand_out = {k: _norm(v) for k, v in cand.items()}
-    flag_reasons = cand.get("flag_reasons") or []
-    if isinstance(flag_reasons, (list, tuple)):
-        cand_out["flag_reasons"] = list(flag_reasons)
-
-    hist_out = []
-    for r in hist:
-        hist_out.append({
-            "snapshot_date": r["snapshot_date"].isoformat() if r.get("snapshot_date") else None,
-            "region": r.get("region"),
-            "n": r.get("n"),
-            "median": _norm(r.get("median_price")),
-            "p25": _norm(r.get("p25_price")),
-            "p75": _norm(r.get("p75_price")),
-            "avg_dol": _norm(r.get("avg_dol")),
-        })
-
-    return {
-        "candidate": cand_out,
-        "regional_history": hist_out,
-        "lsl_anchor": cand.get("lsl_anchor_jsonb") or {},
-    }
-
-
-# ─── end PORSCHE_ARB_2026_05_26 tools ───────────────────────────────────
-
-
-# ─── BILL_BRIEFING_2026_05_26 — on-demand morning briefing ──────────────
-
 @mcp.tool()
 async def briefing_now(caller_name: str) -> dict:
     """OWNER. Generate todays morning briefing on-demand and queue it
     for delivery. Same content the 8 AM cron would produce: overnight
-    bid count + top vehicle, today flagged Porsche arbs, dealer-watch
+    bid count + top vehicle, dealer-watch
     top opportunity, stale-bid sweep, watchlist hits yesterday.
 
     USE when the user says: "give me my briefing", "catch me up",
@@ -5214,7 +5001,6 @@ async def partner_detail(
     dealer name + lsl_aliases. Returns:
       - summary row from partner_activity_summary
       - last 5 LSL purchases (vehicle, sold_at, sale_price)
-      - active candidates from porsche_arb_candidates that might fit them
     """
     if not _is_owner(caller_name):
         return {"error": "owner-only", "owner_required": True}
@@ -5262,34 +5048,6 @@ async def partner_detail(
                         aliases = []
                 buy_profile = summary.pop("buy_profile", None)
 
-                # Active arb candidates (if porsche_arb_candidates exists) —
-                # surface vehicles that match the dealer's buy_profile
-                # primary_makes. Heuristic only; best-effort.
-                arb_candidates = []
-                try:
-                    makes_hint = None
-                    if isinstance(buy_profile, dict):
-                        for k in ("primary_makes", "preferred_makes", "makes"):
-                            v = buy_profile.get(k)
-                            if v:
-                                makes_hint = [str(x).strip().lower() for x in
-                                              (v if isinstance(v, list) else [v])]
-                                break
-                    if makes_hint:
-                        cur.execute("""
-                            SELECT id, subject_year AS year, subject_make AS make,
-                                   subject_model AS model, subject_trim AS trim,
-                                   asking_price, effective_price, dealer_name,
-                                   dealer_city, dealer_state, snapshot_date
-                              FROM porsche_arb_candidates
-                             WHERE snapshot_date >= CURRENT_DATE - INTERVAL '7 days'
-                               AND lower(subject_make) = ANY(%s)
-                             ORDER BY snapshot_date DESC, asking_price ASC
-                             LIMIT 5
-                        """, (makes_hint,))
-                        arb_candidates = [dict(r) for r in cur.fetchall()]
-                except Exception as _e:
-                    log.warning("partner_detail arb lookup err: %s", _e)
     except Exception as e:
         log.exception("partner_detail failed (pg)")
         return {"error": f"{type(e).__name__}: {e}"}
@@ -5356,7 +5114,6 @@ async def partner_detail(
         "aliases":         aliases,
         "profile_summary": profile_summary,
         "recent_purchases": recent_purchases,
-        "arb_candidates":   arb_candidates,
     }
 
 
