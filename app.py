@@ -318,6 +318,7 @@ def _pa_resolve_to_bid(cur, pa_id, target_bid_id, resolved_by, note=None):
             "UPDATE bids SET vin=%s, updated_at=NOW() "
             "WHERE id=%s AND (vin IS NULL OR vin='')",
             (pa['parsed_vin'], target_bid_id))
+        _retrigger_canonicalize_after_vin(target_bid_id)  # VIN_OCR_V2_2026_05_27
     if pa.get('parsed_miles'):
         cur.execute(
             "UPDATE bids SET mileage=%s, updated_at=NOW() "
@@ -1179,8 +1180,28 @@ VIN_PROMPT = (
     '  If remainder=10, check digit=X. If your reading does not produce this check digit, '
     'you likely misread a character — recheck the ambiguous ones above.\n\n'
 
+    # VIN_OCR_V2_2026_05_27: mandatory check-digit verification before reply.
+    'MANDATORY before replying: compute the check digit using the rules above '
+    'and confirm it matches position 9 of your reading. If it does not match, '
+    're-examine ambiguous characters (5/S, 8/B, 0/O/Q, 2/Z, 6/G, 4/A, 1/I) and '
+    'retry. Mercedes W1K/WDC/WDD WMIs and Audi W1V/WAU have a DIGIT (not letter) '
+    'at position 6. Reply ONLY with the 17-char VIN whose check digit you '
+    'have verified. If you cannot produce a valid VIN, reply NONE.\n\n'
     'Reply with ONLY the 17-character VIN. If no VIN is visible, reply NONE.'
 )
+
+
+
+def _retrigger_canonicalize_after_vin(bid_id):
+    """VIN_OCR_V2_2026_05_27 — re-run canonicalize_bid_vin_async after a
+    post-intake VIN write so the bad-VIN gate (bids.vin_invalid_reason)
+    catches OCR misreads that survived the OCR check-digit retries. Fail
+    silently — this is defense-in-depth."""
+    try:
+        from canonicalize_bid import canonicalize_bid_vin_async
+        canonicalize_bid_vin_async(bid_id, get_db)
+    except Exception as _e:
+        print(f'[canonicalize-retrigger] bid={bid_id}: {_e}', flush=True)
 
 
 # ── DB ──────────────────────────────────────────────────────────────────────
@@ -1307,7 +1328,7 @@ def sonnet_vision_call(prompt, image_bytes, mime='image/jpeg', max_tokens=64,
         return None
 
 
-def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-flash',
+def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-pro',
                 max_tokens=1024, temperature=0.4, disable_thinking=False):
     # GEMINI_FLASH_MILES_OCR_2026_05_17 (param): pass disable_thinking=True for
     # terse-output OCR tasks (single number, 17-char VIN). With thinking enabled
@@ -1561,7 +1582,7 @@ def extract_vehicle_info_from_text(body):
         return {}
     try:
         result = gemini_call(_TEXT_EXTRACT_PROMPT + str(body)[:3000],
-                             model='gemini-2.5-flash', max_tokens=1500)
+                             model='gemini-2.5-pro', max_tokens=1500)
         if not result:
             return {}
         raw = result.strip()
@@ -1920,14 +1941,23 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
 
     # Primary: Gemini 2.5 Pro with handwriting prompt + 2 attempts.
     hw_prompt = (
-        'Read the VIN from this image. The image may contain a handwritten note, '
-        'a VIN sticker, a license plate, or any vehicle identifier. Apply strict VIN rules:\n'
+        # VIN_OCR_V2_2026_05_27 — force check-digit verification as mandatory step.
+        'Read the VIN from this image. Apply strict VIN rules:\n'
         '- Exactly 17 characters (A-Z, 0-9)\n'
-        '- Letters I, O, Q are NEVER valid — substitute 1, 0, 0\n'
-        '- Handwriting / low-DPI: resolve 1/7, 0/O/Q, 5/S/G, 2/Z, 4/Y/A, 8/B confusion\n'
-        '- The 9th character is a math check digit. Common values: 0-9 or X.\n'
-        '- Common prefixes: 1G, 1F, 1C, 1H, 2H, 5J, 5Y, 7S, WP, WB, WD, YV\n\n'
-        'Reply with ONLY the 17-char VIN. No other text.'
+        '- Letters I, O, Q are NEVER valid\n'
+        '- Resolve 1/7, 0/O/Q, 5/S/G, 2/Z, 4/Y/A, 8/B, 6/G confusion\n\n'
+        'MANDATORY: Before you reply, compute the ISO 3779 check digit:\n'
+        '  Transliteration: A=1,B=2,C=3,D=4,E=5,F=6,G=7,H=8,J=1,K=2,L=3,M=4,\n'
+        '    N=5,P=7,R=9,S=2,T=3,U=4,V=5,W=6,X=7,Y=8,Z=9, digits = face value.\n'
+        '  Weights by position: 8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2.\n'
+        '  Sum each (transliterated value × weight), mod 11. Remainder = check digit\n'
+        '  (10 = X). The result MUST equal position 9 of your reading.\n\n'
+        'If your reading does NOT validate, you misread at least one character.\n'
+        'Re-examine the ambiguous pairs above and try alternates. Common WMI rule:\n'
+        'Mercedes-Benz W1K / W1V / WDB / WDC / WDD prefixes have a DIGIT at\n'
+        'position 6, not a letter. Do not ship a VIN whose check digit fails.\n\n'
+        'Reply with ONLY the 17-char VIN whose check digit you have verified.\n'
+        'If you cannot produce a valid VIN, reply NONE.'
     )
     candidates = []
     for attempt in range(2):
@@ -1965,7 +1995,7 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
 
     # Cross-check 2: Gemini Flash. Accept ONLY if check digit valid.
     flash_result = gemini_call(VIN_PROMPT, image_bytes=file_bytes, mime=media_type,
-                               model='gemini-2.5-flash', max_tokens=100)
+                               model='gemini-2.5-pro', max_tokens=100)
     if flash_result:
         flash_vin = flash_result.strip().upper()
         m = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', flash_vin)
@@ -1973,11 +2003,54 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
             print(f'[OCR] VIN via Gemini Flash cross-check (check digit OK): {m.group(0)}', flush=True)
             return m.group(0)
 
-    # No layer produced a check-digit-valid VIN. Return the first Pro candidate
-    # (best informed guess) with a manual-review log line so the bid still has
-    # SOMETHING to work from instead of NULL.
+    # VIN_OCR_V2_2026_05_27 — closed-loop retry. Before returning the best-guess
+    # (which lets a bad VIN through to workers that spin on it), give Gemini
+    # Pro one more pass with explicit "your reading failed check digit, here's
+    # the expected value, focus on these positions" feedback. Targets the
+    # exact failure mode that bid 2153 hit (5 misread as S at position 6 in a
+    # Mercedes W1K VIN — check digit math reveals position 6 as the suspect).
     if candidates:
-        print(f'[OCR] All layers failed check digit; returning Pro best-guess for manual review: {candidates[0]}', flush=True)
+        from vin_validate import validate as _vv
+        for cand in candidates[:2]:  # try once per Pro candidate
+            try:
+                check = _vv(cand)
+            except Exception:
+                check = {'valid': False, 'check_digit_expected': None}
+            expected = check.get('check_digit_expected')
+            if not expected:
+                continue
+            actual_at_9 = cand[8] if len(cand) >= 9 else '?'
+            # Position-6 hint for known Mercedes/Audi WMIs that require a digit.
+            wmi = cand[:3].upper()
+            pos6_hint = ''
+            if wmi in ('W1K', 'W1V', 'WDB', 'WDC', 'WDD', 'WAU', 'WA1', 'WBA', 'WBS', 'WBY'):
+                pos6_char = cand[5] if len(cand) >= 6 else '?'
+                if pos6_char.isalpha():
+                    pos6_hint = (f'Position 6 in your reading is "{pos6_char}". WMI {wmi} '
+                                 f'requires a DIGIT at position 6. Try "{pos6_char}" -> '
+                                 + ({'S': '5', 'B': '8', 'O': '0', 'Z': '2', 'G': '6',
+                                     'A': '4', 'I': '1'}.get(pos6_char, '?'))
+                                 + '. ')
+            retry_prompt = (
+                f'Your previous VIN reading "{cand}" failed ISO 3779 check digit. '
+                f'Expected check digit at position 9: "{expected}". Your reading had: '
+                f'"{actual_at_9}". {pos6_hint}'
+                f'Re-examine each ambiguous character (5/S, 8/B, 0/O, 2/Z, 6/G, 4/A, 1/I) '
+                f'and try the alternate. Re-compute the check digit before replying. '
+                f'Reply ONLY with a check-digit-valid 17-char VIN, or NONE.'
+            )
+            retry_result = gemini_call(retry_prompt, image_bytes=file_bytes, mime=media_type,
+                                       model='gemini-2.5-pro', max_tokens=200, temperature=0.4)
+            if not retry_result:
+                continue
+            mm = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', retry_result.strip().upper())
+            if mm and vin_check_digit_valid(mm.group(0)):
+                print(f'[OCR] VIN via Pro retry-loop (check digit OK, was {cand!r}): {mm.group(0)}', flush=True)
+                return mm.group(0)
+        # Retry didn't help. Persist best-guess with the same caveat as before;
+        # the canonicalize re-trigger downstream will stamp vin_invalid_reason
+        # so workers don't spin on it.
+        print(f'[OCR] All layers + retry failed check digit; returning Pro best-guess (vin_invalid_reason will land): {candidates[0]}', flush=True)
         return candidates[0]
     return None
 
@@ -2011,7 +2084,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
         "(no commas, no units). If not, reply with the single word NONE."
     )
     gresult = gemini_call(_odo_prompt, image_bytes=file_bytes, mime=media_type,
-                          model='gemini-2.5-flash', max_tokens=64,
+                          model='gemini-2.5-pro', max_tokens=64,
                           temperature=0, disable_thinking=True)
     if gresult:
         up = gresult.strip().upper()
@@ -2047,7 +2120,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
         "integer (no commas, no units). If unsure or it's not visible, NONE."
     )
     gresult2 = gemini_call(_listing_prompt, image_bytes=file_bytes,
-                           mime=media_type, model='gemini-2.5-flash',
+                           mime=media_type, model='gemini-2.5-pro',
                            max_tokens=64, temperature=0, disable_thinking=True)
     if gresult2:
         up = gresult2.strip().upper()
@@ -2070,7 +2143,7 @@ def extract_color_from_file(file_bytes, media_type='image/jpeg'):
         'If you cannot clearly see a vehicle exterior, reply UNKNOWN.'
     )
     result = gemini_call(prompt, image_bytes=file_bytes, mime=media_type,
-                         model='gemini-2.5-flash', max_tokens=20)
+                         model='gemini-2.5-pro', max_tokens=20)
     if result:
         color = result.strip().title()
         if color.upper() != 'UNKNOWN' and color:
@@ -3497,6 +3570,7 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     bg_cur.execute("""UPDATE bids SET vin=%s, updated_at=NOW()
                                       WHERE id=%s AND (vin IS NULL OR vin='')""",
                                    (_winner, bid_id))
+                    _retrigger_canonicalize_after_vin(bid_id)  # VIN_OCR_V2_2026_05_27
                     # CLEAR_VERIFY_STATE_BASED_2026_05_16: gate on current
                     # bid state (does it have a vin now? is the flag open
                     # with a vin-related reason?) rather than on whether
@@ -3693,10 +3767,27 @@ def twilio_webhook():
         _ref_payload = _hash_m.group(2).strip()
         try:
             _href_cur = db.cursor()
+            # HASH_REF_INTERNAL_MARKER_2026_05_27: relax anti-spoof.
+            # Dashboard-drop / dealerclub / bulk / thalist / field bids have
+            # bids.phone as a marker string (e.g. 'drop:dashboard'), not a
+            # real phone. Operator must still be able to text #N from their
+            # cell to stitch photos/miles onto these. Allow when:
+            #   (a) bids.phone matches from_phone (customer case), OR
+            #   (b) bids.phone is a known internal-marker prefix, OR
+            #   (c) from_phone is the operator's cell (THALIST_ALERT_PHONE).
+            _op_phone = '+14074309675'
             _href_cur.execute(
                 "SELECT id, phone, vin, mileage, year, make, model, status FROM bids "
-                "WHERE id=%s AND phone=%s",
-                (_ref_bid_id, from_phone)
+                "WHERE id=%s AND ("
+                "  phone=%s"
+                "  OR phone LIKE 'drop:%%'"
+                "  OR phone LIKE 'dealerclub:%%'"
+                "  OR phone LIKE 'bulk:%%'"
+                "  OR phone LIKE 'thalist:%%'"
+                "  OR phone LIKE 'field:%%'"
+                "  OR %s = %s"
+                ")",
+                (_ref_bid_id, from_phone, from_phone, _op_phone)
             )
             _ref = _href_cur.fetchone()
         except Exception:
@@ -3730,6 +3821,30 @@ def twilio_webhook():
                     "UPDATE bids SET vin=%s, updated_at=NOW() WHERE id=%s",
                     (_vin_m.group(1), _ref_bid_id))
                 _stitch_log.append(f'vin={_vin_m.group(1)}')
+                _retrigger_canonicalize_after_vin(_ref_bid_id)  # VIN_OCR_V2_2026_05_27
+
+            # HASH_REF_PHOTOS_2026_05_27: attach MMS media to the referenced bid.
+            # Original commit e922411 only stitched miles+VIN from text; photo
+            # URLs in the same MMS were silently dropped. This ingests them
+            # via the same _ingest_sms_photo path the normal new-bid path uses.
+            _hr_n_media = 0
+            try:
+                _hr_n_media = int(request.form.get('NumMedia', 0))
+            except (TypeError, ValueError):
+                _hr_n_media = 0
+            _hr_photos_attached = 0
+            for _i in range(_hr_n_media):
+                _hr_url = request.form.get(f'MediaUrl{_i}')
+                _hr_mt = request.form.get(f'MediaContentType{_i}') or 'image/jpeg'
+                if not _hr_url:
+                    continue
+                try:
+                    _ingest_sms_photo(cur, _ref_bid_id, _hr_url, _hr_mt, from_phone=None)
+                    _hr_photos_attached += 1
+                except Exception as _hr_pe:
+                    print(f'[hash-ref] photo ingest err bid={_ref_bid_id}: {_hr_pe}', flush=True)
+            if _hr_photos_attached:
+                _stitch_log.append(f'photos={_hr_photos_attached}')
             db.commit()
             # Log to sms_intake_log via _finalize_sms_intake
             _finalize_sms_intake(
@@ -9870,8 +9985,19 @@ def api_vauto_pending():
         SELECT b.id, b.vin, '__not_found__', NOW()
           FROM bids b
           JOIN (
+              -- AUTOGIVE_FILTER_2026_05_27: exclude operator-driven releases
+              -- (released_admin / released_admin_reprocess) and cancelled rows.
+              -- Reprocess explicitly means "try again," so those shouldn't
+              -- count toward the 5-fail give-up. Real failures = anything not
+              -- in this exclusion set (e.g. 'in_progress' that never closed,
+              -- 'failed', 'error', NULL status from worker crashes).
               SELECT bid_id FROM worker_jobs
                WHERE job_type='vauto'
+                 AND COALESCE(status,'') NOT IN ('cancelled',
+                                                  'released_admin',
+                                                  'released_admin_reprocess',
+                                                  'released_invalid_vin',
+                                                  'ok')
                GROUP BY bid_id
                HAVING COUNT(*) >= 5
                   AND COUNT(*) FILTER (WHERE status='ok') = 0
@@ -12301,7 +12427,7 @@ def api_vauto_find_click_target():
         'If no matching row exists, return: {"found": false}'
     )
     text = gemini_call(prompt, image_bytes=img_bytes, mime='image/png',
-                       model='gemini-2.5-flash', max_tokens=200, temperature=0.1)
+                       model='gemini-2.5-pro', max_tokens=200, temperature=0.1)
     if not text:
         return jsonify({'error': 'gemini call failed'}), 502
     raw = text.strip()
@@ -13245,7 +13371,7 @@ def api_trim_select():
         'No markdown, no commentary.'
     )
 
-    model = 'gemini-2.5-flash'
+    model = 'gemini-2.5-pro'
     raw = gemini_call(prompt, model=model, max_tokens=400, temperature=0.1, disable_thinking=True)  # TRIM_SELECT_FAST_2026_05_20: skip 10-15s Gemini thinking overhead (prompt has explicit rules; Flash follows them fine without extended reasoning)
     if not raw:
         db.close()
@@ -18661,7 +18787,7 @@ def api_opportunity_pitch(opp_id):
     )
 
     try:
-        pitch = gemini_call(prompt, model='gemini-2.5-flash',
+        pitch = gemini_call(prompt, model='gemini-2.5-pro',
                             max_tokens=1500, temperature=0.4)
     except Exception as e:
         db.close()
@@ -19805,7 +19931,7 @@ def api_voice_ai_critique():
         if not client:
             return jsonify({"error": "Gemini client unavailable"}), 503
         resp = client.models.generate_content(
-            model='gemini-2.5-pro',
+            model='gemini-2.5-flash',
             contents=prompt,
         )
         answer = (getattr(resp, 'text', None) or '').strip()
@@ -19841,6 +19967,6 @@ def api_voice_ai_critique():
         "question": question,
         "answer": answer,
         "prior_ai_price": float(bid['ai_price']) if bid.get('ai_price') else None,
-        "model_used": "gemini-2.5-pro",
+        "model_used": "gemini-2.5-flash",
     })
 

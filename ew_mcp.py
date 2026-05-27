@@ -5477,50 +5477,35 @@ async def dealer_opportunities_now(
 
 # ─── AI_CRITIQUE_2026_05_27 — Bill talks back to the assessor LLM ───────
 @mcp.tool()
-async def ai_critique(
+def ai_critique(
     caller_name: str,
     bid_id: int,
     question: str,
 ) -> dict:
     """OWNER. Ask the AI assessor (Gemini) a follow-up question about a
-    specific bid's existing assessment. The assessor sees its prior
-    verdict, the original market inputs (vAuto/MMR/rBook/AccuTrade/iPacket),
-    and Bill's question, then replies in 2-4 sentences.
+    specific bid's existing assessment. SYNC_AI_CRITIQUE_2026_05_27 — sync
+    using requests (was async/aiohttp but tool_proxy's asyncio.run() cycle
+    inside a gunicorn worker thread tangled aiohttp's loop-bound resolver
+    and caused 'Event loop is closed' on every call after the first).
 
-    USE when the operator (via Bill) wants to challenge or probe the AI's
-    call: "ask the assessor why it weighted X over Y", "what if mileage
-    was lower", "did you consider the trade_in", "do you stand by that
-    price given Z", "second-guess the AI on bid X".
-
-    Args:
-      bid_id: the bid the operator is questioning
-      question: the follow-up question (free text, < 600 chars)
-
-    Returns:
-      {bid_id, vehicle, question, answer (2-4 sentences for Bill to
-       speak), prior_ai_price, model_used}
-    """
+    USE when the operator wants to talk to / consult / discuss with the AI
+    assessor: 'did you talk to the AI', 'ask the assessor', 'second-guess
+    the AI on bid X', 'what if mileage was lower'. Returns {answer}."""
     if not _is_owner(caller_name):
         return {"error": "owner-only", "owner_required": True}
     if not bid_id or not (question or "").strip():
         return {"error": "bid_id and question required"}
 
-    import os as _os, urllib.parse as _up
-    _eq = _os.environ.get('EW_QUERY_URL', 'http://127.0.0.1:9001/api/voice/query')
+    import os as _os, urllib.parse as _up, requests as _req
+    _eq = _os.environ.get("EW_QUERY_URL", "http://127.0.0.1:9001/api/voice/query")
     _pp = _up.urlparse(_eq)
-    url = '{}://{}/api/voice/ai_critique'.format(_pp.scheme, _pp.netloc)
-
-    http = await _ensure_http()
+    url = "{}://{}/api/voice/ai_critique".format(_pp.scheme, _pp.netloc)
     try:
-        import aiohttp as _aio
-        _t = _aio.ClientTimeout(total=90)
-        async with http.post(url, json={
+        r = _req.post(url, json={
             "bid_id": int(bid_id),
             "question": str(question)[:600],
-        }, timeout=_t) as r:
-            data = await r.json()
+        }, timeout=90)
+        return r.json()
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
-
-    return data
 
