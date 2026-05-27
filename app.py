@@ -99,6 +99,15 @@ try:
 except Exception as _e:
     print(f'[network_push] blueprint not loaded: {_e}', flush=True)
 
+# PORSCHE_ARB_2026_05_26 — operator-facing dashboard for the Porsche
+# cross-market arbitrage scanner. Read-only except for a single status
+# POST. Schema: porsche_arb_candidates / _regional_history / _runs.
+try:
+    from porsche_arb_bp import bp as _porsche_arb_bp
+    app.register_blueprint(_porsche_arb_bp)
+except Exception as _e:
+    print(f'[porsche_arb] blueprint not loaded: {_e}', flush=True)
+
 # VOICE_AGENT_2026_05_20 — EW voice bot ("EW") for YMM-based valuation.
 # Read-only on shared tables, writes only to voice_valuations. Comment
 # this block to disable the bot without touching anything else.
@@ -2700,30 +2709,25 @@ def bid_detail(bid_id):
     if not bid:
         db.close()
         return 'Not found', 404
-    # YMMT_MATCH_AUTO_TAG_2026_05_26: any bid with ymmt_id IS NULL gets tagged
-    # on first view. Fast cache hit (~ms) for repeated views; one LLM call
-    # at most (~$0.001) for genuinely new bids. Self-heals the intake gap —
-    # we don't have to chase every bid-creation path to add a hook.
-    if not bid.get('ymmt_id') and bid.get('year') and bid.get('make'):
+    # YMMT_MATCH_CANON_TAG_2026_05_26: safety-net retag on view. Primary
+    # tag fires from accutrade_overseer (canon_trim writeback). This hook
+    # only fires if canon_trim exists but ymmt_id is still NULL (race
+    # condition or pre-canon-hook bid). Will NOT tag from raw bid.trim
+    # anymore — that produced noise (bid 2085 STX -> F-150 model-level).
+    if not bid.get('ymmt_id') and bid.get('canon_trim'):
         try:
-            from ymmt_match import resolve_ymmt
-            _r = resolve_ymmt(bid.get('year'), bid.get('make'),
-                              bid.get('model'), bid.get('trim'), db_conn=db)
-            if _r.get('ymmt_id'):
-                cur.execute("""UPDATE bids
-                                  SET ymmt_id=%s, ymmt_resolved_at=NOW(),
-                                      ymmt_confidence=%s
-                                WHERE id=%s""",
-                            (_r['ymmt_id'], float(_r.get('confidence') or 0),
-                             bid_id))
+            _new_id = _tag_ymmt_for_bid(cur, bid_id)
+            if _new_id:
                 db.commit()
+                # Refresh bid dict for downstream scoring on this same render
+                cur.execute("""SELECT yc.model AS ymmt_model, yc.trim AS ymmt_trim
+                                 FROM ymmt_catalog yc WHERE yc.id=%s""", (_new_id,))
+                _yc = cur.fetchone()
                 bid = dict(bid)
-                bid['ymmt_id'] = _r['ymmt_id']
-                bid['ymmt_model'] = _r.get('model')
-                bid['ymmt_trim'] = _r.get('trim')
-                print(f'[ymmt] auto-tagged bid={bid_id} -> id={_r["ymmt_id"]} '
-                      f'({_r.get("model")} / {_r.get("trim")}) src={_r.get("source")}',
-                      flush=True)
+                bid['ymmt_id'] = _new_id
+                if _yc:
+                    bid['ymmt_model'] = _yc['model']
+                    bid['ymmt_trim'] = _yc['trim']
         except Exception as _yerr:
             print(f'[ymmt] auto-tag bid={bid_id} err: {_yerr}', flush=True)
     # Compute live opportunity for DealerClub bids so the template can
@@ -2844,6 +2848,37 @@ def bid_detail(bid_id):
     # iPacket sticker data — same-VIN fallback for blank/failed captures
     # (mirrors /m/<token> mini-page so desktop bid card matches the SMS link).
     ipacket_data = _ipacket_with_vin_fallback(cur, bid_id, bid.get('vin'))
+
+    # SCREENSHOT_CACHE_2026_05_26: load persistent snapshot cache + fall
+    # back from cache when the live lookup row's screenshot column is null
+    # (e.g. mid force-reprocess window before worker re-writes).
+    screenshot_cache = _load_screenshot_cache(cur, bid_id)
+    if screenshot_cache:
+        if vauto_data is not None:
+            vauto_data = dict(vauto_data)
+            if not vauto_data.get('carfax_screenshot') and screenshot_cache.get('carfax'):
+                vauto_data['carfax_screenshot'] = screenshot_cache['carfax']
+            if not vauto_data.get('autocheck_screenshot') and screenshot_cache.get('autocheck'):
+                vauto_data['autocheck_screenshot'] = screenshot_cache['autocheck']
+        elif screenshot_cache.get('carfax') or screenshot_cache.get('autocheck'):
+            # Row deleted (mid-reprocess) but we have cached screenshots
+            vauto_data = {'carfax_screenshot': screenshot_cache.get('carfax'),
+                          'autocheck_screenshot': screenshot_cache.get('autocheck'),
+                          '_screenshot_only': True}
+        if accutrade_data is not None:
+            accutrade_data = dict(accutrade_data)
+            if not accutrade_data.get('screenshot') and screenshot_cache.get('accutrade'):
+                accutrade_data['screenshot'] = screenshot_cache['accutrade']
+        elif screenshot_cache.get('accutrade'):
+            accutrade_data = {'screenshot': screenshot_cache['accutrade'],
+                              '_screenshot_only': True}
+        if ipacket_data is not None:
+            ipacket_data = dict(ipacket_data)
+            if not ipacket_data.get('screenshot') and screenshot_cache.get('ipacket'):
+                ipacket_data['screenshot'] = screenshot_cache['ipacket']
+        elif screenshot_cache.get('ipacket'):
+            ipacket_data = {'screenshot': screenshot_cache['ipacket'],
+                            '_screenshot_only': True}
     _mark('enrichments')
 
     # Tesla auto-decode (if VIN is Tesla)
@@ -3186,10 +3221,33 @@ def bid_detail(bid_id):
                     [m['dealer_id'] for m in match_dealers])
             except Exception as _det_err:
                 print(f'[bid_detail] match_detail err: {_det_err}', flush=True)
+        # YMMT_MATCH_NO_BUYER_STATE_2026_05_26: when no matches and no ymmt_id,
+        # distinguish between "no partner stocks this model at all" (genuine
+        # no-buyer) vs "waiting for trim verification" (model exists somewhere
+        # in network, just waiting for trim disambiguation).
+        no_model_in_network = False
+        if not match_dealers:
+            _bm = (bid.get('make') or '').upper().strip()
+            _bmod_canon = bid.get('canon_model') or bid.get('model') or ''
+            _bmod = _bmod_canon.strip()
+            _bmod_alt = (bid.get('model') or '').strip()
+            if _bm and _bmod:
+                # Check if ANY portal dealer's buy_profile has this make+model.
+                # Cheap JSONB existence check, no LLM, no rollup.
+                _md_cur.execute("""
+                    SELECT COUNT(*) AS n FROM dealers
+                     WHERE portal_slug IS NOT NULL
+                       AND buy_profile IS NOT NULL
+                       AND (buy_profile->'makes'->%s->'models' ? %s
+                            OR buy_profile->'makes'->%s->'models' ? %s)
+                """, (_bm, _bmod, _bm, _bmod_alt))
+                _row = _md_cur.fetchone()
+                no_model_in_network = (int(_row['n'] or 0) == 0)
         _md_db.close()
     except Exception as _mm_err:
         print(f'[bid_detail] match_dealers err: {_mm_err}', flush=True)
         match_detail = {}
+        no_model_in_network = False
     _mark('match_dealers')
 
     _handler_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
@@ -3213,6 +3271,7 @@ def bid_detail(bid_id):
                                 bid_network_claim=bid_network_claim,
                                 match_dealers=match_dealers,
                                 match_detail=match_detail,
+                                no_model_in_network=no_model_in_network,
                                 time_ago=time_ago)
     _total_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
     _render_ms = _total_ms - _handler_ms
@@ -12424,6 +12483,9 @@ def api_vauto_submit():
         json.dumps(data.get('raw', {})) if data.get('raw') else None,
         data.get('appraisal_url'),
     ))
+    # SCREENSHOT_CACHE_2026_05_26
+    _cache_screenshot(cur, bid_id, 'carfax', data.get('carfax_screenshot'))
+    _cache_screenshot(cur, bid_id, 'autocheck', data.get('autocheck_screenshot'))
     # Clear priority flag + claim now that we have the data. Releasing the
     # claim lets stale-claim recovery never need to fire on this bid.
     cur.execute("""
@@ -13452,6 +13514,8 @@ def api_accutrade_submit():
         normalize_trim_text(data.get('selected_trim_text')),
         data.get('trim_select_source'),
     ))
+    # SCREENSHOT_CACHE_2026_05_26
+    _cache_screenshot(cur, bid_id, 'accutrade', data.get('screenshot'))
     db.commit()
 
     # VIN_VERIFY_SMS_2026_05_15: auto-text bidder if AccuTrade reports no VIN.
@@ -13578,6 +13642,11 @@ def api_accutrade_submit():
                               f'conf={cconf:.2f} from accutrade_overseer '
                               f'(overwrite={_can_overwrite_canon}, '
                               f'prev_source={_cur_canon_source!r})', flush=True)
+                        # YMMT_MATCH_CANON_TAG_2026_05_26: canon_trim is now set
+                        # authoritatively — resolve YMMT immediately so the
+                        # buyer-match card has a trim-accurate match the
+                        # moment the operator opens the bid.
+                        _tag_ymmt_for_bid(cur, bid_id, force=_can_overwrite_canon)
 
                     if _model_mismatch:
                         _new_model = _nhtsa_model.title()
@@ -13750,6 +13819,8 @@ def api_ipacket_submit():
         bool(data.get('not_available', False)),
         data.get('unavailable_reason'),
     ))
+    # SCREENSHOT_CACHE_2026_05_26
+    _cache_screenshot(cur, bid_id, 'ipacket', data.get('screenshot'))
     db.commit()
 
     # ── Ensure OCR text is cached (always, even when canon_trim already set) ──
@@ -17315,6 +17386,15 @@ def _bp_score(bid, dealer_id, profile, vins_owned=None):
     if not make:
         return None, "bid missing make"
 
+    # YMMT_MATCH_CANON_TAG_2026_05_26 (v2 — adjusted): when bid has no
+    # ymmt tag, fall back to MODEL-LEVEL fuzzy scoring so operators still
+    # see candidates while AccuTrade is picking the trim. Clearly labeled
+    # in the reason text as "model-level estimate" so they know the data
+    # is loose. Strict trim discipline kicks in the moment ymmt_trim is
+    # set by the canon-tag hook. Bid 2092 Lambo Urus had 10 dealers stocking
+    # it — refusing to show was the wrong call.
+    _is_model_level = not (bid.get('ymmt_model') and bid.get('ymmt_trim'))
+
     # VIN-on-lot (pre-fetched, in-memory)
     bid_vin = (bid.get('vin') or '').strip().upper()
     if bid_vin and vins_owned and bid_vin in vins_owned:
@@ -17490,8 +17570,12 @@ def _bp_score(bid, dealer_id, profile, vins_owned=None):
         elif miles > mp90 * 1.5:
             score -= 5
 
-    return score, (velocity_reason or
-                   f"{make.title()} {v_label} (profile match, no activity)")
+    _final_reason = (velocity_reason or
+                     f"{make.title()} {v_label} (profile match, no activity)")
+    # Prepend a clear caveat when the match wasn't trim-verified.
+    if _is_model_level:
+        _final_reason = f"[MODEL-LEVEL · trim unverified] {_final_reason}"
+    return score, _final_reason
 
 
 def _bp_tier(score):
@@ -17515,6 +17599,111 @@ def _load_dealer_vins_owned(cur):
         return out
     except Exception as _e:
         print(f"[buy-profile-match] load_dealer_vins err: {_e}", flush=True)
+        return {}
+
+
+def _tag_ymmt_for_bid(cur, bid_id, force=False):
+    """YMMT_MATCH_CANON_TAG_2026_05_26: tag a bid's ymmt_id using canon_trim
+    (authoritative, set by AccuTrade overseer / iPacket extract — not raw
+    SMS-parsed bid.trim). Pre-condition for buyer-match scoring.
+
+    Returns the resolved ymmt_id (or None if catalog gap / ambiguous).
+    Safe to call multiple times — no-ops when bid already tagged unless
+    force=True.
+
+    Call this from EVERY canon_trim writeback site:
+      - accutrade_overseer (primary; conf >= 0.7 trim selection)
+      - iPacket trim extract (when AccuTrade unavailable)
+      - any future enrichment that sets bids.canon_trim
+    """
+    try:
+        cur.execute("""
+            SELECT id, year,
+                   COALESCE(canon_model, model) AS model_for_resolve,
+                   canon_trim,
+                   trim,
+                   ymmt_id
+              FROM bids WHERE id = %s
+        """, (bid_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        if row.get('ymmt_id') and not force:
+            return row['ymmt_id']
+        # CANON_TRIM_REQUIRED: only attempt tag if we have authoritative trim
+        # from enrichment chain. Raw bid.trim is not trusted here — that's
+        # the operator's explicit guidance (bid 2085 STX surfaced model-level
+        # noise because raw trim was used pre-enrichment).
+        if not row.get('canon_trim'):
+            return None
+        from ymmt_match import resolve_ymmt
+        r = resolve_ymmt(row['year'],
+                         _bid_make_from_id(cur, bid_id),
+                         row['model_for_resolve'],
+                         row['canon_trim'],
+                         db_conn=cur.connection)
+        if not r.get('ymmt_id'):
+            # Catalog gap — leave ymmt_id NULL. _bp_score will skip this bid.
+            print(f'[ymmt-tag] bid={bid_id} unresolved canon_trim={row["canon_trim"]!r} '
+                  f'src={r.get("source")} reason={r.get("reason")}', flush=True)
+            return None
+        cur.execute("""UPDATE bids
+                          SET ymmt_id=%s, ymmt_resolved_at=NOW(),
+                              ymmt_confidence=%s
+                        WHERE id=%s""",
+                    (r['ymmt_id'], float(r.get('confidence') or 0), bid_id))
+        print(f'[ymmt-tag] bid={bid_id} -> id={r["ymmt_id"]} '
+              f'({r.get("model")} / {r.get("trim")}) src={r.get("source")} '
+              f'from canon_trim={row["canon_trim"]!r}', flush=True)
+        return r['ymmt_id']
+    except Exception as e:
+        print(f'[ymmt-tag] bid={bid_id} err: {e}', flush=True)
+        return None
+
+
+def _bid_make_from_id(cur, bid_id):
+    """Tiny helper — needed by _tag_ymmt_for_bid since `make` column isn't
+    in the canon_* lineage but is required by resolve_ymmt. One cheap lookup."""
+    try:
+        cur.execute("SELECT make FROM bids WHERE id=%s", (bid_id,))
+        r = cur.fetchone()
+        return r.get('make') if r else None
+    except Exception:
+        return None
+
+
+def _cache_screenshot(cur, bid_id, source, path):
+    """SCREENSHOT_CACHE_2026_05_26: persist a snapshot path in
+    bid_screenshot_cache so it survives force-reprocess deletes of the
+    parent lookup row. Called from /api/vauto/submit, /api/accutrade/submit,
+    /api/ipacket/submit after each successful screenshot capture.
+
+    Source must be one of: 'ipacket', 'accutrade', 'carfax', 'autocheck'.
+    Safe to call with empty path — silently no-ops. Errors are logged
+    but don't propagate (cache failure must never break the submit flow)."""
+    if not bid_id or not path or not source:
+        return
+    if source not in ('ipacket', 'accutrade', 'carfax', 'autocheck'):
+        return
+    try:
+        cur.execute("""INSERT INTO bid_screenshot_cache (bid_id, source, screenshot)
+                       VALUES (%s, %s, %s)""", (bid_id, source, path))
+    except Exception as e:
+        print(f'[screenshot-cache] err bid={bid_id} src={source}: {e}', flush=True)
+
+
+def _load_screenshot_cache(cur, bid_id):
+    """Return {source: latest_screenshot_path} for a bid. Used by bid_detail
+    to fall back when the live lookup row's screenshot column is null
+    (e.g. mid force-reprocess window)."""
+    try:
+        cur.execute("""SELECT DISTINCT ON (source) source, screenshot
+                         FROM bid_screenshot_cache
+                        WHERE bid_id=%s
+                        ORDER BY source, captured_at DESC""", (bid_id,))
+        return {r['source']: r['screenshot'] for r in cur.fetchall()}
+    except Exception as e:
+        print(f'[screenshot-cache] load err bid={bid_id}: {e}', flush=True)
         return {}
 
 
@@ -17580,7 +17769,7 @@ def _load_match_detail(cur, bid, dealer_ids):
                     'dol': r['dol'] or 0, 'exact_year': bool(r['exact_year']),
                 })
 
-        # SOLD last 90d — any year matching (model, trim)
+        # SOLD last 90d — any year matching (model, trim). Filter VIN-only stubs.
         cur.execute("""
             SELECT di.dealer_id, di.vin, di.year, di.ext_color, di.mileage,
                    di.price, di.sold_at,
@@ -17591,6 +17780,9 @@ def _load_match_detail(cur, bid, dealer_ids):
                AND di.status = 'sold' AND di.sold_at IS NOT NULL
                AND di.sold_at >= NOW() - INTERVAL '90 days'
                AND yc.model = %s AND yc.trim = %s
+               AND ((di.ext_color IS NOT NULL AND di.ext_color <> '')
+                    OR di.mileage IS NOT NULL
+                    OR di.price IS NOT NULL)
              ORDER BY di.dealer_id, di.sold_at DESC
         """, (list(dealer_ids), canon_model, canon_trim))
         for r in cur.fetchall():
@@ -17624,10 +17816,17 @@ def _load_match_detail(cur, bid, dealer_ids):
         for d, colors in _color_acc.items():
             colors.sort(key=lambda x: -x[1])
             out[d]['color_pattern_12mo'] = colors[:5]
+            # Pre-compute for template (Jinja can't index into tuples cleanly)
+            out[d]['color_pattern_dict'] = {c: n for c, n in colors}
+            out[d]['color_top3_set']     = {c for c, _ in colors[:3]}
     else:
-        # Untagged bid — fuzzy fallback on make+model substring
-        # (best effort, less accurate; usually only hits on new bids before backfill)
+        # YMMT_MATCH_UNTAGGED_FALLBACK_2026_05_26: bid not yet ymmt-tagged.
+        # Fuzzy match on make+model substring against dealer_inventory.
+        # ALSO queries sold-90d + 12mo + color pattern so the detail panel
+        # has the same shape as tagged bids. Otherwise dealers like Marshall
+        # Goldman (sold 2 base Uruses in 30d) look like "no recent sales".
         if bid_make and bid_model:
+            # ACTIVE
             cur.execute("""
                 SELECT di.dealer_id, di.vin, di.year, di.ext_color, di.mileage,
                        di.price, di.status,
@@ -17637,8 +17836,10 @@ def _load_match_detail(cur, bid, dealer_ids):
                    AND UPPER(di.make) = %s
                    AND di.model ILIKE %s
                    AND di.status = 'active'
-                 ORDER BY di.dealer_id, di.year DESC NULLS LAST
-            """, (list(dealer_ids), bid_make, f"%{bid_model}%"))
+                 ORDER BY di.dealer_id,
+                          (CASE WHEN di.year=%s THEN 0 ELSE 1 END),
+                          di.year DESC NULLS LAST
+            """, (list(dealer_ids), bid_make, f"%{bid_model}%", bid_year))
             for r in cur.fetchall():
                 slot = out.get(r['dealer_id'])
                 if slot and len(slot['in_stock']) < 5:
@@ -17648,9 +17849,66 @@ def _load_match_detail(cur, bid, dealer_ids):
                         'mileage': r['mileage'], 'price': r['price'],
                         'dol': r['dol'] or 0, 'exact_year': r['year'] == bid_year,
                     })
+            # SOLD last 90d — filter out VIN-only records (no color, mileage,
+            # AND no price). Those are usually scraper artifacts from feeds
+            # that gave only a stub; surfacing them as "sold" rows pollutes
+            # the velocity narrative (bid 2092 Marshall Goldman showed 3 sold
+            # but 2 were data-stubs with 0d DOL and blank everything).
+            cur.execute("""
+                SELECT di.dealer_id, di.vin, di.year, di.ext_color, di.mileage,
+                       di.price, di.sold_at,
+                       EXTRACT(DAY FROM di.sold_at - di.first_seen_at)::int AS dol
+                  FROM dealer_inventory di
+                 WHERE di.dealer_id = ANY(%s::int[])
+                   AND UPPER(di.make) = %s
+                   AND di.model ILIKE %s
+                   AND di.status = 'sold' AND di.sold_at IS NOT NULL
+                   AND di.sold_at >= NOW() - INTERVAL '90 days'
+                   AND ((di.ext_color IS NOT NULL AND di.ext_color <> '')
+                        OR di.mileage IS NOT NULL
+                        OR di.price IS NOT NULL)
+                 ORDER BY di.dealer_id, di.sold_at DESC
+            """, (list(dealer_ids), bid_make, f"%{bid_model}%"))
+            for r in cur.fetchall():
+                slot = out.get(r['dealer_id'])
+                if slot and len(slot['sold_90d']) < 5:
+                    slot['sold_90d'].append({
+                        'vin': r['vin'], 'year': r['year'],
+                        'color': r['ext_color'] or '',
+                        'mileage': r['mileage'], 'price': r['price'],
+                        'sold_at': r['sold_at'], 'dol': r['dol'] or 0,
+                    })
+            # SOLD 12mo count + color pattern
+            cur.execute("""
+                SELECT di.dealer_id, UPPER(di.ext_color) AS color, COUNT(*) AS n
+                  FROM dealer_inventory di
+                 WHERE di.dealer_id = ANY(%s::int[])
+                   AND UPPER(di.make) = %s
+                   AND di.model ILIKE %s
+                   AND di.status = 'sold' AND di.sold_at IS NOT NULL
+                   AND di.sold_at >= NOW() - INTERVAL '365 days'
+                 GROUP BY di.dealer_id, UPPER(di.ext_color)
+            """, (list(dealer_ids), bid_make, f"%{bid_model}%"))
+            _color_acc = {}
+            for r in cur.fetchall():
+                slot = out.get(r['dealer_id'])
+                if slot:
+                    slot['sold_12mo_count'] += int(r['n'] or 0)
+                    if r['color']:
+                        _color_acc.setdefault(r['dealer_id'], []).append(
+                            (r['color'], int(r['n'])))
+            for d, colors in _color_acc.items():
+                colors.sort(key=lambda x: -x[1])
+                out[d]['color_pattern_12mo'] = colors[:5]
+                out[d]['color_pattern_dict'] = {c: n for c, n in colors}
+                out[d]['color_top3_set']     = {c for c, _ in colors[:3]}
 
     # Stock-light + fit flags. bid_color used to decide color-match flag.
     bid_color = (bid.get('color') or '').strip().upper() if isinstance(bid, dict) else ''
+    # Pre-fetch dealer names for the "why match" sentence
+    cur.execute("SELECT id, name FROM dealers WHERE id = ANY(%s::int[])",
+                (list(dealer_ids),))
+    _name_by_id = {r['id']: r['name'] for r in cur.fetchall()}
     for d, slot in out.items():
         has_stock = bool(slot['in_stock'])
         has_sales = bool(slot['sold_90d']) or slot['sold_12mo_count'] > 0
@@ -17674,7 +17932,7 @@ def _load_match_detail(cur, bid, dealer_ids):
             fit['color_match'] = bid_color in top3 or bid_color in active_colors
         # Velocity bucket
         n90 = len(slot['sold_90d'])
-        avg_dol_90 = (sum(u.get('dol') or 0 for u in slot['sold_90d']) / n90) if n90 else 0
+        avg_dol_90 = int(sum(u.get('dol') or 0 for u in slot['sold_90d']) / n90) if n90 else 0
         if n90 >= 2 and 0 < avg_dol_90 < 10:
             fit['velocity'] = 'quick'
         elif n90 >= 1 and 0 < avg_dol_90 < 30:
@@ -17683,6 +17941,45 @@ def _load_match_detail(cur, bid, dealer_ids):
             fit['velocity'] = 'slow'
         elif slot['sold_12mo_count']:
             fit['velocity'] = 'history_only'
+
+        # YMMT_MATCH_WHY_2026_05_26: auto-derive a rich "why match" sentence
+        # from the slot data. Replaces the old single-line scorer reason.
+        _parts = []
+        _name = _name_by_id.get(d, 'dealer')
+        _trim = bid.get('ymmt_trim') or (bid.get('canon_trim') or bid.get('model') or 'unit')
+        # 1. Activity headline
+        if n90 >= 1 and slot['sold_12mo_count'] >= n90:
+            _parts.append(f"Active {_trim} buyer ({n90} in 90d, "
+                          f"{slot['sold_12mo_count']} in 12mo)")
+        elif slot['sold_12mo_count'] >= 1:
+            _parts.append(f"Historical {_trim} buyer ({slot['sold_12mo_count']} in 12mo)")
+        elif fit['trim_match']:
+            _parts.append(f"Stocks {_trim} but no recent sales")
+        # 2. Color pattern call-out
+        if slot['color_pattern_12mo']:
+            _top_c, _top_n = slot['color_pattern_12mo'][0]
+            _total_sold = sum(n for _, n in slot['color_pattern_12mo'])
+            if bid_color and bid_color == _top_c:
+                _parts.append(f"{bid_color.title()} is their best-selling color "
+                              f"({_top_n} of {_total_sold} sold) — color match")
+            elif bid_color:
+                if bid_color in {c for c, _ in slot['color_pattern_12mo'][:3]}:
+                    _parts.append(f"{bid_color.title()} is in their top-3 colors")
+                else:
+                    _parts.append(f"{bid_color.title()} is off their pattern "
+                                  f"({_top_c.title()} #1 with {_top_n} sold)")
+            else:
+                _parts.append(f"Top color: {_top_c.title()} ({_top_n} sold)")
+        # 3. Stock state
+        n_stock = len(slot['in_stock'])
+        n_exact = sum(1 for u in slot['in_stock'] if u.get('exact_year'))
+        if n_stock and n_exact:
+            _parts.append(f"{n_exact}× exact-year in stock now")
+        elif n_stock:
+            _parts.append(f"{n_stock}× in stock (different year)")
+        elif slot['sold_12mo_count']:
+            _parts.append("Between fills — no exact-fit on the lot right now")
+        slot['why_match'] = ". ".join(_parts) + "." if _parts else ""
 
     return out
 

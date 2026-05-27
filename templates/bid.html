@@ -190,14 +190,40 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
   .vin-big{font-size:17px}
   .vb-right{width:100%}
   .quick-status-group{display:grid;grid-template-columns:1fr 1fr;width:100%;gap:6px}
-  .qs-btn{text-align:center}
+  .qs-btn{text-align:center;min-height:44px}
   .photo-thumb{width:110px;height:78px}
   .photo-more{width:60px;height:78px;font-size:12px}
   .photos-strip{padding:8px 12px}
   .columns-area{padding:10px 12px;gap:10px}
   .fields{grid-template-columns:1fr}
   .card{padding:14px}
-  .col-action .btn-send-bid,.col-action .btn-pass{padding:13px}
+  .col-action .btn-send-bid,.col-action .btn-pass{padding:14px;min-height:46px;font-size:15px}
+  /* MOBILE_BUYER_MATCH_2026_05_26: collapse 5-col unit row to 2-line layout */
+  .bm-row .bm-summary{grid-template-columns:42px 42px 1fr 16px !important;gap:8px !important;padding:9px 10px !important}
+  .bm-row .bm-detail{padding:0 10px 12px 60px !important}
+  .bm-row .bm-detail > div > div[style*="grid-template-columns:50px 1fr 80px 75px 65px"]{
+    grid-template-columns:42px 1fr auto !important;
+    grid-template-rows:auto auto !important;
+    gap:4px 8px !important;
+  }
+  .bm-row .bm-detail > div > div[style*="grid-template-columns:50px 1fr 80px 75px 65px"] > :nth-child(1){grid-row:1;grid-column:1}
+  .bm-row .bm-detail > div > div[style*="grid-template-columns:50px 1fr 80px 75px 65px"] > :nth-child(2){grid-row:1;grid-column:2/4}
+  .bm-row .bm-detail > div > div[style*="grid-template-columns:50px 1fr 80px 75px 65px"] > :nth-child(3){grid-row:2;grid-column:1/3;color:#94a3b8 !important;text-align:left !important}
+  .bm-row .bm-detail > div > div[style*="grid-template-columns:50px 1fr 80px 75px 65px"] > :nth-child(4){grid-row:2;grid-column:3;text-align:right !important}
+  .bm-row .bm-detail > div > div[style*="grid-template-columns:50px 1fr 80px 75px 65px"] > :nth-child(5){grid-row:1;grid-column:4;text-align:right !important;color:#64748b !important}
+  /* Buttons + form inputs: 44px+ touch target */
+  button,select,input[type=text],input[type=tel],input[type=number],textarea{min-height:42px;font-size:15px}
+  /* Operator estimate input: full width */
+  input[name="operator_estimate"],input[name="your_value"]{width:100% !important}
+  /* AccuTrade/iPacket value blocks: stack */
+  .ac-row,.ip-row{flex-direction:column !important;gap:8px !important}
+  /* Lightbox: full-screen on phone */
+  .lightbox img{max-width:96vw;max-height:88vh}
+  /* Share modal: full width on phone */
+  .share-modal{padding:20px;width:95vw;max-width:95vw}
+  /* Operator estimate card */
+  .op-est-form{display:flex;flex-direction:column;gap:10px}
+  .op-est-form input,.op-est-form button{width:100%}
 }
 
 /* Share toast */
@@ -941,11 +967,43 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
         <div style="padding:12px 16px 16px;background:#0b1220;border-radius:0 0 12px 12px">
           {% if not match_dealers %}
-            <div style="font-size:13px;color:#64748b;line-height:1.5">
-              No onboarded dealers match this bid right now.<br>
-              <span style="color:#475569;font-size:12px">Auto-scored against each partner's nightly buy_profile (trim + color velocity + in-stock + 90d/12mo sales, with VIN-on-lot and overstock exclusion).</span>
-            </div>
+            {% if no_model_in_network %}
+              {# YMMT_MATCH_NO_BUYER_STATE_2026_05_26: definitive no — zero
+                 portal dealers stock this make+model. No amount of trim
+                 disambiguation will produce a match. Honest "no buyer". #}
+              <div style="font-size:13px;color:#94a3b8;line-height:1.55;padding:14px;background:rgba(148,163,184,.05);border:1px solid rgba(148,163,184,.25);border-radius:8px">
+                <span style="font-size:11px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:#94a3b8">No buyer in network</span><br>
+                <span style="color:#cbd5e1;font-size:13px">
+                  Zero of the 15 partner dealers stock <b style="color:#e2e8f0">{{ bid.make.title() if bid.make else '' }} {{ (bid.canon_model or bid.model or '').title() }}</b>. Buyer Match is empty by data, not by pending enrichment.
+                </span>
+              </div>
+            {% elif not bid.ymmt_id %}
+              {# Model exists somewhere in the network — waiting for trim
+                 verification to pick the right buyer. #}
+              <div style="font-size:13px;color:#fbbf24;line-height:1.55;padding:14px;background:rgba(251,191,36,.06);border:1px dashed rgba(251,191,36,.35);border-radius:8px">
+                <span style="font-size:11px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:#fbbf24">Waiting for trim verification</span><br>
+                <span style="color:#cbd5e1;font-size:13px">
+                {% if bid.canon_trim %}
+                  Trim <b style="color:#e2e8f0">{{ bid.canon_trim }}</b> isn't in <code style="background:#1e293b;padding:1px 5px;border-radius:3px;font-size:11px">ymmt_catalog</code> yet. Buyer Match holds rather than guess at model level. Catalog gap forwarded to the build pipeline.
+                {% else %}
+                  AccuTrade hasn't returned a canonical trim yet. The buyer-match scorer waits until the trim is verified to avoid surfacing model-wide noise (e.g. all F-150s when the bid is a specific F-150 STX).
+                {% endif %}
+                </span>
+              </div>
+            {% else %}
+              {# Tagged + model in network somewhere, but no dealer matches
+                 this specific trim. Real "no buyer for this trim" state. #}
+              <div style="font-size:13px;color:#94a3b8;line-height:1.55;padding:14px;background:rgba(148,163,184,.05);border:1px solid rgba(148,163,184,.25);border-radius:8px">
+                <span style="font-size:11px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:#94a3b8">No buyer for this trim</span><br>
+                <span style="color:#cbd5e1;font-size:13px">
+                  Partner dealers stock <b style="color:#e2e8f0">{{ bid.make.title() }} {{ bid.ymmt_model }}</b>, but none stock the <b style="color:#e2e8f0">{{ bid.ymmt_trim }}</b> trim specifically.
+                </span>
+              </div>
+            {% endif %}
           {% else %}
+            {# Preliminary banner removed 2026-05-26 — operator finds it noisy.
+               When bid.ymmt_id is null, score reasons start with [MODEL-LEVEL]
+               which still signals trim isn't verified. #}
             <div style="display:flex;flex-direction:column;gap:7px">
               {% for _m in match_dealers %}
               {% set _d = match_detail.get(_m.dealer_id) if match_detail else None %}
@@ -964,9 +1022,20 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
                       {% if _d %}
                         {% set _n_stock = _d.in_stock|length %}
                         {% set _n_sold_90d = _d.sold_90d|length %}
-                        {% if _n_stock %}<span style="color:#86efac;font-weight:700">{{ _n_stock }}</span> in stock{% else %}<span style="color:#94a3b8">0 in stock now</span>{% endif %}
-                        {% if _n_sold_90d %} · <span style="color:#cbd5e1;font-weight:700">{{ _n_sold_90d }}</span> sold 90d{% endif %}
-                        {% if _d.sold_12mo_count > _n_sold_90d %} · <span style="color:#64748b">{{ _d.sold_12mo_count }} sold 12mo</span>{% endif %}
+                        {% set _top3_set = _d.color_top3_set or [] %}
+                        {% set _ns = namespace(off_color=false) %}
+                        {# Only mark off-color when bid has a stated color
+                           (otherwise there's nothing to be "off" of). #}
+                        {% if bid.color %}
+                          {% for u in _d.in_stock %}
+                            {% if u.color and (u.color | upper) not in _top3_set and _top3_set %}
+                              {% set _ns.off_color = true %}
+                            {% endif %}
+                          {% endfor %}
+                        {% endif %}
+                        {% set _has_off_color = _ns.off_color %}
+                        {% if _n_stock %}<span style="color:#86efac;font-weight:700">{{ _n_stock }}</span> in stock{% if _has_off_color %}<span style="color:#fbbf24;font-size:11px"> (off-color)</span>{% endif %}{% else %}<span style="color:#94a3b8">0 in stock now</span>{% endif %}
+                        {% if _n_sold_90d %} · <span style="color:#cbd5e1;font-weight:700">{{ _n_sold_90d }}</span> sold 90d @ {{ (_d.sold_90d | sum(attribute='dol') / _n_sold_90d) | round | int }}d avg{% endif %}
                       {% else %}{{ _m.reason }}{% endif %}
                     </div>
                   </div>
@@ -996,6 +1065,10 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
                       <span style="color:#64748b;font-size:11px;text-align:right">{{ u.dol }}d</span>
                     </div>
                     {% endfor %}
+                    {# Off-color insight when in-stock unit doesn't match dealer's top color pattern #}
+                    {# Off-pattern notes removed 2026-05-26 — repeating once per
+                       in-stock unit was noisy; header off-color flag + 12mo
+                       color line below the sold list convey the same info. #}
                   </div>
                   {% endif %}
                   {% if _d and _d.sold_90d %}
@@ -1028,7 +1101,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
                   {% endif %}
                   <div style="margin-top:10px;padding:9px 12px;background:rgba(34,197,94,.06);border-left:3px solid rgba(34,197,94,.5);border-radius:0 6px 6px 0;font-size:12px;color:#bbf7d0;line-height:1.5">
                     <span style="font-weight:700;color:#86efac;font-size:10px;letter-spacing:.4px;text-transform:uppercase;margin-right:6px">Why match</span>
-                    {{ _m.reason }}
+                    {{ _d.why_match if _d and _d.why_match else _m.reason }}
                   </div>
                 </div>
               </div>

@@ -161,10 +161,19 @@ tr:last-child td{border-bottom:none}
 .msg-popup-body{font-size:13px;color:#94a3b8;line-height:1.5}
 .msg-popup-close{position:absolute;top:8px;right:12px;background:none;border:none;color:#475569;font-size:16px;cursor:pointer}
 
+/* MOBILE_SEARCH_2026_05_26: desktop hidden, mobile visible. Pure additive. */
+.mobile-search-row{display:none}
+.mobile-search-input{width:100%;padding:11px 14px;background:#0f172a;border:1px solid #1e293b;border-radius:9px;color:#e2e8f0;font-size:15px;font-family:inherit;outline:none}
+.mobile-search-input:focus{border-color:#3b82f6}
+.mobile-search-input::placeholder{color:#475569}
+table tr.search-hide{display:none !important}
+
 @media(max-width:768px){
   .stats-bar{gap:20px;padding:14px 16px;flex-wrap:wrap}
-  .table-wrap{padding:12px}
-  .filters{padding:12px 16px}
+  .table-wrap{padding:8px;overflow-x:visible}
+  .filters{padding:12px 16px;overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+  .filters::-webkit-scrollbar{display:none}
+  .filters > *{flex-shrink:0;white-space:nowrap;min-height:38px}
   th,td{padding:10px 8px}
   /* Mobile nav fix */
   .header{padding:0 12px !important;height:58px;gap:8px}
@@ -177,10 +186,62 @@ tr:last-child td{border-bottom:none}
   .header-right a{font-size:12px !important;padding:4px 9px !important;white-space:nowrap;flex-shrink:0}
   .header-right .live-dot,.header-right .live-label{display:none}
   #online-reps{display:none !important}
+
+  /* MOBILE_DASHBOARD_2026_05_26: table -> stacked cards on phone. Pure
+     CSS (no markup changes). Desktop unaffected. */
+  table,table tbody,table tr,table td{display:block;width:100%}
+  table thead{display:none}
+  table{border-spacing:0}
+  table tr{background:#0f172a;border:1px solid #1e293b;border-radius:10px;margin:0 0 10px 0;padding:12px;position:relative;box-sizing:border-box;cursor:pointer}
+  table tr.status-bid_sent{border-color:rgba(34,197,94,.4)}
+  table tr.status-bought{border-color:rgba(34,197,94,.7)}
+  table tr.status-passed{opacity:.6}
+  table tr.bad-vin{border-color:rgba(239,68,68,.6);background:#1a0f0f}
+  table tr.needs-verify{border-color:rgba(251,191,36,.5)}
+  table td{padding:6px 0 !important;border:none !important;text-align:left !important;font-size:14px;border-bottom:1px solid #1a2235 !important}
+  table td:last-child{border-bottom:none !important}
+  table td:first-child{padding:0 0 8px 0 !important;border-bottom:1px solid #1e293b !important}
+  /* Collapse: hide contact/message/partner-offers/photos cells */
+  table tr td:nth-child(2),
+  table tr td:nth-child(4),
+  table tr td:nth-child(8),
+  table tr td:nth-child(9){display:none}
+  /* Compact remaining cells */
+  table tr td:nth-child(5),
+  table tr td:nth-child(6),
+  table tr td:nth-child(7){display:inline-block !important;width:auto !important;padding:6px 14px 6px 0 !important;border-bottom:none !important;font-size:13px}
+  table tr::after{content:"›";position:absolute;right:14px;top:14px;color:#475569;font-size:22px;font-weight:700;line-height:1}
+  .bid-num{font-size:17px}
+  .vehicle-vin{font-size:15px}
+  .vehicle-desc{font-size:13px}
+  .msg-preview{max-width:none;-webkit-line-clamp:3;font-size:14px;color:#cbd5e1}
+  /* Hide vA pill, dealer-DB aged buckets, status stats — only TODAY shows */
+  .vauto-pill{display:none !important}
+  .stats-bar .stat-item:has(#stat-today-reviewing),
+  .stats-bar .stat-item:has(#stat-today-bid_sent),
+  .stats-bar .stat-item:has(#stat-today-bought),
+  .stats-bar .stat-item:has(#stat-today-passed),
+  .stats-bar .stat-item:has(#stat-aged-30-60),
+  .stats-bar .stat-item:has(#stat-aged-60-90),
+  .stats-bar .stat-item:has(#stat-aged-90-plus),
+  .stats-bar .stat-item:has(#stat-price-drops),
+  .stats-bar .stat-divider{display:none}
+  .stats-bar{display:flex;justify-content:center;padding:18px 12px}
+  #stat-today{font-size:54px !important}
+  /* Hide STATUS label */
+  .filter-label{display:none !important}
+  /* Show search input on mobile */
+  .mobile-search-row{display:block !important;padding:10px 12px 0;background:#0b0f19}
+  /* Tap target floor */
+  button,select,input[type=text],input[type=tel],input[type=number],input[type=search]{min-height:42px;font-size:15px}
 }
 @media(max-width:480px){
   .logo-text{font-size:13px}
   .header-right a{font-size:11px !important;padding:4px 8px !important}
+  .stats-bar{padding:14px 10px}
+  #stat-today{font-size:48px !important}
+  table tr{padding:10px}
+  .bid-num{font-size:16px}
 }
 </style>
 </head>
@@ -238,6 +299,7 @@ tr:last-child td{border-bottom:none}
     <a href="/reports" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'">Reports</a>
     <a href="/intel/" target="_blank" style="font-size:13px;color:#c084fc;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(168,85,247,.35);border-radius:6px;transition:all .15s;background:rgba(168,85,247,.1)" onmouseover="this.style.background='rgba(168,85,247,.2)';this.style.color='#d8b4fe'" onmouseout="this.style.background='rgba(168,85,247,.1)';this.style.color='#c084fc'" title="Dealer Intelligence — separate login (admin / Sedecrem34)">Dealer Intel ↗</a>
     <a href="/opportunities" style="font-size:13px;color:#c084fc;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(168,85,247,.35);border-radius:6px;transition:all .15s;background:rgba(168,85,247,.1)" onmouseover="this.style.background='rgba(168,85,247,.2)';this.style.color='#d8b4fe'" onmouseout="this.style.background='rgba(168,85,247,.1)';this.style.color='#c084fc'" title="Daily AI scout — top buy opportunities across the dealer network">Opportunities</a>
+    <a href="/porsche-arb" style="font-size:13px;color:#4ade80;text-decoration:none;font-weight:600;padding:5px 12px;border:1px solid rgba(34,197,94,.35);border-radius:6px;transition:all .15s;background:rgba(34,197,94,.08)" onmouseover="this.style.background='rgba(34,197,94,.18)';this.style.color='#86efac'" onmouseout="this.style.background='rgba(34,197,94,.08)';this.style.color='#4ade80'" title="Porsche Arbitrage Scanner — daily cross-market flagged candidates">Porsche Arb</a>
     <a href="/admin/workers" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · Worker monitor (live phase progress, stuck-bid watchdog)">Workers</a>
     <a href="/admin/ai-accuracy" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · AI accuracy vs LSL purchase reality">AI Accuracy</a>
     <a href="/admin/phone-gates" style="font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;transition:all .15s" onmouseover="this.style.color='#e2e8f0';this.style.borderColor='#334155'" onmouseout="this.style.color='#64748b';this.style.borderColor='#1e293b'" title="Admin · SMS phone-gate whitelist (full broker + sourcing-bot)">Phone Gates</a>
@@ -402,6 +464,9 @@ setInterval(() => {
   </div>
 </div>
 
+<div class="mobile-search-row">
+  <input type="search" class="mobile-search-input" id="mobile-search" placeholder="Search bid #, VIN, contact, phone…" autocomplete="off" autocapitalize="none" spellcheck="false">
+</div>
 <div class="filters">
   <span class="filter-label">Status</span>
   <a href="/?status=all&rep={{ rep_filter }}" class="filter-btn {% if status_filter=='all' %}active{% endif %}">All <span class="filter-count" data-status="total">{{ stats.total }}</span></a>
@@ -597,8 +662,8 @@ function renderRow(b, pc, fp, activeWorker) {
   const vehicleDesc = (b.year||b.make||b.mileage) ? `<div class="vehicle-desc">${b.year||''} ${b.make||''} ${b.model||''}${b.mileage ? (b.year||b.make?' · ':'')+b.mileage.toLocaleString()+' mi':''}</div>` : '';
   const vaScanDone = _vautoDone.has(b.id);
   const vaBadge = b.vin ? (vaScanDone
-    ? '<span title="Scan complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>'
-    : '<span title="Scanning…" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px;animation:pulse 2s infinite">vA</span>'
+    ? '<span class="vauto-pill" title="Scan complete" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#4ade80;background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.2);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px">vA</span>'
+    : '<span class="vauto-pill" title="Scanning…" style="display:inline-block;margin-left:6px;font-size:9px;font-weight:700;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.18);border-radius:3px;padding:1px 5px;vertical-align:middle;letter-spacing:.3px;animation:pulse 2s infinite">vA</span>'
   ) : '';
   // RED 'INVALID VIN' badge when vin_invalid_reason is set (ISO 3779 check
   // digit / illegal char / wrong length). Worker eligibility query excludes
@@ -823,7 +888,30 @@ function showNewBidAlert(count) {
 }
 
 // Poll every 3 seconds
-setInterval(poll, 10000);  // 2026-05-14: 3s→10s — reduces tbody flicker + gunicorn load 3.3x; stats still feel live, new-bid chime fires within 10s
+setInterval(poll, 120000);  // 2026-05-26: 10s→120s per operator — calmer cadence; Twilio SMS covers urgency on new intake.
+
+/* MOBILE_SEARCH_2026_05_26: client-side filter for the 200 loaded bids.
+   Matches against any visible text in a row. Empty query = show all.
+   Pure additive — does NOT touch existing tbody row click handler. */
+(function(){
+  var input = document.getElementById('mobile-search');
+  if (!input) return;
+  var t = null;
+  function applyFilter() {
+    var q = (input.value || '').trim().toLowerCase();
+    var rows = document.querySelectorAll('tbody tr[data-id]');
+    rows.forEach(function(r){
+      if (!q) { r.classList.remove('search-hide'); return; }
+      var txt = (r.textContent || '').toLowerCase();
+      if (txt.indexOf(q) >= 0) r.classList.remove('search-hide');
+      else r.classList.add('search-hide');
+    });
+  }
+  input.addEventListener('input', function(){
+    if (t) clearTimeout(t);
+    t = setTimeout(applyFilter, 150);
+  });
+})();
 
 // Poll active reps every 10 seconds
 async function pollActiveReps() {
