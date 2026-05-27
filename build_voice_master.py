@@ -363,14 +363,15 @@ def enrich_ymm(seed: dict, dry_run: bool = False) -> dict:
         mh_all = []
         for vr in vauto_rows:
             mht = vr.get('manheim_transactions') or {}
-            for r in (mht.get('rows') or []):
+            # MH_KEY_FIX_2026_05_27: inner key is 'transactions', not 'rows'
+            for r in (mht.get('transactions') or mht.get('rows') or []):
                 if not isinstance(r, dict): continue
                 price = r.get('sale_price') or r.get('price')
                 if not price or not (1000 <= float(price) <= 1_000_000): continue
                 mh_all.append({
                     'price': int(float(price)),
                     'mileage': r.get('odometer') or r.get('mileage'),
-                    'sale_date': r.get('sale_date') or r.get('date'),
+                    'sale_date': r.get('date_sold') or r.get('sale_date') or r.get('date'),
                     'condition_grade': r.get('condition'),
                     'auction': r.get('auction'), 'region': r.get('region'),
                     'color': r.get('color'),
@@ -389,6 +390,92 @@ def enrich_ymm(seed: dict, dry_run: bool = False) -> dict:
             row['manheim_last_sale_at'] = mh_all[0].get('sale_date')[:10] if mh_all[0].get('sale_date') else None
     except Exception as e:
         print(f'[enrich] vauto-agg err for {year} {make} {model}: {e}', flush=True)
+
+    # ── ACCUTRADE AGGREGATION from accutrade_lookups (90d) ──────────────
+    # ACCUTRADE_AGG_2026_05_27 — voice_ymm_master had accutrade_* columns
+    # but no populator before today. Fills accutrade_pool_count, the 3
+    # avg-dollar fields (guaranteed/trade_in/market), and a closest-mile
+    # local_comps sample.
+    try:
+        with _connect_ew() as c, c.cursor() as cur:
+            cur.execute("""
+                SELECT b.mileage, a.guaranteed_offer, a.trade_in,
+                       a.market_avg, a.local_comps
+                  FROM bids b
+                  JOIN accutrade_lookups a ON a.bid_id = b.id
+                 WHERE b.year = %s
+                   AND UPPER(b.make)   = %s
+                   AND UPPER(b.model) LIKE %s
+                   AND b.created_at > NOW() - INTERVAL '90 days'
+                   AND a.not_available IS NOT TRUE
+            """, (year, make_u, f'%{model_u}%'))
+            accu_rows = [dict(r) for r in cur.fetchall()]
+
+        if accu_rows:
+            row['accutrade_pool_count'] = len(accu_rows)
+
+            def _avg_int(field):
+                vals = [float(r[field]) for r in accu_rows
+                        if r.get(field) is not None
+                        and 1000 <= float(r[field]) <= 1_000_000]
+                return int(sum(vals) / len(vals)) if vals else None
+
+            row['accutrade_avg_guaranteed'] = _avg_int('guaranteed_offer')
+            row['accutrade_avg_trade_in']   = _avg_int('trade_in')
+            row['accutrade_avg_market']     = _avg_int('market_avg')
+
+            # Flatten local_comps across all bids.
+            # Sample shape: [{"make": "KIA", "model": "SORENTO", "year": 2024,
+            #                 "miles": 52175, "price": 21777, "text": "..."}]
+            # Some rows are UI-scrape artifacts (null make/model) — skip those.
+            comps_all = []
+            for ar in accu_rows:
+                lc = ar.get('local_comps')
+                if not lc:
+                    continue
+                if isinstance(lc, str):
+                    try:
+                        lc = _json.loads(lc)
+                    except Exception:
+                        continue
+                rows_in = lc.get('rows') if isinstance(lc, dict) else lc
+                if not isinstance(rows_in, list):
+                    continue
+                for r in rows_in:
+                    if not isinstance(r, dict):
+                        continue
+                    price = r.get('price')
+                    mk = r.get('make')
+                    if not price or not mk:
+                        continue
+                    try:
+                        p_int = int(float(price))
+                    except (TypeError, ValueError):
+                        continue
+                    if not (1000 <= p_int <= 1_000_000):
+                        continue
+                    comps_all.append({
+                        'price': p_int,
+                        'miles': r.get('miles'),
+                        'year':  r.get('year'),
+                        'make':  mk,
+                        'model': r.get('model'),
+                        'text':  (r.get('text') or '')[:200],
+                    })
+            comps_sorted = sorted(
+                comps_all,
+                key=lambda c: abs((c.get('miles') or 0) - miles_target),
+            )
+            row['accutrade_local_comps_top'] = _json.dumps(
+                comps_sorted[:10], default=str
+            )
+        else:
+            row['accutrade_pool_count'] = 0
+            row['accutrade_local_comps_top'] = '[]'
+    except Exception as e:
+        print(f'[enrich] accutrade-agg err for {year} {make} {model}: {e}',
+              flush=True)
+
 
     # PRIOR BIDS enrichment
     try:
