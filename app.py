@@ -5470,6 +5470,40 @@ def _run_assessment(bid_id):
         print(f'velocity lookup error: {_vel_err}', flush=True)
         _velocity = None
 
+    # ── voice_ymm_master pre-built intel pack ───────────────────────
+    # VOICE_YMM_MASTER_2026_05_27. Nightly cache used by Bill voice path;
+    # we read it here as richer Gemini context.
+    _voice_master = None
+    try:
+        _vm_year = bid.get('year')
+        _vm_make = (bid.get('make') or '').strip()
+        _vm_model = (bid.get('model') or '').strip()
+        _vm_miles = bid.get('mileage') or 0
+        if _vm_year and _vm_make and _vm_model:
+            _vm_band = int(round(_vm_miles / 5000.0) * 5000) if _vm_miles else 0
+            _vm_db = get_db()
+            _vm_cur = _vm_db.cursor()
+            _vm_cur.execute("""
+                SELECT * FROM voice_ymm_master
+                WHERE year = %s AND make ILIKE %s AND model ILIKE %s
+                  AND refreshed_at > NOW() - INTERVAL '48 hours'
+                ORDER BY ABS(miles_band - %s) ASC, refreshed_at DESC
+                LIMIT 1
+            """, (_vm_year, _vm_make, _vm_model, _vm_band))
+            _vm_row = _vm_cur.fetchone()
+            _vm_db.close()
+            if _vm_row:
+                _voice_master = dict(_vm_row)
+                print(f'[ASSESS] Bid {bid_id} voice_master HIT '
+                      f"(miles_band={_voice_master.get('miles_band')}, "
+                      f"sonnet={'Y' if _voice_master.get('sonnet_narrative') else 'N'}, "
+                      f"drops={_voice_master.get('partner_with_price_drop') or 0})", flush=True)
+            else:
+                print(f'[ASSESS] Bid {bid_id} voice_master MISS for {_vm_year} {_vm_make} {_vm_model}', flush=True)
+    except Exception as _vm_e:
+        print(f'[ASSESS] voice_master err: {_vm_e}', flush=True)
+        _voice_master = None
+
     # ── Build vehicle context ─────────────────────────────────────────────────
     vparts = [str(bid['year'] or ''), bid['make'] or '', bid['model'] or '', bid['trim'] or '']
     vehicle_str = ' '.join(p for p in vparts if p).strip() or 'Unknown vehicle'
@@ -5971,10 +6005,25 @@ def _run_assessment(bid_id):
                         # Track the highest odometer reading in the OCR text so
                         # we can flag rollback / listing-understatement after
                         # both reports are processed.
+                        # ODO_FILTER_2026_05_27: reject warranty/per-year context.
+                        # AutoCheck "60 months / 60000 miles" (warranty term) and
+                        # Carfax "15,000 miles per year" (industry avg) were both
+                        # being caught as odometer readings. Real odometer entries
+                        # appear without these flanking phrases.
+                        _odo_blacklist_re = re.compile(
+                            r"(?:\d+\s*(?:months?|years?)\s*/|/\s*\d{4,6}\s*miles\b|per\s*year|/\s*yr\b|annually|industry\s+average|miles\s+per\s+year|unlimited\s+miles)",
+                            re.I,
+                        )
                         for mm in re.finditer(r'(\d{1,3}(?:,\d{3})+|\d{4,7})\s*(?:mi|miles)\b', clean_text, re.I):
                             try:
                                 n = int(mm.group(1).replace(',', ''))
-                                if 100 <= n <= 999_999 and n > max_history_odometer:
+                                if not (100 <= n <= 999_999):
+                                    continue
+                                pre = clean_text[max(0, mm.start()-50):mm.start()]
+                                post = clean_text[mm.end():min(len(clean_text), mm.end()+30)]
+                                if _odo_blacklist_re.search(pre) or _odo_blacklist_re.search(post):
+                                    continue
+                                if n > max_history_odometer:
                                     max_history_odometer = n
                             except ValueError:
                                 pass
@@ -6227,6 +6276,7 @@ def _run_assessment(bid_id):
             purchase_history=_purchase_history,
             ml_prediction=_ml_pred_assess,
             thalist_asks=_thalist_asks,
+            voice_master=_voice_master,
         )
     else:
         # Module unavailable — emit a minimal prompt so we still return something
@@ -19640,3 +19690,138 @@ def api_bid_book_lsl(bid_id):
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=9000)
+
+# ─── AI_CRITIQUE_2026_05_27 — Bill ↔ assessor LLM bridge ───────────────
+# Lets Bill (via the ai_critique MCP tool) ask the same Gemini that wrote
+# bids.ai_assessment a follow-up question. We re-load the bid's market
+# context, append the prior verdict + Bill's question, and synthesize a
+# short answer Bill can speak back to the operator.
+@app.route('/api/voice/ai_critique', methods=['POST'])
+def api_voice_ai_critique():
+    # Localhost-only — MCP server is the sole caller.
+    from flask import request, jsonify, abort
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr or '')
+    client_ip = client_ip.split(',')[0].strip()
+    if client_ip not in ('127.0.0.1', '::1', 'localhost'):
+        abort(403)
+
+    body = request.get_json(silent=True) or {}
+    try:
+        bid_id = int(body.get('bid_id') or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "bid_id must be int"}), 400
+    question = (body.get('question') or '').strip()
+    if not bid_id or not question:
+        return jsonify({"error": "bid_id and question required"}), 400
+    if len(question) > 600:
+        question = question[:600]
+
+    # Load bid + assessment + market signals.
+    import psycopg2.extras as _pgex
+    db = get_db()
+    try:
+        cur = db.cursor(cursor_factory=_pgex.RealDictCursor)
+        cur.execute("""
+            SELECT id, vin, year, make, model, trim, mileage, asking_price,
+                   status, ai_assessment, ai_price, ai_assessed_at
+              FROM bids WHERE id = %s
+        """, (bid_id,))
+        bid = cur.fetchone()
+        if not bid:
+            return jsonify({"error": f"bid {bid_id} not found"}), 404
+        if not bid.get('ai_assessment'):
+            return jsonify({"error": f"bid {bid_id} has no AI assessment yet"}), 404
+
+        cur.execute("""
+            SELECT mmr, rbook, kbb, black_book, jd_power,
+                   appraisal_url, looked_up_at,
+                   rbook_completed_at, manheim_completed_at,
+                   (rbook_competitive_set IS NOT NULL) AS has_rbook,
+                   (manheim_transactions IS NOT NULL) AS has_manheim
+              FROM vauto_lookups WHERE bid_id = %s LIMIT 1
+        """, (bid_id,))
+        vauto = cur.fetchone() or {}
+
+        cur.execute("""
+            SELECT guaranteed_offer, trade_in, trade_market, retail,
+                   market_avg, looked_up_at, not_available
+              FROM accutrade_lookups WHERE bid_id = %s LIMIT 1
+        """, (bid_id,))
+        accu = cur.fetchone() or {}
+
+        cur.execute("""
+            SELECT total_msrp, base_price, looked_up_at, not_available
+              FROM ipacket_lookups WHERE bid_id = %s LIMIT 1
+        """, (bid_id,))
+        ipkt = cur.fetchone() or {}
+    finally:
+        db.close()
+
+    def _f(v):
+        if v is None: return "—"
+        if hasattr(v, 'isoformat'): return v.isoformat()
+        if isinstance(v, float): return f"{v:,.2f}"
+        return str(v)
+
+    vehicle = " ".join(str(x) for x in (
+        bid.get('year'), bid.get('make'), bid.get('model'), bid.get('trim')
+    ) if x).strip()
+
+    # Build compact context block — keep tokens lean for fast response.
+    context = (
+        f"BID #{bid_id}: {vehicle} | VIN {bid.get('vin')}\n"
+        f"  Mileage: {_f(bid.get('mileage'))} | Asking: {_f(bid.get('asking_price'))}\n"
+        f"  Status: {bid.get('status') or '—'}\n\n"
+        f"PRIOR AI ASSESSMENT (you wrote this on {_f(bid.get('ai_assessed_at'))}):\n"
+        f"  Target buy: {_f(bid.get('ai_price'))}\n"
+        f"  Verdict:\n{bid['ai_assessment']}\n\n"
+        f"MARKET INPUTS YOU HAD:\n"
+        f"  vAuto: mmr={_f(vauto.get('mmr'))}, rbook={_f(vauto.get('rbook'))}, "
+        f"kbb={_f(vauto.get('kbb'))}, black_book={_f(vauto.get('black_book'))}, "
+        f"jd_power={_f(vauto.get('jd_power'))}, "
+        f"has_rbook_set={vauto.get('has_rbook')}, has_manheim={vauto.get('has_manheim')}\n"
+        f"  AccuTrade: guaranteed={_f(accu.get('guaranteed_offer'))}, "
+        f"trade_in={_f(accu.get('trade_in'))}, market_avg={_f(accu.get('market_avg'))}, "
+        f"retail={_f(accu.get('retail'))}\n"
+        f"  iPacket: msrp={_f(ipkt.get('total_msrp'))}, base={_f(ipkt.get('base_price'))}\n"
+    )
+
+    prompt = (
+        "You are the EW vehicle-assessment AI. You previously wrote the "
+        "verdict shown below. A trusted colleague (Bill, the EW voice "
+        "assistant) is now asking you a follow-up question about it.\n\n"
+        "Answer in 2-4 short sentences. Be concrete and reference the "
+        "specific numbers when relevant. If Bill is pointing out something "
+        "you missed, acknowledge it directly and say how you'd revise. If "
+        "you stand by your call, say why in one line. No filler.\n\n"
+        f"{context}\n\n"
+        f"BILL'S QUESTION: {question}\n\n"
+        "YOUR REPLY (2-4 sentences, spoken-English friendly):"
+    )
+
+    # Call Gemini via the existing client helper.
+    try:
+        client = _gemini()
+        if not client:
+            return jsonify({"error": "Gemini client unavailable"}), 503
+        resp = client.models.generate_content(
+            model='gemini-2.5-pro',
+            contents=prompt,
+        )
+        answer = (getattr(resp, 'text', None) or '').strip()
+    except Exception as e:
+        print(f'[ai_critique] gemini err bid={bid_id}: {e}', flush=True)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+    if not answer:
+        return jsonify({"error": "Gemini returned empty"}), 502
+
+    return jsonify({
+        "bid_id": bid_id,
+        "vehicle": vehicle,
+        "question": question,
+        "answer": answer,
+        "prior_ai_price": float(bid['ai_price']) if bid.get('ai_price') else None,
+        "model_used": "gemini-2.5-pro",
+    })
+
