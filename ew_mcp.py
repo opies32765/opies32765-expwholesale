@@ -5118,3 +5118,360 @@ async def partner_detail(
 
 
 # ─── end PARTNER_ACTIVITY_2026_05_26 tools ──────────────────────────────
+
+# ─── BILL_INTEL_2026_05_27 — Phase A: deeper EW intelligence ────────────
+# 4 read-only tools so Bill can:
+#   - see today's inventory holes + surpluses
+#   - read the LLM's existing assessment on a bid (so he can critique it)
+#   - ask the per-make ML model for a second-opinion price
+#   - surface today's top dealer-watch buy opportunities
+
+@mcp.tool()
+async def inventory_gaps_now(
+    caller_name: str,
+    top_n_dealers: int = 10,
+) -> dict:
+    """OWNER. Today's inventory holes + surpluses across the portal dealer
+    network. Same logic as the /inventory-gaps page and the 2:30 AM
+    Telegram digest. A "hole" = baseline sold 3+ in 90d, current stock <=1.
+    A "surplus" = current stock 4+ AND (no recent sales OR stock >= 2x sold).
+
+    USE when the operator asks: "what holes do we have", "where are the
+    surpluses", "gaps", "holes and surplus", "what is missing in inventory",
+    "what is piling up".
+
+    Args:
+      top_n_dealers: cap on how many dealer cards to return (default 10).
+
+    Returns:
+      {as_of, active_dealers, total_holes, total_surpluses,
+       dealers: [{name, holes:[{ymm, baseline_sold_90d, current_count,
+                                top_sold_configs, current_configs}],
+                  surpluses:[ ... same shape ... ]}]}
+    """
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+
+    import sys as _sys, os as _os, datetime as _dt
+    if "/opt/expwholesale" not in _sys.path:
+        _sys.path.insert(0, "/opt/expwholesale")
+    import psycopg2
+    from inventory_gap_lib import (
+        fetch_portal_dealers, fetch_current_inventory, fetch_baseline,
+        analyze_dealer, format_ymm, format_config,
+    )
+
+    db_url = _os.environ.get(
+        "DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale",
+    )
+    try:
+        with psycopg2.connect(db_url, connect_timeout=5) as c:
+            with c.cursor() as cur:
+                dealers = fetch_portal_dealers(cur)
+                dealer_ids = [d[0] for d in dealers]
+                current = fetch_current_inventory(cur, dealer_ids)
+                baseline = fetch_baseline(cur, dealer_ids)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    dealer_cards = []
+    total_holes = total_surp = active_count = 0
+    for d_id, d_name in dealers:
+        holes, surpluses = analyze_dealer(
+            current.get(d_id, {}), baseline.get(d_id, {})
+        )
+        if not (holes or surpluses):
+            continue
+        active_count += 1
+        total_holes += len(holes)
+        total_surp += len(surpluses)
+        dealer_cards.append({
+            "name": d_name,
+            "holes": [{
+                "ymm": format_ymm(k),
+                "baseline_sold_90d": base,
+                "current_count": cur_n,
+                "top_sold_configs": [[format_config(c), n] for c, n in scfg],
+                "current_configs": [[format_config(c), n] for c, n in ccfg],
+            } for (k, base, cur_n, scfg, ccfg) in holes],
+            "surpluses": [{
+                "ymm": format_ymm(k),
+                "baseline_sold_90d": base,
+                "current_count": cur_n,
+                "top_sold_configs": [[format_config(c), n] for c, n in scfg],
+                "current_configs": [[format_config(c), n] for c, n in ccfg],
+            } for (k, base, cur_n, scfg, ccfg) in surpluses],
+        })
+
+    # Sort: dealers with the most action first
+    dealer_cards.sort(key=lambda d: -(len(d["holes"]) + len(d["surpluses"])))
+    dealer_cards = dealer_cards[:max(1, int(top_n_dealers))]
+
+    return {
+        "as_of": _dt.date.today().isoformat(),
+        "active_dealers": active_count,
+        "total_holes": total_holes,
+        "total_surpluses": total_surp,
+        "dealers": dealer_cards,
+    }
+
+
+@mcp.tool()
+async def ai_assessment_for_bid(
+    caller_name: str,
+    bid_id: int,
+) -> dict:
+    """OWNER. Return the existing LLM assessment on a specific bid plus the
+    raw market signals (vAuto/MMR/rBook, AccuTrade trade-in & retail,
+    iPacket sticker MSRP) that the LLM had when it decided. Useful for
+    second-opinion work — Bill can critique the AI's call against the
+    inputs.
+
+    USE when asked: "what did the AI say about bid X", "AI's take on
+    bid X", "why did the AI recommend that price", "second-opinion bid X",
+    "do you agree with the AI on bid X".
+
+    Returns:
+      {bid_id, vin, vehicle (year make model trim), mileage, asking_price,
+       status, ai_recommendation_text, ai_price, ai_assessed_at,
+       market_inputs: {
+         vauto: {appraisal_url, looked_up_at, has_rbook, has_manheim,
+                 rbook_completed_at, manheim_completed_at},
+         accutrade: {guaranteed_offer, trade_in, trade_market, retail,
+                     market_avg, looked_up_at, not_available, unavailable_reason},
+         ipacket: {total_msrp, base_price, looked_up_at, not_available,
+                   unavailable_reason}}}
+    """
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+
+    import os as _os
+    import psycopg2, psycopg2.extras
+    db_url = _os.environ.get(
+        "DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale",
+    )
+
+    def _ser(v):
+        if v is None: return None
+        if hasattr(v, "isoformat"): return v.isoformat()
+        if isinstance(v, (bool, int, str)): return v
+        if isinstance(v, float): return float(v)
+        return str(v)[:500]
+
+    try:
+        with psycopg2.connect(db_url, connect_timeout=5) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT id, vin, year, make, model, trim, mileage,
+                           asking_price, status, ai_assessment, ai_price,
+                           ai_assessed_at
+                      FROM bids WHERE id = %s
+                """, (bid_id,))
+                bid = cur.fetchone()
+                if not bid:
+                    return {"error": f"bid {bid_id} not found"}
+
+                cur.execute("""
+                    SELECT appraisal_url, looked_up_at,
+                           rbook_completed_at, manheim_completed_at,
+                           (rbook_competitive_set IS NOT NULL) AS has_rbook,
+                           (manheim_transactions IS NOT NULL) AS has_manheim
+                      FROM vauto_lookups WHERE bid_id = %s LIMIT 1
+                """, (bid_id,))
+                vauto = cur.fetchone()
+
+                cur.execute("""
+                    SELECT guaranteed_offer, trade_in, trade_market, retail,
+                           market_avg, looked_up_at, not_available,
+                           unavailable_reason
+                      FROM accutrade_lookups WHERE bid_id = %s LIMIT 1
+                """, (bid_id,))
+                accu = cur.fetchone()
+
+                cur.execute("""
+                    SELECT total_msrp, base_price, looked_up_at,
+                           not_available, unavailable_reason
+                      FROM ipacket_lookups WHERE bid_id = %s LIMIT 1
+                """, (bid_id,))
+                ipkt = cur.fetchone()
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    vehicle = " ".join(str(x) for x in (
+        bid.get("year"), bid.get("make"), bid.get("model"), bid.get("trim")
+    ) if x).strip()
+
+    return {
+        "bid_id": bid["id"],
+        "vin": bid.get("vin"),
+        "vehicle": vehicle,
+        "mileage": bid.get("mileage"),
+        "asking_price": _ser(bid.get("asking_price")),
+        "status": bid.get("status"),
+        "ai_recommendation_text": bid.get("ai_assessment"),
+        "ai_price": _ser(bid.get("ai_price")),
+        "ai_assessed_at": _ser(bid.get("ai_assessed_at")),
+        "market_inputs": {
+            "vauto": {k: _ser(vauto.get(k)) for k in vauto.keys()} if vauto else None,
+            "accutrade": {k: _ser(accu.get(k)) for k in accu.keys()} if accu else None,
+            "ipacket": {k: _ser(ipkt.get(k)) for k in ipkt.keys()} if ipkt else None,
+        },
+    }
+
+
+@mcp.tool()
+async def ml_predict_price(
+    make: str,
+    year: int,
+    mileage: int,
+    est_wholesale_price: float,
+    model: Optional[str] = None,
+    market_asking_price: Optional[float] = None,
+    original_msrp: Optional[float] = None,
+) -> dict:
+    """Open tool. Per-make ML model prediction (xgboost trained nightly
+    from LSL purchase history). Second-opinion price signal next to
+    MMR/rBook/AI-assessment.
+
+    USE when asked: "what does the ML model say", "ML predict",
+    "what would the model price this at", "ML take on this car",
+    "second opinion price".
+
+    Args:
+      make: required, e.g. "BMW", "TOYOTA"
+      year, mileage: required
+      est_wholesale_price: required — best wholesale signal you have
+            (MMR, rBook median, etc.). Anchors the model.
+      model: optional model name (improves accuracy if present)
+      market_asking_price: optional rBook avg/median
+      original_msrp: optional original MSRP
+
+    Returns: {prediction (int $), source ("xgboost" or "baseline"),
+              mae_dollars, mape_pct, within_10pct, n_train, make_name,
+              baseline_prediction}
+      OR {error} if make has no model and no baseline.
+    """
+    import sys as _sys
+    if "/opt/expwholesale" not in _sys.path:
+        _sys.path.insert(0, "/opt/expwholesale")
+    try:
+        from ml_predict import predict_for_bid as _predict
+    except Exception as e:
+        return {"error": f"ml_predict import failed: {e}"}
+    try:
+        result = _predict({
+            "make_name": make,
+            "model_name": model,
+            "year": year,
+            "odometer": mileage,
+            "est_wholesale_price": est_wholesale_price,
+            "market_asking_price": market_asking_price,
+            "original_msrp": original_msrp,
+            "sale_type": "Wholesale",
+            "vehicle_sale_type": "Used",
+        })
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+    if result is None:
+        return {"error": f"no ML model for make {make!r} or missing inputs"}
+    out = {}
+    for k, v in result.items():
+        if v is None or isinstance(v, (bool, str)):
+            out[k] = v
+        elif isinstance(v, (int, float)):
+            out[k] = float(v) if isinstance(v, float) else int(v)
+        else:
+            out[k] = str(v)[:200]
+    return out
+
+
+@mcp.tool()
+async def dealer_opportunities_now(
+    caller_name: str,
+    top_n: int = 10,
+    min_score: Optional[float] = None,
+) -> dict:
+    """OWNER. Today's top dealer-watch buy opportunities — vehicles in the
+    portal dealer network priced under MMR / under retail. From the 09:30
+    EDT daily AI scout that scores ~1,700 dealer-network vehicles.
+
+    USE when asked: "best opportunities today", "what should we buy",
+    "top dealer picks", "dealer watch", "opportunities", "scout picks".
+
+    Args:
+      top_n: max results (default 10, cap 50)
+      min_score: optional minimum composite score filter
+
+    Returns:
+      {as_of, total_today,
+       opportunities: [{year, make, model, trim, mileage, asking_price,
+                        mmr_wholesale_avg, dollars_under_mmr, pct_under_mmr,
+                        score, signals, gemini_pitch, detail_url,
+                        dealer_name, dealer_state}]}
+    """
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+
+    import os as _os
+    import psycopg2, psycopg2.extras
+    db_url = _os.environ.get(
+        "DATABASE_URL",
+        "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale",
+    )
+    n = max(1, min(int(top_n or 10), 50))
+
+    def _ser(v):
+        if v is None: return None
+        if hasattr(v, "isoformat"): return v.isoformat()
+        if isinstance(v, (bool, int, str, list, dict)): return v
+        if isinstance(v, float): return float(v)
+        return str(v)[:500]
+
+    try:
+        with psycopg2.connect(db_url, connect_timeout=5) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                params = []
+                extra = ""
+                if min_score is not None:
+                    extra = "AND o.score >= %s"
+                    params.append(float(min_score))
+                sql = f"""
+                    SELECT o.year, o.make, o.model, o.trim, o.mileage,
+                           o.asking_price, o.mmr_wholesale_avg,
+                           o.dollars_under_mmr, o.pct_under_mmr,
+                           o.score, o.signals, o.gemini_pitch,
+                           o.detail_url, o.snapshot_date,
+                           d.name AS dealer_name, d.state AS dealer_state
+                      FROM dealer_opportunities o
+                      JOIN dealers d ON d.id = o.dealer_id
+                     WHERE o.snapshot_date = (
+                            SELECT MAX(snapshot_date) FROM dealer_opportunities)
+                       {extra}
+                     ORDER BY o.score DESC NULLS LAST
+                     LIMIT %s
+                """
+                cur.execute(sql, (*params, n))
+                rows = [dict(r) for r in cur.fetchall()]
+
+                cur.execute("""
+                    SELECT MAX(snapshot_date) AS as_of,
+                           (SELECT COUNT(*) FROM dealer_opportunities
+                             WHERE snapshot_date = (
+                               SELECT MAX(snapshot_date)
+                                 FROM dealer_opportunities)) AS total_today
+                      FROM dealer_opportunities
+                """)
+                meta = cur.fetchone()
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    return {
+        "as_of": _ser(meta.get("as_of")) if meta else None,
+        "total_today": int(meta.get("total_today") or 0) if meta else 0,
+        "opportunities": [{k: _ser(v) for k, v in r.items()} for r in rows],
+    }
+
+# ─── end BILL_INTEL_2026_05_27 ───────────────────────────────────────────
+
