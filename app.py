@@ -665,7 +665,58 @@ def healthz():
     except Exception as e:
         return {'ok': False, 'error': str(e)[:200]}, 503
 
-_PUBLIC_SUFFIXES = ('/rep-message', '/field-update', '/messages', '/messages-poll')
+
+# --- /inventory-gaps public live page (added 2026-05-27) ---------------------
+# Live-computed visualization of the same data inventory_gap_scan.py sends to
+# Telegram nightly. Reuses inventory_gap_lib so logic stays single-source.
+# Public (no auth) -- _PUBLIC_SUFFIXES carries it past the login gate.
+@app.route('/inventory-gaps')
+def inventory_gaps_page():
+    import time as _t
+    from flask import render_template
+    from inventory_gap_lib import (
+        fetch_portal_dealers, fetch_current_inventory, fetch_baseline,
+        analyze_dealer, format_ymm,
+    )
+    t0 = _t.time()
+    conn = psycopg2.connect(DB_URL)
+    try:
+        cur = conn.cursor()
+        dealers = fetch_portal_dealers(cur)
+        dealer_ids = [d[0] for d in dealers]
+        current = fetch_current_inventory(cur, dealer_ids)
+        baseline = fetch_baseline(cur, dealer_ids)
+    finally:
+        conn.close()
+
+    dealer_cards = []
+    total_holes = total_surp = active_count = 0
+    for d_id, d_name in dealers:
+        holes, surplus = analyze_dealer(current.get(d_id, {}), baseline.get(d_id, {}))
+        if holes or surplus:
+            active_count += 1
+        total_holes += len(holes)
+        total_surp += len(surplus)
+        dealer_cards.append({
+            'name': d_name,
+            'holes': holes,
+            'surplus': surplus,
+        })
+    dealer_cards.sort(key=lambda d: (0 if (d['holes'] or d['surplus']) else 1, d['name'].lower()))
+
+    duration_ms = int((_t.time() - t0) * 1000)
+    return render_template(
+        'inventory_gaps.html',
+        dealers=dealers,
+        dealer_cards=dealer_cards,
+        total_holes=total_holes,
+        total_surp=total_surp,
+        active_count=active_count,
+        duration_ms=duration_ms,
+        format_ymm=format_ymm,
+    )
+
+_PUBLIC_SUFFIXES = ('/rep-message', '/field-update', '/messages', '/messages-poll', '/inventory-gaps')
 
 
 @app.before_request

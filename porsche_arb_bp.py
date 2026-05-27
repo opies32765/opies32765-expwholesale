@@ -272,6 +272,8 @@ def _fetch_recent_runs(cur, limit: int = 5) -> list[dict]:
 
 @bp.route("/porsche-arb")
 def porsche_arb_page():
+    # NEW 2026-05-27: model filter via ?model=Cayenne etc. Empty = all.
+    _q_model = (request.args.get("model") or "").strip().lower()
     """Render the operator dashboard."""
     with _conn() as c, c.cursor() as cur:
         today, snapshot_date = _fetch_today_candidates(cur)
@@ -294,9 +296,14 @@ def porsche_arb_page():
     v3_scored = sum(1 for r in today if r.get("arb_score_v3") is not None)
     detail_scraped = sum(1 for r in today if (r.get('detail_scrape') or {}).get('confidence') is not None)
 
-    # Unique models + regions for filter chips
-    models = sorted({(r.get("subject_model") or "").strip()
-                     for r in today if r.get("subject_model")})
+    # Unique models — query the DB for ALL models in latest snapshot (not just the 100 fetched)
+    with _conn() as _c2, _c2.cursor() as _cur2:
+        _cur2.execute("""SELECT DISTINCT subject_model
+                            FROM porsche_arb_candidates
+                           WHERE flagged = TRUE
+                             AND snapshot_date = (SELECT MAX(snapshot_date) FROM porsche_arb_candidates WHERE flagged = TRUE)
+                           ORDER BY subject_model""")
+        models = [r["subject_model"] for r in _cur2.fetchall() if r.get("subject_model")]
     regions = sorted({(r.get("home_region") or "").strip()
                       for r in today if r.get("home_region")})
 

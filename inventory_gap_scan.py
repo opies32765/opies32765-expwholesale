@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""inventory_gap_scan.py — nightly EW inventory holes vs surplus per portal dealer.
+"""inventory_gap_scan.py — nightly EW inventory holes vs surplus Telegram digest.
 
-Compares each portal dealer's CURRENT active inventory against a 90-day
-SALES VELOCITY baseline (distinct VINs sold in the last 90 days, per YMM
-bucket) and sends a single Telegram digest. Cron: 02:30 EDT, after
-scan_all_dealers.py.
+Live analysis logic now lives in inventory_gap_lib.py (shared with the
+public /inventory-gaps web page). This script just wires the lib to
+Telegram + cron logging.
 
 Usage:
   python3 inventory_gap_scan.py            # live (Telegram)
@@ -13,11 +12,16 @@ Usage:
 import argparse
 import logging
 import os
-import sys
-from collections import defaultdict
 
 import psycopg2
-import psycopg2.extras
+
+from inventory_gap_lib import (
+    fetch_portal_dealers,
+    fetch_current_inventory,
+    fetch_baseline,
+    analyze_dealer,
+    format_ymm,
+)
 
 LOG_FILE = "/var/log/ew-inventory-gap.log"
 
@@ -37,104 +41,6 @@ logging.basicConfig(
     format="%(asctime)s [gap-scan] %(message)s",
 )
 log = logging.getLogger("gap_scan")
-
-
-def year_bucket(yr):
-    if yr is None:
-        return "older"
-    try:
-        yr = int(yr)
-    except (TypeError, ValueError):
-        return "older"
-    if yr >= 2021:
-        return str(yr)
-    return "older"
-
-
-def fetch_portal_dealers(cur):
-    cur.execute(
-        "SELECT id, name FROM dealers "
-        "WHERE portal_slug IS NOT NULL AND active = TRUE "
-        "ORDER BY name"
-    )
-    return cur.fetchall()
-
-
-def fetch_current_inventory(cur, dealer_ids):
-    """Return dict[dealer_id] -> dict[(yb, make, model)] = current count."""
-    cur.execute(
-        """
-        SELECT dealer_id, year, make, model
-          FROM dealer_inventory
-         WHERE status = 'active'
-           AND dealer_id = ANY(%s)
-           AND make IS NOT NULL
-           AND model IS NOT NULL
-        """,
-        (dealer_ids,),
-    )
-    out = defaultdict(lambda: defaultdict(int))
-    for d_id, yr, mk, md in cur.fetchall():
-        key = (year_bucket(yr), (mk or "").strip().upper(), (md or "").strip().upper())
-        if not key[1] or not key[2]:
-            continue
-        out[d_id][key] += 1
-    return out
-
-
-def fetch_baseline(cur, dealer_ids):
-    """90-day sales velocity baseline: distinct VINs SOLD per (dealer, yb, make, model)
-    in the last 90 days. Value = raw sold count (magnitude of "how many they move")."""
-    cur.execute(
-        """
-        SELECT di.dealer_id,
-               di.year,
-               di.make,
-               di.model,
-               COUNT(DISTINCT di.vin) AS sold_count
-          FROM dealer_inventory di
-         WHERE di.dealer_id = ANY(%s)
-           AND di.make IS NOT NULL
-           AND di.model IS NOT NULL
-           AND di.vin IS NOT NULL
-           AND di.sold_at IS NOT NULL
-           AND di.sold_at >= NOW() - INTERVAL '90 days'
-         GROUP BY di.dealer_id, di.year, di.make, di.model
-        """,
-        (dealer_ids,),
-    )
-    out = defaultdict(lambda: defaultdict(int))
-    for d_id, yr, mk, md, sold_count in cur.fetchall():
-        key = (year_bucket(yr), (mk or "").strip().upper(), (md or "").strip().upper())
-        if not key[1] or not key[2]:
-            continue
-        out[d_id][key] += int(sold_count or 0)
-    return out
-
-
-def format_ymm(key):
-    yb, mk, md = key
-    return f"{yb} {mk} {md}".strip()
-
-
-def analyze_dealer(current, baseline):
-    """Return (holes, surpluses) lists of (key, baseline_sold, current_count).
-
-    HOLE:    baseline_sold >= 3 AND current <= 1  (moved >=3 in 90d, holding <=1 now)
-    SURPLUS: current >= 4 AND (baseline_sold == 0 OR current >= baseline_sold * 2)
-    """
-    all_keys = set(current.keys()) | set(baseline.keys())
-    holes, surplus = [], []
-    for k in all_keys:
-        cur_n = current.get(k, 0)
-        base = baseline.get(k, 0)
-        if base >= 3 and cur_n <= 1:
-            holes.append((k, base, cur_n))
-        if cur_n >= 4 and (base == 0 or cur_n >= base * 2):
-            surplus.append((k, base, cur_n))
-    holes.sort(key=lambda x: -x[1])
-    surplus.sort(key=lambda x: -(x[2] - x[1]))
-    return holes[:5], surplus[:5]
 
 
 def build_message(dealers, results):
