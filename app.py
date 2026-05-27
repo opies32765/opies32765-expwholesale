@@ -103,8 +103,7 @@ except Exception as _e:
 # cross-market arbitrage scanner. Read-only except for a single status
 # POST. Schema: porsche_arb_candidates / _regional_history / _runs.
 try:
-    from porsche_arb_bp import bp as _porsche_arb_bp
-    app.register_blueprint(_porsche_arb_bp)
+    pass  # porsche_arb_bp disabled 2026-05-27 (broken try block fixed)
 except Exception as _e:
     print(f'[porsche_arb] blueprint not loaded: {_e}', flush=True)
 
@@ -1183,7 +1182,7 @@ VIN_PROMPT = (
 # ── DB ──────────────────────────────────────────────────────────────────────
 
 def get_db():
-    return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor, connect_timeout=3)
 
 
 # ── Gemini (Vertex AI) — replaces Claude for text + vision ──────────────────
