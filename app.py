@@ -19816,6 +19816,25 @@ def api_voice_ai_critique():
     if not answer:
         return jsonify({"error": "Gemini returned empty"}), 502
 
+    # AI_CRITIQUE_LOG_2026_05_27 — human-readable conversation log so the
+    # operator can `tail -f /var/log/ew_ai_critique.log` and watch the
+    # Bill <-> assessor exchange in real time.
+    try:
+        import datetime as _dt_l
+        _ts = _dt_l.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        _q_disp = question.replace('\n', ' ').strip()
+        _a_disp = answer.replace('\n', ' ').strip()
+        _line = (
+            f"\n[{_ts}] bid={bid_id}  {vehicle}\n"
+            f"  Q (Bill): {_q_disp}\n"
+            f"  A (Assessor): {_a_disp}\n"
+            f"  (prior AI price: ${bid.get('ai_price')})\n"
+        )
+        with open('/var/log/ew_ai_critique.log', 'a') as _f:
+            _f.write(_line)
+    except Exception as _log_e:
+        print(f'[ai_critique] log write err: {_log_e}', flush=True)
+
     return jsonify({
         "bid_id": bid_id,
         "vehicle": vehicle,
