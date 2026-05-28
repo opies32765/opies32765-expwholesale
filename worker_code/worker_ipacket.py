@@ -641,54 +641,6 @@ def lookup(page, ctx, vin, t, bid_id=None):
     sticker_page = page
     time.sleep(8)  # bumped 2s -> 8s 2026-05-08 — bid 1060 captured spinner; give canvas more time to actually render the sticker PDF after JS detector says ready
 
-    # IPACKET_VIEWER_GUARD_2026_05_27 — when the readiness detector fires via
-    # the relaxed-iframe or watermark path, the viewer iframe may not exist
-    # yet. The downstream capture block falls through to screenshotting the
-    # current page (dashboard chrome, no sticker) when viewer_src is None.
-    # Bid 2154 hit this exact path. Guard: confirm we have either a real
-    # viewer iframe OR MSRP markers in the body before proceeding. Otherwise
-    # extend wait once, then fail cleanly with a precise reason.
-    def _check_viewer_or_markers():
-        try:
-            vsrc = sticker_page.evaluate(
-                "() => { const f = document.querySelector('iframe.ipacket-viewer, iframe[src*=\"document-viewer.autoipacket.com\"]'); return f ? f.src : null; }"
-            )
-        except Exception:
-            vsrc = None
-        try:
-            body_txt = sticker_page.evaluate("() => document.body ? (document.body.innerText || '').toUpperCase() : ''") or ''
-        except Exception:
-            body_txt = ''
-        markers = [m for m in ("MSRP", "TOTAL PRICE", "VEHICLE PRICE",
-                               "AS DELIVERED PRICE", "TOTAL VEHICLE PRICE",
-                               "SUGGESTED RETAIL")
-                   if m in body_txt]
-        return vsrc, markers
-
-    _vsrc_pre, _markers_pre = _check_viewer_or_markers()
-    if not _vsrc_pre and not _markers_pre:
-        # Detector fired ready but page is empty. Extend wait once.
-        print(f"[+{time.time()-t:5.1f}s] [ipacket] ready signal but no viewer iframe + no MSRP text — extending wait 12s")
-        time.sleep(12)
-        _vsrc_pre, _markers_pre = _check_viewer_or_markers()
-        if not _vsrc_pre and not _markers_pre:
-            # Still nothing real. Save debug screenshot, return not_available
-            # rather than persisting a misleading capture of the dashboard.
-            print(f"[+{time.time()-t:5.1f}s] [ipacket] FALSE-READY confirmed — no viewer, no markers after extra wait")
-            _ts_fail = int(time.time())
-            _dbg = REPORTS_DIR / f"debug_falseready_{vin}_{_ts_fail}.png"
-            try:
-                sticker_page.screenshot(path=str(_dbg), full_page=True)
-            except Exception:
-                pass
-            return {
-                "not_available": True,
-                "reason": "false_ready_no_viewer_no_markers",
-                "screenshot": str(_dbg) if _dbg.exists() else None,
-                "sticker_url": sticker_page.url,
-            }
-        print(f"[+{time.time()-t:5.1f}s] [ipacket] markers appeared after extra wait: {_markers_pre}")
-
     ts = int(time.time())
     screenshot = REPORTS_DIR / f"ipacket_{vin}_{ts}.png"
     sticker_url = sticker_page.url

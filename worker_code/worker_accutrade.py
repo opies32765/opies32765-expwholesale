@@ -174,89 +174,19 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
         # Material-Icons glyph names before grabbing textContent — otherwise
         # "GT3 COUPE 4.0L 6 CYL" came through as
         # "GT3 COUPE 4.0L 6 CYLkeyboard_arrow_right" (chevron font ligature).
-        # ACCU_TRIM_BUTTON_FALLBACK_2026_05_28: Bentley/exotic modal renders
-        # trim choices as plain <button>/<div> elements with chevrons, NOT
-        # the Angular custom element 'new-appraisal-trim-choice'. Bid 2182
-        # (2024 Bentley Continental GTC) hit empty choices[] -> trim picker
-        # never fired -> worker bailed mileage_did_not_commit_v2. Fallback:
-        # find clickable elements inside the appraisal-new modal whose text
-        # matches a body-style + engine-spec pattern (e.g. "A CONVERTIBLE
-        # 4.0L V8 TURBO"). Tag each row with _selector so the click handler
-        # below knows whether to click the Angular element or the fallback.
         _scrape_choices_js = r"""() => {
-            const out = [];
-            const stripGlyphs = (el) => {
-                const clone = el.cloneNode(true);
-                clone.querySelectorAll('mat-icon, .mat-icon, .material-icons, svg, i.material-icons-outlined').forEach(e => e.remove());
-                let txt = (clone.textContent || '').trim().replace(/\s+/g, ' ');
-                txt = txt.replace(/\s*(?:keyboard_arrow_right|keyboard_arrow_left|chevron_right|chevron_left|arrow_forward|arrow_back|arrow_drop_down|expand_more|more_vert)\s*$/i, '').trim();
-                return txt;
-            };
-
-            // ── Path 1: Angular custom element (Cox v1 layout) ──
             let nodes = document.querySelectorAll('new-appraisal-trim-choice');
             if (!nodes.length) nodes = document.querySelectorAll('.new-appraisal-trim-choice');
+            const out = [];
             nodes.forEach((c, i) => {
                 if (!c.offsetParent) return;
-                const txt = stripGlyphs(c);
-                if (txt) out.push({index: out.length, dom_index: i, text: txt, _selector: 'angular'});
-            });
-            if (out.length) return out;
-
-            // ── Path 1.5: Cox v2 layout used for Bentley/exotics (BENTLEY_TRIM_2026_05_28) ──
-            // <article class="select-container single-trim"> wraps each trim row.
-            // Bid 2182 (2024 Bentley Continental GTC) hit this; v1 selector
-            // returned zero matches.
-            let v2 = document.querySelectorAll('article.select-container');
-            v2.forEach((c, i) => {
-                if (!c.offsetParent) return;
-                const txt = stripGlyphs(c);
-                if (txt) out.push({index: out.length, dom_index: i, text: txt, _selector: 'v2_article'});
-            });
-            if (out.length) return out;
-
-            // ── Path 2: button-fallback (Bentley/exotic modal layouts) ──
-            // Find a parent container that looks like the appraisal-new modal:
-            // header text "Start a New Appraisal" OR "Select a trim".
-            const modalHosts = [];
-            document.querySelectorAll('h1, h2, h3, h4, [class*="dialog"], [class*="modal"]').forEach(h => {
-                const t = (h.textContent || '').toLowerCase();
-                if (t.includes('start a new appraisal') || t.includes('select a trim')) {
-                    // climb 5 levels max to find a containing block
-                    let p = h; for (let d=0; d<5 && p; d++) { if (p) modalHosts.push(p); p = p.parentElement; }
-                }
-            });
-            const seen = new Set();
-            const cands = [];
-            // Body-style + engine-spec pattern: matches "A CONVERTIBLE 4.0L V8 TURBO",
-            // "GT3 COUPE 4.0L 6 CYL", "BASE SEDAN 3.0L I6", etc.
-            const TRIM_RE = /\b(COUPE|SEDAN|CONVERTIBLE|HATCHBACK|WAGON|SUV|TRUCK|ROADSTER|CABRIOLET|FASTBACK|HARDTOP|PICKUP|VAN|MINIVAN|CROSSOVER)\b.*\b\d+(?:\.\d+)?L\s*(?:V\d+|I\d+|R\d+|\d+\s*CYL)/i;
-            const inAnyHost = (el) => modalHosts.length === 0 || modalHosts.some(h => h.contains(el));
-            // Scan likely-clickable elements first
-            const clickable = document.querySelectorAll('button, a, [role="button"], [tabindex], li, div');
-            clickable.forEach(el => {
-                if (!el.offsetParent) return;
-                if (seen.has(el)) return;
-                if (!inAnyHost(el)) return;
-                // Skip if any DESCENDANT (other than self) is also a clickable match — we want
-                // the innermost matching element. (Container divs would over-match.)
-                const txt = stripGlyphs(el);
-                if (!txt || txt.length < 6 || txt.length > 120) return;
-                if (!TRIM_RE.test(txt)) return;
-                // Reject if a child element ALSO matches — climb only to leaf clickables
-                let childMatch = false;
-                el.querySelectorAll('*').forEach(d => {
-                    if (d === el) return;
-                    if (!d.offsetParent) return;
-                    const dt = stripGlyphs(d);
-                    if (dt && dt.length < 120 && TRIM_RE.test(dt)) childMatch = true;
-                });
-                if (childMatch) return;
-                seen.add(el);
-                cands.push({el, txt});
-            });
-            cands.forEach((c, i) => {
-                out.push({index: out.length, dom_index: i, text: c.txt, _selector: 'button_fallback'});
+                const clone = c.cloneNode(true);
+                clone.querySelectorAll('mat-icon, .mat-icon, .material-icons, svg, i.material-icons-outlined').forEach(e => e.remove());
+                let txt = (clone.textContent || '').trim().replace(/\s+/g, ' ');
+                // Belt-and-suspenders: strip trailing Material-Icons glyph names that
+                // some Angular builds render as plain text via ::before pseudo-elements.
+                txt = txt.replace(/\s*(?:keyboard_arrow_right|keyboard_arrow_left|chevron_right|chevron_left|arrow_forward|arrow_back|arrow_drop_down|expand_more|more_vert)\s*$/i, '').trim();
+                if (txt) out.push({index: out.length, dom_index: i, text: txt});
             });
             return out;
         }"""
@@ -316,7 +246,57 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                 print(f"[+{time.time()-t:5.1f}s] [accutrade] force-fresh failed: {_force_err}")
 
         if not choices:
-            # Genuinely no modal even after forcing — bail to whatever's on page.
+            # SHADOW_LOCATOR_FALLBACK_2026_05_28: Playwright locator-based scrape
+            # for shadow-rendered modals (Bentley Continental, possibly other
+            # exotics). page.evaluate(querySelectorAll) runs in main-document
+            # scope and cannot pierce open shadow roots. page.locator(...) Python
+            # API auto-pierces. ADDITIVE-ONLY: only fires when the legacy JS
+            # scrape returned empty above, so mainstream cars unaffected.
+            try:
+                _pw_locs = []
+                _pw_selectors = (
+                    "new-appraisal-trim-choice",
+                    ".new-appraisal-trim-choice",
+                    "article.select-container",
+                    "[role='option']",
+                )
+                for _sel in _pw_selectors:
+                    try:
+                        _all = page.locator(_sel).all()
+                    except Exception:
+                        continue
+                    for _i, _loc in enumerate(_all):
+                        try:
+                            if not _loc.is_visible(timeout=300):
+                                continue
+                            _txt = (_loc.text_content(timeout=600) or "").strip()
+                        except Exception:
+                            continue
+                        import re as _re_local
+                        _txt = _re_local.sub(r"\s+", " ", _txt)
+                        _txt = _re_local.sub(
+                            r"\s*(?:keyboard_arrow_right|keyboard_arrow_left|chevron_right|chevron_left|arrow_forward|arrow_back|arrow_drop_down|expand_more|more_vert)\s*$",
+                            "", _txt, flags=_re_local.IGNORECASE,
+                        ).strip()
+                        if not _txt or len(_txt) > 200:
+                            continue
+                        _pw_locs.append({
+                            "index": len(_pw_locs),
+                            "dom_index": _i,
+                            "text": _txt,
+                            "_selector_for_click": _sel,
+                            "_used_locator": True,
+                        })
+                    if _pw_locs:
+                        break
+                if _pw_locs:
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] SHADOW_LOCATOR_FALLBACK picked up {len(_pw_locs)} trim choice(s) via Playwright locator")
+                    choices = _pw_locs
+            except Exception as _shl_err:
+                print(f"[+{time.time()-t:5.1f}s] [accutrade] SHADOW_LOCATOR_FALLBACK err: {_shl_err}")
+
+        if not choices:
+            # Genuinely no modal even after JS + locator scrape — bail.
             pass
         else:
                 chosen_index = None
@@ -343,82 +323,37 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                     trim_select_source = 'first_visible'
                     print(f"[+{time.time()-t:5.1f}s] [accutrade] NO overseer/hint — defaulting to [0] '{selected_trim_text}'")
 
-                # ACCU_TRIM_BUTTON_FALLBACK_2026_05_28: re-do the same dual-path
-                # scan as the scraper, then click the Nth match. We re-scan
-                # here (vs taking targetDomIndex by stale ref) because Angular
-                # may have re-rendered between scrape + click.
-                page.evaluate(r"""(targetDomIndex) => {
-                    function fc(el) { try { el.click(); } catch(e) {}
-                        try { el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window})); } catch(e) {} }
-                    const stripGlyphs = (el) => {
-                        const clone = el.cloneNode(true);
-                        clone.querySelectorAll('mat-icon, .mat-icon, .material-icons, svg, i.material-icons-outlined').forEach(e => e.remove());
-                        let txt = (clone.textContent || '').trim().replace(/\s+/g, ' ');
-                        txt = txt.replace(/\s*(?:keyboard_arrow_right|keyboard_arrow_left|chevron_right|chevron_left|arrow_forward|arrow_back|arrow_drop_down|expand_more|more_vert)\s*$/i, '').trim();
-                        return txt;
-                    };
-                    // Path 1: Angular custom element (Cox v1)
-                    let nodes = document.querySelectorAll('new-appraisal-trim-choice');
-                    if (!nodes.length) nodes = document.querySelectorAll('.new-appraisal-trim-choice');
-                    const visible = [];
-                    nodes.forEach(c => { if (c.offsetParent) visible.push(c); });
-                    if (visible.length) {
+                # SHADOW_LOCATOR_FALLBACK_2026_05_28 click path. When the
+                # choices came from the Playwright locator fallback, click via
+                # locator (shadow-DOM-piercing). Otherwise use the legacy JS
+                # click that runs in main-document scope (unchanged for
+                # mainstream cars).
+                _chosen_meta = choices[chosen_index] if 0 <= chosen_index < len(choices) else None
+                if _chosen_meta and _chosen_meta.get("_used_locator"):
+                    _sel = _chosen_meta.get("_selector_for_click")
+                    _dom_i = int(_chosen_meta.get("dom_index", chosen_index))
+                    try:
+                        _target = page.locator(_sel).nth(_dom_i)
+                        _target.scroll_into_view_if_needed(timeout=2000)
+                        _target.click(timeout=5000)
+                        print(f"[+{time.time()-t:5.1f}s] [accutrade] locator-click ok sel={_sel} idx={_dom_i}")
+                    except Exception as _lc_err:
+                        print(f"[+{time.time()-t:5.1f}s] [accutrade] locator-click err: {_lc_err}")
+                else:
+                    page.evaluate(r"""(targetDomIndex) => {
+                        function fc(el) { try { el.click(); } catch(e) {}
+                            try { el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window})); } catch(e) {} }
+                        let nodes = document.querySelectorAll('new-appraisal-trim-choice');
+                        if (!nodes.length) nodes = document.querySelectorAll('.new-appraisal-trim-choice');
+                        const visible = [];
+                        nodes.forEach(c => { if (c.offsetParent) visible.push(c); });
                         const best = visible[targetDomIndex] || visible[0];
-                        if (!best) return 'no_target_angular';
+                        if (!best) return 'no_target';
                         fc(best);
                         const inner = best.querySelector('.new-appraisal-trim-choice, .text');
                         if (inner) fc(inner);
-                        return 'clicked_trim_angular';
-                    }
-                    // Path 1.5: Cox v2 layout (BENTLEY_TRIM_2026_05_28)
-                    // article.select-container wraps each trim row.
-                    let v2 = document.querySelectorAll('article.select-container');
-                    const v2_visible = [];
-                    v2.forEach(c => { if (c.offsetParent) v2_visible.push(c); });
-                    if (v2_visible.length) {
-                        const best = v2_visible[targetDomIndex] || v2_visible[0];
-                        if (!best) return 'no_target_v2';
-                        fc(best);
-                        // Also click the inner .trim div in case article-level click is no-op
-                        const inner = best.querySelector('.trim');
-                        if (inner) fc(inner);
-                        return 'clicked_trim_v2';
-                    }
-                    // Path 2: button-fallback
-                    const modalHosts = [];
-                    document.querySelectorAll('h1, h2, h3, h4, [class*="dialog"], [class*="modal"]').forEach(h => {
-                        const t = (h.textContent || '').toLowerCase();
-                        if (t.includes('start a new appraisal') || t.includes('select a trim')) {
-                            let p = h; for (let d=0; d<5 && p; d++) { if (p) modalHosts.push(p); p = p.parentElement; }
-                        }
-                    });
-                    const inAnyHost = (el) => modalHosts.length === 0 || modalHosts.some(h => h.contains(el));
-                    const TRIM_RE = /\b(COUPE|SEDAN|CONVERTIBLE|HATCHBACK|WAGON|SUV|TRUCK|ROADSTER|CABRIOLET|FASTBACK|HARDTOP|PICKUP|VAN|MINIVAN|CROSSOVER)\b.*\b\d+(?:\.\d+)?L\s*(?:V\d+|I\d+|R\d+|\d+\s*CYL)/i;
-                    const seen = new Set();
-                    const cands = [];
-                    document.querySelectorAll('button, a, [role="button"], [tabindex], li, div').forEach(el => {
-                        if (!el.offsetParent) return;
-                        if (seen.has(el)) return;
-                        if (!inAnyHost(el)) return;
-                        const txt = stripGlyphs(el);
-                        if (!txt || txt.length < 6 || txt.length > 120) return;
-                        if (!TRIM_RE.test(txt)) return;
-                        let childMatch = false;
-                        el.querySelectorAll('*').forEach(d => {
-                            if (d === el) return;
-                            if (!d.offsetParent) return;
-                            const dt = stripGlyphs(d);
-                            if (dt && dt.length < 120 && TRIM_RE.test(dt)) childMatch = true;
-                        });
-                        if (childMatch) return;
-                        seen.add(el);
-                        cands.push(el);
-                    });
-                    if (!cands.length) return 'no_target_fallback';
-                    const target = cands[targetDomIndex] || cands[0];
-                    fc(target);
-                    return 'clicked_trim_fallback';
-                }""", chosen_index)
+                        return 'clicked_trim';
+                    }""", chosen_index)
         time.sleep(1)  # was 3s
         deadline = time.time() + 30
         while time.time() < deadline:
