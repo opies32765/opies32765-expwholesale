@@ -1863,7 +1863,16 @@ def _extract_sticker_options(text):
 
 
 def _parse_sticker_text(text):
-    """Regex-extract MSRP / base / colors / options from OCR or DOM sticker text."""
+    """Regex-extract MSRP / base / colors / options from OCR or DOM sticker text.
+
+    COLUMN_MANGLE_FIX_2026_05_28: OEM stickers (Audi, BMW, etc.) lay prices in
+    a right-column where OCR reads top-to-bottom, so an actual "Total Price:
+    $79,045" can surface as "Total Price:\n$995 (package credit)\n$79,045".
+    Previously re.search captured the first $-amount (995), failed the >$1k
+    guard, fell through, and total_msrp stayed None on a parseable sticker.
+    Now we collect ALL $-prefixed values in a 200-char window after the label
+    match and pick the largest in valid MSRP range, returning the actual
+    total even when OCR interleaved credits/options."""
     result = {
         'total_msrp': None, 'base_price': None,
         'exterior_color': None, 'interior_color': None,
@@ -1871,6 +1880,27 @@ def _parse_sticker_text(text):
     }
     if not text or len(text) < 50:
         return result
+
+    def _pick_largest_near(text, pat, min_v=1000, max_v=10_000_000):
+        """For each match of pat: collect group(1) and any $-prefixed numbers
+        in the next 200 chars; return the largest in [min_v, max_v] or None."""
+        candidates = []
+        for m in re.finditer(pat, text, re.I):
+            try:
+                v0 = int(m.group(1).replace(',', ''))
+                if min_v < v0 < max_v:
+                    candidates.append(v0)
+            except (ValueError, IndexError):
+                pass
+            tail = text[m.end():m.end()+200]
+            for nm in re.finditer(r'\$\s*([\d,]+)(?:\.\d{2})?', tail):
+                try:
+                    v = int(nm.group(1).replace(',', ''))
+                    if min_v < v < max_v:
+                        candidates.append(v)
+                except ValueError:
+                    pass
+        return max(candidates) if candidates else None
 
     for pat in (
                 # iPacket PDF window-sticker format
@@ -1882,15 +1912,10 @@ def _parse_sticker_text(text):
                 r'TOTAL\s+(?:PREDICTED\s+)?PRICE\s*[:$]?\s*\*?\s*\$?\s*([\d,]+)',  # RAM puts * between : and $
                 r'TOTAL\s+MSRP\s*[:$]?\s*\$?\s*([\d,]+)',
                 r'(?<!BASE\s)MSRP\s*[:$]?\s*\$?\s*([\d,]+)'):
-        m = re.search(pat, text, re.I)
-        if m:
-            try:
-                v = int(m.group(1).replace(',', ''))
-                if 1000 < v < 10_000_000:
-                    result['total_msrp'] = v
-                    break
-            except ValueError:
-                pass
+        v = _pick_largest_near(text, pat)
+        if v is not None:
+            result['total_msrp'] = v
+            break
 
     for pat in (
                 # iPacket PDF window-sticker format
