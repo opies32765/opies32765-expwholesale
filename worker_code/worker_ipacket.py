@@ -639,7 +639,7 @@ def lookup(page, ctx, vin, t, bid_id=None):
 
     print(f"[+{time.time()-t:5.1f}s] [ipacket] ready (canvas stable)")
     sticker_page = page
-    time.sleep(8)  # bumped 2s -> 8s 2026-05-08 — bid 1060 captured spinner; give canvas more time to actually render the sticker PDF after JS detector says ready
+    time.sleep(12)  # IPACKET_SLEEP_BUMP_2026_05_28: 8s -> 12s. Brand-new 2026 Silverado HD bid 2211 captured page without MSRP — sticker needs more time to fully render after canvas-stable signal. — bid 1060 captured spinner; give canvas more time to actually render the sticker PDF after JS detector says ready
 
     ts = int(time.time())
     screenshot = REPORTS_DIR / f"ipacket_{vin}_{ts}.png"
@@ -661,7 +661,7 @@ def lookup(page, ctx, vin, t, bid_id=None):
             except Exception as nav_ex:
                 print(f"[+{time.time()-t:5.1f}s] [ipacket] nav to viewer failed: {nav_ex}")
             # Brief wait for the sticker to render in the standalone view
-            time.sleep(4)
+            time.sleep(8)  # IPACKET_SLEEP_BUMP_2026_05_28: 4s -> 8s post-viewer-nav
 
         sticker_page.screenshot(path=str(screenshot), full_page=True)
         size = screenshot.stat().st_size

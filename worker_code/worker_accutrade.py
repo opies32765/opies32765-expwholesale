@@ -361,6 +361,41 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                 break
             time.sleep(0.3)  # was 1s — tighter polling lands on the new URL faster
 
+    # PRE_VALUES_BEFORE_DISPATCH_2026_05_28: capture price snapshot BEFORE
+    # the JS dispatch. Original v2 detector captured AFTER, which fires
+    # false-fail when AccuTrade commits synchronously on input/blur — by the
+    # time pre_values is read, the page already reflects the typed mileage,
+    # so post==pre and "no change detected" becomes a false negative.
+    # Two flakes today (bid 2208 GLC vm-worker-11, bid 2215 Maserati
+    # vm-worker-2) both resolved on different-worker retry — classic
+    # synchronous-recalc race symptom. This snapshot is taken before any
+    # input event fires so any recalc Cox does post-dispatch is detectable.
+    _pre_values_pre_dispatch = page.evaluate(r"""() => {
+        const map = [
+            ['Instant Offer','guaranteed_offer'],
+            ['Target Auction','trade_in'],
+            ['Target Retail','trade_market'],
+            ['Wholesale / Average','market_avg'],
+            ['Wholesale/Average','market_avg'],
+            ['Wholesale Average','market_avg']
+        ];
+        const r = {guaranteed_offer:null, trade_in:null, trade_market:null, market_avg:null};
+        const text = document.body.innerText || '';
+        for (const [label, field] of map) {
+            if (r[field] !== null) continue;
+            const idx = text.indexOf(label);
+            if (idx < 0) continue;
+            const win = text.substring(idx + label.length, idx + label.length + 80);
+            if (/^\s*\r?\n?\s*N\/A\b/i.test(win)) { r[field] = null; continue; }
+            const m = win.match(/\$\s*([\d,]+)(?!\d)/);
+            if (m) {
+                const n = parseInt(m[1].replace(/,/g, ''));
+                if (n > 100 && n < 10000000) r[field] = n;
+            }
+        }
+        return r;
+    }""") or {}
+
     # Set mileage
     page.evaluate(r"""(target) => {
         const targetStr = target.toLocaleString('en-US');
@@ -435,7 +470,11 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
             return r;
         }""") or {}
 
-    pre_values = _read_4_values()
+    # PRE_VALUES_BEFORE_DISPATCH_2026_05_28: use the snapshot taken BEFORE
+    # the dispatch (above) instead of re-reading post-dispatch. If Cox
+    # recalculated synchronously on input/blur the post-read would already
+    # show new values and we'd fire a false-fail.
+    pre_values = _pre_values_pre_dispatch
     # Strong trigger: real Playwright Tab keypress (v1 carry-over — still
     # better than nothing).
     try:
