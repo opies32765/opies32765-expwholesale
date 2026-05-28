@@ -2084,7 +2084,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
         "(no commas, no units). If not, reply with the single word NONE."
     )
     gresult = gemini_call(_odo_prompt, image_bytes=file_bytes, mime=media_type,
-                          model='gemini-2.5-pro', max_tokens=64,
+                          model='gemini-2.5-flash', max_tokens=64,
                           temperature=0, disable_thinking=True)
     if gresult:
         up = gresult.strip().upper()
@@ -2120,7 +2120,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
         "integer (no commas, no units). If unsure or it's not visible, NONE."
     )
     gresult2 = gemini_call(_listing_prompt, image_bytes=file_bytes,
-                           mime=media_type, model='gemini-2.5-pro',
+                           mime=media_type, model='gemini-2.5-flash',
                            max_tokens=64, temperature=0, disable_thinking=True)
     if gresult2:
         up = gresult2.strip().upper()
@@ -3722,6 +3722,11 @@ def _save_sms_media_local(bid_id, photo_id, content_bytes, mime):
         return None
 
 
+class _VsSkip(Exception):
+    """VS_WINDOW_GUARD_2026_05_27: signal to fall through silent stitch without logging an error."""
+    pass
+
+
 @app.route('/webhook/twilio', methods=['POST'])
 def twilio_webhook():
     from_phone = request.form.get('From', '')
@@ -4186,6 +4191,126 @@ def twilio_webhook():
         print(f'[stitch] verify-pending bid #{_vp_row["id"]} found for '
               f'{from_phone}, bypassing share-reply routing', flush=True)
         looks_like_new_bid = True  # bypass share_reply so verify-stitch handles
+
+        # VERIFY_STITCH_SILENT_2026_05_27 — restores pre-2026-05-18 silent
+        # stitch removed by PENDING_ATTACH_LAYER2 (commit 75d578f) and never
+        # re-enabled when BOT_QUIET_MODE_2026_05_20 disabled the YES/NO ask.
+        # When the original bid asked for missing data (needs_verification_at
+        # + reason='missing_miles'/'missing_vin'/etc), the next inbound from
+        # the same phone within 24h that contains the missing field attaches
+        # to that bid instead of spawning a new orphan bid.
+        try:
+            # VS_WINDOW_GUARD_2026_05_27: only silent-stitch if the verify-
+            # pending bid was created within last 1 min AND there is only
+            # ONE such bid in that window. If multiple, fall through so the
+            # operator manually reconciles rather than risk attaching data
+            # to the wrong bid.
+            with db.cursor() as _vsg_cur:
+                _vsg_cur.execute(
+                    "SELECT COUNT(*) AS n FROM bids "
+                    "WHERE phone = %s AND needs_verification_at IS NOT NULL "
+                    "AND needs_verification_cleared_at IS NULL "
+                    "AND created_at > NOW() - INTERVAL '1 minute'",
+                    (from_phone,))
+                _vsg_n = _vsg_cur.fetchone().get('n', 0)
+            if _vsg_n != 1:
+                print(f'[verify-stitch-silent] skip: {_vsg_n} verify-pending bids in 1min window for {from_phone} (need exactly 1)', flush=True)
+                raise _VsSkip()
+            _vs_bid_id = _vp_row['id']
+            _vs_miles = None
+            _vs_vin = None
+            if body:
+                _vs_mm = re.search(
+                    r'(\d{1,3}(?:[,.]?\d{3})*|\d+)\s*(?:k\b|mi\b|miles?\b)',
+                    body, re.IGNORECASE)
+                if _vs_mm:
+                    try:
+                        _ms = _vs_mm.group(1).replace(',', '').replace('.', '')
+                        if _ms.isdigit():
+                            _vs_miles = int(_ms)
+                            if 'k' in (_vs_mm.group(0) or '').lower() and _vs_miles < 1000:
+                                _vs_miles *= 1000
+                    except Exception:
+                        _vs_miles = None
+                if not _vs_miles:
+                    _vs_bm = re.match(r'^\s*(\d{3,6})\s*$', body)
+                    if _vs_bm:
+                        _n = int(_vs_bm.group(1))
+                        if 100 <= _n <= 999_999:
+                            _vs_miles = _n
+                _vs_vm = re.search(r'\b([A-HJ-NPR-Z0-9]{17})\b', body.upper())
+                if _vs_vm:
+                    _vs_vin = _vs_vm.group(1)
+            _vs_n_media = 0
+            try:
+                _vs_n_media = int(request.form.get('NumMedia', 0))
+            except (TypeError, ValueError):
+                _vs_n_media = 0
+            if _vs_miles or _vs_vin or _vs_n_media > 0:
+                _vs_applied = []
+                if _vs_vin:
+                    cur.execute(
+                        "UPDATE bids SET vin=%s, updated_at=NOW() "
+                        "WHERE id=%s AND (vin IS NULL OR vin='')",
+                        (_vs_vin, _vs_bid_id))
+                    _vs_applied.append(f'vin={_vs_vin}')
+                    _retrigger_canonicalize_after_vin(_vs_bid_id)
+                if _vs_miles:
+                    cur.execute(
+                        "UPDATE bids SET mileage=%s, updated_at=NOW() "
+                        "WHERE id=%s AND (mileage IS NULL OR mileage < %s)",
+                        (_vs_miles, _vs_bid_id, _vs_miles))
+                    _vs_applied.append(f'miles={_vs_miles}')
+                _vs_photos = 0
+                for _vi in range(_vs_n_media):
+                    _vs_url = request.form.get(f'MediaUrl{_vi}')
+                    _vs_mt = request.form.get(f'MediaContentType{_vi}') or 'image/jpeg'
+                    if not _vs_url:
+                        continue
+                    try:
+                        _ingest_sms_photo(cur, _vs_bid_id, _vs_url, _vs_mt, from_phone=from_phone)
+                        _vs_photos += 1
+                    except Exception as _vs_pe:
+                        print(f'[verify-stitch-silent] photo err bid={_vs_bid_id}: {_vs_pe}', flush=True)
+                if _vs_photos:
+                    _vs_applied.append(f'photos={_vs_photos}')
+                if _vs_applied:
+                    cur.execute(
+                        "UPDATE bids SET needs_verification_cleared_at = NOW(), "
+                        "needs_verification_cleared_by = 'auto:verify_stitch_silent', "
+                        "updated_at = NOW() "
+                        "WHERE id = %s AND needs_verification_at IS NOT NULL "
+                        "AND needs_verification_cleared_at IS NULL",
+                        (_vs_bid_id,))
+                    cur.execute(
+                        "DELETE FROM ipacket_lookups WHERE bid_id=%s AND "
+                        "(looked_up_at IS NULL OR looked_up_at < NOW() - INTERVAL '5 minutes' "
+                        "OR not_available=true)", (_vs_bid_id,))
+                    cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s", (_vs_bid_id,))
+                    cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s", (_vs_bid_id,))
+                    cur.execute(
+                        "UPDATE bids SET vauto_claimed_by=NULL, vauto_claimed_at=NULL, "
+                        "ai_assessed_at=NULL, ai_price=NULL, ai_assessment=NULL, "
+                        "miles_audit_at=NULL WHERE id=%s", (_vs_bid_id,))
+                    if body:
+                        cur.execute(
+                            "INSERT INTO bid_messages (bid_id, direction, message, from_phone) "
+                            "VALUES (%s, 'inbound', %s, %s)",
+                            (_vs_bid_id, body, from_phone))
+                    _finalize_sms_intake(
+                        cur, intake_log_id, 'verify_stitch_silent',
+                        bid_id=_vs_bid_id,
+                        reason=f'silent stitch to verify-pending bid #{_vs_bid_id}: {" ".join(_vs_applied)}')
+                    db.commit()
+                    print(f'[verify-stitch-silent] bid={_vs_bid_id} from={from_phone} applied: {_vs_applied}', flush=True)
+                    db.close()
+                    return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                            200, {'Content-Type': 'text/xml'})
+        except _VsSkip:
+            pass  # window/ambiguity guard tripped; fall through
+        except Exception as _vs_e:
+            print(f'[verify-stitch-silent] err bid={_vp_row.get("id") if _vp_row else "?"}: {_vs_e}', flush=True)
+
 
     if share_row and not looks_like_new_bid:
         # This is a reply to a shared bid — add as message, don't create new bid
@@ -12990,7 +13115,7 @@ def _normalize_accutrade_url(url):
 #   6. NEVER calls the LLM blindly (the bid-1761 Lariat hallucination class of bug is structurally eliminated)
 # Empty by default → no canary bids → existing LLM behavior preserved fleet-wide.
 # Add a bid_id here to test the new flow for that specific bid.
-ACCUTRADE_WAIT_FOR_EVIDENCE_ALLOWLIST: set[int] = {1764}
+ACCUTRADE_WAIT_FOR_EVIDENCE_ALLOWLIST: set[int] = set()  # MODEL_TOKEN_AUGMENT_2026_05_27: evidence-first now runs for ALL bids; this set is legacy and unused
 ACCUTRADE_EVIDENCE_WAIT_SECONDS = 8  # TIMING_FIX_2_2026_05_19: was 20. Bid 1830 (BMW 740i) overflowed worker 90s budget when LLM trim_select ran slow (~25s LLM + 20s evidence wait + 34s scrape = 79s of useful + 9s overhead = 99s, abandoned at 90s losing real values). 8s wait still lets vauto/ipacket land partway while leaving budget for slow LLM cases.
 
 
@@ -13049,20 +13174,50 @@ def _evidence_first_trim_pick(db, vin, bid_id, choices):
                               WHERE bid_id=%s AND raw_json IS NOT NULL ORDER BY id DESC LIMIT 1""", (bid_id,))
             _cfrow = _ecur.fetchone()
             if _cfrow:
+                # MODEL_TOKEN_AUGMENT_2026_05_27 — bid 2157 case: AutoCheck trim
+                # was "Carrera GTS" (RWD ambiguous) but model was "911 Carrera 4 GTS"
+                # — the "4" AWD qualifier lived ONLY in model. Without it the
+                # strict token matcher accepted both RWD and AWD AccuTrade choices.
+                # Augment trim with any extra tokens from model (excluding the
+                # bid's known model name) so the matcher requires them all.
+                _bid_model_upper = ((_b.get('model') if _b else '') or '').upper().strip()
                 for _key in ('carfax_json', 'autocheck_json', 'api_carfax'):
                     _doc = _cfrow.get(_key) if hasattr(_cfrow, 'get') else None
                     if isinstance(_doc, str):
                         try: _doc = json.loads(_doc)
                         except Exception: _doc = None
                     if isinstance(_doc, dict):
-                        # Try common trim field paths
                         _trim = (_doc.get('trim')
                                  or (_doc.get('vehicle') or {}).get('trim')
                                  or _doc.get('series')
                                  or (_doc.get('decode') or {}).get('trim'))
+                        _model_doc = (_doc.get('model')
+                                      or (_doc.get('vehicle') or {}).get('model')
+                                      or '')
                         if _trim and isinstance(_trim, str) and _trim.strip():
                             _src_name = 'carfax' if 'carfax' in _key else 'autocheck'
-                            evidence_sources.append((_src_name, _trim.strip()))
+                            _trim_clean = _trim.strip()
+                            # Pull disambiguating tokens from model that
+                            # weren't already in trim AND aren't the bid's
+                            # base model name.
+                            if isinstance(_model_doc, str) and _model_doc.strip():
+                                _trim_tokens = {t.upper() for t in _trim_clean.split() if t}
+                                # Strip leading model name (e.g. "911", "Continental")
+                                _model_words = [w for w in _model_doc.split()
+                                                if w.upper() != _bid_model_upper
+                                                and not w.startswith('/')]
+                                _extra = []
+                                for _w in _model_words:
+                                    _wu = _w.upper().strip('.,/')
+                                    if (_wu and _wu not in _trim_tokens
+                                            and len(_wu) <= 12
+                                            # Don't pull punctuation/separators
+                                            and any(ch.isalnum() for ch in _wu)):
+                                        _extra.append(_w.strip('.,/'))
+                                        _trim_tokens.add(_wu)
+                                if _extra:
+                                    _trim_clean = _trim_clean + ' ' + ' '.join(_extra)
+                            evidence_sources.append((_src_name, _trim_clean))
                             break  # one hit per row is enough
             # iPacket OCR text (full sticker text)
             _ecur.execute("""SELECT raw_json, screenshot FROM ipacket_lookups

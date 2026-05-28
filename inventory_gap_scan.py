@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """inventory_gap_scan.py — nightly EW inventory holes vs surplus Telegram digest.
 
-Live analysis logic now lives in inventory_gap_lib.py (shared with the
+Live analysis logic lives in inventory_gap_lib.py (shared with the
 public /inventory-gaps web page). This script just wires the lib to
-Telegram + cron logging.
+Telegram + cron logging, and surfaces the top sub-config per gap.
 
 Usage:
   python3 inventory_gap_scan.py            # live (Telegram)
@@ -21,6 +21,7 @@ from inventory_gap_lib import (
     fetch_baseline,
     analyze_dealer,
     format_ymm,
+    format_config,
 )
 
 LOG_FILE = "/var/log/ew-inventory-gap.log"
@@ -43,8 +44,15 @@ logging.basicConfig(
 log = logging.getLogger("gap_scan")
 
 
+def _top_config_line(label, cfgs):
+    if not cfgs:
+        return None
+    parts = [f"{n}× {format_config(c)}" for c, n in cfgs[:2]]
+    return f"      {label}: " + " | ".join(parts)
+
+
 def build_message(dealers, results):
-    lines = ["EW Inventory Gap Scan (90d sales velocity)", ""]
+    lines = ["EW Inventory Gap Scan (90d sales velocity + granular configs)", ""]
     any_content = False
     for d_id, d_name in dealers:
         holes, surplus = results.get(d_id, ([], []))
@@ -52,10 +60,14 @@ def build_message(dealers, results):
             continue
         any_content = True
         lines.append(f"— {d_name} —")
-        for key, base, cur_n in holes:
-            lines.append(f"  HOLE  {format_ymm(key)}: in stock {cur_n}, sold {base} in last 90d")
-        for key, base, cur_n in surplus:
-            lines.append(f"  SURP  {format_ymm(key)}: in stock {cur_n}, sold {base} in last 90d")
+        for key, base, cur_n, scfg, ccfg in holes:
+            lines.append(f"  HOLE  {format_ymm(key)}: in stock {cur_n}, sold {base} in 90d")
+            sub = _top_config_line("sold mix", scfg)
+            if sub: lines.append(sub)
+        for key, base, cur_n, scfg, ccfg in surplus:
+            lines.append(f"  SURP  {format_ymm(key)}: in stock {cur_n}, sold {base} in 90d")
+            sub = _top_config_line("stocked mix", ccfg)
+            if sub: lines.append(sub)
         lines.append("")
     if not any_content:
         lines.append("(no holes or surpluses crossed thresholds)")

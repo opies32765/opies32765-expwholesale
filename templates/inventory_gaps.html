@@ -22,31 +22,52 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
 .summary{display:flex;gap:32px;margin:22px 0 28px;flex-wrap:wrap}
 .summary .pill{background:#243447;border:1px solid #344f68;border-radius:8px;padding:10px 16px;font-size:13px;color:#a8c0d6;font-weight:600}
 .summary .pill b{color:#f1f5f9;font-weight:800;margin-left:4px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:18px}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(540px,1fr));gap:18px}
 .card{background:#243447;border:1px solid #344f68;border-radius:10px;padding:18px 20px;display:flex;flex-direction:column;gap:14px}
 .card.empty{opacity:.55}
 .card-head{display:flex;align-items:baseline;justify-content:space-between;border-bottom:1px solid #344f68;padding-bottom:10px}
 .card-name{font-size:16px;font-weight:700;color:#f1f5f9}
 .card-counts{font-size:11px;color:#7a9bb5;font-weight:600;text-transform:uppercase;letter-spacing:.6px}
-.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-.col h4{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
-.col.holes h4{color:#fca5a5}
-.col.surp h4{color:#fbbf24}
-.col ul{list-style:none;display:flex;flex-direction:column;gap:6px}
-.col li{font-size:13px;line-height:1.35;padding:7px 9px;border-radius:6px}
-.col.holes li{background:rgba(127,29,29,.18);border-left:3px solid #ef4444;color:#fecaca}
-.col.surp li{background:rgba(120,53,15,.22);border-left:3px solid #fbbf24;color:#fde68a}
-.col li .ymm{font-weight:700;color:#f1f5f9;display:block;margin-bottom:2px;font-size:13px}
-.col li .meta{font-size:11px;color:#a8c0d6;font-weight:500}
-.col .none{font-size:12px;color:#5a7a96;font-style:italic;padding:4px 0}
+
+.section{display:flex;flex-direction:column;gap:8px}
+.section + .section{margin-top:6px}
+.section-head{display:flex;align-items:baseline;gap:8px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px}
+.section.holes .section-head{color:#fca5a5}
+.section.surp  .section-head{color:#fbbf24}
+.section-count{color:#7a9bb5;font-size:10.5px;letter-spacing:.4px}
+.section ul{list-style:none;display:flex;flex-direction:column;gap:8px}
+
+.entry{padding:10px 14px;border-radius:6px}
+.section.holes .entry{background:rgba(127,29,29,.18);border-left:3px solid #ef4444}
+.section.surp  .entry{background:rgba(120,53,15,.22);border-left:3px solid #fbbf24}
+
+.entry-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:8px}
+.entry-ymm{font-weight:700;color:#f1f5f9;font-size:14px;letter-spacing:-0.2px}
+.section.holes .entry-meta{color:#fca5a5;font-size:11.5px;font-weight:600;white-space:nowrap}
+.section.surp  .entry-meta{color:#fde68a;font-size:11.5px;font-weight:600;white-space:nowrap}
+
+.cfg-block + .cfg-block{margin-top:8px}
+.cfg-lbl{font-size:9.5px;color:#7a9bb5;font-weight:700;text-transform:uppercase;letter-spacing:.7px;margin-bottom:3px}
+
+.cfg-table{display:grid;grid-template-columns:32px minmax(120px,2fr) minmax(90px,1fr);column-gap:14px;row-gap:1px;font-size:12px;font-variant-numeric:tabular-nums;line-height:1.6}
+.cfg-table .cell{padding:2px 0}
+.cfg-table .cell.qty   {color:#7a9bb5;font-weight:700;text-align:right}
+.cfg-table .cell.trim  {color:#f1f5f9;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg-table .cell.color {color:#a8c0d6}
+.cfg-table .cell.dim   {opacity:.45;font-style:italic}
+
+.none{font-size:12px;color:#5a7a96;font-style:italic;padding:4px 0}
 .empty-line{font-size:13px;color:#5a7a96;font-style:italic}
-.footer{margin-top:36px;padding-top:18px;border-top:1px solid #344f68;font-size:12px;color:#5a7a96;text-align:center}
+.footer{margin-top:36px;padding-top:18px;border-top:1px solid #344f68;font-size:12px;color:#5a7a96;text-align:center;line-height:1.6}
+
 @media(max-width:640px){
   .wrap{padding:18px}
   .grid{grid-template-columns:1fr}
-  .cols{grid-template-columns:1fr}
   .header{padding:0 16px}
   .logo-sub{display:none}
+  .cfg-table{grid-template-columns:28px minmax(80px,1.5fr) minmax(70px,1fr);column-gap:10px;font-size:11px}
+  .entry-head{flex-wrap:wrap}
 }
 </style>
 </head>
@@ -64,7 +85,7 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
 
 <div class="wrap">
   <h1 class="page-title">Partner Inventory Gaps & Surpluses</h1>
-  <div class="page-sub">Live 90-day sales-velocity scan across portal dealers</div>
+  <div class="page-sub">Live 90-day sales-velocity scan · grouped by trim + color</div>
 
   <div class="summary">
     <div class="pill">Dealers scanned <b>{{ dealers|length }}</b></div>
@@ -73,6 +94,22 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
     <div class="pill" style="color:#fbbf24">Total surpluses <b style="color:#fde68a">{{ total_surp }}</b></div>
   </div>
 
+  {%- macro cfg_table(rows) -%}
+    <div class="cfg-table">
+      {% for cfg, n in rows -%}
+        {%- set parts = cfg.split(' · ') -%}
+        {%- if parts|length == 2 -%}
+          {%- set trim_v = parts[0] -%}{%- set color_v = parts[1] -%}
+        {%- else -%}
+          {%- set trim_v = '' -%}{%- set color_v = parts[0] -%}
+        {%- endif -%}
+        <span class="cell qty">{{ n }}×</span>
+        <span class="cell trim">{{ trim_v }}</span>
+        <span class="cell color {% if color_v == 'UNKNOWN' or color_v == 'OTHER' %}dim{% endif %}">{{ color_v|lower if color_v in ['UNKNOWN','OTHER'] else color_v|title }}</span>
+      {% endfor %}
+    </div>
+  {%- endmacro %}
+
   <div class="grid">
     {% for d in dealer_cards %}
       <div class="card {% if not d.holes and not d.surplus %}empty{% endif %}">
@@ -80,43 +117,74 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
           <div class="card-name">{{ d.name }}</div>
           <div class="card-counts">{{ d.holes|length }} hole{{ '' if d.holes|length==1 else 's' }} · {{ d.surplus|length }} surplus</div>
         </div>
+
         {% if not d.holes and not d.surplus %}
           <div class="empty-line">No gaps detected — inventory matches recent sales velocity.</div>
-        {% else %}
-          <div class="cols">
-            <div class="col holes">
-              <h4>🕳️ Holes</h4>
-              {% if d.holes %}
-                <ul>
-                  {% for key, base, cur_n in d.holes %}
-                    <li>
-                      <span class="ymm">{{ format_ymm(key) }}</span>
-                      <span class="meta">in stock {{ cur_n }} · sold {{ base }} in 90d</span>
-                    </li>
-                  {% endfor %}
-                </ul>
-              {% else %}<div class="none">none</div>{% endif %}
-            </div>
-            <div class="col surp">
-              <h4>📦 Surplus</h4>
-              {% if d.surplus %}
-                <ul>
-                  {% for key, base, cur_n in d.surplus %}
-                    <li>
-                      <span class="ymm">{{ format_ymm(key) }}</span>
-                      <span class="meta">in stock {{ cur_n }} · sold {{ base }} in 90d</span>
-                    </li>
-                  {% endfor %}
-                </ul>
-              {% else %}<div class="none">none</div>{% endif %}
-            </div>
-          </div>
+        {% endif %}
+
+        {% if d.holes %}
+        <div class="section holes">
+          <div class="section-head">🕳️ Holes <span class="section-count">— sold but not stocked</span></div>
+          <ul>
+            {% for h in d.holes %}
+              <li class="entry">
+                <div class="entry-head">
+                  <div class="entry-ymm">{{ h.ymm }}</div>
+                  <div class="entry-meta">stock {{ h.cur_n }} · sold {{ h.base }}/90d</div>
+                </div>
+                {% if h.sold_cfgs %}
+                  <div class="cfg-block">
+                    <div class="cfg-lbl">Sold</div>
+                    {{ cfg_table(h.sold_cfgs) }}
+                  </div>
+                {% endif %}
+                {% if h.cur_cfgs %}
+                  <div class="cfg-block">
+                    <div class="cfg-lbl">Currently stocked</div>
+                    {{ cfg_table(h.cur_cfgs) }}
+                  </div>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+
+        {% if d.surplus %}
+        <div class="section surp">
+          <div class="section-head">📦 Surplus <span class="section-count">— stocked but not selling</span></div>
+          <ul>
+            {% for s in d.surplus %}
+              <li class="entry">
+                <div class="entry-head">
+                  <div class="entry-ymm">{{ s.ymm }}</div>
+                  <div class="entry-meta">stock {{ s.cur_n }} · sold {{ s.base }}/90d</div>
+                </div>
+                {% if s.cur_cfgs %}
+                  <div class="cfg-block">
+                    <div class="cfg-lbl">Stocked</div>
+                    {{ cfg_table(s.cur_cfgs) }}
+                  </div>
+                {% endif %}
+                {% if s.sold_cfgs %}
+                  <div class="cfg-block">
+                    <div class="cfg-lbl">Sold</div>
+                    {{ cfg_table(s.sold_cfgs) }}
+                  </div>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
         {% endif %}
       </div>
     {% endfor %}
   </div>
 
-  <div class="footer">Computed live · {{ duration_ms }}ms · thresholds: hole = sold≥3 / stock≤1 · surplus = stock≥4 and (sold=0 or stock≥2×sold)</div>
+  <div class="footer">
+    Computed live · {{ duration_ms }}ms<br>
+    Hole = sold≥3 / stock≤1 · Surplus = stock≥4 and (sold=0 or stock≥2×sold) · sub-rows show top-3 configs by count
+  </div>
 </div>
 </body>
 </html>

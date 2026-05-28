@@ -101,9 +101,113 @@ async def submit_bid_to_ew(
         vin=vin, submitted_by=submitted_by, mileage=mileage)
 
 
+
+# ─── BILL_INTEL_2026_05_27 — Phase A + ai_critique tools ────────────────
+
+@function_tool
+async def inventory_gaps_now(
+    context: RunContext, caller_name: str, top_n_dealers: int,
+) -> dict:
+    """OWNER. Today's inventory holes + surpluses across the portal
+    dealer network. Use when asked 'what holes do we have',
+    'where are the surpluses', 'gaps', 'holes and surplus',
+    'what is missing in inventory'. top_n_dealers: cap (default 10)."""
+    return await _unwrap("inventory_gaps_now")(
+        caller_name=caller_name, top_n_dealers=top_n_dealers or 10)
+
+
+@function_tool
+async def ai_assessment_for_bid(
+    context: RunContext, caller_name: str, bid_id: int,
+) -> dict:
+    """OWNER. Return the LLM's existing assessment of a bid plus the
+    market inputs (vAuto/MMR/rBook, AccuTrade, iPacket) it had. Use when
+    asked 'what did the AI say about bid X', 'second-opinion bid X',
+    'do you agree with the AI on bid X'."""
+    return await _unwrap("ai_assessment_for_bid")(
+        caller_name=caller_name, bid_id=bid_id)
+
+
+@function_tool
+async def ml_predict_price(
+    context: RunContext,
+    make: str, year: int, mileage: int, est_wholesale_price: float,
+    model: str,
+) -> dict:
+    """Per-make ML model price prediction (xgboost). Second-opinion
+    signal alongside MMR/rBook/AI. Use when asked 'what does the ML
+    model say', 'ML predict', 'ML take on this car'. Pass empty string
+    for model if unknown. est_wholesale_price is required (MMR / rBook
+    median is the anchor input)."""
+    return await _unwrap("ml_predict_price")(
+        make=make, year=year, mileage=mileage,
+        est_wholesale_price=est_wholesale_price, model=_z(model))
+
+
+@function_tool
+async def dealer_opportunities_now(
+    context: RunContext, caller_name: str, top_n: int,
+) -> dict:
+    """OWNER. Today's top dealer-watch buy opportunities — vehicles in
+    the portal dealer network priced under MMR. From the 09:30 daily AI
+    scout. Use when asked 'best opportunities today', 'what should we
+    buy', 'top dealer picks', 'opportunities'. top_n default 10."""
+    return await _unwrap("dealer_opportunities_now")(
+        caller_name=caller_name, top_n=top_n or 10)
+
+
+@function_tool
+async def ai_critique(
+    context: RunContext, caller_name: str, bid_id: int, question: str,
+) -> dict:
+    """OWNER. Ask the AI assessor (Gemini) a follow-up question about a
+    specific bid's existing assessment. The assessor sees its prior
+    verdict + original market inputs + your question, then replies in
+    2-4 sentences. Use when asked 'ask the assessor why...', 'second-
+    guess the AI on bid X', 'what if mileage was lower', 'do you stand
+    by that price'. Returns {answer: '...'} — speak the answer back."""
+    return await _unwrap("ai_critique")(
+        caller_name=caller_name, bid_id=bid_id, question=question)
+
+
+@function_tool
+async def dashboard_stats(context: RunContext) -> dict:
+    """General EW dashboard health: bid counts, assessment progress,
+    pipeline state. Use when asked 'how is the dashboard',
+    'dashboard stats', 'what is going on today', 'state of EW'."""
+    return await _unwrap("dashboard_stats")()
+
+
+@function_tool
+async def briefing_now(context: RunContext, caller_name: str) -> dict:
+    """OWNER. Generate today's morning briefing on-demand — overnight
+    bid count + top vehicle, dealer-watch top opportunity, stale bids,
+    watchlist hits yesterday. Use when asked 'give me my briefing',
+    'catch me up', 'morning brief', 'rundown', 'whats going on this
+    morning'."""
+    return await _unwrap("briefing_now")(caller_name=caller_name)
+
+
+@function_tool
+async def lsl_query(
+    context: RunContext, caller_name: str, query: str,
+) -> dict:
+    """OWNER. Unified LSL deep-query dispatcher. Free-form natural
+    language LSL questions: 'how much profit last week', 'what did Joe
+    sell yesterday', 'inventory over 90 days', 'top buyer this month',
+    'service queue'. Routes to the right LSL backend."""
+    return await _unwrap("lsl_query")(
+        caller_name=caller_name, query=query)
+
+
 ALL_TOOLS = [
+    # Original 6 (yesterday's Bill)
     get_vehicle_valuation, get_bid, recent_bids,
     lsl_deals_booked, find_best_buyer, submit_bid_to_ew,
+    # Added 2026-05-27 — Phase A + ai_critique + 3 high-value extras
+    inventory_gaps_now, ai_assessment_for_bid, ml_predict_price,
+    dealer_opportunities_now, ai_critique,
+    dashboard_stats, briefing_now, lsl_query,
 ]
 
 
@@ -120,7 +224,7 @@ async def entrypoint(ctx: JobContext) -> None:
         # activity events. Contabo CPU could not keep up with Silero
         # inference under streaming audio (3s+ behind realtime).
         stt=google.STT(spoken_punctuation=False, enable_voice_activity_events=True),
-        llm=anthropic.LLM(model=ANTHROPIC_MODEL),
+        llm=anthropic.LLM(model=ANTHROPIC_MODEL, _strict_tool_schema=False),
         tts=elevenlabs.TTS(voice_id=ELEVEN_VOICE_ID, model=ELEVEN_MODEL),
     )
     agent = Agent(instructions=SYSTEM_PROMPT, tools=ALL_TOOLS)

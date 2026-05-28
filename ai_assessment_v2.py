@@ -49,6 +49,8 @@ EW buys cars and resells them to retail dealers, who then retail them to consume
 
 {velocity_section}
 
+{voice_master_section}
+
 ═══ KEY QUESTIONS TO ASK YOURSELF ═══
 
 1. Is the retail-to-MMR spread healthy (>$5k)? Strong retail demand → buyer dealer has cushion → we can pay closer to or above MMR.
@@ -432,6 +434,58 @@ def _velocity_section(velocity: dict | None) -> str:
     return '\n'.join(out)
 
 
+
+def _voice_master_section(vm: dict | None) -> str:
+    """VOICE_YMM_MASTER_2026_05_27 — Pre-built nightly intel pack from
+    voice_ymm_master. Leading-indicator signals not computed per-bid."""
+    if not vm:
+        return ""
+    out = ["═══ MARKET INTEL PACK (nightly, voice_ymm_master) ═══"]
+    refreshed = vm.get("refreshed_at")
+    if refreshed:
+        out.append(f"  Refreshed: {refreshed}")
+    drops = vm.get("partner_with_price_drop")
+    drop_amt = vm.get("partner_total_drop_amount")
+    active_n = vm.get("partner_active_count")
+    if drops and active_n:
+        out.append(f"  Partner price drops: {drops} of {active_n} active listings dropped, total ${int(drop_amt or 0):,} — SOFTENING")
+    elif active_n:
+        out.append(f"  Partner active: {active_n}, no price drops — STABLE")
+    p50_dol = vm.get("dealer_active_p50_dol")
+    sold_dol = vm.get("dealer_sold_avg_dol")
+    if p50_dol and sold_dol:
+        ratio = p50_dol / max(sold_dol, 1)
+        verdict = "SATURATED" if ratio > 1.5 else ("MOVING" if ratio < 0.8 else "BALANCED")
+        out.append(f"  DOL: active P50 {p50_dol}d vs sold avg {sold_dol}d — {verdict}")
+    cert_pct = vm.get("rbook_certified_pct")
+    pend_pct = vm.get("rbook_pending_pct")
+    cfx_pct = vm.get("rbook_carfax_clean_pct")
+    qual = []
+    if cert_pct is not None: qual.append(f"certified {float(cert_pct):.0%}")
+    if pend_pct is not None: qual.append(f"pending {float(pend_pct):.0%}")
+    if cfx_pct is not None: qual.append(f"carfax-clean {float(cfx_pct):.0%}")
+    if qual:
+        out.append(f"  rBook quality mix: " + ", ".join(qual))
+    n_lsl = vm.get("lsl_count_90d")
+    avg_buy = vm.get("lsl_avg_purchase_cost")
+    avg_front = vm.get("lsl_avg_front")
+    if n_lsl and avg_buy:
+        front_s = f", avg front ${int(avg_front):,}" if avg_front else ""
+        out.append(f"  LSL 90d: {n_lsl} purchases, avg ${int(avg_buy):,}{front_s}")
+    at_n = vm.get("accutrade_pool_count")
+    at_gtd = vm.get("accutrade_avg_guaranteed")
+    if at_n and at_gtd:
+        out.append(f"  AccuTrade pool: n={at_n}, avg guaranteed ${int(at_gtd):,}")
+    sonnet = vm.get("sonnet_narrative")
+    if sonnet:
+        out.append("")
+        out.append("  Peer-LLM (Sonnet) reference summary — use as calibration, NOT authoritative:")
+        for line in str(sonnet).strip().split("\n")[:8]:
+            if line.strip():
+                out.append(f"    {line.strip()}")
+    return "\n".join(out) if len(out) > 1 else ""
+
+
 # ── Public API ────────────────────────────────────────────────────────────
 
 def _thalist_asks_section(asks: dict | None) -> str:
@@ -488,7 +542,8 @@ def build_prompt(bid: dict, *, vauto: dict | None = None,
                  tesla: dict | None = None,
                  purchase_history: dict | None = None,
                  ml_prediction: dict | None = None,
-                 thalist_asks: dict | None = None) -> str:
+                 thalist_asks: dict | None = None,
+                 voice_master: dict | None = None) -> str:  # VOICE_YMM_MASTER_2026_05_27
     """Compose the v2 assessment prompt. All inputs optional; sections render
     with placeholders when data is missing."""
     # ASKING_PRICE_OUT_2026_05_26: never feed asking_price to the LLM. Set
@@ -507,6 +562,7 @@ def build_prompt(bid: dict, *, vauto: dict | None = None,
         ml_section=_ml_section(ml_prediction),
         velocity_section=_velocity_section(velocity),
         thalist_asks_section=_thalist_asks_section(thalist_asks),
+        voice_master_section=_voice_master_section(voice_master),
         asking_constraint=asking_constraint,
     )
 

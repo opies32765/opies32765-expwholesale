@@ -884,7 +884,7 @@ function showNewBidAlert(count) {
 }
 
 // Poll every 3 seconds
-setInterval(poll, 120000);  // 2026-05-26: 10s→120s per operator — calmer cadence; Twilio SMS covers urgency on new intake.
+setInterval(poll, 15000);  // 2026-05-27: 120s→15s (reverted, operator wants live) — calmer cadence; Twilio SMS covers urgency on new intake.
 
 /* MOBILE_SEARCH_2026_05_26: client-side filter for the 200 loaded bids.
    Matches against any visible text in a row. Empty query = show all.
