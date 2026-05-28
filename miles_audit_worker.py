@@ -155,9 +155,26 @@ def _extract_highest_odometer_text(text):
     # Reject matches with context words indicating warranty-remaining /
     # projected-not-actual readings (e.g. "warranty estimated to have 30
     # months or 35,990 miles remaining").
+    # ODO_FILTER_AUDIT_2026_05_28: reject warranty-schedule slash patterns.
+    # Examples that previously slipped through (string blacklist caught
+    # narrative phrases only; the warranty-table slash structure is its
+    # own signal):
+    #   '6 years/100,000 miles' (rust-through coverage)
+    #   '60 months / 60000 miles' (powertrain)
+    #   '36 months/36000 miles' (battery)
+    # Bid 2193 (2025 Corvette) hit 100,000 from the AutoCheck rust line.
+    import re as _re_local
+    _warranty_slash_re = _re_local.compile(
+        r'\d+\s*(?:years?|months?)\s*/\s*$',
+        _re_local.IGNORECASE,
+    )
     for m in _MI_SUFFIX_RE.finditer(text):
         before = text[max(0, m.start() - 80):m.start()].lower()
         if any(bad in before for bad in _MI_REJECT_CONTEXT):
+            continue
+        # Tight 20-char window before the match: warranty schedule pattern
+        before_tight = text[max(0, m.start() - 20):m.start()]
+        if _warranty_slash_re.search(before_tight):
             continue
         s = m.group(1).replace(',', '')
         if s.isdigit():

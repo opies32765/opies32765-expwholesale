@@ -13294,6 +13294,26 @@ def _evidence_first_trim_pick(db, vin, bid_id, choices):
         if ac:
             primary_trim = ac.strip().upper()
             primary_source = 'autocheck'
+
+    # TRIM_DISAGREE_2026_05_28: validate Carfax against AutoCheck's variant
+    # list. AutoCheck often reports the FULL list ("GTC Edition 8 / GTC
+    # Azure V8 / GTC Mulliner V8 / GTC S V8 / GTC V8") which acts as a
+    # confirmation pool. If Carfax's trim is in AutoCheck's signal -> AGREE
+    # -> keep deterministic Carfax pick. If NOT in AutoCheck's signal ->
+    # DISAGREE -> return None so the caller falls through to the LLM path
+    # with both signals in the prompt, instead of blind-trusting Carfax.
+    if primary_trim and primary_source == 'carfax':
+        ac_raw = next((s[1] for s in evidence_sources if s[0] == 'autocheck'), None)
+        if ac_raw:
+            ac_upper = ac_raw.strip().upper()
+            cf_tokens = primary_trim.split()
+            ac_tail = ' '.join(cf_tokens[-2:]) if len(cf_tokens) >= 2 else primary_trim
+            agree = (primary_trim in ac_upper) or (ac_tail in ac_upper)
+            if not agree:
+                print(f'[trim_select/disagree] bid={bid_id} carfax={primary_trim!r} '
+                      f'NOT in autocheck={ac_upper[:120]!r} -- falling through to LLM',
+                      flush=True)
+                return None
     # 4. vauto canonical — ONLY when canon_source begins with 'vds'
     if not primary_trim:
         _canon_src = (_b.get('canon_source') or '').lower() if _b else ''

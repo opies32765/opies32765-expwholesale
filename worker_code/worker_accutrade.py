@@ -174,19 +174,89 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
         # Material-Icons glyph names before grabbing textContent — otherwise
         # "GT3 COUPE 4.0L 6 CYL" came through as
         # "GT3 COUPE 4.0L 6 CYLkeyboard_arrow_right" (chevron font ligature).
+        # ACCU_TRIM_BUTTON_FALLBACK_2026_05_28: Bentley/exotic modal renders
+        # trim choices as plain <button>/<div> elements with chevrons, NOT
+        # the Angular custom element 'new-appraisal-trim-choice'. Bid 2182
+        # (2024 Bentley Continental GTC) hit empty choices[] -> trim picker
+        # never fired -> worker bailed mileage_did_not_commit_v2. Fallback:
+        # find clickable elements inside the appraisal-new modal whose text
+        # matches a body-style + engine-spec pattern (e.g. "A CONVERTIBLE
+        # 4.0L V8 TURBO"). Tag each row with _selector so the click handler
+        # below knows whether to click the Angular element or the fallback.
         _scrape_choices_js = r"""() => {
-            let nodes = document.querySelectorAll('new-appraisal-trim-choice');
-            if (!nodes.length) nodes = document.querySelectorAll('.new-appraisal-trim-choice');
             const out = [];
-            nodes.forEach((c, i) => {
-                if (!c.offsetParent) return;
-                const clone = c.cloneNode(true);
+            const stripGlyphs = (el) => {
+                const clone = el.cloneNode(true);
                 clone.querySelectorAll('mat-icon, .mat-icon, .material-icons, svg, i.material-icons-outlined').forEach(e => e.remove());
                 let txt = (clone.textContent || '').trim().replace(/\s+/g, ' ');
-                // Belt-and-suspenders: strip trailing Material-Icons glyph names that
-                // some Angular builds render as plain text via ::before pseudo-elements.
                 txt = txt.replace(/\s*(?:keyboard_arrow_right|keyboard_arrow_left|chevron_right|chevron_left|arrow_forward|arrow_back|arrow_drop_down|expand_more|more_vert)\s*$/i, '').trim();
-                if (txt) out.push({index: out.length, dom_index: i, text: txt});
+                return txt;
+            };
+
+            // ── Path 1: Angular custom element (Cox v1 layout) ──
+            let nodes = document.querySelectorAll('new-appraisal-trim-choice');
+            if (!nodes.length) nodes = document.querySelectorAll('.new-appraisal-trim-choice');
+            nodes.forEach((c, i) => {
+                if (!c.offsetParent) return;
+                const txt = stripGlyphs(c);
+                if (txt) out.push({index: out.length, dom_index: i, text: txt, _selector: 'angular'});
+            });
+            if (out.length) return out;
+
+            // ── Path 1.5: Cox v2 layout used for Bentley/exotics (BENTLEY_TRIM_2026_05_28) ──
+            // <article class="select-container single-trim"> wraps each trim row.
+            // Bid 2182 (2024 Bentley Continental GTC) hit this; v1 selector
+            // returned zero matches.
+            let v2 = document.querySelectorAll('article.select-container');
+            v2.forEach((c, i) => {
+                if (!c.offsetParent) return;
+                const txt = stripGlyphs(c);
+                if (txt) out.push({index: out.length, dom_index: i, text: txt, _selector: 'v2_article'});
+            });
+            if (out.length) return out;
+
+            // ── Path 2: button-fallback (Bentley/exotic modal layouts) ──
+            // Find a parent container that looks like the appraisal-new modal:
+            // header text "Start a New Appraisal" OR "Select a trim".
+            const modalHosts = [];
+            document.querySelectorAll('h1, h2, h3, h4, [class*="dialog"], [class*="modal"]').forEach(h => {
+                const t = (h.textContent || '').toLowerCase();
+                if (t.includes('start a new appraisal') || t.includes('select a trim')) {
+                    // climb 5 levels max to find a containing block
+                    let p = h; for (let d=0; d<5 && p; d++) { if (p) modalHosts.push(p); p = p.parentElement; }
+                }
+            });
+            const seen = new Set();
+            const cands = [];
+            // Body-style + engine-spec pattern: matches "A CONVERTIBLE 4.0L V8 TURBO",
+            // "GT3 COUPE 4.0L 6 CYL", "BASE SEDAN 3.0L I6", etc.
+            const TRIM_RE = /\b(COUPE|SEDAN|CONVERTIBLE|HATCHBACK|WAGON|SUV|TRUCK|ROADSTER|CABRIOLET|FASTBACK|HARDTOP|PICKUP|VAN|MINIVAN|CROSSOVER)\b.*\b\d+(?:\.\d+)?L\s*(?:V\d+|I\d+|R\d+|\d+\s*CYL)/i;
+            const inAnyHost = (el) => modalHosts.length === 0 || modalHosts.some(h => h.contains(el));
+            // Scan likely-clickable elements first
+            const clickable = document.querySelectorAll('button, a, [role="button"], [tabindex], li, div');
+            clickable.forEach(el => {
+                if (!el.offsetParent) return;
+                if (seen.has(el)) return;
+                if (!inAnyHost(el)) return;
+                // Skip if any DESCENDANT (other than self) is also a clickable match — we want
+                // the innermost matching element. (Container divs would over-match.)
+                const txt = stripGlyphs(el);
+                if (!txt || txt.length < 6 || txt.length > 120) return;
+                if (!TRIM_RE.test(txt)) return;
+                // Reject if a child element ALSO matches — climb only to leaf clickables
+                let childMatch = false;
+                el.querySelectorAll('*').forEach(d => {
+                    if (d === el) return;
+                    if (!d.offsetParent) return;
+                    const dt = stripGlyphs(d);
+                    if (dt && dt.length < 120 && TRIM_RE.test(dt)) childMatch = true;
+                });
+                if (childMatch) return;
+                seen.add(el);
+                cands.push({el, txt});
+            });
+            cands.forEach((c, i) => {
+                out.push({index: out.length, dom_index: i, text: c.txt, _selector: 'button_fallback'});
             });
             return out;
         }"""
@@ -273,19 +343,81 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                     trim_select_source = 'first_visible'
                     print(f"[+{time.time()-t:5.1f}s] [accutrade] NO overseer/hint — defaulting to [0] '{selected_trim_text}'")
 
+                # ACCU_TRIM_BUTTON_FALLBACK_2026_05_28: re-do the same dual-path
+                # scan as the scraper, then click the Nth match. We re-scan
+                # here (vs taking targetDomIndex by stale ref) because Angular
+                # may have re-rendered between scrape + click.
                 page.evaluate(r"""(targetDomIndex) => {
                     function fc(el) { try { el.click(); } catch(e) {}
                         try { el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window})); } catch(e) {} }
+                    const stripGlyphs = (el) => {
+                        const clone = el.cloneNode(true);
+                        clone.querySelectorAll('mat-icon, .mat-icon, .material-icons, svg, i.material-icons-outlined').forEach(e => e.remove());
+                        let txt = (clone.textContent || '').trim().replace(/\s+/g, ' ');
+                        txt = txt.replace(/\s*(?:keyboard_arrow_right|keyboard_arrow_left|chevron_right|chevron_left|arrow_forward|arrow_back|arrow_drop_down|expand_more|more_vert)\s*$/i, '').trim();
+                        return txt;
+                    };
+                    // Path 1: Angular custom element (Cox v1)
                     let nodes = document.querySelectorAll('new-appraisal-trim-choice');
                     if (!nodes.length) nodes = document.querySelectorAll('.new-appraisal-trim-choice');
                     const visible = [];
                     nodes.forEach(c => { if (c.offsetParent) visible.push(c); });
-                    const best = visible[targetDomIndex] || visible[0];
-                    if (!best) return 'no_target';
-                    fc(best);
-                    const inner = best.querySelector('.new-appraisal-trim-choice, .text');
-                    if (inner) fc(inner);
-                    return 'clicked_trim';
+                    if (visible.length) {
+                        const best = visible[targetDomIndex] || visible[0];
+                        if (!best) return 'no_target_angular';
+                        fc(best);
+                        const inner = best.querySelector('.new-appraisal-trim-choice, .text');
+                        if (inner) fc(inner);
+                        return 'clicked_trim_angular';
+                    }
+                    // Path 1.5: Cox v2 layout (BENTLEY_TRIM_2026_05_28)
+                    // article.select-container wraps each trim row.
+                    let v2 = document.querySelectorAll('article.select-container');
+                    const v2_visible = [];
+                    v2.forEach(c => { if (c.offsetParent) v2_visible.push(c); });
+                    if (v2_visible.length) {
+                        const best = v2_visible[targetDomIndex] || v2_visible[0];
+                        if (!best) return 'no_target_v2';
+                        fc(best);
+                        // Also click the inner .trim div in case article-level click is no-op
+                        const inner = best.querySelector('.trim');
+                        if (inner) fc(inner);
+                        return 'clicked_trim_v2';
+                    }
+                    // Path 2: button-fallback
+                    const modalHosts = [];
+                    document.querySelectorAll('h1, h2, h3, h4, [class*="dialog"], [class*="modal"]').forEach(h => {
+                        const t = (h.textContent || '').toLowerCase();
+                        if (t.includes('start a new appraisal') || t.includes('select a trim')) {
+                            let p = h; for (let d=0; d<5 && p; d++) { if (p) modalHosts.push(p); p = p.parentElement; }
+                        }
+                    });
+                    const inAnyHost = (el) => modalHosts.length === 0 || modalHosts.some(h => h.contains(el));
+                    const TRIM_RE = /\b(COUPE|SEDAN|CONVERTIBLE|HATCHBACK|WAGON|SUV|TRUCK|ROADSTER|CABRIOLET|FASTBACK|HARDTOP|PICKUP|VAN|MINIVAN|CROSSOVER)\b.*\b\d+(?:\.\d+)?L\s*(?:V\d+|I\d+|R\d+|\d+\s*CYL)/i;
+                    const seen = new Set();
+                    const cands = [];
+                    document.querySelectorAll('button, a, [role="button"], [tabindex], li, div').forEach(el => {
+                        if (!el.offsetParent) return;
+                        if (seen.has(el)) return;
+                        if (!inAnyHost(el)) return;
+                        const txt = stripGlyphs(el);
+                        if (!txt || txt.length < 6 || txt.length > 120) return;
+                        if (!TRIM_RE.test(txt)) return;
+                        let childMatch = false;
+                        el.querySelectorAll('*').forEach(d => {
+                            if (d === el) return;
+                            if (!d.offsetParent) return;
+                            const dt = stripGlyphs(d);
+                            if (dt && dt.length < 120 && TRIM_RE.test(dt)) childMatch = true;
+                        });
+                        if (childMatch) return;
+                        seen.add(el);
+                        cands.push(el);
+                    });
+                    if (!cands.length) return 'no_target_fallback';
+                    const target = cands[targetDomIndex] || cands[0];
+                    fc(target);
+                    return 'clicked_trim_fallback';
                 }""", chosen_index)
         time.sleep(1)  # was 3s
         deadline = time.time() + 30
@@ -447,15 +579,69 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     # Refuse to store if commit never happened. This is intentionally strict —
     # the alternative (soft pass) is what stored bid 1466 wrong.
     if not mileage_committed:
+        # ACCU_MANUAL_QUOTE_2026_05_28: AccuTrade has no automated valuation
+        # for certain Bentley / Rolls-Royce / exotic VINs — page renders the
+        # "contact inventory consultant via chat or by calling 1.800.215.0001"
+        # banner with all 4 price panels at N/A. The value-change detector
+        # fires a false-FAIL here because there are no values that COULD
+        # change (Cox content gap, not a worker bug). Detect the banner and
+        # exit cleanly with a precise reason so operator + AI assessment
+        # both know AccuTrade has no data for this VIN class. Bid 2182
+        # (2024 Bentley Continental GTC, VIN SCBDG4ZG5RC018285) hit this.
+        try:
+            _manual_quote = page.evaluate(
+                r"() => /contact\s+inventory\s+consultant|1[\s.\-]?800[\s.\-]?215[\s.\-]?0001/i"
+                r".test(document.body.innerText || '')"
+            )
+        except Exception:
+            _manual_quote = False
+        if _manual_quote:
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] manual-quote-only "
+                  f"(Cox has no automated value) vin={vin} miles={miles}")
+            return {
+                "guaranteed_offer": None, "trade_in": None, "trade_market": None,
+                "retail": None, "market_avg": None,
+                "screenshot": None,
+                "appraisal_url": page.url if "/appraisal/" in page.url else None,
+                "selected_trim_text": selected_trim_text,
+                "trim_select_source": trim_select_source,
+                "not_available": True,
+                "unavailable_reason": "accutrade_manual_quote_only",
+            }
+
+        # ACCU_CAPTURE_ONFAIL_2026_05_28: dump screenshot + HTML for forensics.
+        # Bid 2182 (2024 Bentley) hit this path with no diagnostic detail
+        # because worker_main.py masked the reason via key-name mismatch.
+        # Now we save the actual page state so operator can SEE what AccuTrade
+        # showed when mileage failed to commit.
+        _fail_ts = int(time.time())
+        _fail_ss = REPORTS_DIR / f"_failed_{vin}_{_fail_ts}.png"
+        _fail_html = REPORTS_DIR / f"_failed_{vin}_{_fail_ts}.html"
+        try:
+            page.screenshot(path=str(_fail_ss), full_page=True)
+        except Exception as _ssx:
+            print(f"  [accutrade-fail] screenshot err: {_ssx}")
+            _fail_ss = None
+        try:
+            _fail_html.write_text(page.content(), encoding="utf-8", errors="ignore")
+        except Exception as _hx:
+            print(f"  [accutrade-fail] html dump err: {_hx}")
+            _fail_html = None
+        _reason = "mileage_did_not_commit_v2"
+        if _fail_ss:
+            _reason = _reason + " (ss=" + _fail_ss.name + ")"
+        if _fail_html:
+            _reason = _reason + " (html=" + _fail_html.name + ")"
         print(f"[+{time.time()-t:5.1f}s] [accutrade] FAIL: mileage_did_not_commit "
-              f"pre={pre_values} post={last_post} miles={miles}")
+              f"pre={pre_values} post={last_post} miles={miles} forensics={_reason}")
         return {
             "guaranteed_offer": None, "trade_in": None, "trade_market": None,
-            "retail": None, "market_avg": None, "screenshot": None,
+            "retail": None, "market_avg": None,
+            "screenshot": str(_fail_ss) if _fail_ss else None,
             "appraisal_url": page.url if "/appraisal/" in page.url else None,
             "selected_trim_text": selected_trim_text,
             "trim_select_source": trim_select_source,
-            "not_available": True, "unavailable_reason": "mileage_did_not_commit_v2",
+            "not_available": True, "unavailable_reason": _reason,
         }
 
     values = page.evaluate(r"""() => {

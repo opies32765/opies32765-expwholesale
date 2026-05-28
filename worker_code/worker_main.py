@@ -501,10 +501,16 @@ def process_one_bid(item):
     _post_phase(bid_id, "accutrade", "started")
     if accu and not accu.get("error"):
         if accu.get("not_available"):
+            # ACCU_REASON_KEY_FIX_2026_05_28: worker_accutrade.py sets
+            # "unavailable_reason" not "reason"; the old lookup masked every
+            # failure mode as the generic literal "unavailable", losing
+            # diagnostic detail like "mileage_did_not_commit_v2".
             ok = ew_submit_accutrade({
                 "bid_id": bid_id, "vin": vin,
                 "not_available": True,
-                "unavailable_reason": accu.get("reason", "unavailable"),
+                "unavailable_reason": (accu.get("unavailable_reason")
+                                       or accu.get("reason")
+                                       or "unavailable"),
             })
             print(f"  AccuTrade {'OK' if ok else 'FAIL'}: NOT AVAILABLE")
         else:
