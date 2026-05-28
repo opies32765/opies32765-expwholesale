@@ -3570,6 +3570,13 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     bg_cur.execute("""UPDATE bids SET vin=%s, updated_at=NOW()
                                       WHERE id=%s AND (vin IS NULL OR vin='')""",
                                    (_winner, bid_id))
+                    # VIN_OCR_V2_COMMIT_2026_05_28: commit before retrigger so the
+                    # canonicalize daemon thread (opens a NEW connection via get_db())
+                    # reads the just-written VIN. Without this, the thread sees vin=NULL
+                    # still and validate() returns "missing" — vin_invalid_reason stays
+                    # set even though the OCR'd VIN is valid. Bid 2227 hit this race.
+                    try: conn.commit()
+                    except Exception: pass
                     _retrigger_canonicalize_after_vin(bid_id)  # VIN_OCR_V2_2026_05_27
                     # CLEAR_VERIFY_STATE_BASED_2026_05_16: gate on current
                     # bid state (does it have a vin now? is the flag open

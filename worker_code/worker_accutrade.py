@@ -396,7 +396,57 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
         return r;
     }""") or {}
 
-    # Set mileage
+    # ANGULAR_FILL_2026_05_28: OS-keystroke commit via Playwright locator,
+    # BEFORE the legacy JS dispatch. Empirical validation from bid 2208's
+    # forensic HTML showed `ng-pristine` + `ng-untouched` + `ng-valid` on
+    # the odometer input AT THE MOMENT OF FAILURE — Angular's reactive
+    # form never saw the JS-dispatched input/change/blur events because
+    # they're `trusted: false`. Cox's CDK input handler only updates the
+    # reactive form model from TRUSTED keystrokes. Playwright's
+    # locator.type() sends OS-level keystroke events that arrive trusted,
+    # which Angular catches → model updates → recalc fires.
+    # JS dispatch below is left in place as harmless belt-and-suspenders.
+    try:
+        _ang_target_miles = str(int(miles))
+        # Selector cascade — try most specific first. .first picks the first
+        # visible match (Playwright auto-waits for actionability).
+        _ang_selectors = [
+            "appraisal-widget-scorecard-odometer input",
+            ".scorecard-odometer input",
+            "input[placeholder*='odometer' i]",
+            "input[aria-label*='odometer' i]",
+            "input[id*='odometer' i]",
+            "input[placeholder*='mileage' i]",
+            "input[aria-label*='mileage' i]",
+        ]
+        _ang_filled = False
+        for _sel in _ang_selectors:
+            try:
+                _loc = page.locator(_sel).first
+                if _loc.count() == 0:
+                    continue
+                _loc.scroll_into_view_if_needed(timeout=1500)
+                _loc.click(timeout=2000)
+                # Select-all + Delete (clears any pre-populated default like 45,000)
+                _loc.press("Control+A", timeout=1000)
+                _loc.press("Delete", timeout=1000)
+                # Type with delay so each keystroke arrives as a discrete
+                # trusted event (Angular's CDK input event listener relies
+                # on per-keystroke `input` events to update its model).
+                _loc.type(_ang_target_miles, delay=40, timeout=4000)
+                _loc.press("Tab", timeout=1500)
+                _ang_filled = True
+                print(f"[+{time.time()-t:5.1f}s] [accutrade] ANGULAR_FILL ok via {_sel!r}")
+                break
+            except Exception as _ang_sel_err:
+                # Selector didn't match or actionability timed out — try next
+                continue
+        if not _ang_filled:
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] ANGULAR_FILL: no selector matched, falling through to JS dispatch")
+    except Exception as _ang_err:
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] ANGULAR_FILL err: {_ang_err}")
+
+    # Set mileage (legacy JS dispatch — kept as belt-and-suspenders fallback)
     page.evaluate(r"""(target) => {
         const targetStr = target.toLocaleString('en-US');
         const ins = []; function gather(root) {
@@ -482,13 +532,19 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     except Exception:
         pass
 
-    deadline = time.time() + 12
+    # MILEAGE_REDISPATCH_RETRY_2026_05_28: Phase-1 poll for 12s. If no value
+    # change detected by 12s, fire ONE more Tab keypress (re-blurs the
+    # mileage input → re-triggers Angular reactive recalc), then poll another
+    # 8s. Total 20s budget. Mirrors what operator-driven reprocess does
+    # today: gives Cox a second chance to respond. Pattern source: today's
+    # bids 2208 (Mercedes GLC), 2215 (Maserati), 2220 (GMC HD), 2222 (BMW M4)
+    # all hit mileage_did_not_commit_v2 on first attempt → reprocess landed
+    # clean values. 30-day DB sweep showed 7.1% baseline retry rate.
+    deadline_phase1 = time.time() + 12
     mileage_committed = False
     last_post = pre_values
-    while time.time() < deadline:
+    while time.time() < deadline_phase1:
         post_values = _read_4_values()
-        # Committed if ANY value differs from snapshot (handles N/A->value
-        # and value->different-value).
         for k in ('guaranteed_offer', 'trade_in', 'trade_market', 'market_avg'):
             if pre_values.get(k) != post_values.get(k):
                 mileage_committed = True
@@ -498,6 +554,29 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
             break
         last_post = post_values
         time.sleep(0.4)
+
+    # Phase 2: re-blur + extra 8s poll. Only fires when phase 1 produced
+    # no value change. The extra Tab keypress nudges Angular's reactive form
+    # which sometimes misses the initial blur on slow-hydrating pages.
+    if not mileage_committed:
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] v2 phase 1 (12s) no value change — re-blurring + 8s phase 2")
+        try:
+            page.keyboard.press('Tab')
+        except Exception:
+            pass
+        deadline_phase2 = time.time() + 8
+        while time.time() < deadline_phase2:
+            post_values = _read_4_values()
+            for k in ('guaranteed_offer', 'trade_in', 'trade_market', 'market_avg'):
+                if pre_values.get(k) != post_values.get(k):
+                    mileage_committed = True
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] v2 phase 2 RECOVERED — Cox responded after re-blur")
+                    break
+            if mileage_committed:
+                last_post = post_values
+                break
+            last_post = post_values
+            time.sleep(0.4)
 
     # ACCUTRADE_SETTLE_DELAY_2026_05_15: bid 1503 case — once we detect ANY
     # value change, the other 3 panels may still be rendering. Wait 2.5s
