@@ -5057,6 +5057,12 @@ def update_bid(bid_id):
             print(f'[update_bid] decode_vin error bid={bid_id}: {_e}', flush=True)
         cur.execute("UPDATE bids SET vauto_priority=TRUE WHERE id=%s", (bid_id,))
         db.commit()
+        # VIN_EDIT_CANONICALIZE_2026_05_28: re-run validate + canonicalize
+        # so a fixed VIN clears vin_invalid_reason (Phase 1 gate at app.py:9929).
+        try:
+            _retrigger_canonicalize_after_vin(bid_id)
+        except Exception as _ce:
+            print(f'[update_bid] canonicalize err bid={bid_id}: {_ce}', flush=True)
 
     db.close()
 

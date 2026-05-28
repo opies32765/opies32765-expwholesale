@@ -82,6 +82,18 @@ def canonicalize_bid_vin(bid_id: int, conn,
     except Exception as _e:
         log.warning('bid %d vin_validate import failed: %s', bid_id, _e)
         v_check = {'valid': True, 'reason': None}  # fail open
+    if v_check['valid']:
+        # VIN_FLAG_CLEAR_2026_05_28: clear stale invalid flag when VIN now
+        # validates. Without this, a manual operator edit that fixes a typo
+        # VIN leaves vin_invalid_reason set forever and Phase 1 keeps
+        # excluding the bid. Bid 2186 (Subaru WRX) hit this exact path.
+        try:
+            cur.execute(
+                'UPDATE bids SET vin_invalid_reason = NULL '
+                'WHERE id = %s AND vin_invalid_reason IS NOT NULL',
+                (bid_id,))
+        except Exception as _e:
+            log.warning('bid %d clear vin_invalid_reason failed: %s', bid_id, _e)
     if not v_check['valid']:
         try:
             cur.execute(
