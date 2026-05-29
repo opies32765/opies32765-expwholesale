@@ -233,23 +233,22 @@ def _load_candidates(db_conn, year, make_u):
 
 
 def _ask_claude(year, make, raw_model, raw_trim, candidates):
-    client = _get_client()
-    if client is None:
-        return {'ymmt_id': None, 'confidence': 0.0,
-                'source': 'disabled', 'reason': 'anthropic disabled'}
     cand_lines = '\n'.join(
         f"  - id={c['id']} year={c['year']} model={c['model']!r} trim={c['trim']!r}"
         for c in candidates[:TOP_K_FOR_LLM])
     prompt = _USER_PROMPT.format(
         year=year, make=make, raw_model=raw_model or '',
         raw_trim=raw_trim or '', candidates=cand_lines)
+    # GEMINI_MIGRATION_2026_05_29: Gemini (Vertex) replaces Anthropic here.
     try:
-        resp = client.messages.create(
-            model=ANTHROPIC_MODEL, max_tokens=MAX_TOKENS, system=_SYSTEM,
-            messages=[{'role': 'user', 'content': prompt}],
-            timeout=CLAUDE_TIMEOUT_SEC)
-        txt = ''.join(b.text for b in resp.content
-                      if getattr(b, 'type', None) == 'text')
+        from gemini_helper import gemini_text
+    except Exception as e:
+        print(f'[gemini_ymmt] gemini_helper import failed: {e}', flush=True)
+        return {'ymmt_id': None, 'confidence': 0.0,
+                'source': 'disabled', 'reason': 'gemini unavailable'}
+    try:
+        txt = gemini_text(_SYSTEM + "\n\n" + prompt,
+                          model='gemini-2.5-flash', max_tokens=1024, temperature=0.0, thinking_budget=0) or ""
         parsed = _parse_json(txt)
         if not parsed:
             return {'ymmt_id': None, 'confidence': 0.0,

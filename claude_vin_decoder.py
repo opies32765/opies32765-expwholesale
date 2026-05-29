@@ -121,20 +121,17 @@ def _parse_json(txt):
 
 def decode_vin_via_claude(vin, model=ANTHROPIC_MODEL, timeout=CLAUDE_TIMEOUT_SEC):
     """One-shot Claude VIN decode. Returns dict or None on failure."""
-    c = _get_client()
-    if not c:
+    # GEMINI_MIGRATION_2026_05_29: Gemini (Vertex) replaces Anthropic here.
+    try:
+        from gemini_helper import gemini_text
+    except Exception as e:
+        print(f"[gemini_vin] gemini_helper import failed: {e}", flush=True)
         return None
     try:
         t0 = time.time()
-        resp = c.messages.create(
-            model=model,
-            max_tokens=600,
-            timeout=timeout,
-            system=_SYSTEM,
-            messages=[{"role": "user", "content": _USER_PROMPT_TEMPLATE.format(vin=vin)}],
-        )
+        txt = gemini_text(_SYSTEM + "\n\n" + _USER_PROMPT_TEMPLATE.format(vin=vin),
+                          model="gemini-2.5-pro", max_tokens=2000, temperature=0.0) or ""
         latency_ms = int((time.time() - t0) * 1000)
-        txt = resp.content[0].text if resp.content else ""
         parsed = _parse_json(txt)
         if not parsed:
             print(f"[claude_vin] {vin}: parse failed | raw={txt[:200]}", flush=True)

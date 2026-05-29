@@ -165,23 +165,20 @@ def _cache_put(db_conn, make_u, model_u, a, b, decision):
 
 
 def _ask_claude(make, model, year, subj_trim, cand_trim):
-    client = _get_client()
-    if client is None:
-        return {'match': True, 'confidence': 0.0,
-                'reason': 'anthropic disabled — filter is no-op',
-                'source': 'disabled'}
     prompt = _USER_PROMPT.format(
         year=year or '', make=make or '', model=model or '',
         subj=subj_trim or '', cand=cand_trim or '')
+    # GEMINI_MIGRATION_2026_05_29: Gemini (Vertex) replaces Anthropic here.
     try:
-        resp = client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=MAX_TOKENS,
-            system=_SYSTEM,
-            messages=[{'role': 'user', 'content': prompt}],
-            timeout=CLAUDE_TIMEOUT_SEC,
-        )
-        txt = ''.join(b.text for b in resp.content if getattr(b, 'type', None) == 'text')
+        from gemini_helper import gemini_text
+    except Exception as e:
+        print(f'[gemini_trim] gemini_helper import failed: {e}', flush=True)
+        return {'match': True, 'confidence': 0.0,
+                'reason': 'gemini unavailable — filter is no-op',
+                'source': 'disabled'}
+    try:
+        txt = gemini_text(_SYSTEM + "\n\n" + prompt,
+                          model='gemini-2.5-flash', max_tokens=1024, temperature=0.0, thinking_budget=0) or ""
         parsed = _parse_json(txt)
         if not parsed or 'match' not in parsed:
             print(f'[claude_trim] parse failed: raw={txt[:200]!r}', flush=True)
