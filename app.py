@@ -14048,6 +14048,41 @@ def api_clear_verification(bid_id):
                     'forced_ipacket': force_ipacket})
 
 
+def _accutrade_autoretry(bid_id):
+    """ACCU_AUTORETRY_2026_05_29: one-shot, storm-safe re-run for the AccuTrade
+    'mileage_did_not_commit' transient (~7% rate; AccuTrade returns no offer in
+    the worker window). Delayed so the worker's in-flight phase-1 job (it still
+    has the iPacket phase to finish) completes first, then mirrors force-reprocess:
+    preserve a SUCCESSFUL iPacket, wipe vauto+accutrade, reset claim+assessment
+    so the bid re-enters the vauto-pending queue for exactly one fresh pass.
+    The bids.accutrade_autoretried guard (set TRUE before this fires) makes a
+    second auto-retry impossible — no storm."""
+    import time as _t
+    _t.sleep(15)  # let the current worker job finish (ipacket phase + completion)
+    try:
+        _db = get_db()
+        _c = _db.cursor()
+        # Preserve a SUCCESSFUL iPacket capture (same rule as force-reprocess) so
+        # we don't trip iPacket's ~1h same-VIN rate-limit on the re-run.
+        _c.execute("""DELETE FROM ipacket_lookups WHERE bid_id=%s
+                       AND (not_available=true OR (total_msrp IS NULL AND base_price IS NULL
+                            AND (raw_json->'options') IS NULL))""", (bid_id,))
+        _c.execute('DELETE FROM accutrade_lookups WHERE bid_id=%s', (bid_id,))
+        _c.execute('DELETE FROM vauto_lookups WHERE bid_id=%s', (bid_id,))
+        _c.execute("""UPDATE bids SET vauto_claimed_by=NULL, vauto_claimed_at=NULL,
+                          ai_assessed_at=NULL, ai_price=NULL, ai_assessment=NULL
+                        WHERE id=%s""", (bid_id,))
+        _c.execute("""UPDATE worker_jobs SET completed_at=NOW(),
+                          status='released_accu_autoretry',
+                          duration_ms=EXTRACT(EPOCH FROM (NOW()-claimed_at))::int*1000
+                        WHERE bid_id=%s AND completed_at IS NULL""", (bid_id,))
+        _db.commit()
+        _db.close()
+        print(f'[accu-autoretry] bid={bid_id} re-enqueued (one-shot) after mileage_did_not_commit', flush=True)
+    except Exception as _e:
+        print(f'[accu-autoretry] bid={bid_id} reprocess err: {_e}', flush=True)
+
+
 @app.route('/api/accutrade/submit', methods=['POST'])
 def api_accutrade_submit():
     """Accept AccuTrade lookup results from worker."""
@@ -14254,6 +14289,31 @@ def api_accutrade_submit():
 
     db.close()
     _maybe_fire_assessment(bid_id, require_all=True, source='accutrade')
+
+    # ACCU_AUTORETRY_2026_05_29: schedule a one-shot retry on the mileage
+    # transient. Storm-safe — bids.accutrade_autoretried is stamped TRUE here
+    # BEFORE the retry fires, so it can never loop (see _accutrade_autoretry).
+    try:
+        _ar_reason = (data.get('unavailable_reason') or '')
+        if data.get('not_available') and _ar_reason.startswith('mileage_did_not_commit'):
+            _ardb = get_db()
+            _arc = _ardb.cursor()
+            _arc.execute("UPDATE bids SET accutrade_autoretried=TRUE "
+                         "WHERE id=%s AND COALESCE(accutrade_autoretried,FALSE)=FALSE "
+                         "RETURNING id", (bid_id,))
+            _won = _arc.fetchone() is not None
+            _ardb.commit()
+            _ardb.close()
+            if _won:
+                import threading as _arth
+                _arth.Thread(target=_accutrade_autoretry, args=(bid_id,), daemon=True,
+                             name=f'accu-autoretry-{bid_id}').start()
+                print(f'[accu-autoretry] bid={bid_id} scheduled one-shot retry (mileage transient)', flush=True)
+            else:
+                print(f'[accu-autoretry] bid={bid_id} already auto-retried once — no further retry', flush=True)
+    except Exception as _are:
+        print(f'[accu-autoretry] bid={bid_id} schedule err: {_are}', flush=True)
+
     return jsonify({'ok': True, 'bid_id': bid_id})
 
 
@@ -16044,6 +16104,7 @@ def _ensure_share_columns():
         cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS driver_phone VARCHAR(20)")
         cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS driver_notified_at TIMESTAMP")
         cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS int_color VARCHAR(64)")
+        cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS accutrade_autoretried BOOLEAN DEFAULT FALSE")  # ACCU_AUTORETRY_2026_05_29
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_bids_driver_token ON bids(driver_token) WHERE driver_token IS NOT NULL")
         db.commit()
         db.close()
