@@ -1663,6 +1663,17 @@ def extract_vehicle(url, html):
                 out['trim'] = ' '.join(t_toks[k:]) or None
                 break
 
+    # CONDITION_FROM_SLUG_2026_05_29: derive used/cpo from the VDP URL slug.
+    # DealerOn (/used-..., /certified-pre-owned-...) and dealer.com crawl VDPs
+    # encode condition in the path. 'certified' -> cpo, else used. Only EW-
+    # sourced pre-owned reach here (new-car VDP paths filtered upstream).
+    if not out.get('condition'):
+        _ul = (url or '').lower()
+        if 'certified' in _ul or 'cpo' in _ul:
+            out['condition'] = 'cpo'
+        elif 'used' in _ul or 'pre-owned' in _ul or 'preowned' in _ul:
+            out['condition'] = 'used'
+
     # Filter: need at least ONE of year/make/model OR vin
     if not (out.get('vin') or out.get('make') or out.get('year')):
         return None

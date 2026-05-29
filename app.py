@@ -5979,6 +5979,50 @@ def _run_assessment(bid_id):
             except Exception as _ocr_err:
                 print(f'iPacket canvas-OCR error for bid {bid_id}: {_ocr_err}')
 
+    # IPACKET_OCR_PERSIST_2026_05_29: the worker's stale _parse_sticker_text can
+    # submit a row whose raw_json._ocr_text CONTAINS the MSRP but with total_msrp
+    # NULL (e.g. the "TOTAL VEHICLE PRICE*" layout the old worker regex missed —
+    # bid 2250). The server parser (COLUMN_MANGLE) handles these. Re-parse the
+    # STORED OCR and PERSIST to the row + VIN cache so the bid card / future reads
+    # see it with no reprocess or re-pull. Independent of the screenshot /
+    # _dom_empty gating above; runs before the Level-2 PDF fallback so a good
+    # parse avoids an unnecessary iPacket API hit.
+    if ipacket and not ipacket.get('total_msrp'):
+        try:
+            _ip_raw = ipacket.get('raw_json') or {}
+            _stored_ocr = _ip_raw.get('_ocr_text') if isinstance(_ip_raw, dict) else None
+            if _stored_ocr:
+                _rp = _parse_sticker_text(_stored_ocr)
+                if _rp.get('total_msrp'):
+                    ipacket['total_msrp'] = _rp['total_msrp']
+                    if _rp.get('base_price') and not ipacket.get('base_price'):
+                        ipacket['base_price'] = _rp['base_price']
+                    try:
+                        _pdb = get_db()
+                        _pc = _pdb.cursor()
+                        _pc.execute(
+                            "UPDATE ipacket_lookups SET total_msrp = COALESCE(total_msrp, %s), "
+                            "base_price = COALESCE(base_price, %s) WHERE bid_id = %s",
+                            (_rp['total_msrp'], _rp.get('base_price'), bid_id))
+                        _pc.execute(
+                            "INSERT INTO ipacket_vin_cache "
+                            "(vin, total_msrp, base_price, captured_at, source_bid_id) "
+                            "VALUES (%s, %s, %s, NOW(), %s) "
+                            "ON CONFLICT (vin) DO UPDATE SET "
+                            "total_msrp=EXCLUDED.total_msrp, base_price=EXCLUDED.base_price, "
+                            "captured_at=NOW(), source_bid_id=EXCLUDED.source_bid_id",
+                            ((bid.get('vin') or '').upper().strip()[:17] or None,
+                             _rp['total_msrp'], _rp.get('base_price'), bid_id))
+                        _pdb.commit()
+                        _pdb.close()
+                        print(f'[ASSESS] Bid {bid_id} iPacket OCR-persist: wrote '
+                              f'MSRP=${_rp["total_msrp"]:,} from stored OCR (worker parser missed it)',
+                              flush=True)
+                    except Exception as _pe:
+                        print(f'[ASSESS] Bid {bid_id} iPacket OCR-persist DB err: {_pe}', flush=True)
+        except Exception as _oe:
+            print(f'[ASSESS] Bid {bid_id} iPacket OCR-persist err: {_oe}', flush=True)
+
     # Level-2 fallback: when canvas-OCR (screenshot) didn't yield MSRP,
     # pull the full iPacket PDF directly and re-parse. The screenshot is
     # often partial (~1.2k chars) while the PDF holds the full sticker
