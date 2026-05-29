@@ -509,6 +509,11 @@ def lookup(page, ctx, vin, t, bid_id=None):
                 if (r.width < 400 || r.height < 400) continue;
                 const fsrc = (f.getAttribute('src') || '');
                 if (!fsrc || fsrc === 'about:blank') continue;
+                // IPACKET_SOURCE_FIX_2026_05_29: only the iPacket sticker viewer
+                // counts — a generic visible iframe (chat/help widget on the
+                // dashboard) is NOT a sticker and caused dashboard captures.
+                const _fl = fsrc.toLowerCase();
+                if (_fl.indexOf('autoipacket') < 0 && _fl.indexOf('document-viewer') < 0 && _fl.indexOf('sticker') < 0) continue;
                 return {state: 'ready_iframe_relaxed', size: 'iframe-vis-' + Math.round(r.width) + 'x' + Math.round(r.height)};
             }
             // IPACKET_IFRAME_RELAXED_2026_05_15: sticker watermark text fallback
@@ -791,19 +796,39 @@ def lookup(page, ctx, vin, t, bid_id=None):
         _ss_bytes = screenshot.stat().st_size if (screenshot and screenshot.exists()) else 0
     except Exception:
         _ss_bytes = 0
-    if not _has_markers and not _has_data and _ss_bytes < 100_000:
+    # IPACKET_SOURCE_FIX_2026_05_29: positive proof we captured the STICKER and
+    # not the iPacket dashboard/VIN-entry form. The standalone sticker viewer
+    # lives on document-viewer.autoipacket.com (/sticker/<VIN>?token=...). A
+    # full-page dashboard screenshot is >100KB and used to slip through the
+    # old ">=100KB => accept as rasterized-PDF" branch as a fake success
+    # (bid 2258 captured the 'Enter your 17-character VIN' page). For a capture
+    # with NO pricing markers we now require the viewer to actually be loaded.
+    try:
+        _final_url = (sticker_page.url or "").lower()
+    except Exception:
+        _final_url = ""
+    _viewer_loaded = ("document-viewer" in _final_url) or ("/sticker/" in _final_url)
+    _is_dashboard = ("ENTER YOUR 17" in _txt_u) or ("WINDOW STICKER/BUILDSHEET LOOKUP" in _txt_u)
+    if (not _has_markers and not _has_data) and (_ss_bytes < 100_000 or not _viewer_loaded or _is_dashboard):
         if sticker_page is not page:
             try: sticker_page.close()
             except Exception: pass
-        print(f"[+{time.time()-t:5.1f}s] [ipacket] BLANK-CAPTURE -> not_available (text={len(sticker_text or '')} chars, no markers, screenshot={_ss_bytes:,}b<100KB) -- likely iPacket repeat-VIN rate-limit")
+        if _is_dashboard or not _viewer_loaded:
+            _reason = "captured iPacket dashboard/VIN-entry page, not a sticker (viewer never rendered)"
+        else:
+            _reason = "iPacket sticker did not render (blank capture). Likely repeat-VIN rate-limit; another bid for same VIN may have full data."
+        print(f"[+{time.time()-t:5.1f}s] [ipacket] NO-STICKER -> not_available "
+              f"(text={len(sticker_text or '')} chars, markers={_has_markers}, "
+              f"viewer_loaded={_viewer_loaded}, dashboard={_is_dashboard}, "
+              f"screenshot={_ss_bytes:,}b) :: {_reason}")
         return {
             "screenshot": str(screenshot) if screenshot else None,
             "sticker_url": sticker_url,
             "not_available": True,
-            "reason": "iPacket sticker did not render (blank capture). Likely repeat-VIN rate-limit; another bid for same VIN may have full data.",
+            "reason": _reason,
         }
-    if not _has_markers and not _has_data and _ss_bytes >= 100_000:
-        print(f"[+{time.time()-t:5.1f}s] [ipacket] no text markers but screenshot={_ss_bytes:,}b -- accepting as rasterized-PDF visual sticker")
+    if not _has_markers and not _has_data and _viewer_loaded and _ss_bytes >= 100_000:
+        print(f"[+{time.time()-t:5.1f}s] [ipacket] no text markers but viewer loaded + screenshot={_ss_bytes:,}b -- accepting as rasterized-PDF visual sticker")
 
     if sticker_page is not page:
         try: sticker_page.close()
