@@ -1911,7 +1911,11 @@ def _parse_sticker_text(text):
                 # Common formats
                 r'TOTAL\s+(?:PREDICTED\s+)?PRICE\s*[:$]?\s*\*?\s*\$?\s*([\d,]+)',  # RAM puts * between : and $
                 r'TOTAL\s+MSRP\s*[:$]?\s*\$?\s*([\d,]+)',
-                r'(?<!BASE\s)MSRP\s*[:$]?\s*\$?\s*([\d,]+)'):
+                r'(?<!BASE\s)MSRP\s*[:$]?\s*\$?\s*([\d,]+)',
+                # IPACKET_MSRP_LABEL_FIX_2026_05_29: Lexus/Toyota-style sticker —
+                # 'MANUFACTURER'S SUGGESTED RETAIL PRICE' MSRP line with no TOTAL
+                # prefix; _pick_largest_near then grabs the grand total in-window.
+                r"(?<!BASE\s)MANUFACTURER'?S?\s+SUGGESTED\s+RETAIL\s+PRICE"):
         v = _pick_largest_near(text, pat)
         if v is not None:
             result['total_msrp'] = v
@@ -6115,6 +6119,7 @@ def _run_assessment(bid_id):
                                SET total_msrp = COALESCE(total_msrp, %s),
                                    base_price = COALESCE(base_price, %s),
                                    screenshot = %s,
+                                   not_available = false, unavailable_reason = NULL,  -- IPACKET_PDF_CLEAR_NA_2026_05_29
                                    looked_up_at = NOW()
                              WHERE bid_id = %s
                         """, (_pdf_res.get('msrp'),
@@ -6126,6 +6131,7 @@ def _run_assessment(bid_id):
                             UPDATE ipacket_lookups
                                SET total_msrp = COALESCE(total_msrp, %s),
                                    base_price = COALESCE(base_price, %s),
+                                   not_available = false, unavailable_reason = NULL,  -- IPACKET_PDF_CLEAR_NA_2026_05_29
                                    looked_up_at = NOW()
                              WHERE bid_id = %s
                         """, (_pdf_res.get('msrp'),
