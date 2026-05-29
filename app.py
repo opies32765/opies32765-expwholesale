@@ -6086,6 +6086,16 @@ def _run_assessment(bid_id):
                     # (preserves prior behavior when screenshot is missing).
                     _existing_blank = True
 
+                # IPACKET_PDF_IMG_SWAP_2026_05_29: the worker capture is not
+                # a real sticker if the row is flagged not_available (dashboard /
+                # blank / rate-limit per the source fix). The near-white check
+                # above wrongly KEEPS a full-page dashboard screenshot (large +
+                # colorful), so force the swap to the rendered PDF sticker. The
+                # PDF-fallback only fires when the worker failed to get MSRP, so
+                # its image is unreliable; a genuine worker sticker is
+                # not_available=false and is left untouched.
+                if ipacket.get('not_available'):
+                    _existing_blank = True
                 _new_screenshot_path = None
                 if _existing_blank:
                     try:
