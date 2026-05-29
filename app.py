@@ -12477,11 +12477,20 @@ def api_admin_force_reprocess(bid_id):
     if _force_ipkt:
         cur.execute('DELETE FROM ipacket_lookups WHERE bid_id=%s', (bid_id,))
     else:
+        # IPACKET_PRESERVE_SUCCESS_2026_05_28: never delete a SUCCESSFUL iPacket
+        # capture on reprocess, regardless of age. Stickers are factory-locked
+        # to the VIN — a good capture is valid indefinitely. Old logic only
+        # preserved rows <5min old, so reprocessing for AccuTrade more than 5
+        # min after intake wiped the good sticker, the re-pull hit iPacket's
+        # ~1h same-VIN rate-limit, and the bid lost iPacket entirely. Now we
+        # only delete iPacket rows that FAILED (not_available=true) or have no
+        # data — successful captures survive reprocess. force_ipacket=1 still
+        # forces a full re-pull when the operator genuinely wants one.
         cur.execute("""DELETE FROM ipacket_lookups
              WHERE bid_id = %s
-               AND (looked_up_at IS NULL
-                    OR looked_up_at < NOW() - INTERVAL '5 minutes'
-                    OR not_available = true)""", (bid_id,))
+               AND (not_available = true
+                    OR (total_msrp IS NULL AND base_price IS NULL
+                        AND (raw_json->'options') IS NULL))""", (bid_id,))
     n_ipacket = cur.rowcount
     cur.execute('DELETE FROM accutrade_lookups WHERE bid_id=%s', (bid_id,))
     n_accu = cur.rowcount
@@ -14197,33 +14206,35 @@ def api_ipacket_submit():
     cur = db.cursor()
     bid_id = data['bid_id']
 
-    # RATE_LIMIT_DONOR_COPY_2026_05_23: when iPacket rate-limits a same-VIN
-    # re-pull (worker submits not_available=True with 'rate-limit' in reason),
-    # copy the sticker data from a recent successful same-VIN row. Window
-    # stickers are factory-locked to the VIN -- safe to copy. 4h freshness
-    # window is well outside iPacket's ~1h same-VIN rate-limit.
-    if data.get('not_available') and 'rate-limit' in (data.get('unavailable_reason') or '').lower():
+    # IPACKET_VIN_CACHE_DONOR_2026_05_28: when a worker submits a FAILED iPacket
+    # (not_available=True) for ANY reason — rate-limit blank, viewer-did-not-render,
+    # silent blank — try to rescue from the persistent VIN-keyed sticker cache.
+    # Stickers are factory-locked to the VIN, so a prior good capture (even from
+    # weeks ago, even from a different bid / different worker / different iPacket
+    # account) is valid. The cache survives bid-level reprocess + delete, unlike
+    # the old donor-copy that read from ipacket_lookups (which reprocess deletes).
+    # Supersedes RATE_LIMIT_DONOR_COPY_2026_05_23 (which only fired on the literal
+    # 'rate-limit' reason AND needed a surviving sibling row).
+    if data.get('not_available'):
         _vin_val = (data.get('vin') or '').upper().strip()
         if _vin_val and len(_vin_val) == 17:
             try:
                 _dcur = db.cursor()
                 _dcur.execute("""
-                    SELECT bid_id, total_msrp, base_price, exterior_color, interior_color,
-                           screenshot, raw_json
-                    FROM ipacket_lookups
+                    SELECT total_msrp, base_price, exterior_color, interior_color,
+                           screenshot, raw_json, source_bid_id, captured_at
+                    FROM ipacket_vin_cache
                     WHERE vin = %s
-                      AND bid_id != %s
-                      AND not_available = FALSE
                       AND (total_msrp IS NOT NULL OR base_price IS NOT NULL
                            OR raw_json->'options' IS NOT NULL)
-                      AND looked_up_at > NOW() - INTERVAL '4 hours'
-                    ORDER BY looked_up_at DESC
+                      AND captured_at > NOW() - INTERVAL '21 days'
                     LIMIT 1
-""", (_vin_val, bid_id))
+""", (_vin_val,))
                 _donor = _dcur.fetchone()
                 if _donor:
-                    print(f'[ipacket-copy] bid={bid_id} vin={_vin_val} copying from '
-                          f'donor bid={_donor["bid_id"]} (rate-limit avoided)', flush=True)
+                    print(f'[ipacket-cache] bid={bid_id} vin={_vin_val} RESCUED from '
+                          f'VIN cache (source bid={_donor.get("source_bid_id")}, '
+                          f'captured {_donor.get("captured_at")})', flush=True)
                     data['not_available'] = False
                     data['unavailable_reason'] = None
                     data['total_msrp'] = _donor.get('total_msrp')
@@ -14233,11 +14244,11 @@ def api_ipacket_submit():
                     if _donor.get('screenshot'):
                         data['screenshot'] = _donor.get('screenshot')
                     _donor_raw = dict(_donor.get('raw_json') or {})
-                    _donor_raw['_copied_from_bid_id'] = _donor['bid_id']
-                    _donor_raw['_copy_reason'] = 'rate_limit_donor_copy'
+                    _donor_raw['_copied_from_bid_id'] = _donor.get('source_bid_id')
+                    _donor_raw['_copy_reason'] = 'vin_cache_donor'
                     data['raw'] = _donor_raw
             except Exception as _copy_err:
-                print(f'[ipacket-copy] bid={bid_id} donor lookup err: {_copy_err}', flush=True)
+                print(f'[ipacket-cache] bid={bid_id} VIN-cache lookup err: {_copy_err}', flush=True)
 
     cur.execute("""
         INSERT INTO ipacket_lookups
@@ -14264,6 +14275,43 @@ def api_ipacket_submit():
     ))
     # SCREENSHOT_CACHE_2026_05_26
     _cache_screenshot(cur, bid_id, 'ipacket', data.get('screenshot'))
+
+    # IPACKET_VIN_CACHE_WRITE_2026_05_28: persist every successful capture to the
+    # VIN-keyed cache so future bids/reprocesses for the same VIN can be rescued
+    # without re-pulling iPacket (which rate-limits same-VIN within ~1h). Only
+    # write real data; newer good captures overwrite older. Never let a cache
+    # write failure break the submit.
+    try:
+        _ok_capture = (not data.get('not_available')) and (
+            data.get('total_msrp') or data.get('base_price')
+            or (data.get('raw') or {}).get('options')
+        )
+        _cv_vin = (data.get('vin') or '').upper().strip()
+        if _ok_capture and _cv_vin and len(_cv_vin) == 17:
+            cur.execute("""
+                INSERT INTO ipacket_vin_cache
+                    (vin, total_msrp, base_price, exterior_color, interior_color,
+                     screenshot, raw_json, captured_at, source_bid_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s)
+                ON CONFLICT (vin) DO UPDATE SET
+                    total_msrp     = EXCLUDED.total_msrp,
+                    base_price     = EXCLUDED.base_price,
+                    exterior_color = EXCLUDED.exterior_color,
+                    interior_color = EXCLUDED.interior_color,
+                    screenshot     = EXCLUDED.screenshot,
+                    raw_json       = EXCLUDED.raw_json,
+                    captured_at    = NOW(),
+                    source_bid_id  = EXCLUDED.source_bid_id
+            """, (
+                _cv_vin, data.get('total_msrp'), data.get('base_price'),
+                data.get('exterior_color'), data.get('interior_color'),
+                data.get('screenshot'),
+                json.dumps(data.get('raw', {})) if data.get('raw') else None,
+                bid_id,
+            ))
+    except Exception as _cvw_err:
+        print(f'[ipacket-cache] bid={bid_id} VIN-cache write err: {_cvw_err}', flush=True)
+
     db.commit()
 
     # ── Ensure OCR text is cached (always, even when canon_trim already set) ──
