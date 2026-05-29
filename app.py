@@ -11181,6 +11181,88 @@ def api_bid_progress(bid_id):
     return jsonify(out)
 
 
+@app.route('/api/bid/<int:bid_id>/source-status')
+def api_bid_source_status(bid_id):
+    """SOURCE_STATUS_2026_05_29: per-source enrichment state (vauto / accutrade /
+    ipacket) for the bid-card status strip. Lets the operator distinguish
+    'still enriching' from 'failed/unavailable' from 'done' without reprocessing.
+    Read-only; safe to poll every few seconds. Stops being polled client-side
+    once all three sources are terminal (done / captured / unavailable)."""
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT vauto_claimed_at FROM bids WHERE id=%s", (bid_id,))
+        b = cur.fetchone()
+        if not b:
+            return jsonify({'bid_id': bid_id, 'error': 'not found'}), 404
+        in_flight = b.get('vauto_claimed_at') is not None
+
+        cur.execute("SELECT phase, state FROM bid_phase_progress WHERE bid_id=%s", (bid_id,))
+        marks = {(r['phase'], r['state']) for r in cur.fetchall()}
+
+        cur.execute("SELECT appraisal_url, rbook_completed_at, manheim_completed_at "
+                    "FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+        v = cur.fetchone()
+        cur.execute("SELECT guaranteed_offer, not_available, unavailable_reason "
+                    "FROM accutrade_lookups WHERE bid_id=%s", (bid_id,))
+        a = cur.fetchone()
+        cur.execute("SELECT total_msrp, not_available, unavailable_reason "
+                    "FROM ipacket_lookups WHERE bid_id=%s", (bid_id,))
+        i = cur.fetchone()
+
+        def _pending(phase):
+            if (phase, 'started') in marks and (phase, 'done') not in marks:
+                return {'state': 'running', 'value': None, 'label': 'running'}
+            if in_flight:
+                return {'state': 'queued', 'value': None, 'label': 'queued'}
+            return {'state': 'pending', 'value': None, 'label': 'pending'}
+
+        def _short(reason):
+            r = (reason or '').strip()
+            if not r:
+                return 'unavailable'
+            return (r[:40] + '\u2026') if len(r) > 41 else r
+
+        # vAuto: done only when appraisal + both books completed
+        if v is None:
+            vauto = _pending('vauto')
+        elif v.get('appraisal_url') and v.get('rbook_completed_at') and v.get('manheim_completed_at'):
+            vauto = {'state': 'done', 'value': '\u2713', 'label': 'books in'}
+        else:
+            vauto = {'state': 'running', 'value': None, 'label': 'books'}
+
+        # AccuTrade
+        if a is None:
+            accu = _pending('accutrade')
+        elif a.get('not_available'):
+            accu = {'state': 'unavailable', 'value': None, 'label': _short(a.get('unavailable_reason'))}
+        elif a.get('guaranteed_offer') is not None:
+            accu = {'state': 'done', 'value': '${:,.0f}'.format(a['guaranteed_offer']), 'label': 'instant offer'}
+        else:
+            accu = {'state': 'captured', 'value': None, 'label': 'no offer'}
+
+        # iPacket
+        if i is None:
+            ipkt = _pending('ipacket')
+        elif i.get('not_available'):
+            ipkt = {'state': 'unavailable', 'value': None, 'label': _short(i.get('unavailable_reason'))}
+        elif i.get('total_msrp') is not None:
+            ipkt = {'state': 'done', 'value': 'MSRP ${:,.0f}'.format(i['total_msrp']), 'label': 'sticker'}
+        else:
+            ipkt = {'state': 'captured', 'value': None, 'label': 'no MSRP'}
+
+        _term = ('done', 'captured', 'unavailable')
+        all_terminal = all(s['state'] in _term for s in (vauto, accu, ipkt))
+        return jsonify({
+            'bid_id': bid_id,
+            'in_flight': in_flight,
+            'sources': {'vauto': vauto, 'accutrade': accu, 'ipacket': ipkt},
+            'all_terminal': all_terminal,
+        })
+    finally:
+        db.close()
+
+
 @app.route('/api/bids/progress')
 def api_bids_progress_batch():
     raw = request.args.get('ids', '').strip()
