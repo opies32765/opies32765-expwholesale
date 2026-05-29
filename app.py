@@ -14460,12 +14460,29 @@ def api_ipacket_submit():
              unavailable_reason, looked_up_at)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         ON CONFLICT (bid_id) DO UPDATE SET
-            vin=EXCLUDED.vin, total_msrp=EXCLUDED.total_msrp,
-            base_price=EXCLUDED.base_price, exterior_color=EXCLUDED.exterior_color,
-            interior_color=EXCLUDED.interior_color, screenshot=EXCLUDED.screenshot,
-            raw_json=EXCLUDED.raw_json,
-            not_available=EXCLUDED.not_available,
-            unavailable_reason=EXCLUDED.unavailable_reason,
+            -- IPACKET_NO_CLOBBER_2026_05_29: never let a blank/slow-snapshot
+            -- re-submit wipe a good capture. New non-null values win; nulls
+            -- keep the prior value (factory stickers are VIN-locked → valid
+            -- forever). Fixes reprocess silently blanking iPacket (bid 2258):
+            -- preserve kept the row, the old upsert's EXCLUDED NULLs erased it.
+            vin=EXCLUDED.vin,
+            total_msrp=COALESCE(EXCLUDED.total_msrp, ipacket_lookups.total_msrp),
+            base_price=COALESCE(EXCLUDED.base_price, ipacket_lookups.base_price),
+            exterior_color=COALESCE(EXCLUDED.exterior_color, ipacket_lookups.exterior_color),
+            interior_color=COALESCE(EXCLUDED.interior_color, ipacket_lookups.interior_color),
+            screenshot=COALESCE(EXCLUDED.screenshot, ipacket_lookups.screenshot),
+            raw_json=CASE
+                WHEN EXCLUDED.total_msrp IS NOT NULL
+                  OR length(COALESCE(EXCLUDED.raw_json->>'_ocr_text','')) >
+                     length(COALESCE(ipacket_lookups.raw_json->>'_ocr_text',''))
+                THEN EXCLUDED.raw_json ELSE ipacket_lookups.raw_json END,
+            not_available = (EXCLUDED.not_available
+                             AND COALESCE(EXCLUDED.total_msrp, ipacket_lookups.total_msrp) IS NULL
+                             AND COALESCE(EXCLUDED.base_price, ipacket_lookups.base_price) IS NULL),
+            unavailable_reason = CASE
+                WHEN COALESCE(EXCLUDED.total_msrp, ipacket_lookups.total_msrp) IS NOT NULL
+                  OR COALESCE(EXCLUDED.base_price, ipacket_lookups.base_price) IS NOT NULL
+                THEN NULL ELSE EXCLUDED.unavailable_reason END,
             looked_up_at=NOW()
     """, (
         bid_id, data.get('vin', ''),
