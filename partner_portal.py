@@ -160,6 +160,63 @@ def _send_email(to_addr: str, subject: str, html: str) -> bool:
 
 
 # ── Welcome onboarding (no activation code) ─────────────────────────────
+def provision_passwordless_portal(dealer_id: int, full_name: str = None,
+                                  phone: str = None) -> dict:
+    """PASSWORDLESS_PORTAL_2026_05_29 — every new dealer gets a tokenized
+    portal with NO login credentials. Mints portal_slug + dashboard_token +
+    mobile_token and creates ONE placeholder partner_user with NULL
+    password_hash for the /partner/<slug>/d/<token> link to ride on. No
+    email, no password. Dealer can set real credentials later via settings /
+    forgot-password. Idempotent: never clobbers an existing slug/token and
+    never creates a 2nd placeholder."""
+    import re as _re
+    try:
+        with _db() as conn, conn.cursor() as cur:
+            cur.execute("SELECT name, portal_slug, dashboard_token, mobile_token "
+                        "FROM dealers WHERE id=%s", (dealer_id,))
+            d = cur.fetchone()
+            if not d:
+                return {'success': False, 'error': 'dealer not found'}
+            slug = d.get('portal_slug')
+            if not slug:
+                base = _re.sub(r'[^a-z0-9]+', '', (d['name'] or '').lower())[:32] or f'dealer{dealer_id}'
+                slug = base; n = 2
+                while True:
+                    cur.execute("SELECT 1 FROM dealers WHERE LOWER(portal_slug)=%s AND id<>%s",
+                                (slug, dealer_id))
+                    if not cur.fetchone():
+                        break
+                    slug = f'{base[:30]}{n}'; n += 1
+            dash = d.get('dashboard_token') or secrets.token_urlsafe(20)
+            mob = d.get('mobile_token') or secrets.token_urlsafe(16)
+            cur.execute("UPDATE dealers SET portal_slug=COALESCE(portal_slug,%s), "
+                        "dashboard_token=COALESCE(dashboard_token,%s), "
+                        "mobile_token=COALESCE(mobile_token,%s) WHERE id=%s",
+                        (slug, dash, mob, dealer_id))
+            placeholder_email = f'portal+dealer{dealer_id}@experience-wholesale.net'
+            cur.execute("SELECT id FROM partner_users WHERE dealer_id=%s LIMIT 1", (dealer_id,))
+            if not cur.fetchone():
+                cur.execute('''INSERT INTO partner_users
+                                 (dealer_id, email, full_name, phone, password_hash,
+                                  sms_opt_in, email_bid_alerts, invite_token,
+                                  invite_used_at, created_at)
+                               VALUES (%s, %s, %s, %s, NULL, FALSE, TRUE, NULL, NULL, NOW())
+                               ON CONFLICT (email) DO NOTHING''',
+                            (dealer_id, placeholder_email, full_name,
+                             (phone or '').strip() or None))
+            conn.commit()
+        link = f"{PORTAL_BASE}/partner/{slug}/d/{dash}"
+        try:
+            _tg_alert(f"\U0001F511 Passwordless portal provisioned for <b>{d['name']}</b>\n{link}")
+        except Exception:
+            pass
+        return {'success': True, 'slug': slug, 'dashboard_link': link,
+                'mobile_token': mob}
+    except Exception as e:
+        print(f'[provision_passwordless_portal] dealer {dealer_id}: {e}', flush=True)
+        return {'success': False, 'error': str(e)}
+
+
 def create_welcome_account(dealer_id: int, email: str, phone: str = None,
                            sms_opt_in: bool = False, email_bid_alerts: bool = True,
                            full_name: str = None) -> dict:

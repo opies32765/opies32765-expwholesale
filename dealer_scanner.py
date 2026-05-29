@@ -735,7 +735,7 @@ DEALERCOM_VDP_RE = re.compile(
 )
 
 
-def discover_via_dealer_com(base_url, sess, max_pages_per_list=10, per_page=24):
+def discover_via_dealer_com(base_url, sess, max_pages_per_list=10, per_page=24, list_paths=None):
     """Dealer.com-specific VDP discovery.
 
     Sitemap on dealer.com only exposes list pages, not per-VDP URLs. This walks
@@ -749,7 +749,10 @@ def discover_via_dealer_com(base_url, sess, max_pages_per_list=10, per_page=24):
     found = set()
     netloc = urlparse(base_url).netloc.lower().lstrip('www.')
 
-    for path in DEALERCOM_LIST_PATHS:
+    # DEALERCOM_LIST_PATHS_OVERRIDE_2026_05_29: per-dealer list-path override
+    # lets a multi-location Dealer.com site (e.g. Lifted Trucks Hurst) crawl
+    # only its location-scoped used-inventory listing instead of the site-wide one.
+    for path in (list_paths or DEALERCOM_LIST_PATHS):
         prev_count = -1
         for page_idx in range(max_pages_per_list):
             start = page_idx * per_page
@@ -775,6 +778,220 @@ def discover_via_dealer_com(base_url, sess, max_pages_per_list=10, per_page=24):
             if len(found) >= CRAWL_MAX_URLS:
                 return sorted(found)[:CRAWL_MAX_URLS]
     return sorted(found)
+
+
+# ── Dealer.com ws-inv-data getInventory JSON API ───────────────
+# DDC_GETINVENTORY_2026_05_29: Dealer.com listing pages render inventory from a
+# public POST API (no auth) at {base}/api/widget/ws-inv-data/getInventory. One
+# POST returns up to 100 vehicles with full data; paginate via
+# inventoryParameters.start=[offset]. Multi-location sites (e.g. Lifted Trucks)
+# return the home rooftop PLUS nearby/transfer stores boosted by listing.boost
+# .order; account_filter scopes to one physical rooftop. Replaces the slow,
+# Akamai-throttled per-VDP crawl for dealer.com stores.
+def _normalize_dealercom_getinv(it, base_url):
+    """Convert one getInventory hit to our internal vehicle dict (AAN-shaped)."""
+    cond_raw = (it.get('condition') or it.get('type') or '').strip().lower()
+    if cond_raw in ('new', 'demo', 'loaner', 'courtesy'):
+        return None  # EW sources pre-owned + certified only
+    vin = (it.get('vin') or '').strip().upper()
+    if not vin:
+        return None
+    miles = None
+    for a in (it.get('attributes') or []):
+        if isinstance(a, dict) and a.get('name') == 'odometer':
+            digits = re.sub(r'[^0-9]', '', str(a.get('value') or ''))
+            miles = int(digits) if digits else None
+            break
+    price = None
+    pr = it.get('pricing') or {}
+    cands = [pr.get('retailPrice')] + [d.get('value') for d in (pr.get('dprice') or []) if isinstance(d, dict)]
+    for cand in cands:
+        if cand:
+            digits = re.sub(r'[^0-9]', '', str(cand))
+            if digits:
+                price = int(digits)
+                break
+    source_added_at = None
+    di = (it.get('inventoryDate') or '').strip()
+    if di:
+        try:
+            from datetime import datetime as _dt
+            source_added_at = _dt.strptime(di, '%m/%d/%Y').replace(tzinfo=timezone.utc).isoformat()
+        except Exception:
+            pass
+    imgs = it.get('images') or []
+    photo = imgs[0].get('uri') if imgs and isinstance(imgs[0], dict) else None
+    year = it.get('year')
+    try:
+        year = int(year)
+    except (ValueError, TypeError):
+        year = None
+    return {
+        'vin': vin, 'year': year,
+        'make': (it.get('make') or '').strip() or None,
+        'model': (it.get('model') or '').strip() or None,
+        'trim': (it.get('trim') or '').strip() or None,
+        'body_style': (it.get('bodyStyle') or '').strip() or None,
+        'mileage': miles, 'price': price,
+        'condition': 'cpo' if it.get('certified') else 'used',
+        'stock_number': (it.get('stockNumber') or '').strip() or None,
+        'url': urljoin(base_url, it.get('link')) if it.get('link') else None,
+        'photo_url': photo, 'photos': [photo] if photo else [],
+        'source_added_at': source_added_at,
+        '_aan_sold': False, '_aan_pending': False, '_aan_coming_soon': False,
+    }
+
+
+def fetch_dealercom_getinventory(base_url, sess, cfg):
+    """Dealer.com getInventory JSON-API fetch. cfg = {'body': <POST template>,
+    'account_filter': <accountId or None>}. Returns a list of normalized used/cpo
+    vehicle dicts (rooftop-scoped if account_filter set), or None on hard failure
+    so the caller can decide whether to abort vs fall through."""
+    import json as _j
+    body0 = (cfg or {}).get('body')
+    if not body0:
+        return None
+    acct = (cfg or {}).get('account_filter')
+    _u = urlparse(base_url)
+    _root = f'{_u.scheme}://{_u.netloc}'
+    url = _root + '/api/widget/ws-inv-data/getInventory'
+    headers = {'Content-Type': 'application/json', 'Referer': base_url,
+               'Accept': '*/*'}
+    out, offset, total, PAGE = [], 0, None, 100
+    for _page in range(80):  # hard cap 8000 vehicles
+        b = _j.loads(_j.dumps(body0))  # deep copy
+        b.setdefault('preferences', {})['pageSize'] = str(PAGE)
+        ip = dict(b.get('inventoryParameters') or {})
+        ip['start'] = [str(offset)]
+        b['inventoryParameters'] = ip
+        try:
+            r = requests.post(url, json=b, headers=headers, timeout=30)
+            if r.status_code != 200:
+                return None if not out else out
+            data = r.json()
+        except Exception:
+            return None if not out else out
+        inv = data.get('inventory') or []
+        if total is None:
+            total = (data.get('pageInfo') or {}).get('totalCount') or 0
+        if not inv:
+            break
+        for it in inv:
+            if acct and it.get('accountId') != acct:
+                continue
+            v = _normalize_dealercom_getinv(it, base_url)
+            if v:
+                out.append(v)
+        offset += PAGE
+        if offset >= (total or 0):
+            break
+    return out
+
+
+# ── Cars Commerce listings API (newer DealerInspire / group sites) ────────
+# CARSCOMMERCE_2026_05_29: POST {api}/api/v1/listings/{ccid}/search with an
+# x-api-key. ccid is the per-account id; the response pools the whole group
+# (boosted by the store's source_id), so facetFilters.source_id=[N] scopes to
+# one physical rooftop. perPage caps ~100; paginate via page. used/cpo only.
+def _normalize_carscommerce(it):
+    t = (it.get('type') or '').strip().lower()
+    if t in ('new', 'demo', 'loaner', 'courtesy'):
+        return None
+    vin = (it.get('vin') or '').strip().upper()
+    if not vin:
+        return None
+    cond = 'cpo' if ('certif' in t or t == 'ctp') else 'used'
+    pr = it.get('pricing') or {}
+    price = pr.get('our_price') or pr.get('price') or None
+    try:
+        price = int(price) if price else None
+    except (ValueError, TypeError):
+        price = None
+    miles = it.get('mileage')
+    miles = int(miles) if isinstance(miles, (int, float)) and miles else None
+    source_added_at = None
+    di = (it.get('date_in_stock') or '').strip()
+    if di:
+        try:
+            from datetime import datetime as _dt
+            source_added_at = _dt.fromisoformat(di.replace('Z', '+00:00')).isoformat()
+        except Exception:
+            pass
+    media = it.get('media') or {}
+    imgs = media.get('images') if isinstance(media, dict) else None
+    imgs = [i for i in (imgs or []) if isinstance(i, str)]
+    year = it.get('year')
+    try:
+        year = int(year)
+    except (ValueError, TypeError):
+        year = None
+    return {
+        'vin': vin, 'year': year,
+        'make': (it.get('make') or '').strip() or None,
+        'model': (it.get('model') or '').strip() or None,
+        'trim': (it.get('trim') or '').strip() or None,
+        'body_style': None, 'mileage': miles, 'price': price, 'condition': cond,
+        'stock_number': (it.get('stock') or '').strip() or None,
+        'url': it.get('vdp_url') or None,
+        'photo_url': (imgs[0] if imgs else None), 'photos': imgs,
+        'source_added_at': source_added_at,
+        '_aan_sold': False, '_aan_pending': False, '_aan_coming_soon': False,
+    }
+
+
+def fetch_carscommerce_inventory(cfg):
+    """cfg = {ccid, api_key, source_id(optional rooftop filter), origin}. Returns
+    list of normalized used/cpo dicts, or None on hard failure."""
+    import json as _j
+    ccid = (cfg or {}).get('ccid')
+    key = (cfg or {}).get('api_key')
+    src = (cfg or {}).get('source_id')
+    origin = (cfg or {}).get('origin') or ''
+    if not (ccid and key):
+        return None
+    url = f'https://websites-search.api.carscommerce.inc/api/v1/listings/{ccid}/search'
+    headers = {'x-api-key': key, 'Content-Type': 'application/json', 'Accept': '*/*'}
+    if origin:
+        headers['Origin'] = origin
+        headers['Referer'] = origin.rstrip('/') + '/'
+    base_body = {
+        'perPage': 100,
+        'facets': ['type_slug', 'year', 'make', 'model_slug', 'trim_slug',
+                   'miles', 'body_type', 'low_price'],
+        'filters': {'status': ['publish', 'modified', 'pend-sale']},
+        'facetFilters': {'type': ['Used', 'Certified Used', 'CTP'],
+                         'type_slug': ['Used', 'Certified Used']},
+        'requestedFields': ['vin', 'stock', 'type', 'year', 'make', 'model',
+                            'trim', 'date_in_stock', 'mileage', 'vdp_url',
+                            'source_id', 'pricing', 'media'],
+    }
+    if src:
+        base_body['facetFilters']['source_id'] = [str(src)]
+    out, page, total = [], 1, None
+    for _ in range(80):
+        b = _j.loads(_j.dumps(base_body))
+        b['page'] = page
+        try:
+            r = requests.post(url, json=b, headers=headers, timeout=30)
+            if r.status_code != 200:
+                return None if not out else out
+            data = r.json()
+        except Exception:
+            return None if not out else out
+        block = data.get('data') or {}
+        L = block.get('listings') or []
+        if total is None:
+            total = block.get('total_vehicle_count') or 0
+        if not L:
+            break
+        for it in L:
+            v = _normalize_carscommerce(it)
+            if v:
+                out.append(v)
+        if page * 100 >= (total or 0):
+            break
+        page += 1
+    return out
 
 
 # ── DealerInspire (Cox) platform ─────────────────────────────────────────
@@ -909,13 +1126,28 @@ def fetch_dealer_inspire_inventory(base_url, sess, cached_cfg=None):
     if not cfg:
         return None, None
 
+    # ROOFTOP_FILTER_2026_05_29: Hendrick (and other group) DI indexes pool a
+    # huge shared 'Available for Transfer' nationwide pool on top of the
+    # store's own lot. Without scoping, every EW dealer pulls the same ~9k
+    # cars instead of its physical inventory. cached_cfg.rooftop_filter is an
+    # Algolia facetFilters array (e.g. [["api_id:9022398"]] or
+    # [["location:<exact addr>"]]) that scopes to one rooftop. Carry it onto
+    # cfg so the persist step below doesn't clobber it.
+    rooftop = (cached_cfg or {}).get('rooftop_filter')
+    if rooftop:
+        cfg['rooftop_filter'] = rooftop
+
     algolia_url = f"https://{cfg['app_id']}-dsn.algolia.net/1/indexes/{cfg['index']}/query"
     headers = {
         'X-Algolia-Application-Id': cfg['app_id'],
         'X-Algolia-API-Key': cfg['api_key'],
         'Content-Type': 'application/json',
     }
-    payload = _json.dumps({'params': 'hitsPerPage=1000&page=0'})
+    _params = 'hitsPerPage=1000&page=0'
+    if rooftop:
+        import urllib.parse as _ul
+        _params += '&facetFilters=' + _ul.quote(_json.dumps(rooftop))
+    payload = _json.dumps({'params': _params})
     try:
         # Direct Algolia call — bypass FlareSolverr/proxy entirely. Algolia's
         # public search key is meant to be browser-callable, no Cloudflare.
@@ -993,6 +1225,9 @@ def _normalize_dealer_inspire_vehicle(item, base_url):
         'photo_url': thumb,
         'photos': photos,
         'source_added_at': source_added_at,
+        # CONDITION_2026_05_29: record used vs cpo (New already dropped above).
+        'condition': ('cpo' if vtype.lower() in ('ctp','cpo','certified','certified pre-owned')
+                      else ('used' if vtype else None)),
         # Reuse AAN flags so the downstream upsert path is unchanged.
         '_aan_sold': False,
         '_aan_pending': False,
@@ -2392,14 +2627,15 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
         cur.execute('''
             INSERT INTO dealer_inventory
                 (dealer_id, vin, year, make, model, trim, ext_color, mileage,
-                 price, url, photo_url, photos, raw, source_added_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::timestamptz)
+                 price, url, photo_url, photos, raw, source_added_at, condition)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::timestamptz, %s)
             RETURNING id
         ''', (
             dealer_id, vin or '', veh.get('year'), veh.get('make'),
             veh.get('model'), veh.get('trim'), veh.get('ext_color'),
             veh.get('mileage'), veh.get('price'), url, veh.get('photo_url'),
             photos_json, raw_json, veh.get('source_added_at'),
+            (veh.get('condition') or veh.get('car_condition') or None),
         ))
         inv_id = cur.fetchone()['id']
         cur.execute('''INSERT INTO dealer_inventory_history
@@ -2512,6 +2748,35 @@ class DealerScanner:
                     return stats
                 platform, method = detect_platform(body or '')
 
+            # Cars Commerce listings fast-path (CARSCOMMERCE_2026_05_29).
+            # Runs BEFORE the Algolia path: on newer DealerInspire/group sites
+            # the Algolia index is the shared nationwide pool, while Cars
+            # Commerce (scoped by source_id) is the store's real rooftop lot.
+            if self.dealer.get('platform') == 'dealerinspire' \
+                    and (self.dealer.get('scrape_config') or {}).get('carscommerce'):
+                stats['platform_detected'] = 'dealerinspire'
+                cc = fetch_carscommerce_inventory(self.dealer['scrape_config']['carscommerce'])
+                if cc is not None:
+                    if not cc:
+                        prior = self._zero_vehicle_abort_check()
+                        if prior:
+                            stats['status'] = 'blocked'
+                            stats['error'] = ('carscommerce returned 0 but '
+                                              f'{prior} active — source_id/api_key may '
+                                              'be stale, scan aborted, inventory preserved')
+                            self._update_dealer('dealerinspire', 'carscommerce', scan_id,
+                                                stats['error'][:200], stats['tier'])
+                            self._finalize(scan_id, stats, started)
+                            return stats
+                    print(f'  carscommerce returned {len(cc)} vehicles', flush=True)
+                    self._process_aan(scan_id, cc, stats)
+                    stats['colors_detected'] = self._detect_colors()
+                    self._update_dealer('dealerinspire', 'carscommerce', scan_id, 'ok', stats['tier'])
+                    stats['status'] = 'ok'
+                    self._finalize(scan_id, stats, started)
+                    return stats
+                print('  carscommerce path failed — falling through', flush=True)
+
             # DealerInspire Algolia fast-path — runs before any other
             # branching. Gated on the dealer's STORED platform column
             # (set during initial onboarding/discovery), not the live
@@ -2605,8 +2870,14 @@ class DealerScanner:
                 self._finalize(scan_id, stats, started)
                 return stats
 
-            # If the dealer has a stored scrape_config, prefer it.
-            if self.dealer.get('scrape_config'):
+            # If the dealer has a stored scrape_config, prefer the generic
+            # config-driven path - UNLESS a known native platform already
+            # owns the routing. NATIVE_CFG_ROUTING_2026_05_29: dealer.com
+            # (dealercom_list_paths) and other native platforms consume their
+            # own scrape_config keys in their own branch; don't hijack those
+            # into the AI-generated extractor (which only understands algolia/
+            # extraction configs and would silently return ~0 for them).
+            if self.dealer.get('scrape_config') and stored_platform in ('', 'custom', 'ai-generated'):
                 platform = 'ai-generated'
                 method = 'config-driven'
             # Auto-spawn AI discovery when no fingerprint matched ('custom').
@@ -2738,6 +3009,35 @@ class DealerScanner:
             # ai-generated branching so a single HTTP call replaces the
             # 100+ FlareSolverr VDP fetches that the universal path needs.
 
+            # Dealer.com getInventory JSON-API fast path (DDC_GETINVENTORY_2026_05_29).
+            # Gated on stored platform + scrape_config.dealercom_getinventory so it
+            # only fires for dealers explicitly configured with a captured body.
+            if self.dealer.get('platform') == 'dealer.com' \
+                    and (self.dealer.get('scrape_config') or {}).get('dealercom_getinventory'):
+                dc = fetch_dealercom_getinventory(
+                    self.base_url, self.sess,
+                    self.dealer['scrape_config']['dealercom_getinventory'])
+                if dc is not None:
+                    if not dc:
+                        prior = self._zero_vehicle_abort_check()
+                        if prior:
+                            stats['status'] = 'blocked'
+                            stats['error'] = ('dealer.com getInventory returned 0 but '
+                                              f'{prior} active — body/account_filter may '
+                                              'be stale, scan aborted, inventory preserved')
+                            self._update_dealer('dealer.com', 'getinventory-api', scan_id,
+                                                stats['error'][:200], stats['tier'])
+                            self._finalize(scan_id, stats, started)
+                            return stats
+                    print(f'  dealer.com getInventory returned {len(dc)} vehicles', flush=True)
+                    self._process_aan(scan_id, dc, stats)
+                    stats['colors_detected'] = self._detect_colors()
+                    self._update_dealer('dealer.com', 'getinventory-api', scan_id, 'ok', stats['tier'])
+                    stats['status'] = 'ok'
+                    self._finalize(scan_id, stats, started)
+                    return stats
+                print('  dealer.com getInventory path failed — falling through to crawl', flush=True)
+
             # AI-generated config-driven extraction (Ferrari, novel platforms).
             # Reads dealers.scrape_config JSONB produced by discover_dealer.py
             # and runs config_driven_extractor.fetch_inventory against it.
@@ -2768,7 +3068,8 @@ class DealerScanner:
                 # Platform-specific discovery first (dealer.com uses /new/, /used/
                 # VDP URL patterns; sitemap only lists category index pages).
                 if platform == 'dealer.com':
-                    urls = discover_via_dealer_com(self.base_url, self.sess)
+                    urls = discover_via_dealer_com(self.base_url, self.sess,
+                        list_paths=(self.dealer.get('scrape_config') or {}).get('dealercom_list_paths'))
                     if len(urls) < 5:
                         urls = list(set(urls) | set(
                             discover_via_sitemap(self.base_url, self.sess)))

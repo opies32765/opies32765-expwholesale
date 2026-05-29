@@ -716,11 +716,26 @@ def create_dealer():
         dealer_id = cur.fetchone()['id']
         conn.commit()
 
-    # Pre-provision the partner-portal account when contact email is provided.
-    # No activation code, no magic link — single welcome email with credentials.
-    # Dealer can log in immediately and start receiving bid notifications.
+    # PASSWORDLESS_PORTAL_2026_05_29: every new dealer auto-gets a tokenized
+    # portal (slug + dashboard/mobile tokens + NULL-password placeholder
+    # account) with NO login and NO password. Dealers add real credentials
+    # later. The credentialed welcome-email path is now opt-in only
+    # (pass send_welcome=true), never the default.
+    portal_result = None
     welcome_result = None
-    if contact_email:
+    try:
+        from partner_portal import provision_passwordless_portal
+        portal_result = provision_passwordless_portal(
+            dealer_id=dealer_id,
+            full_name=contact_full_name,
+            phone=contact_phone or None,
+        )
+    except Exception as e:
+        print(f'[create_dealer] portal provision failed for dealer {dealer_id}: {e}',
+              flush=True)
+        portal_result = {'success': False, 'error': str(e)}
+
+    if contact_email and bool(data.get('send_welcome')):
         try:
             from partner_portal import create_welcome_account
             welcome_result = create_welcome_account(
@@ -740,6 +755,7 @@ def create_dealer():
     return jsonify({
         'dealer_id': dealer_id,
         'scan_started': True,
+        'portal': portal_result,
         'partner_account': welcome_result,
     })
 

@@ -14206,6 +14206,23 @@ def api_ipacket_submit():
     cur = db.cursor()
     bid_id = data['bid_id']
 
+    # IPACKET_DATA_PRESENT_AVAILABLE_2026_05_29: a submission carrying a valid
+    # MSRP/base price is by definition AVAILABLE. Never let a worker's defensive
+    # viewer-render / rate-limit guard flag the row not_available while real data
+    # rode along — that contradiction silently skipped the VIN-cache WRITE
+    # (_ok_capture gates on not_available=false), so the sticker was never cached,
+    # so a later reprocess re-pull hit the ~1h same-VIN rate-limit and the donor
+    # found an empty cache and the bid lost iPacket. Bid 2245 (2024 Suburban,
+    # msrp 73315) hit exactly this. Runs before the donor block so the donor
+    # correctly skips when data is already present.
+    if data.get('not_available') and (data.get('total_msrp') or data.get('base_price')):
+        print(f'[ipacket-submit] bid={bid_id} carried '
+              f'msrp=${data.get("total_msrp") or 0:,}/base=${data.get("base_price") or 0:,} '
+              f'but not_available=True -- coercing to available (real data present)',
+              flush=True)
+        data['not_available'] = False
+        data['unavailable_reason'] = None
+
     # IPACKET_VIN_CACHE_DONOR_2026_05_28: when a worker submits a FAILED iPacket
     # (not_available=True) for ANY reason — rate-limit blank, viewer-did-not-render,
     # silent blank — try to rescue from the persistent VIN-keyed sticker cache.

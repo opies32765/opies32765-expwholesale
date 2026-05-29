@@ -408,8 +408,102 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     # JS dispatch below is left in place as harmless belt-and-suspenders.
     try:
         _ang_target_miles = str(int(miles))
-        # Selector cascade — try most specific first. .first picks the first
-        # visible match (Playwright auto-waits for actionability).
+
+        # DOCK_LIST_EXPAND_2026_05_29: THE REAL FIX. 5-agent RCA on bid 2239
+        # proved the editable odometer input is NOT the scorecard widget (that
+        # is a read-only <div class="value">) — it lives inside the COLLAPSED
+        # "Odometer" dock-list row in the Actions panel:
+        #   <odometer-dock-list data-qa="Odometer"><dock-list>
+        #     <div class="container"><mat-icon>chevron_right</mat-icon>
+        #     <div class="title bold">Odometer</div>...
+        # The row must be CLICKED to expand before the input mounts. The worker
+        # never did this, so every prior selector matched nothing and fell
+        # through to the doomed JS dispatch. dock-list uses Angular EMULATED
+        # encapsulation (_nghost/_ngcontent attrs = light DOM), so once expanded
+        # a plain Playwright locator reaches the input — no CDP/shadow piercing.
+        # Self-diagnosing: logs each step so a one-worker canary confirms the
+        # exact behavior before fleet rollout.
+        _dock_committed = False
+        try:
+            _dock = page.locator("odometer-dock-list").first
+            if _dock.count() > 0:
+                _dock.scroll_into_view_if_needed(timeout=1500)
+                # Click the row container / chevron to expand it.
+                try:
+                    _dock.locator(".container").first.click(timeout=2000)
+                except Exception:
+                    _dock.click(timeout=2000)
+                print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND: clicked odometer-dock-list to expand")
+                # DOCK_INPUT_WIDEN_2026_05_29: the editable odometer input does
+                # NOT mount as a child of <odometer-dock-list> — Angular Material
+                # renders the edit field into a cdk-overlay appended to <body>
+                # (bid 2240 log: expand clicked, "no input mounted" under the
+                # dock-list, yet JS-dispatch fallthrough then found+filled it and
+                # the bid committed). So after expanding, search DOCUMENT-WIDE for
+                # the newly-mounted numeric/text input, excluding the known
+                # location-picker + country-radio inputs. Also dump every input's
+                # attrs to the log so any miss gives us the exact DOM, no guessing.
+                _dock_input = None
+                _dl_deadline = time.time() + 4
+                _widen_sel = ("input[type='number'], input[inputmode='numeric'], "
+                              "input.mat-input-element, .cdk-overlay-container input, "
+                              "input[formcontrolname*='dometer' i], input[formcontrolname*='ileage' i]")
+                while time.time() < _dl_deadline:
+                    _cand = page.locator(_widen_sel)
+                    try:
+                        _n = _cand.count()
+                    except Exception:
+                        _n = 0
+                    # Pick first VISIBLE candidate that isn't the location picker.
+                    for _ci in range(_n):
+                        try:
+                            _c = _cand.nth(_ci)
+                            if not _c.is_visible(timeout=200):
+                                continue
+                            _cls = (_c.get_attribute('class', timeout=300) or '')
+                            _ph = (_c.get_attribute('placeholder', timeout=300) or '')
+                            if 'location-picker' in _cls or 'Location' in _ph:
+                                continue
+                            _dock_input = _c
+                            break
+                        except Exception:
+                            continue
+                    if _dock_input is not None:
+                        break
+                    time.sleep(0.3)
+                # Always dump the full input inventory for forensics.
+                try:
+                    _inv = page.evaluate(
+                        "() => { const out=[]; const walk=(r)=>{ "
+                        "(r.querySelectorAll('input')||[]).forEach(el=>{ const cs=getComputedStyle(el); "
+                        "out.push({id:el.id,ph:el.placeholder,aria:el.getAttribute('aria-label'),"
+                        "type:el.type,fc:el.getAttribute('formcontrolname'),cls:(el.className||'').slice(0,40),"
+                        "vis:(el.offsetParent!==null)}); }); "
+                        "(r.querySelectorAll('*')||[]).forEach(el=>{ if(el.shadowRoot) walk(el.shadowRoot); }); }; "
+                        "walk(document); return out; }"
+                    )
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND input-inventory: {_inv}")
+                except Exception:
+                    pass
+                if _dock_input is not None:
+                    _dock_input.scroll_into_view_if_needed(timeout=1500)
+                    _dock_input.click(timeout=2000)
+                    _dock_input.press("Control+A", timeout=1000)
+                    _dock_input.press("Delete", timeout=1000)
+                    _dock_input.type(_ang_target_miles, delay=40, timeout=4000)
+                    _dock_input.press("Tab", timeout=1500)
+                    _dock_committed = True
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND ok — typed {_ang_target_miles} into expanded odometer input (document-wide match)")
+                else:
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND: no editable input found document-wide after expand — see input-inventory above; falling through")
+            else:
+                print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND: odometer-dock-list not present")
+        except Exception as _dl_err:
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND err: {_dl_err}")
+
+        _ang_filled = _dock_committed
+        # Selector cascade — fallback only if the dock-list expand path did
+        # not commit. Kept for DOM variants where the input IS in the scorecard.
         _ang_selectors = [
             "appraisal-widget-scorecard-odometer input",
             ".scorecard-odometer input",
@@ -419,8 +513,7 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
             "input[placeholder*='mileage' i]",
             "input[aria-label*='mileage' i]",
         ]
-        _ang_filled = False
-        for _sel in _ang_selectors:
+        for _sel in ([] if _ang_filled else _ang_selectors):
             try:
                 _loc = page.locator(_sel).first
                 if _loc.count() == 0:

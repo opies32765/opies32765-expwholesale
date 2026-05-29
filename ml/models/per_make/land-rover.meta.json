@@ -1,9 +1,9 @@
 {
   "make_name": "LAND ROVER",
-  "trained_at": "2026-05-28T08:30:12.520875Z",
-  "n_total": 1173,
+  "trained_at": "2026-05-29T08:30:18.098733Z",
+  "n_total": 1176,
   "n_train": 1091,
-  "n_test": 82,
+  "n_test": 85,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -213,49 +213,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3577.0,
-    "mape_pct": 6.31,
-    "r2": 0.9731,
-    "within_5pct": 64.6,
-    "within_10pct": 84.1
+    "mae_dollars": 3503.0,
+    "mape_pct": 5.9,
+    "r2": 0.9712,
+    "within_5pct": 64.7,
+    "within_10pct": 84.7
   },
   "baseline_metrics": {
-    "mae_dollars": 5459.0,
-    "mape_pct": 9.71,
+    "mae_dollars": 5508.0,
+    "mape_pct": 9.73,
     "ratio": 1.0254
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.47570809721946716
+      "importance": 0.47763174772262573
     },
     {
       "name": "market_asking_price",
-      "importance": 0.24213232100009918
+      "importance": 0.2403751164674759
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.11424346268177032
+      "importance": 0.11593519151210785
     },
     {
       "name": "model_name_New Range Rover SE Sport Utility Vehicle",
-      "importance": 0.012553669512271881
+      "importance": 0.012932529672980309
     },
     {
       "name": "supplier_name_Marino Performance Motors",
-      "importance": 0.012392318807542324
+      "importance": 0.01231350377202034
     },
     {
       "name": "model_name_Range Rover Sport Utility Vehicle",
-      "importance": 0.010159023106098175
+      "importance": 0.01046561449766159
     },
     {
       "name": "supplier_name_Mall Of Georgia Mazda",
-      "importance": 0.0074128140695393085
+      "importance": 0.0071268752217292786
     },
     {
       "name": "model_name_Range Rover Supercharged Sport Utility Vehicle",
-      "importance": 0.006333926692605019
+      "importance": 0.006525079719722271
     }
   ]
 }

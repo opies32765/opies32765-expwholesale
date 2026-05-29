@@ -1,9 +1,9 @@
 {
   "make_name": "NISSAN",
-  "trained_at": "2026-05-28T08:30:16.233864Z",
-  "n_total": 518,
+  "trained_at": "2026-05-29T08:30:27.201769Z",
+  "n_total": 521,
   "n_train": 490,
-  "n_test": 28,
+  "n_test": 31,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -227,49 +227,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 4674.0,
-    "mape_pct": 13.44,
-    "r2": 0.8995,
-    "within_5pct": 39.3,
-    "within_10pct": 67.9
+    "mae_dollars": 4243.0,
+    "mape_pct": 12.29,
+    "r2": 0.9013,
+    "within_5pct": 38.7,
+    "within_10pct": 67.7
   },
   "baseline_metrics": {
-    "mae_dollars": 1859.0,
-    "mape_pct": 14.5,
+    "mae_dollars": 1755.0,
+    "mape_pct": 13.51,
     "ratio": 1.0252
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.46509039402008057
+      "importance": 0.4979965388774872
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.32622843980789185
+      "importance": 0.29281869530677795
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.09573110193014145
+      "importance": 0.10003003478050232
     },
     {
       "name": "original_msrp",
-      "importance": 0.023839497938752174
+      "importance": 0.020896224305033684
     },
     {
       "name": "year",
-      "importance": 0.007871228270232677
+      "importance": 0.006612542551010847
     },
     {
       "name": "supplier_name_I-75 Autos",
-      "importance": 0.0039414954371750355
+      "importance": 0.0043567754328250885
     },
     {
       "name": "body_type_Van",
-      "importance": 0.0032788049429655075
+      "importance": 0.003589074593037367
     },
     {
       "name": "body_type_SUV",
-      "importance": 0.0032531602773815393
+      "importance": 0.0035126605071127415
     }
   ]
 }
