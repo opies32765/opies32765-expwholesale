@@ -85,16 +85,41 @@ def _parse_sticker_text(text):
            "exterior_color": None, "interior_color": None, "options": []}
     if not text or len(text) < 50:
         return out
-    for pat in (r"TOTAL\s+(?:PREDICTED\s+)?PRICE\s*[:$]?\s*\$?\s*([\d,]+)",
+
+    # COLUMN_MANGLE_FIX_2026_05_29 (worker mirror of app.py): for each total-price
+    # label, collect group(1) + every $-amount in the next 200 chars and pick the
+    # largest in valid MSRP range, instead of re.search grabbing the first $-value.
+    # Fixes column-layout OEM stickers where "Total Price:\n$995 credit\n$79,045"
+    # or "TOTAL VEHICLE PRICE*\n$89,845" left the old narrow regex empty.
+    def _pick_largest_near(text, pat, min_v=1000, max_v=10_000_000):
+        candidates = []
+        for m in re.finditer(pat, text, re.I):
+            try:
+                v0 = int(m.group(1).replace(",", ""))
+                if min_v < v0 < max_v:
+                    candidates.append(v0)
+            except (ValueError, IndexError):
+                pass
+            for nm in re.finditer(r"\$\s*([\d,]+)(?:\.\d{2})?", text[m.end():m.end()+200]):
+                try:
+                    v = int(nm.group(1).replace(",", ""))
+                    if min_v < v < max_v:
+                        candidates.append(v)
+                except ValueError:
+                    pass
+        return max(candidates) if candidates else None
+
+    for pat in (r"TOTAL\s+MANUFACTURER'?S?\s+SUGGESTED\s+RETAIL\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)",
+                r"AS\s+DELIVERED\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)",
+                r"TOTAL\s+VEHICLE\s+PRICE\*?\s*[:$]?\s*\$?\s*([\d,]+)",
+                r"Net\s+Total\s*[:$]?\s*\$?\s*([\d,]+)",
+                r"TOTAL\s+(?:PREDICTED\s+)?PRICE\s*[:$]?\s*\*?\s*\$?\s*([\d,]+)",
                 r"TOTAL\s+MSRP\s*[:$]?\s*\$?\s*([\d,]+)",
                 r"(?<!BASE\s)MSRP\s*[:$]?\s*\$?\s*([\d,]+)"):
-        m = re.search(pat, text, re.I)
-        if m:
-            try:
-                v = int(m.group(1).replace(",", ""))
-                if 1000 < v < 10_000_000:
-                    out["total_msrp"] = v; break
-            except ValueError: pass
+        _v = _pick_largest_near(text, pat)
+        if _v is not None:
+            out["total_msrp"] = _v
+            break
     for pat in (r"BASE\s+SUGGESTED\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)",
                 r"BASE\s+PRICE\s*[:$]?\s*\$?\s*([\d,]+)",
                 r"BASE\s+MSRP\s*[:$]?\s*\$?\s*([\d,]+)"):
