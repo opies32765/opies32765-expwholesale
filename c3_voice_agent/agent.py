@@ -351,7 +351,7 @@ async def entrypoint(ctx: JobContext) -> None:
         vad=ctx.proc.userdata["vad"],
         stt=google.STT(spoken_punctuation=False),
         llm=_build_llm(),
-        tts=elevenlabs.TTS(voice_id=ELEVEN_VOICE_ID, model=ELEVEN_MODEL, streaming_latency=4),
+        tts=elevenlabs.TTS(voice_id=ELEVEN_VOICE_ID, model=ELEVEN_MODEL, streaming_latency=4, encoding="pcm_24000"),
         # Give the operator room to pause mid-sentence (default 0.5s was too aggressive,
         # cutting off utterances on natural "uh...so..." pauses).
         min_endpointing_delay=2.0,
