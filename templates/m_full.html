@@ -164,7 +164,7 @@
 
 {# COMBINED_SMS_2026_05_20 ─ card order: vAuto / AccuTrade / Carfax / AutoCheck / iPacket / Manheim / rBook / LSL / Dealer #}
 {# vAuto #}
-{% if vauto and (vauto.appraisal_url or vauto.rbook or vauto.mmr or vauto.blackbook or vauto.kbb or vauto.j2j) %}
+{% if vauto and (vauto.appraisal_url or vauto.rbook or vauto.mmr or vauto.blackbook or vauto.kbb or vauto.j2j or vauto.jd_power) %}
 <details class="card vauto">
   <summary>
     <span class="title">vAuto</span>
@@ -180,6 +180,7 @@
     {% if vauto.rbook %}<div class="row"><span class="lbl">vAuto rBook</span><span class="val">${{ '{:,}'.format(vauto.rbook|int) }}</span></div>{% endif %}
     {% if vauto.mmr %}<div class="row"><span class="lbl">MMR</span><span class="val">${{ '{:,}'.format(vauto.mmr|int) }}</span></div>{% endif %}
     {% if vauto.blackbook %}<div class="row"><span class="lbl">Black Book</span><span class="val">${{ '{:,}'.format(vauto.blackbook|int) }}</span></div>{% endif %}
+    {% if vauto.jd_power %}<div class="row"><span class="lbl">J.D. Power</span><span class="val">${{ '{:,}'.format(vauto.jd_power|int) }}</span></div>{% endif %}
     {% if vauto.kbb %}<div class="row"><span class="lbl">KBB</span><span class="val">${{ '{:,}'.format(vauto.kbb|int) }}</span></div>{% endif %}
     {% if vauto.j2j %}<div class="row"><span class="lbl">J2J</span><span class="val">${{ '{:,}'.format(vauto.j2j|int) }}</span></div>{% endif %}
   </div>
