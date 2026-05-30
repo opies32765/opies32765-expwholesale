@@ -14078,6 +14078,20 @@ def _accutrade_autoretry(bid_id):
     try:
         _db = get_db()
         _c = _db.cursor()
+        # ACCU_AUTORETRY_NO_BLANK_2026_05_30: never wipe a bid whose customer
+        # mini-page SMS already went out — the reprocess blanks their
+        # /m/<token> page for ~90s until the re-run repopulates (bid 2267 was
+        # texted a blank page). Imperfect AccuTrade beats a blank customer page;
+        # operator can still reprocess manually.
+        _c.execute("SELECT driver_notified_at, phase2_notified_at, "
+                   "phase3_notified_at FROM bids WHERE id=%s", (bid_id,))
+        _nr = _c.fetchone()
+        if _nr and (_nr.get('driver_notified_at') or _nr.get('phase2_notified_at')
+                    or _nr.get('phase3_notified_at')):
+            print(f'[accu-autoretry] bid={bid_id} SKIP reprocess — customer '
+                  f'already notified (would blank their mini-page)', flush=True)
+            _db.close()
+            return
         # Preserve a SUCCESSFUL iPacket capture (same rule as force-reprocess) so
         # we don't trip iPacket's ~1h same-VIN rate-limit on the re-run.
         _c.execute("""DELETE FROM ipacket_lookups WHERE bid_id=%s
