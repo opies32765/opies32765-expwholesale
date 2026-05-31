@@ -32,6 +32,9 @@ from process_bid import process_bid
 # IPACKET_ONLY_2026_05_20: import for the new iPacket-only path
 from process_bid import IPACKET_PROFILE_DIR
 import worker_ipacket as _worker_ipacket_mod
+# ACCUTRADE_ONLY_2026_05_31: import for the new AccuTrade-only retry path
+from process_bid import ACCUTRADE_PROFILE_DIR
+import worker_accutrade as _worker_accutrade_mod
 
 # ── Config ────────────────────────────────────────────────────────────────────
 EW_SERVER = os.environ.get("EW_SERVER", "https://experience-wholesale.net")
@@ -161,6 +164,18 @@ def ew_get_pending():
             return r.json().get("pending", [])
     except Exception as e:
         print(f"  [EW] Error fetching pending: {e}")
+    return []
+
+
+def ew_get_accutrade_pending():
+    try:
+        params = {"worker_id": WORKER_ID}
+        r = http_requests.get(f"{EW_SERVER}/api/accutrade/pending",
+                              params=params, timeout=30)
+        if r.status_code == 200:
+            return r.json().get("pending", [])
+    except Exception as e:
+        print(f"  [EW] Error fetching accutrade pending: {e}")
     return []
 
 
@@ -681,6 +696,93 @@ def process_one_ipacket(item):
     return ok
 
 
+# ACCUTRADE_ONLY_2026_05_31: dedicated AccuTrade-only run. Mirrors
+# process_one_ipacket: opens just the AccuTrade Playwright profile (no vauto,
+# no ipacket), runs the lookup, submits result. Does NOT disturb existing
+# vauto/ipacket values OR re-fire the AI assessment. Always submits something
+# (not_available on any error) so the bid never gets stuck.
+def process_one_accutrade(item):
+    bid_id = item.get("bid_id")
+    vin = item.get("vin")
+    miles = item.get("mileage") or 0
+    trim = item.get("trim")
+    if not bid_id or not vin:
+        return False
+    print(f"\n[accutrade-only bid #{bid_id}] {vin} miles={miles:,} trim={trim}")
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            ctx = p.chromium.launch_persistent_context(
+                user_data_dir=str(ACCUTRADE_PROFILE_DIR),
+                headless=False,
+                viewport={"width": 1500, "height": 1000},
+                user_agent=(
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/124.0.0.0 Safari/537.36'),
+                locale="en-US",
+                timezone_id="America/New_York",
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
+            )
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            t = time.time()
+            result = _worker_accutrade_mod.lookup(page, ctx, vin, miles, t, trim=trim, bid_id=bid_id)
+            try: ctx.close()
+            except Exception: pass
+    except Exception as e:
+        traceback.print_exc()
+        try:
+            ew_submit_accutrade({
+                "bid_id": bid_id, "vin": vin, "not_available": True,
+                "unavailable_reason": f"accutrade-only worker error: {str(e)[:200]}",
+            })
+        except Exception: pass
+        return False
+
+    # Submit result — mirror the not_available / error / success branches from
+    # process_one_bid's AccuTrade block.
+    if result.get("error"):
+        ok = ew_submit_accutrade({
+            "bid_id": bid_id, "vin": vin, "not_available": True,
+            "unavailable_reason": f"worker error: {result.get('error')}",
+        })
+        print(f"  AccuTrade {'OK' if ok else 'FAIL'}: error->NA")
+        return ok
+    if result.get("not_available"):
+        ok = ew_submit_accutrade({
+            "bid_id": bid_id, "vin": vin,
+            "not_available": True,
+            "unavailable_reason": (result.get("unavailable_reason")
+                                   or result.get("reason")
+                                   or "unavailable"),
+        })
+        print(f"  AccuTrade {'OK' if ok else 'FAIL'}: NOT AVAILABLE")
+        return ok
+    screenshot_path = accutrade_upload(result.get("screenshot"))
+    a_payload = {
+        "bid_id": bid_id, "vin": vin,
+        "guaranteed_offer": result.get("guaranteed_offer"),
+        "trade_in": result.get("trade_in"),
+        "trade_market": result.get("trade_market"),
+        "retail": result.get("retail"),
+        "market_avg": result.get("market_avg"),
+        "local_comps": result.get("local_comps"),
+        "screenshot": screenshot_path,
+        "raw": result.get("raw", {}),
+        "appraisal_url": result.get("appraisal_url"),
+        "selected_trim_text": result.get("selected_trim_text"),
+        "trim_select_source": result.get("trim_select_source"),
+    }
+    ok = ew_submit_accutrade(a_payload)
+    g = result.get("guaranteed_offer") or 0
+    print(f"  AccuTrade {'OK' if ok else 'FAIL'}: guaranteed=${g:,}")
+    return ok
+
+
 
 
 # ── Main loop ────────────────────────────────────────────────────────────────
@@ -700,6 +802,19 @@ def run_pass():
     else:
         print("  0 pending")
         ok_count = 0
+
+    # ACCUTRADE_ONLY_2026_05_31: after the vauto pending loop, ALSO poll the
+    # AccuTrade-only queue and run process_one_accutrade for each. Kept AFTER
+    # vauto so vauto stays primary.
+    accu_pending = ew_get_accutrade_pending()
+    if accu_pending:
+        print(f"  {len(accu_pending)} accutrade pending")
+        for item in accu_pending:
+            try:
+                process_one_accutrade(item)
+            except Exception:
+                traceback.print_exc()
+            time.sleep(2)
 
     return ok_count
 

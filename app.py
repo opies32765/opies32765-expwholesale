@@ -3411,11 +3411,28 @@ def bid_detail(bid_id):
     _mark('match_dealers')
 
     _handler_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
+    # DISPLAY_HOLD_2026_05_31: reveal the raw source cards (vAuto/AccuTrade/
+    # iPacket/rBook/MMR) together only once the bid is terminal — assessed,
+    # priced, has an assessment narrative, OR older than 8 min (so a bid whose
+    # assessment never fired can never hide its data forever). On any error,
+    # default to SHOWING (never hide).
+    try:
+        show_sources = bool(bid.get('ai_price') or bid.get('ai_assessed_at')
+                            or bid.get('ai_assessment'))
+        if not show_sources:
+            _c_at = bid.get('created_at')
+            if _c_at is not None:
+                import datetime as _dt_sh
+                show_sources = (_dt_sh.datetime.now(_c_at.tzinfo) - _c_at).total_seconds() > 480
+            else:
+                show_sources = True
+    except Exception:
+        show_sources = True
     # RENDER_TIMER_2026_05_20: also time the Jinja template render. Server
     # work and template work are different problems with different fixes;
     # need to see both. Phase deltas printed AFTER render so the log line
     # has the full picture.
-    _rendered = render_template('bid.html', bid=bid, photos=photos,
+    _rendered = render_template('bid.html', bid=bid, photos=photos, show_sources=show_sources,
                                 messages=messages, valuations=valuations,
                                 vauto_data=vauto_data,
                                 accutrade_data=accutrade_data,
@@ -6036,7 +6053,20 @@ def _run_assessment(bid_id):
     # often partial (~1.2k chars) while the PDF holds the full sticker
     # (~6-7k chars including the TOTAL MSRP line). Same regex; no new
     # patterns. Triggers only when subject MSRP is still missing.
-    if ipacket and bid.get('vin') and not ipacket.get('total_msrp'):
+    # IPACKET_RESCUE_DASHBOARD_2026_05_31: a dashboard/blank capture's canvas-OCR
+    # can set a STRAY in-memory total_msrp that suppresses this reliable PDF
+    # rescue. Force the rescue on a RETRYABLE not_available (worker failed but
+    # iPacket HAS the sticker) regardless of that stray value; NEVER pull for a
+    # genuine refusal (Tesla/Porsche / 'does not support' / 'vehicle is
+    # unavailable') so we never hit iPacket for a VIN with no sticker.
+    _ipr = (ipacket.get('unavailable_reason') or '').lower() if ipacket else ''
+    _ip_retryable_na = bool(
+        ipacket and ipacket.get('not_available')
+        and any(_s in _ipr for _s in ('dashboard', 'did not render', 'viewer',
+            'false_ready', 'blank', 'worker error', 'vin_input', 'rate-limit',
+            'did not appear', 'recent'))
+        and not any(_s in _ipr for _s in ('does not support', 'vehicle is unavailable')))
+    if ipacket and bid.get('vin') and (not ipacket.get('total_msrp') or _ip_retryable_na):
         try:
             _pdf_res = _ipacket_lookup_msrp_for_vin(bid['vin'])
             if not (_pdf_res and _pdf_res.get('ok') and _pdf_res.get('msrp')):
@@ -13332,19 +13362,80 @@ def api_vauto_status(bid_id):
 
 @app.route('/api/accutrade/pending')
 def api_accutrade_pending():
-    """Return bids that need AccuTrade lookup."""
+    """Return bids EXPLICITLY marked for an AccuTrade-only retry, atomically
+    claimed for this worker.
+
+    ACCU_ONLY_RETRY_2026_05_31: the OLD version returned EVERY bid with no
+    accutrade row (al.id IS NULL) LIMIT 20 — which meant a polling worker would
+    re-grab historical April bids that simply never had AccuTrade run. This
+    version returns a bid ONLY when:
+      * bids.accutrade_retry_at IS NOT NULL                 (explicitly marked), and
+      * accutrade_retry_at > NOW() - INTERVAL '15 minutes'  (marker is fresh), and
+      * no USABLE accutrade row already exists for the bid  (NOT EXISTS), and
+      * it is not currently claimed by a live worker         (claimed_at NULL or >3 min stale).
+    The claim is atomic via FOR UPDATE SKIP LOCKED + a single UPDATE ... RETURNING,
+    so two workers polling simultaneously can never grab the same bid. There is
+    no path to an unmarked bid (the marker IS NULL filter) or a >15-min-old bid
+    (the freshness filter) — both are hard WHERE predicates evaluated inside the
+    same locked SELECT that produces the claim.
+
+    The submit handler clears accutrade_retry_at on the next AccuTrade POST
+    (success OR not_available), so a bid leaves this queue after exactly one
+    fresh pass; the accutrade_autoretried one-shot guard prevents re-queue.
+
+    Query params:
+        worker_id — defaults to 'trainer' for backward compat (mirrors
+                    /api/vauto/pending).
+    """
+    worker_id = (request.args.get('worker_id') or 'trainer').strip()
     db = get_db()
     cur = db.cursor()
+    # Atomic marker-gated claim. The eligible CTE locks exactly the rows that
+    # are (a) freshly marked for retry, (b) without a usable accutrade row, and
+    # (c) unclaimed-or-stale. The "usable accutrade row" predicate mirrors the
+    # _maybe_fire_assessment gate (line ~7117): real values present, OR a
+    # terminal not_available that is NOT the retryable mileage_did_not_commit
+    # transient. So a bid whose only accutrade row is the mileage placeholder is
+    # still eligible (correct — that is exactly what we are retrying), while a
+    # bid that has since produced real values or a terminal failure drops out.
     cur.execute("""
-        SELECT b.id as bid_id, b.vin, b.mileage, b.year, b.make, b.model
-        FROM bids b
-        LEFT JOIN accutrade_lookups al ON al.bid_id = b.id
-        WHERE b.vin IS NOT NULL AND length(b.vin) = 17
-          AND al.id IS NULL
-        ORDER BY b.created_at DESC
-        LIMIT 20
+        WITH eligible AS (
+            SELECT b.id
+            FROM bids b
+            WHERE b.vin IS NOT NULL AND length(b.vin) = 17
+              AND b.accutrade_retry_at IS NOT NULL
+              AND b.accutrade_retry_at > NOW() - INTERVAL '15 minutes'
+              AND NOT EXISTS (
+                  SELECT 1 FROM accutrade_lookups al
+                   WHERE al.bid_id = b.id
+                     AND (al.guaranteed_offer IS NOT NULL
+                          OR al.trade_in IS NOT NULL
+                          OR al.trade_market IS NOT NULL
+                          OR (COALESCE(al.not_available, false) = true
+                              AND COALESCE(al.unavailable_reason, '')
+                                  NOT ILIKE '%%mileage_did_not_commit%%'))
+              )
+              AND (b.accutrade_retry_claimed_at IS NULL
+                   OR b.accutrade_retry_claimed_at < NOW() - INTERVAL '3 minutes')
+            ORDER BY b.accutrade_retry_at ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        UPDATE bids
+           SET accutrade_retry_claimed_at = NOW()
+          FROM eligible
+         WHERE bids.id = eligible.id
+        RETURNING bids.id AS bid_id, bids.vin, bids.mileage,
+                  bids.year, bids.make, bids.model
     """)
     rows = cur.fetchall()
+    # Log the claim to worker_jobs for history/dashboard (mirrors vauto).
+    for row in rows:
+        cur.execute("""
+            INSERT INTO worker_jobs (bid_id, worker_id, job_type, status, claimed_at)
+            VALUES (%s, %s, 'accutrade', 'in_progress', NOW())
+        """, (row['bid_id'], worker_id))
+    db.commit()
     db.close()
     return jsonify({'pending': [dict(r) for r in rows]})
 
@@ -14152,39 +14243,49 @@ def _accutrade_autoretry(bid_id):
     try:
         _db = get_db()
         _c = _db.cursor()
-        # ACCU_AUTORETRY_NO_BLANK_2026_05_30: never wipe a bid whose customer
-        # mini-page SMS already went out — the reprocess blanks their
-        # /m/<token> page for ~90s until the re-run repopulates (bid 2267 was
-        # texted a blank page). Imperfect AccuTrade beats a blank customer page;
-        # operator can still reprocess manually.
-        _c.execute("SELECT driver_notified_at, phase2_notified_at, "
-                   "phase3_notified_at FROM bids WHERE id=%s", (bid_id,))
-        _nr = _c.fetchone()
-        if _nr and (_nr.get('driver_notified_at') or _nr.get('phase2_notified_at')
-                    or _nr.get('phase3_notified_at')):
-            print(f'[accu-autoretry] bid={bid_id} SKIP reprocess — customer '
-                  f'already notified (would blank their mini-page)', flush=True)
-            _db.close()
-            return
-        # Preserve a SUCCESSFUL iPacket capture (same rule as force-reprocess) so
-        # we don't trip iPacket's ~1h same-VIN rate-limit on the re-run.
-        _c.execute("""DELETE FROM ipacket_lookups WHERE bid_id=%s
-                       AND (not_available=true OR (total_msrp IS NULL AND base_price IS NULL
-                            AND (raw_json->'options') IS NULL))""", (bid_id,))
+        # ACCU_ONLY_RETRY_2026_05_31: AccuTrade-only re-run. The OLD body did a
+        # FULL force-reprocess (deleted vauto+accutrade+blank-iPacket, reset
+        # ai_assessed_at/ai_price/ai_assessment, re-enqueued the vauto queue) so
+        # the worker re-ran ALL THREE sources → iPacket re-pulled, vAuto
+        # re-fetched, 30-60s flicker. We now re-run ONLY AccuTrade: delete the
+        # AccuTrade row and stamp a retry marker that ONLY /api/accutrade/pending
+        # reads. vAuto, iPacket, and the computed assessment are left fully
+        # intact — the page never blanks.
+        #
+        # ACCU_AUTORETRY_NO_BLANK note (kept harmless / now moot): the old
+        # full-reprocess blanked the customer's /m/<token> page for ~90s, so it
+        # was suppressed once driver/phase2/phase3 SMS had gone out. The
+        # AccuTrade-only re-run NEVER blanks the page (vauto/iPacket/assessment
+        # untouched), so the notified-skip is no longer required for safety. We
+        # keep the marker write unconditional; the one-shot accutrade_autoretried
+        # guard (stamped TRUE by the caller before this fires) still prevents any
+        # second retry / storm.
+        #
+        # Delete ONLY the AccuTrade row (the mileage_did_not_commit placeholder)
+        # so the worker's submit lands fresh. NOTHING ELSE is touched: NOT
+        # vauto_lookups, NOT ipacket_lookups, NOT ai_assessed_at / ai_price /
+        # ai_assessment, NOT vauto_claimed_*, NOT driver_notified / phase2 /
+        # phase3 columns.
         _c.execute('DELETE FROM accutrade_lookups WHERE bid_id=%s', (bid_id,))
-        _c.execute('DELETE FROM vauto_lookups WHERE bid_id=%s', (bid_id,))
-        _c.execute("""UPDATE bids SET vauto_claimed_by=NULL, vauto_claimed_at=NULL,
-                          ai_assessed_at=NULL, ai_price=NULL, ai_assessment=NULL
+        # Stamp the AccuTrade-only retry marker. accutrade_retry_at is the ONLY
+        # gate /api/accutrade/pending uses; clear any stale claim so the next
+        # poll can grab it immediately.
+        _c.execute("""UPDATE bids SET accutrade_retry_at=NOW(),
+                          accutrade_retry_claimed_at=NULL
                         WHERE id=%s""", (bid_id,))
+        # Close out the open worker_jobs row for history. This is bookkeeping
+        # only — re-claim is gated by accutrade_retry_at / accutrade_retry_claimed_at
+        # on the bids row, NOT by worker_jobs, so this close-out cannot block the
+        # AccuTrade-only re-claim.
         _c.execute("""UPDATE worker_jobs SET completed_at=NOW(),
                           status='released_accu_autoretry',
                           duration_ms=EXTRACT(EPOCH FROM (NOW()-claimed_at))::int*1000
                         WHERE bid_id=%s AND completed_at IS NULL""", (bid_id,))
         _db.commit()
         _db.close()
-        print(f'[accu-autoretry] bid={bid_id} re-enqueued (one-shot) after mileage_did_not_commit', flush=True)
+        print(f'[accu-autoretry] bid={bid_id} AccuTrade-only re-run marked (one-shot) after mileage_did_not_commit', flush=True)
     except Exception as _e:
-        print(f'[accu-autoretry] bid={bid_id} reprocess err: {_e}', flush=True)
+        print(f'[accu-autoretry] bid={bid_id} accutrade-only retry err: {_e}', flush=True)
 
 
 @app.route('/api/accutrade/submit', methods=['POST'])
@@ -14390,6 +14491,22 @@ def api_accutrade_submit():
     except Exception as _canon_err:
         print(f'[canon_trim] writeback err bid={bid_id}: {_canon_err}', flush=True)
         db.rollback()
+
+    # ACCU_ONLY_RETRY_2026_05_31: AccuTrade has now landed for this bid (this
+    # POST persisted a row above — success OR not_available). Clear the
+    # retry markers so the bid leaves /api/accutrade/pending's queue. The
+    # accutrade_autoretried one-shot guard already prevents any re-queue, so
+    # clearing here is purely the "job done, stop offering it" signal. Done on
+    # a fresh short-lived connection because `db` is about to be closed.
+    try:
+        _mkdb = get_db()
+        _mkc = _mkdb.cursor()
+        _mkc.execute("UPDATE bids SET accutrade_retry_at=NULL, "
+                     "accutrade_retry_claimed_at=NULL WHERE id=%s", (bid_id,))
+        _mkdb.commit()
+        _mkdb.close()
+    except Exception as _mke:
+        print(f'[accu-retry-clear] bid={bid_id} err: {_mke}', flush=True)
 
     db.close()
     _accu_fired = _maybe_fire_assessment(bid_id, require_all=True, source='accutrade')

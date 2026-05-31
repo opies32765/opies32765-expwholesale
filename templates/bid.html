@@ -447,50 +447,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
     {% endif %}
   </div>
 
-  <!-- SOURCE_STATUS_STRIP_2026_05_29: per-source enrichment state so the
-       operator can tell still-enriching from failed without reprocessing -->
-  <div id="src-status-strip" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0 2px 0">
-    <span style="font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:#475569">Enrichment</span>
-    <span class="src-pill" id="src-vauto" style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:600;background:#1e293b;color:#7a9bb5;border:1px solid #334155">vAuto \u2026</span>
-    <span class="src-pill" id="src-accutrade" style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:600;background:#1e293b;color:#7a9bb5;border:1px solid #334155">AccuTrade \u2026</span>
-    <span class="src-pill" id="src-ipacket" style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:600;background:#1e293b;color:#7a9bb5;border:1px solid #334155">iPacket \u2026</span>
-  </div>
-  <script>
-  (function(){
-    var BID = {{ bid.id }};
-    var C = {
-      done:        ['#053d1f','#34d399','#0a5c30'],
-      captured:    ['#0d2440','#60a5fa','#1e3a5f'],
-      unavailable: ['#2d0a0a','#fca5a5','#5c1a1a'],
-      running:     ['#2d2000','#fbbf24','#5c4300'],
-      queued:      ['#1e293b','#94a3b8','#334155'],
-      pending:     ['#1e293b','#7a9bb5','#334155']
-    };
-    var ICON = {done:'\u2713',captured:'\u2713',unavailable:'\u2715',running:'\u23f3',queued:'\u00b7',pending:'\u00b7'};
-    var NAME = {vauto:'vAuto',accutrade:'AccuTrade',ipacket:'iPacket'};
-    function render(src, d){
-      var el = document.getElementById('src-'+src); if(!el||!d) return;
-      var c = C[d.state] || C.pending;
-      el.style.background = c[0]; el.style.color = c[1]; el.style.border = '1px solid '+c[2];
-      var detail = d.value ? d.value : (d.label||'');
-      el.innerHTML = (ICON[d.state]||'\u00b7')+' '+NAME[src]+' <span style="opacity:.85;font-weight:500">'+detail+'</span>';
-      el.title = (d.state==='unavailable' && d.label) ? d.label : '';
-    }
-    var timer=null, tries=0;
-    function poll(){
-      fetch('/api/bid/'+BID+'/source-status').then(function(r){return r.json();}).then(function(j){
-        if(!j||!j.sources) return;
-        render('vauto', j.sources.vauto);
-        render('accutrade', j.sources.accutrade);
-        render('ipacket', j.sources.ipacket);
-        tries++;
-        if(j.all_terminal || tries>60){ if(timer){clearInterval(timer);timer=null;} }
-      }).catch(function(){});
-    }
-    poll();
-    timer = setInterval(poll, 5000);
-  })();
-  </script>
+  <!-- SOURCE_STATUS_STRIP removed 2026-05-31 per operator: redundant with the source cards below; was showing the live enrichment trickle -->
 
   <!-- ROW 2: Photos Strip (full-width, always visible) -->
   {% if photos %}
@@ -909,6 +866,25 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
       </div>
 
+      {# DISPLAY_HOLD_2026_05_31: single 'Analyzing' placeholder. Shown ONLY
+         while show_sources is NULL — the all-three-together gate sets ai_price
+         once vAuto+AccuTrade+iPacket are ALL terminal (real value OR genuine
+         no-sticker like Tesla/Bentley), so reveal happens once, all at once.
+         The raw source cards (vAuto / AccuTrade / iPacket / rBook / MMR) are
+         each wrapped in {% if show_sources %} below and stay hidden until then.
+         The AI Assessment card ABOVE stays visible (it carries the ANALYZING
+         badge + the ↻ re-run affordance) so a stuck bid is never a dead end. #}
+      {% if not show_sources %}
+      <div class="card" id="display-hold-card" style="flex-shrink:0;border-color:#3b2c0a;background:linear-gradient(180deg,rgba(245,158,11,.07),#0b0f19)">
+        <div style="display:flex;align-items:center;gap:12px">
+          <span style="width:14px;height:14px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 0 rgba(251,191,36,.6);animation:pulse 2s infinite;flex-shrink:0"></span>
+          <div>
+            <div style="font-size:14px;font-weight:800;color:#fbbf24;letter-spacing:.3px">Analyzing &mdash; gathering vAuto, AccuTrade &amp; iPacket&hellip;</div>
+            <div style="margin-top:4px;font-size:12px;color:#94a3b8;line-height:1.5">Source cards appear together once the assessment completes. This usually takes under a minute; the page refreshes itself when it's ready.</div>
+          </div>
+        </div>
+      </div>
+      {% endif %}
 
       {# ─── 2026-05-12 Network claim received ─── #}
       {% if bid_network_claim %}
@@ -1523,7 +1499,8 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
          to ai_log.market_intel if the bid view didn't populate it. #}
       {% set mi = market_intel or (ai_log.market_intel if ai_log else None) or None %}
       {% set rb = (mi.rbook if mi else None) or {} %}
-      {% if rb.n_visible or rb.retail_median or rb.stocking_report %}
+      {# DISPLAY_HOLD_2026_05_31: this rBook card is a vAuto-derived 'related book card' — hold it until show_sources reveals everything at once #}
+      {% if show_sources and (rb.n_visible or rb.retail_median or rb.stocking_report) %}
       <div class="card" style="border-color:#22c55e;flex-shrink:0" id="rbook-card">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
           rBook Retail Comps
@@ -1624,7 +1601,8 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
       {# ─────────────────── MMR Auction Floor ─────────────────── #}
       {% set mh = (mi.manheim if mi else None) or {} %}
-      {% if mh.n_transactions or mh.base_mmr or mh.adjusted_mmr %}
+      {# DISPLAY_HOLD_2026_05_31: this MMR card is a vAuto-derived 'related book card' — hold it until show_sources reveals everything at once #}
+      {% if show_sources and (mh.n_transactions or mh.base_mmr or mh.adjusted_mmr) %}
       <div class="card" style="border-color:#f59e0b;flex-shrink:0" id="mmr-card">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
           MMR Auction Floor
@@ -1855,6 +1833,8 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
     <div class="col col-vauto">
 
       <!-- vAuto Book Values + Reports -->
+      {# DISPLAY_HOLD_2026_05_31: hidden until show_sources is set (revealed with all sources at once) #}
+      {% if show_sources %}
       <div class="card" style="border-color:#1e3a5f;flex:1" id="vauto-card">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
           vAuto
@@ -1947,12 +1927,15 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         <div style="font-size:13px;color:#334155;font-style:italic">Submit a VIN to trigger vAuto lookup.</div>
         {% endif %}
       </div>
+      {% endif %}{# DISPLAY_HOLD_2026_05_31 /vauto #}
 
     </div><!-- /col 2 -->
 
     <!-- COL 3: AccuTrade -->
     <div class="col col-accutrade">
 
+      {# DISPLAY_HOLD_2026_05_31: hidden until show_sources is set (revealed with all sources at once) #}
+      {% if show_sources %}
       <div class="card" style="border-color:#065f46;flex:1;display:flex;flex-direction:column" id="accutrade-card">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
           AccuTrade
@@ -2042,6 +2025,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         <div style="font-size:13px;color:#334155;font-style:italic">Submit a VIN to trigger AccuTrade lookup.</div>
         {% endif %}
       </div>
+      {% endif %}{# DISPLAY_HOLD_2026_05_31 /accutrade #}
 
     </div><!-- /col 3 -->
 
@@ -2132,6 +2116,8 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
       </div>
 
       <!-- iPacket Window Sticker -->
+      {# DISPLAY_HOLD_2026_05_31: hidden until show_sources is set (revealed with all sources at once) #}
+      {% if show_sources %}
       <div class="card" style="border-color:#4338ca" id="ipacket-card">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
           iPacket Sticker
@@ -2209,6 +2195,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         <div style="font-size:13px;color:#334155;font-style:italic">Submit a VIN to trigger iPacket lookup.</div>
         {% endif %}
       </div>
+      {% endif %}{# DISPLAY_HOLD_2026_05_31 /ipacket #}
 
     </div><!-- /col 3 -->
 
@@ -3652,7 +3639,16 @@ async function submitShare(action) {
   }
 }
 
-{% if vauto_data and not ai_assessment %}
+{# DISPLAY_HOLD_2026_05_31: run the poller whenever the page rendered in
+   display-hold (show_sources NULL), not just when vAuto is in but the
+   assessment text is missing. Reload on d.ai_price (NOT d.done): d.done is
+   ai_assessment IS NOT NULL, which can be true while ai_price is still NULL
+   (mileage-missing manual-review rows write assessment text + ai_price=NULL).
+   show_sources is the operator's reveal gate, so match it exactly. Reuses the
+   existing read-only /assess-status endpoint — NO status pills re-added.
+   Self-stops after 60 tries (~5 min) so it never polls forever; a genuinely
+   stuck bid then just sits on the Analyzing card with the ↻ re-run control. #}
+{% if not show_sources %}
 (function() {
   let _assessPoll;
   let _assessAttempts = 0;
@@ -3661,7 +3657,7 @@ async function submitShare(action) {
     try {
       const r = await fetch(`/api/bid/${BID_ID}/assess-status`);
       const d = await r.json();
-      if (d.done) { clearInterval(_assessPoll); location.reload(); }
+      if (d.ai_price != null || d.done) { clearInterval(_assessPoll); location.reload(); }
     } catch(e) {}
   }
   _assessPoll = setInterval(checkAssess, 5000);

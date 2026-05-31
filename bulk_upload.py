@@ -57,6 +57,16 @@ _HEADER_MAP = {
     'vin': 'vin',
     'vin#': 'vin',
     'vin number': 'vin',
+    'vin no': 'vin',
+    # combined columns: dealers often jam mileage + VIN into one cell
+    'miles/vin': 'miles_vin',
+    'miles / vin': 'miles_vin',
+    'vin/miles': 'miles_vin',
+    'vin / miles': 'miles_vin',
+    'mileage/vin': 'miles_vin',
+    'odometer/vin': 'miles_vin',
+    'miles vin': 'miles_vin',
+    'vin/odometer': 'miles_vin',
     'body': 'body',
     'body style': 'body',
     'color': 'color',
@@ -165,6 +175,30 @@ def _parse_money(value, force_thousands: bool = False) -> int | None:
     return None
 
 
+def _find_vin_in(value) -> str:
+    """Find a 17-char VIN ANYWHERE inside a cell. Handles combined cells like a
+    'MILES/VIN' column ('69,235 3TMCZ5AN5JM176XX' -> the VIN). Returns '' if none."""
+    s = _clean(value).upper()
+    if not s:
+        return ''
+    whole = s.replace(' ', '').replace('-', '')
+    if _VIN_RE.match(whole):
+        return whole
+    for tok in re.split(r'[^A-HJ-NPR-Z0-9]+', s):
+        if _VIN_RE.match(tok):
+            return tok
+    return ''
+
+
+def _miles_beside_vin(value, vin: str) -> str:
+    """From a combined 'miles vin' cell, return the leftover numeric (miles)."""
+    s = _clean(value)
+    if vin:
+        s = re.sub(re.escape(vin), ' ', s, flags=re.I)
+    m = re.search(r'\d[\d,]*', s)
+    return m.group(0) if m else ''
+
+
 def split_vehicle_string(s: str) -> tuple[int | None, str, str, str]:
     """Heuristic split of a free-form "2023 BMW M8 Competition" cell.
 
@@ -238,7 +272,7 @@ def _normalize_headers(headers: list) -> list[str | None]:
 def _header_score(headers: list[str | None]) -> int:
     """Count how many strong header columns were recognized."""
     strong = {h for h in headers
-              if h in ('vin', 'raw_vehicle', 'stock', 'mileage',
+              if h in ('vin', 'miles_vin', 'raw_vehicle', 'stock', 'mileage',
                        'asking_price', 'cost', 'model_col')}
     return len(strong)
 
@@ -278,7 +312,14 @@ def _row_to_record(headers: list[str | None], row: tuple) -> dict | None:
 
 def _finalize_record(rec: dict) -> dict:
     """Normalize a raw row dict into the canonical bid-candidate shape."""
-    vin = _clean(rec.get('vin')).upper().replace(' ', '').replace('-', '')
+    vin = _find_vin_in(rec.get('vin'))
+    if not vin and rec.get('miles_vin'):                  # combined MILES/VIN column
+        vin = _find_vin_in(rec.get('miles_vin'))
+    if not vin:                                           # last resort: VIN hiding in any cell
+        for _v in rec.values():
+            vin = _find_vin_in(_v)
+            if vin:
+                break
     raw_vehicle = _clean(rec.get('raw_vehicle'))
     year, make, model, trim = split_vehicle_string(raw_vehicle)
 
@@ -359,7 +400,10 @@ def _finalize_record(rec: dict) -> dict:
         'trim':  trim,
         'body':  _clean(rec.get('body')),
         'color': _clean(rec.get('color')),
-        'mileage': _parse_mileage(rec.get('mileage')),
+        'mileage': _parse_mileage(
+            rec.get('mileage') if rec.get('mileage') not in (None, '')
+            else _miles_beside_vin(rec.get('miles_vin'), vin) if rec.get('miles_vin')
+            else None),
         'asking_price': asking,
         'dealer_cost': cost,
         'stock': _clean(rec.get('stock')),
@@ -400,8 +444,7 @@ def _classify_cell(s: str) -> str:
     Returns one of: 'vin', 'vehicle', 'money_k', 'money_dollar', 'numeric',
     'short_alnum', 'text'."""
     raw = s.strip()
-    up = raw.upper().replace(' ', '').replace('-', '')
-    if _VIN_RE.match(up):
+    if _find_vin_in(raw):                 # VIN anywhere, incl. combined 'miles vin' cells
         return 'vin'
     if _YEAR_RE.match(raw):
         return 'vehicle'
@@ -563,6 +606,11 @@ def _row_to_record_heuristic(roles: dict[int, str], row: tuple,
         seen_any = True
         if role == 'vin':
             rec['vin'] = s
+            v = _find_vin_in(s)            # combined 'miles vin' cell -> also capture miles
+            if v and not rec.get('mileage'):
+                mm = _miles_beside_vin(s, v)
+                if mm:
+                    rec['mileage'] = mm
         elif role == 'vehicle':
             rec['raw_vehicle'] = s
         elif role == 'stock':
