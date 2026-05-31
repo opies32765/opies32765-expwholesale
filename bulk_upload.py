@@ -95,6 +95,10 @@ _TWO_WORD_MAKES = {
 }
 
 _YEAR_RE = re.compile(r'^\s*(19\d{2}|20\d{2})\b\s*(.+)$')
+# TWO_DIGIT_YEAR_2026_05_30: dealer lists often lead with a 2-digit model year
+# ("23 HONDA PILOT TOURING"). Require 2 digits + space + an alpha make so we
+# never misfire on "1500 SILVERADO" (no \b inside the number) or "4RUNNER".
+_YEAR2_RE = re.compile(r'^\s*(\d{2})\s+([A-Za-z].*)$')
 _YEAR_ANY_RE = re.compile(r'\b(19\d{2}|20\d{2})\b')
 _VIN_RE = re.compile(r'^[A-HJ-NPR-Z0-9]{17}$')
 
@@ -172,11 +176,18 @@ def split_vehicle_string(s: str) -> tuple[int | None, str, str, str]:
     if not raw:
         return None, '', '', ''
     m = _YEAR_RE.match(raw)
-    if not m:
-        # No year prefix — give up and dump everything into model
-        return None, '', raw, ''
-    year = int(m.group(1))
-    rest = m.group(2).strip()
+    if m:
+        year = int(m.group(1))
+        rest = m.group(2).strip()
+    else:
+        # TWO_DIGIT_YEAR_2026_05_30: 2-digit model year fallback.
+        m2 = _YEAR2_RE.match(raw)
+        if not m2:
+            # No year prefix — give up and dump everything into model
+            return None, '', raw, ''
+        _yy = int(m2.group(1))
+        year = 2000 + _yy if _yy <= 49 else 1900 + _yy
+        rest = m2.group(2).strip()
 
     # Try 2-word make first
     lo = rest.lower()

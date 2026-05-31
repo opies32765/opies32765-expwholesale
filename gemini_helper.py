@@ -54,7 +54,13 @@ def gemini_text(prompt, model='gemini-2.5-pro', max_tokens=2000, temperature=0.0
     from google.genai import types
     _cfg = dict(max_output_tokens=max_tokens, temperature=temperature)
     if thinking_budget is not None:
-        _cfg['thinking_config'] = types.ThinkingConfig(thinking_budget=thinking_budget)
+        # THINKING_CLAMP_2026_05_30: pro/non-flash models 400 on thinking_budget=0
+        # ("model does not support setting thinking_budget to 0"). Clamp 0->128
+        # (pro minimum) unless flash, which does support a true 0.
+        _tb = thinking_budget
+        if _tb == 0 and 'flash' not in (model or '').lower():
+            _tb = 128
+        _cfg['thinking_config'] = types.ThinkingConfig(thinking_budget=_tb)
     cfg = types.GenerateContentConfig(**_cfg)
     last = None
     for attempt in range(3):

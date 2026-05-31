@@ -155,8 +155,14 @@ def _cache_get(vin, db_conn):
 
 
 def _cache_put(vin, decoded, source, db_conn):
+    # TXN_ISOLATION_2026_05_30: SAVEPOINT-wrap so a column overflow / any INSERT
+    # error rolls back ONLY this statement and never aborts the caller's shared
+    # txn (was poisoning the downstream canon_trim UPDATE). vin_decode_cache cols
+    # were widened to TEXT the same day; this is defense-in-depth.
     cur = db_conn.cursor()
-    cur.execute("""
+    try:
+        cur.execute("SAVEPOINT vin_cache_put")
+        cur.execute("""
         INSERT INTO vin_decode_cache
           (vin, year, make, model, trim, body_style, drive_type, generation,
            confidence, source, reasoning, raw_response)
@@ -188,8 +194,16 @@ def _cache_put(vin, decoded, source, db_conn):
         decoded.get("reasoning"),
         json.dumps({"raw": decoded.get("_raw")}) if decoded.get("_raw") else None,
     ))
-    db_conn.commit()
-    cur.close()
+        cur.execute("RELEASE SAVEPOINT vin_cache_put")
+        db_conn.commit()
+    except Exception as _cp_err:
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT vin_cache_put")
+        except Exception:
+            pass
+        print(f"[claude_vin] _cache_put skipped for {vin}: {_cp_err}", flush=True)
+    finally:
+        cur.close()
 
 
 def decode_vin_smart(vin, db_conn, nhtsa_fallback=None):

@@ -363,8 +363,8 @@ def _pa_resolve_to_bid(cur, pa_id, target_bid_id, resolved_by, note=None):
         """, (f'auto:pa_resolve_{resolved_by}', target_bid_id))
         cur.execute(
             "DELETE FROM ipacket_lookups WHERE bid_id=%s AND "
-            "(looked_up_at IS NULL OR looked_up_at < NOW() - INTERVAL '5 minutes' "
-            "OR not_available=true)", (target_bid_id,))
+            "(not_available=true OR (total_msrp IS NULL AND base_price IS NULL "  # IPACKET_PRESERVE_ALLPATHS_2026_05_30
+            "AND (raw_json->'options') IS NULL))", (target_bid_id,))
         cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s",
                     (target_bid_id,))
         cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s",
@@ -1367,7 +1367,11 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-p
         temperature=temperature,
     )
     if disable_thinking:
-        _cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        # THINKING_CLAMP_2026_05_30: pro/non-flash models reject thinking_budget=0
+        # (400 INVALID_ARGUMENT). Clamp to pro-minimum 128 for non-flash; flash
+        # supports a true 0. Fixes the trim-select 400s (13739 uses pro+disable).
+        _tb0 = 0 if 'flash' in (model or '').lower() else 128
+        _cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=_tb0)
     cfg = types.GenerateContentConfig(**_cfg_kwargs)
 
     last_err = None
@@ -3637,7 +3641,7 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                             """, (bid_id,))
                             bg_cur.execute(
                                 "DELETE FROM ipacket_lookups WHERE bid_id=%s "
-                                "AND (looked_up_at IS NULL OR looked_up_at < NOW() - INTERVAL '5 minutes' OR not_available=true)",
+                                "AND (not_available=true OR (total_msrp IS NULL AND base_price IS NULL AND (raw_json->'options') IS NULL))",  # IPACKET_PRESERVE_ALLPATHS_2026_05_30
                                 (bid_id,))
                             bg_cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s", (bid_id,))
                             bg_cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
@@ -3692,7 +3696,7 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                             """, (bid_id,))
                             bg_cur.execute(
                                 "DELETE FROM ipacket_lookups WHERE bid_id=%s "
-                                "AND (looked_up_at IS NULL OR looked_up_at < NOW() - INTERVAL '5 minutes' OR not_available=true)",
+                                "AND (not_available=true OR (total_msrp IS NULL AND base_price IS NULL AND (raw_json->'options') IS NULL))",  # IPACKET_PRESERVE_ALLPATHS_2026_05_30
                                 (bid_id,))
                             bg_cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s", (bid_id,))
                             bg_cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
@@ -4320,8 +4324,8 @@ def twilio_webhook():
                         (_vs_bid_id,))
                     cur.execute(
                         "DELETE FROM ipacket_lookups WHERE bid_id=%s AND "
-                        "(looked_up_at IS NULL OR looked_up_at < NOW() - INTERVAL '5 minutes' "
-                        "OR not_available=true)", (_vs_bid_id,))
+                        "(not_available=true OR (total_msrp IS NULL AND base_price IS NULL "  # IPACKET_PRESERVE_ALLPATHS_2026_05_30
+                        "AND (raw_json->'options') IS NULL))", (_vs_bid_id,))
                     cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s", (_vs_bid_id,))
                     cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s", (_vs_bid_id,))
                     cur.execute(
@@ -5123,9 +5127,9 @@ def update_bid(bid_id):
                 # iPacket: keep recent good capture; wipe vauto + accutrade.
                 _vcur.execute("""DELETE FROM ipacket_lookups
              WHERE bid_id = %s
-               AND (looked_up_at IS NULL
-                    OR looked_up_at < NOW() - INTERVAL '5 minutes'
-                    OR not_available = true)""", (bid_id,))
+               AND (not_available = true
+                    OR (total_msrp IS NULL AND base_price IS NULL
+                        AND (raw_json->'options') IS NULL))  -- IPACKET_PRESERVE_ALLPATHS_2026_05_30""", (bid_id,))
                 _vcur.execute(
                     'DELETE FROM accutrade_lookups WHERE bid_id=%s', (bid_id,))
                 _vcur.execute(
@@ -6035,6 +6039,14 @@ def _run_assessment(bid_id):
     if ipacket and bid.get('vin') and not ipacket.get('total_msrp'):
         try:
             _pdf_res = _ipacket_lookup_msrp_for_vin(bid['vin'])
+            if not (_pdf_res and _pdf_res.get('ok') and _pdf_res.get('msrp')):
+                # IPACKET_PDF_NOOP_LOG_2026_05_30: this branch was silent for
+                # weeks; every first-pass MSRP miss (25s poll timeout, same-VIN
+                # rate-limit, jwt expired) vanished here. Log so misses are
+                # attributable.
+                print(f'[ASSESS] Bid {bid_id} iPacket PDF-fallback NO-OP: '
+                      f'{(_pdf_res or {}).get("error") or "no msrp returned"}',
+                      flush=True)
             if (_pdf_res and _pdf_res.get('ok')
                 and _pdf_res.get('msrp')):
                 ipacket['total_msrp'] = _pdf_res['msrp']
@@ -6886,6 +6898,13 @@ def _auto_assess(bid_id):
             result = _run_assessment(bid_id)
             if result.get('success'):
                 print(f'Auto-assess complete for bid {bid_id}: buy_price={result.get("buy_price")}')
+                # ALL_THREE_TOGETHER_2026_05_30: fire the customer SMS ONLY now —
+                # _run_assessment has fetched iPacket (server PDF pull) and fed it
+                # into the price, so the /m card shows all three. Idempotent.
+                try:
+                    _notify_driver_combined(bid_id)
+                except Exception as _cs_err:
+                    print(f'[combined-sms] error bid={bid_id}: {_cs_err}', flush=True)
                 _notify_driver_if_pending(bid_id)
                 # Phase 2 SMS — second text with link to /m/<token>/full.
                 # Idempotent via bids.phase2_notified_at (only fires once).
@@ -7088,8 +7107,25 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
         has_vauto = _vrow is not None
         rb_done   = bool(_vrow and _vrow.get('rb_done'))
         mh_done   = bool(_vrow and _vrow.get('mh_done'))
-        cur.execute("SELECT 1 FROM accutrade_lookups WHERE bid_id=%s LIMIT 1", (bid_id,))
+        # F1 DATA_QUALITY_GATE_2026_05_30: count a row only if it carries a
+        # real value OR a not_available that is NOT a known-RETRYABLE transient.
+        # Retryable blanks (mileage_did_not_commit; iPacket dashboard/viewer/
+        # render/rate-limit/worker-error/blank) must NOT fire+lock the assessment
+        # — they fall to the 150s fallback timer, and F2 re-assesses when the
+        # real value lands. Terminal/unknown reasons DO pass (assess degraded,
+        # which is correct when the source genuinely has no data).
+        cur.execute("""SELECT 1 FROM accutrade_lookups WHERE bid_id=%s AND (
+                          guaranteed_offer IS NOT NULL OR trade_in IS NOT NULL
+                          OR trade_market IS NOT NULL
+                          OR (COALESCE(not_available,false)=true
+                              AND COALESCE(unavailable_reason,'') NOT ILIKE '%%mileage_did_not_commit%%')
+                       ) LIMIT 1""", (bid_id,))
         has_accu = cur.fetchone() is not None
+        # ALL_THREE_TOGETHER_2026_05_30: gate on the iPacket worker phase
+        # EXISTING (success or not) — the REAL MSRP is fetched by the server PDF
+        # pull inside _run_assessment, which runs before the price + before the
+        # SMS (see _auto_assess). Requiring a data-good row here was circular and
+        # forced vauto-only partials. (AccuTrade still requires terminal data.)
         cur.execute("SELECT 1 FROM ipacket_lookups WHERE bid_id=%s LIMIT 1", (bid_id,))
         has_ipkt = cur.fetchone() is not None
 
@@ -7127,15 +7163,53 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
     # Phase 2 enrichment is complete here (gate above required rb_done +
     # mh_done + accu + ipkt). AI keeps running in the daemon thread above;
     # the customer gets their report link immediately, no Gemini wait.
-    try:
-        threading.Thread(target=_notify_driver_combined, args=(bid_id,),
-                         daemon=True, name=f'combined-sms-{bid_id}').start()
-    except Exception as _cs_spawn_err:
-        print(f'[combined-sms] thread spawn err: {_cs_spawn_err}', flush=True)
+    # ALL_THREE_TOGETHER_2026_05_30: customer SMS no longer fires in parallel
+    # with the assessment (that sent a partial card). It now fires from
+    # _auto_assess AFTER _run_assessment completes (iPacket fetched), so the /m
+    # card always shows vAuto + AccuTrade + iPacket together.
     return True
 
 
-def _schedule_assessment_fallback(bid_id, delay_sec=60):
+def _maybe_reassess_on_late_data(bid_id, source):
+    """F2 LATE_DATA_REASSESS_2026_05_30: if the assessment already fired/locked
+    but this source just landed REAL data, atomically claim ONE re-assessment and
+    re-run _run_assessment DIRECTLY. No customer SMS (only _maybe_fire_assessment
+    sends it) and no new claimable window (we do NOT clear ai_assessed_at —
+    _run_assessment re-stamps it with the corrected price). Bounded to 1
+    re-assess/bid via reassess_count. Call ONLY when _maybe_fire_assessment
+    returned False (i.e. it bailed because the bid was already assessed) so a
+    normal first-pass success can never double-fire."""
+    try:
+        db = get_db(); cur = db.cursor()
+        if source == 'accutrade':
+            cur.execute("""SELECT 1 FROM accutrade_lookups WHERE bid_id=%s
+                            AND COALESCE(not_available,false)=false
+                            AND (guaranteed_offer IS NOT NULL OR trade_in IS NOT NULL
+                                 OR trade_market IS NOT NULL) LIMIT 1""", (bid_id,))
+        else:
+            cur.execute("""SELECT 1 FROM ipacket_lookups WHERE bid_id=%s
+                            AND COALESCE(not_available,false)=false
+                            AND (total_msrp IS NOT NULL OR base_price IS NOT NULL)
+                            LIMIT 1""", (bid_id,))
+        usable = cur.fetchone() is not None
+        if not usable:
+            db.close(); return
+        cur.execute("""UPDATE bids SET reassess_count = COALESCE(reassess_count,0)+1
+                        WHERE id=%s AND ai_assessed_at IS NOT NULL
+                          AND COALESCE(reassess_count,0) < 1
+                        RETURNING id""", (bid_id,))
+        won = cur.fetchone() is not None
+        db.commit(); db.close()
+        if won:
+            print(f'[late-reassess] bid={bid_id} src={source} real data landed '
+                  f'after assessment locked — re-firing (no SMS)', flush=True)
+            threading.Thread(target=_run_assessment, args=(bid_id,), daemon=True,
+                             name=f'late-reassess-{bid_id}').start()
+    except Exception as _lre:
+        print(f'[late-reassess] bid={bid_id} err: {_lre}', flush=True)
+
+
+def _schedule_assessment_fallback(bid_id, delay_sec=300):
     """Arm a one-shot timer that fires assessment with require_all=False if
     AccuTrade/iPacket never landed. Safe to call on every vAuto submit —
     the gate bails if assessment already fired."""
@@ -13090,7 +13164,7 @@ def api_vauto_submit():
     # Gate assessment on all three books (vAuto+AccuTrade+iPacket) — fire now
     # if they're all present, otherwise arm a 5-minute fallback timer.
     _maybe_fire_assessment(bid_id, require_all=True, source='vauto')
-    _schedule_assessment_fallback(bid_id, delay_sec=60)
+    _schedule_assessment_fallback(bid_id, delay_sec=300)  # ALL_THREE_TOGETHER_2026_05_30: was 150; vauto-only fallback is last-resort so the full gate (accu+ipkt) fires first
 
     return jsonify({'ok': True, 'bid_id': bid_id})
 
@@ -14035,9 +14109,9 @@ def api_clear_verification(bid_id):
         else:
             cur.execute("""DELETE FROM ipacket_lookups
              WHERE bid_id = %s
-               AND (looked_up_at IS NULL
-                    OR looked_up_at < NOW() - INTERVAL '5 minutes'
-                    OR not_available = true)""", (bid_id,))
+               AND (not_available = true
+                    OR (total_msrp IS NULL AND base_price IS NULL
+                        AND (raw_json->'options') IS NULL))  -- IPACKET_PRESERVE_ALLPATHS_2026_05_30""", (bid_id,))
         cur.execute('DELETE FROM accutrade_lookups WHERE bid_id=%s', (bid_id,))
         cur.execute('DELETE FROM vauto_lookups WHERE bid_id=%s', (bid_id,))
         cur.execute(
@@ -14318,7 +14392,9 @@ def api_accutrade_submit():
         db.rollback()
 
     db.close()
-    _maybe_fire_assessment(bid_id, require_all=True, source='accutrade')
+    _accu_fired = _maybe_fire_assessment(bid_id, require_all=True, source='accutrade')
+    if not _accu_fired:
+        _maybe_reassess_on_late_data(bid_id, 'accutrade')  # F2 LATE_DATA_REASSESS_2026_05_30
 
     # ACCU_AUTORETRY_2026_05_29: schedule a one-shot retry on the mileage
     # transient. Storm-safe — bids.accutrade_autoretried is stamped TRUE here
@@ -14615,7 +14691,9 @@ def api_ipacket_submit():
     db.close()
     # AI assessment still fires in background (saved to ai_assessment column
     # for internal reference) — but the SMS-back no longer waits for it.
-    _maybe_fire_assessment(bid_id, require_all=True, source='ipacket')
+    _ipkt_fired = _maybe_fire_assessment(bid_id, require_all=True, source='ipacket')
+    if not _ipkt_fired:
+        _maybe_reassess_on_late_data(bid_id, 'ipacket')  # F2 LATE_DATA_REASSESS_2026_05_30
     # Driver SMS-back fires NOW — iPacket is the last step in the pipeline,
     # success or not_available both qualify. Idempotent (driver_notified_at
     # guard prevents double-text if assessment also tries to notify).
