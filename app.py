@@ -14693,7 +14693,17 @@ def api_ipacket_submit():
             base_price=COALESCE(EXCLUDED.base_price, ipacket_lookups.base_price),
             exterior_color=COALESCE(EXCLUDED.exterior_color, ipacket_lookups.exterior_color),
             interior_color=COALESCE(EXCLUDED.interior_color, ipacket_lookups.interior_color),
-            screenshot=COALESCE(EXCLUDED.screenshot, ipacket_lookups.screenshot),
+            -- IPACKET_KEEP_GOOD_SCREENSHOT_2026_05_31: a blank/not_available
+            -- re-pull must NOT replace a good sticker image. Keep the existing
+            -- screenshot when the incoming submit is not_available AND the row
+            -- has (or merges to) a real MSRP/base. A genuine new good capture
+            -- (not_available=false) still updates the image via the ELSE.
+            screenshot=CASE
+                WHEN EXCLUDED.not_available
+                     AND (COALESCE(EXCLUDED.total_msrp, ipacket_lookups.total_msrp) IS NOT NULL
+                          OR COALESCE(EXCLUDED.base_price, ipacket_lookups.base_price) IS NOT NULL)
+                THEN ipacket_lookups.screenshot
+                ELSE COALESCE(EXCLUDED.screenshot, ipacket_lookups.screenshot) END,
             raw_json=CASE
                 WHEN EXCLUDED.total_msrp IS NOT NULL
                   OR length(COALESCE(EXCLUDED.raw_json->>'_ocr_text','')) >
