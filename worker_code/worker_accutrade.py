@@ -409,21 +409,10 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     try:
         _ang_target_miles = str(int(miles))
 
-        # DOCK_LIST_EXPAND_2026_05_29: THE REAL FIX. 5-agent RCA on bid 2239
-        # proved the editable odometer input is NOT the scorecard widget (that
-        # is a read-only <div class="value">) — it lives inside the COLLAPSED
-        # "Odometer" dock-list row in the Actions panel:
-        #   <odometer-dock-list data-qa="Odometer"><dock-list>
-        #     <div class="container"><mat-icon>chevron_right</mat-icon>
-        #     <div class="title bold">Odometer</div>...
-        # The row must be CLICKED to expand before the input mounts. The worker
-        # never did this, so every prior selector matched nothing and fell
-        # through to the doomed JS dispatch. dock-list uses Angular EMULATED
-        # encapsulation (_nghost/_ngcontent attrs = light DOM), so once expanded
-        # a plain Playwright locator reaches the input — no CDP/shadow piercing.
-        # Self-diagnosing: logs each step so a one-worker canary confirms the
-        # exact behavior before fleet rollout.
+        # DOCK_LIST_EXPAND_2026_05_29: editable odometer input lives in the
+        # COLLAPSED "Odometer" dock-list row; click to expand before it mounts.
         _dock_committed = False
+        _committed_loc = None  # RETYPE_ROUNDS_2026_05_31: stash winning input
         try:
             _dock = page.locator("odometer-dock-list").first
             if _dock.count() > 0:
@@ -434,15 +423,8 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                 except Exception:
                     _dock.click(timeout=2000)
                 print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND: clicked odometer-dock-list to expand")
-                # DOCK_INPUT_WIDEN_2026_05_29: the editable odometer input does
-                # NOT mount as a child of <odometer-dock-list> — Angular Material
-                # renders the edit field into a cdk-overlay appended to <body>
-                # (bid 2240 log: expand clicked, "no input mounted" under the
-                # dock-list, yet JS-dispatch fallthrough then found+filled it and
-                # the bid committed). So after expanding, search DOCUMENT-WIDE for
-                # the newly-mounted numeric/text input, excluding the known
-                # location-picker + country-radio inputs. Also dump every input's
-                # attrs to the log so any miss gives us the exact DOM, no guessing.
+                # DOCK_INPUT_WIDEN_2026_05_29: input mounts in a body-level
+                # cdk-overlay, not under the dock-list — search document-wide.
                 _dock_input = None
                 _dl_deadline = time.time() + 4
                 _widen_sel = ("input[type='number'], input[inputmode='numeric'], "
@@ -493,7 +475,8 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                     _dock_input.type(_ang_target_miles, delay=40, timeout=4000)
                     _dock_input.press("Tab", timeout=1500)
                     _dock_committed = True
-                    print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND ok — typed {_ang_target_miles} into expanded odometer input (document-wide match)")
+                    _committed_loc = _dock_input
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND ok — typed {_ang_target_miles}")
                 else:
                     print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND: no editable input found document-wide after expand — see input-inventory above; falling through")
             else:
@@ -529,6 +512,7 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                 _loc.type(_ang_target_miles, delay=40, timeout=4000)
                 _loc.press("Tab", timeout=1500)
                 _ang_filled = True
+                _committed_loc = _loc
                 print(f"[+{time.time()-t:5.1f}s] [accutrade] ANGULAR_FILL ok via {_sel!r}")
                 break
             except Exception as _ang_sel_err:
@@ -625,14 +609,40 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     except Exception:
         pass
 
-    # MILEAGE_REDISPATCH_RETRY_2026_05_28: Phase-1 poll for 12s. If no value
-    # change detected by 12s, fire ONE more Tab keypress (re-blurs the
-    # mileage input → re-triggers Angular reactive recalc), then poll another
-    # 8s. Total 20s budget. Mirrors what operator-driven reprocess does
-    # today: gives Cox a second chance to respond. Pattern source: today's
-    # bids 2208 (Mercedes GLC), 2215 (Maserati), 2220 (GMC HD), 2222 (BMW M4)
-    # all hit mileage_did_not_commit_v2 on first attempt → reprocess landed
-    # clean values. 30-day DB sweep showed 7.1% baseline retry rate.
+    # MILEAGE_REDISPATCH_RETRY_2026_05_28: Phase-1 poll 12s; on no change,
+    # one Tab re-blur + 8s phase 2; then RE-TYPE rounds (below). ~7% of cold
+    # forms drop the typed mileage and only re-typing on the warm page commits.
+
+    # RETYPE_ROUNDS_2026_05_31: re-type the mileage into the winning input on
+    # the now-warm form (a re-blur alone can't commit a value the cold form
+    # never registered). Prefer the captured locator; else re-run the cascade.
+    def _retype():
+        _t = str(int(miles))
+        if _committed_loc is not None:
+            try:
+                _committed_loc.click(timeout=2000)
+                _committed_loc.press("Control+A", timeout=1000)
+                _committed_loc.press("Delete", timeout=1000)
+                _committed_loc.type(_t, delay=40, timeout=4000)
+                _committed_loc.press("Tab", timeout=1500)
+                return True
+            except Exception:
+                pass
+        for _s in _ang_selectors:
+            try:
+                _l = page.locator(_s).first
+                if _l.count() == 0:
+                    continue
+                _l.click(timeout=2000)
+                _l.press("Control+A", timeout=1000)
+                _l.press("Delete", timeout=1000)
+                _l.type(_t, delay=40, timeout=4000)
+                _l.press("Tab", timeout=1500)
+                return True
+            except Exception:
+                continue
+        return False
+
     deadline_phase1 = time.time() + 12
     mileage_committed = False
     last_post = pre_values
@@ -669,6 +679,30 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                 last_post = post_values
                 break
             last_post = post_values
+            time.sleep(0.4)
+
+    # RETYPE_ROUNDS_2026_05_31: phase 1+2 saw no change → cold form likely
+    # dropped the value. Re-type up to 2x on the warm form, 5s poll each,
+    # under a hard wall-clock cap so the worker can never hang. Zero added
+    # time on the common (already-committed) path.
+    _retype_cap = time.time() + 12
+    _round = 0
+    while not mileage_committed and _round < 2 and time.time() < _retype_cap:
+        _round += 1
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] RETYPE round {_round} on warm form")
+        if not _retype():
+            break
+        _rd = min(time.time() + 5, _retype_cap)
+        while time.time() < _rd:
+            post_values = _read_4_values()
+            for k in ('guaranteed_offer', 'trade_in', 'trade_market', 'market_avg'):
+                if pre_values.get(k) != post_values.get(k):
+                    mileage_committed = True
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] RETYPE round {_round} RECOVERED")
+                    break
+            last_post = post_values
+            if mileage_committed:
+                break
             time.sleep(0.4)
 
     # ACCUTRADE_SETTLE_DELAY_2026_05_15: bid 1503 case — once we detect ANY
