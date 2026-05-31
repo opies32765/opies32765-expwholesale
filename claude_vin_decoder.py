@@ -130,7 +130,7 @@ def decode_vin_via_claude(vin, model=ANTHROPIC_MODEL, timeout=CLAUDE_TIMEOUT_SEC
     try:
         t0 = time.time()
         txt = gemini_text(_SYSTEM + "\n\n" + _USER_PROMPT_TEMPLATE.format(vin=vin),
-                          model="gemini-2.5-pro", max_tokens=2000, temperature=0.0) or ""
+                          model="gemini-3.5-flash", max_tokens=2000, temperature=0.0) or ""
         latency_ms = int((time.time() - t0) * 1000)
         parsed = _parse_json(txt)
         if not parsed:

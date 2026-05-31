@@ -35,11 +35,11 @@ def _client_get():
     return _client if _client else None
 
 
-def gemini_text(prompt, model='gemini-2.5-pro', max_tokens=2000, temperature=0.0,
+def gemini_text(prompt, model='gemini-3.5-flash', max_tokens=2000, temperature=0.0,
                 thinking_budget=None):
     """One-shot Gemini text completion. Returns stripped text or None.
 
-    Defaults: gemini-2.5-pro, temperature 0.0 (deterministic structured output —
+    Defaults: gemini-3.5-flash, temperature 0.0 (deterministic structured output —
     these callers all want strict JSON). max_tokens defaults high so reasoning
     ('thinking') tokens don't crowd out the JSON answer.
 
@@ -53,11 +53,13 @@ def gemini_text(prompt, model='gemini-2.5-pro', max_tokens=2000, temperature=0.0
         return None
     from google.genai import types
     _cfg = dict(max_output_tokens=max_tokens, temperature=temperature)
-    if thinking_budget is not None:
-        # THINKING_CLAMP_2026_05_30: pro/non-flash models 400 on thinking_budget=0
-        # ("model does not support setting thinking_budget to 0"). Clamp 0->128
-        # (pro minimum) unless flash, which does support a true 0.
-        _tb = thinking_budget
+    # GEMINI_35_FLASH_NOTHINK_2026_05_31: flash models default to extended
+    # thinking which eats max_output_tokens -> small-budget calls return empty.
+    # Default flash to thinking_budget=0. Non-flash keeps THINKING_CLAMP behavior.
+    _tb = thinking_budget
+    if _tb is None and 'flash' in (model or '').lower():
+        _tb = 0
+    if _tb is not None:
         if _tb == 0 and 'flash' not in (model or '').lower():
             _tb = 128
         _cfg['thinking_config'] = types.ThinkingConfig(thinking_budget=_tb)

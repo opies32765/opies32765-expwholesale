@@ -1328,7 +1328,7 @@ def sonnet_vision_call(prompt, image_bytes, mime='image/jpeg', max_tokens=64,
         return None
 
 
-def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-pro',
+def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-3.5-flash',
                 max_tokens=1024, temperature=0.4, disable_thinking=False):
     # GEMINI_FLASH_MILES_OCR_2026_05_17 (param): pass disable_thinking=True for
     # terse-output OCR tasks (single number, 17-char VIN). With thinking enabled
@@ -1337,7 +1337,7 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-p
     # on bid 1501 (it didn't; it just got cut off mid-token).
     """One-shot Gemini call. Returns text response or None on failure.
     Pass image_bytes for vision tasks. Defaults to Flash (cheap).
-    Use model='gemini-2.5-pro' for high-quality reasoning (assessments).
+    Use model='gemini-3.5-flash' for high-quality reasoning (assessments).
 
     2026-05-09: Auto-retries up to 2 times on 429 RESOURCE_EXHAUSTED with
     exponential backoff (1s, 2s). Per-minute Vertex quota recovers fast,
@@ -1366,10 +1366,12 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-p
         max_output_tokens=max_tokens,
         temperature=temperature,
     )
-    if disable_thinking:
-        # THINKING_CLAMP_2026_05_30: pro/non-flash models reject thinking_budget=0
-        # (400 INVALID_ARGUMENT). Clamp to pro-minimum 128 for non-flash; flash
-        # supports a true 0. Fixes the trim-select 400s (13739 uses pro+disable).
+    # GEMINI_35_FLASH_NOTHINK_2026_05_31: flash models default to extended
+    # thinking which eats max_output_tokens -> small-budget calls (VIN=100,
+    # odo=64) return empty. Disable thinking for ALL flash (EW tasks don't
+    # need it; Claude reasons). Non-flash keeps the THINKING_CLAMP_2026_05_30
+    # behavior (pro rejects thinking_budget=0, so clamp to 128).
+    if disable_thinking or 'flash' in (model or '').lower():
         _tb0 = 0 if 'flash' in (model or '').lower() else 128
         _cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=_tb0)
     cfg = types.GenerateContentConfig(**_cfg_kwargs)
@@ -1586,7 +1588,7 @@ def extract_vehicle_info_from_text(body):
         return {}
     try:
         result = gemini_call(_TEXT_EXTRACT_PROMPT + str(body)[:3000],
-                             model='gemini-2.5-pro', max_tokens=1500)
+                             model='gemini-3.5-flash', max_tokens=1500)
         if not result:
             return {}
         raw = result.strip()
@@ -1606,7 +1608,7 @@ def extract_vehicle_info_from_text(body):
             # One retry with Pro (more reliable on edge cases) if Flash truncated
             try:
                 result2 = gemini_call(_TEXT_EXTRACT_PROMPT + str(body)[:3000],
-                                       model='gemini-2.5-pro', max_tokens=2000)
+                                       model='gemini-3.5-flash', max_tokens=2000)
                 if result2:
                     r2 = result2.strip()
                     if r2.startswith('```'):
@@ -1995,7 +1997,7 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
     candidates = []
     for attempt in range(2):
         result = gemini_call(hw_prompt, image_bytes=file_bytes, mime=media_type,
-                             model='gemini-2.5-pro', max_tokens=2000,
+                             model='gemini-3.5-flash', max_tokens=2000,
                              temperature=0.2 + attempt * 0.3)
         if not result:
             continue
@@ -2028,7 +2030,7 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
 
     # Cross-check 2: Gemini Flash. Accept ONLY if check digit valid.
     flash_result = gemini_call(VIN_PROMPT, image_bytes=file_bytes, mime=media_type,
-                               model='gemini-2.5-pro', max_tokens=100)
+                               model='gemini-3.5-flash', max_tokens=100)
     if flash_result:
         flash_vin = flash_result.strip().upper()
         m = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', flash_vin)
@@ -2073,7 +2075,7 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
                 f'Reply ONLY with a check-digit-valid 17-char VIN, or NONE.'
             )
             retry_result = gemini_call(retry_prompt, image_bytes=file_bytes, mime=media_type,
-                                       model='gemini-2.5-pro', max_tokens=200, temperature=0.4)
+                                       model='gemini-3.5-flash', max_tokens=200, temperature=0.4)
             if not retry_result:
                 continue
             mm = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', retry_result.strip().upper())
@@ -2117,7 +2119,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
         "(no commas, no units). If not, reply with the single word NONE."
     )
     gresult = gemini_call(_odo_prompt, image_bytes=file_bytes, mime=media_type,
-                          model='gemini-2.5-flash', max_tokens=64,
+                          model='gemini-3.5-flash', max_tokens=64,
                           temperature=0, disable_thinking=True)
     if gresult:
         up = gresult.strip().upper()
@@ -2153,7 +2155,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
         "integer (no commas, no units). If unsure or it's not visible, NONE."
     )
     gresult2 = gemini_call(_listing_prompt, image_bytes=file_bytes,
-                           mime=media_type, model='gemini-2.5-flash',
+                           mime=media_type, model='gemini-3.5-flash',
                            max_tokens=64, temperature=0, disable_thinking=True)
     if gresult2:
         up = gresult2.strip().upper()
@@ -2176,7 +2178,7 @@ def extract_color_from_file(file_bytes, media_type='image/jpeg'):
         'If you cannot clearly see a vehicle exterior, reply UNKNOWN.'
     )
     result = gemini_call(prompt, image_bytes=file_bytes, mime=media_type,
-                         model='gemini-2.5-pro', max_tokens=20)
+                         model='gemini-3.5-flash', max_tokens=20)
     if result:
         color = result.strip().title()
         if color.upper() != 'UNKNOWN' and color:
@@ -2237,7 +2239,7 @@ def extract_carfax_info(file_bytes, media_type='image/jpeg'):
 
     Uses Gemini 2.5 Pro for better accuracy on handwriting and ambiguous text."""
     raw = gemini_call(CARFAX_PROMPT, image_bytes=file_bytes, mime=media_type,
-                      model='gemini-2.5-pro', max_tokens=3000)
+                      model='gemini-3.5-flash', max_tokens=3000)
     if not raw:
         return {}
     try:
@@ -3984,6 +3986,169 @@ def twilio_webhook():
     # redundant. The sms_attach_context table is no longer written to.
     # Removed code preserved in app.py.bak.20260518-pre-ask-every-time.
 
+    # -- ORDER_INDEP_MERGE_2026_05_31 (v2, bare-miles-only) ---------------
+    # Order-independent merge, narrowed to the ONE pattern that physically
+    # cannot conflate two different vehicles: a BARE-MILES-ONLY inbound
+    # (digits only -- no 17-char VIN, no media) merged onto the most-recent
+    # UNASSESSED bid from the same phone (last 120s) that is missing miles.
+    # Miles alone carry no vehicle identity, so a pure miles text can only be
+    # a follow-up, never a new car. Fixes bids 2343/2344 (2026-05-31): a VIN
+    # photo (2343, VIN OCR'd async, no miles) followed 3s later by bare
+    # "47848" (2344) split into two bids -- the verify-stitch block below
+    # gates on needs_verification_at, which a 3-second-old bid has not been
+    # stamped with yet. This block runs first, is sender-agnostic (no phone
+    # gate), and returns on success so the later paths never run.
+    #
+    # Safety (per the adversarial vet that rejected the broad version):
+    #   * BARE-MILES-ONLY: a VIN or photo inbound is NOT merged here (it could
+    #     be a brand-new vehicle from a high-volume sender) -- it falls through
+    #     to normal new-bid creation. Pure-alpha name replies have no digits
+    #     so they fall through to the name-reply path untouched.
+    #   * ai_assessed_at IS NULL: never re-opens a bid already in/through the
+    #     pricing pipeline (reviewing/bid_sent/priced), so no churn.
+    #   * EXACTLY ONE matching incomplete bid in the window (else fall through).
+    #   * Excludes terminal statuses.
+    # The miles-then-VIN direction (a VIN/photo arriving after a bare-miles
+    # bid) is intentionally NOT handled here -- a VIN/photo cannot be safely
+    # told apart from a new vehicle at intake time.
+    _oim_vin_in_body = bool(re.search(r'\b([A-HJ-NPR-Z0-9]{17})\b', (body or '').upper()))
+    _oim_n_media = 0
+    try:
+        _oim_n_media = int(request.form.get('NumMedia', 0))
+    except (TypeError, ValueError):
+        _oim_n_media = 0
+    _oim_miles = None
+    if body and not _oim_vin_in_body and _oim_n_media == 0:
+        _oim_mm = re.search(
+            r'(\d{1,3}(?:[,.]?\d{3})*|\d+)\s*(?:k\b|mi\b|miles?\b)',
+            body, re.IGNORECASE)
+        if _oim_mm:
+            try:
+                _oms = _oim_mm.group(1).replace(',', '').replace('.', '')
+                if _oms.isdigit():
+                    _oim_miles = int(_oms)
+                    if 'k' in (_oim_mm.group(0) or '').lower() and _oim_miles < 1000:
+                        _oim_miles *= 1000
+            except Exception:
+                _oim_miles = None
+        if not _oim_miles:
+            _oim_bm = re.match(r'^\s*(\d{3,6})\s*$', body)
+            if _oim_bm:
+                _on = int(_oim_bm.group(1))
+                # Reject 4-digit model-year-looking values (1990-2030): a bare
+                # "2025" is far more likely a year than a 2,025-mile odometer.
+                # (5-digit FL ZIPs stay indistinguishable from real mileage,
+                # same as the existing verify-stitch bare-digit regex.)
+                if 100 <= _on <= 999_999 and not (1990 <= _on <= 2030):
+                    _oim_miles = _on
+    if from_phone and _oim_miles:
+        try:
+            # Most-recent UNASSESSED bid from this phone in 120s missing miles.
+            cur.execute("""
+                SELECT id FROM bids
+                 WHERE phone = %s
+                   AND created_at > NOW() - INTERVAL '120 seconds'
+                   AND status = 'new'
+                   AND COALESCE(awaiting_name, FALSE) = FALSE
+                   AND mileage IS NULL
+                   AND ai_assessed_at IS NULL
+                   AND ai_price IS NULL
+                 ORDER BY id DESC LIMIT 1
+            """, (from_phone,))
+            _oim_row = cur.fetchone()
+            cur.execute("""
+                SELECT COUNT(*) AS n FROM bids
+                 WHERE phone = %s
+                   AND created_at > NOW() - INTERVAL '120 seconds'
+                   AND status = 'new'
+                   AND COALESCE(awaiting_name, FALSE) = FALSE
+                   AND mileage IS NULL
+                   AND ai_assessed_at IS NULL
+                   AND ai_price IS NULL
+            """, (from_phone,))
+            _oim_n = (cur.fetchone() or {}).get('n', 0)
+            if _oim_row and _oim_n == 1:
+                _oim_bid_id = _oim_row['id']
+                cur.execute(
+                    "UPDATE bids SET mileage=%s, updated_at=NOW() "
+                    "WHERE id=%s AND mileage IS NULL",
+                    (_oim_miles, _oim_bid_id))
+                if cur.rowcount:
+                    # Reuse verify-stitch reset: clear any open verify flag,
+                    # drop stale/empty source rows, reset the (likely empty)
+                    # assessment claim so the worker pool re-fetches once the
+                    # bid is complete (VIN from async OCR + these miles). Each
+                    # source completion calls _maybe_fire_assessment(
+                    # require_all=True), which fires the assessment + the
+                    # customer mini-site SMS once vauto+accu+ipkt all land.
+                    cur.execute(
+                        "UPDATE bids SET needs_verification_cleared_at = NOW(), "
+                        "needs_verification_cleared_by = 'auto:order_indep_merge', "
+                        "updated_at = NOW() "
+                        "WHERE id = %s AND needs_verification_at IS NOT NULL "
+                        "AND needs_verification_cleared_at IS NULL",
+                        (_oim_bid_id,))
+                    cur.execute(
+                        "DELETE FROM ipacket_lookups WHERE bid_id=%s AND "
+                        "(not_available=true OR (total_msrp IS NULL AND base_price IS NULL "
+                        "AND (raw_json->'options') IS NULL))", (_oim_bid_id,))
+                    cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s", (_oim_bid_id,))
+                    cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s", (_oim_bid_id,))
+                    cur.execute(
+                        "UPDATE bids SET vauto_claimed_by=NULL, vauto_claimed_at=NULL, "
+                        "ai_assessed_at=NULL, ai_price=NULL, ai_assessment=NULL, "
+                        "miles_audit_at=NULL WHERE id=%s", (_oim_bid_id,))
+                    if body:
+                        cur.execute(
+                            "INSERT INTO bid_messages (bid_id, direction, message, from_phone) "
+                            "VALUES (%s, 'inbound', %s, %s)",
+                            (_oim_bid_id, body, from_phone))
+                    _finalize_sms_intake(
+                        cur, intake_log_id, 'order_indep_merge',
+                        bid_id=_oim_bid_id,
+                        reason='order-independent merge: bare miles %s onto recent incomplete bid #%s' % (_oim_miles, _oim_bid_id),
+                        parsed_vin=None, parsed_miles=_oim_miles)
+                    db.commit()
+                    print('[order-indep-merge] bid=%s from=%s miles=%s' % (_oim_bid_id, from_phone, _oim_miles), flush=True)
+                    db.close()
+                    return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                            200, {'Content-Type': 'text/xml'})
+            elif _oim_row and _oim_n != 1:
+                print('[order-indep-merge] skip: %s incomplete bids in 120s window for %s (need exactly 1)' % (_oim_n, from_phone), flush=True)
+            elif not _oim_row:
+                # ORDER_INDEP_STAGE_2026_05_31: no mergeable incomplete bid in
+                # the 120s window. Defer to the existing handlers if this phone
+                # has a verify-pending bid (verify-stitch covers missing-miles
+                # up to 24h) or an awaiting_name held bid (name-reply re-ask);
+                # otherwise STAGE the bare-miles so it neither share-replies
+                # onto an old bid nor spawns a vin-less miles-only orphan. A
+                # VIN/photo bid created within 120s reclaims it
+                # (ORDER_INDEP_RECLAIM_2026_05_31). The only thing this drops
+                # is a lone bare number with no vehicle ever arriving.
+                cur.execute(
+                    "SELECT 1 FROM bids WHERE phone=%s "
+                    "AND created_at > NOW() - INTERVAL '24 hours' "
+                    "AND ((needs_verification_at IS NOT NULL AND needs_verification_cleared_at IS NULL) "
+                    "OR COALESCE(awaiting_name, FALSE) = TRUE) LIMIT 1",
+                    (from_phone,))
+                if not cur.fetchone():
+                    _finalize_sms_intake(
+                        cur, intake_log_id, 'order_indep_staged',
+                        parsed_miles=_oim_miles,
+                        reason='bare miles %s staged (no vehicle yet); awaits VIN within 120s' % _oim_miles)
+                    db.commit()
+                    print('[order-indep-merge] staged miles=%s from=%s (awaiting vehicle)' % (_oim_miles, from_phone), flush=True)
+                    db.close()
+                    return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                            200, {'Content-Type': 'text/xml'})
+        except Exception as _oim_e:
+            print('[order-indep-merge] err phone=%s: %s' % (from_phone, _oim_e), flush=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    # -- end ORDER_INDEP_MERGE_2026_05_31 ---------------------------------
+
     # ── Name-reply routing (Phase 3 onboarding) ──
     # If this phone has one or more held bids (status='awaiting_name'),
     # AND the inbound has no VIN and no media (a plausible name-only reply),
@@ -4621,6 +4786,54 @@ def twilio_webhook():
             _ai_vals.append(bid_id)
             cur.execute(f"UPDATE bids SET {', '.join(_ai_sets)} WHERE id=%s", _ai_vals)
 
+    # -- ORDER_INDEP_RECLAIM_2026_05_31 -----------------------------------
+    # Miles-then-VIN half. MMS photos lag plain SMS, so a bare-miles text sent
+    # moments before a VIN photo often reaches the server FIRST and gets STAGED
+    # (ORDER_INDEP_STAGE above). When THIS new bid is created without miles,
+    # reclaim that staged bare-miles from the same phone in the 120s lookback
+    # and attach it now -- no waiting. Staged rows are a clean single-use signal
+    # (no orphan, no share-reply); re-pointed to 'order_indep_reclaim' after use
+    # so they can't be reclaimed twice. Exactly-one guard. Bare-miles-only
+    # carries no vehicle identity, so this cannot merge two different cars.
+    # SAVEPOINT-wrapped: any error rolls back only the reclaim, never the
+    # surrounding new-bid INSERT (committed downstream at the new-bid tail).
+    if not miles:
+        try:
+            cur.execute("SAVEPOINT oim_reclaim")
+            cur.execute("""
+                SELECT id AS log_id, parsed_miles, COUNT(*) OVER () AS n
+                  FROM sms_intake_log
+                 WHERE from_phone = %s
+                   AND id <> COALESCE(%s, -1)
+                   AND created_at > NOW() - INTERVAL '120 seconds'
+                   AND outcome = 'order_indep_staged'
+                   AND parsed_miles IS NOT NULL
+                 ORDER BY id DESC LIMIT 1
+            """, (from_phone, intake_log_id))
+            _rc = cur.fetchone()
+            if _rc and _rc.get('n') == 1 and _rc.get('parsed_miles'):
+                _rc_miles = int(_rc['parsed_miles'])
+                cur.execute(
+                    "UPDATE bids SET mileage=%s, updated_at=NOW() "
+                    "WHERE id=%s AND mileage IS NULL",
+                    (_rc_miles, bid_id))
+                if cur.rowcount:
+                    miles = _rc_miles  # downstream sees the bid as complete
+                    cur.execute(
+                        "UPDATE sms_intake_log SET bid_id=%s, outcome='order_indep_reclaim', "
+                        "reason = COALESCE(reason,'') || ' [reclaimed to bid #' || %s || ']' "
+                        "WHERE id=%s",
+                        (bid_id, bid_id, _rc['log_id']))
+                    print('[order-indep-reclaim] bid=%s reclaimed staged miles=%s (log #%s)'
+                          % (bid_id, _rc_miles, _rc['log_id']), flush=True)
+            cur.execute("RELEASE SAVEPOINT oim_reclaim")
+        except Exception as _rce:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT oim_reclaim")
+            except Exception:
+                pass
+            print('[order-indep-reclaim] err bid=%s: %s' % (bid_id, _rce), flush=True)
+    # -- end ORDER_INDEP_RECLAIM_2026_05_31 -------------------------------
     # STITCH_WINDOW_FIX_2026_05_20: if VIN landed but miles didn't, flag
     # the bid as needs_verification='missing_miles' so a follow-up bare
     # number SMS (e.g. "9207") routes via the stitch-verify path at
@@ -6066,7 +6279,7 @@ def _run_assessment(bid_id):
             'false_ready', 'blank', 'worker error', 'vin_input', 'rate-limit',
             'did not appear', 'recent'))
         and not any(_s in _ipr for _s in ('does not support', 'vehicle is unavailable')))
-    if ipacket and bid.get('vin') and (not ipacket.get('total_msrp') or _ip_retryable_na):
+    if ipacket and bid.get('vin') and (not ipacket.get('total_msrp') or _ip_retryable_na) and _claim_ipacket_rescue(bid_id):  # IPACKET_EARLY_RESCUE_2026_05_31 claim-gate
         try:
             _pdf_res = _ipacket_lookup_msrp_for_vin(bid['vin'])
             if not (_pdf_res and _pdf_res.get('ok') and _pdf_res.get('msrp')):
@@ -6178,6 +6391,13 @@ def _run_assessment(bid_id):
                               _pdf_res.get('base_price'),
                               _new_screenshot_path, bid_id))
                         ipacket['screenshot'] = _new_screenshot_path
+                        try:  # IPACKET_OCR_DASHBOARD_GUARD_2026_05_31: re-OCR the clean _pdf.png; drop stale dashboard OCR
+                            _pcur.execute("UPDATE ipacket_lookups SET raw_json = COALESCE(raw_json,'{}'::jsonb) - '_ocr_text' WHERE bid_id=%s", (bid_id,))
+                            _pdb.commit()
+                            from ipacket_trim import ensure_ipacket_ocr_cached as _ipt_reocr
+                            _ipt_reocr(bid_id, {'screenshot': _new_screenshot_path, 'raw_json': {}}, _pdb)
+                        except Exception as _reocr_e:
+                            print('[ASSESS] PDF-fallback re-OCR err: %s' % _reocr_e, flush=True)
                     else:
                         _pcur.execute("""
                             UPDATE ipacket_lookups
@@ -6682,7 +6902,7 @@ def _run_assessment(bid_id):
         if not gc:
             raise RuntimeError('Gemini client unavailable')
         resp = gc.models.generate_content(
-            model='gemini-2.5-pro',
+            model='gemini-3.5-flash',
             contents=gemini_parts,
             config=_gtypes.GenerateContentConfig(max_output_tokens=8000, temperature=0.4),
         )
@@ -12845,7 +13065,7 @@ def api_vauto_find_click_target():
         'If no matching row exists, return: {"found": false}'
     )
     text = gemini_call(prompt, image_bytes=img_bytes, mime='image/png',
-                       model='gemini-2.5-pro', max_tokens=200, temperature=0.1)
+                       model='gemini-3.5-flash', max_tokens=200, temperature=0.1)
     if not text:
         return jsonify({'error': 'gemini call failed'}), 502
     raw = text.strip()
@@ -13900,7 +14120,7 @@ def api_trim_select():
         'No markdown, no commentary.'
     )
 
-    model = 'gemini-2.5-pro'
+    model = 'gemini-3.5-flash'
     raw = gemini_call(prompt, model=model, max_tokens=400, temperature=0.1, disable_thinking=True)  # TRIM_SELECT_FAST_2026_05_20: skip 10-15s Gemini thinking overhead (prompt has explicit rules; Flash follows them fine without extended reasoning)
     if not raw:
         db.close()
@@ -14577,6 +14797,96 @@ def api_accutrade_status(bid_id):
 # ── iPacket worker API ─────────────────────────────────────────────────────
 
 
+def _claim_ipacket_rescue(bid_id):
+    """IPACKET_EARLY_RESCUE_2026_05_31: atomic one-shot (30-min) claim so only
+    ONE path pulls the iPacket sticker PDF per bid -> prevents the submit-time
+    and assess-side rescues from double-pulling (iPacket-spam guard). Returns
+    True if THIS caller won the claim and should pull."""
+    try:
+        _db = get_db(); _c = _db.cursor()
+        _c.execute("""UPDATE bids SET ipacket_rescue_claimed_at = NOW()
+                       WHERE id = %s
+                         AND (ipacket_rescue_claimed_at IS NULL
+                              OR ipacket_rescue_claimed_at < NOW() - INTERVAL '30 minutes')
+                       RETURNING id""", (bid_id,))
+        won = _c.fetchone() is not None
+        _db.commit(); _db.close()
+        return won
+    except Exception as _ce:
+        print('[ipacket-claim] err bid=%s: %s' % (bid_id, _ce), flush=True)
+        return False
+
+
+def _ipacket_early_rescue(bid_id):
+    """Submit-time iPacket PDF rescue (runs in a daemon thread). Claim-gated so
+    it never double-pulls with the assess-side rescue. Pulls ONCE, renders the
+    sticker, persists MSRP + screenshot + re-OCR, then fires the assessment if
+    all sources are ready. NEVER pulls for genuine-NA (caller pre-filters)."""
+    if not bid_id:
+        return
+    if not _claim_ipacket_rescue(bid_id):
+        print('[ipacket-early] bid=%s rescue already claimed -- skip (no double pull)' % bid_id, flush=True)
+        return
+    try:
+        _db0 = get_db(); _c0 = _db0.cursor()
+        _c0.execute("SELECT vin FROM bids WHERE id=%s", (bid_id,))
+        _r0 = _c0.fetchone(); _db0.close()
+        _vin = (_r0.get('vin') if _r0 else None)
+        if not _vin:
+            return
+        _pdf_res = _ipacket_lookup_msrp_for_vin(_vin)
+        if not (_pdf_res and _pdf_res.get('ok') and _pdf_res.get('msrp')):
+            print('[ipacket-early] bid=%s NO-OP: %s' % (bid_id, (_pdf_res or {}).get('error') or 'no msrp'), flush=True)
+            return
+        _new_ss = None
+        _viewer = _pdf_res.get('viewer_url')
+        if _viewer:
+            try:
+                import requests as _rr2, pdfplumber as _pp2, io as _io2
+                _vr = _rr2.get(_viewer, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
+                if _vr.status_code == 200:
+                    with _pp2.open(_io2.BytesIO(_vr.content)) as _pdf:
+                        _pil = _pdf.pages[0].to_image(resolution=200).original
+                        _fname = 'ipacket_%s_%d_pdf.png' % (_vin, int(time.time()))
+                        _pil.save(os.path.join(IPACKET_REPORTS_DIR, _fname), format='PNG')
+                        _new_ss = '/ipacket_reports/%s' % _fname
+            except Exception as _ie:
+                print('[ipacket-early] render err bid=%s: %s' % (bid_id, _ie), flush=True)
+        _db = get_db(); _c = _db.cursor()
+        if _new_ss:
+            _c.execute("""UPDATE ipacket_lookups
+                             SET total_msrp = COALESCE(total_msrp, %s),
+                                 base_price = COALESCE(base_price, %s),
+                                 screenshot = %s, not_available = false,
+                                 unavailable_reason = NULL, looked_up_at = NOW()
+                           WHERE bid_id = %s""",
+                       (_pdf_res.get('msrp'), _pdf_res.get('base_price'), _new_ss, bid_id))
+            _c.execute("UPDATE ipacket_lookups SET raw_json = COALESCE(raw_json,'{}'::jsonb) - '_ocr_text' WHERE bid_id=%s", (bid_id,))
+            _db.commit()
+            try:
+                from ipacket_trim import ensure_ipacket_ocr_cached as _reocr
+                _reocr(bid_id, {'screenshot': _new_ss, 'raw_json': {}}, _db)
+            except Exception as _roe:
+                print('[ipacket-early] re-OCR err bid=%s: %s' % (bid_id, _roe), flush=True)
+        else:
+            _c.execute("""UPDATE ipacket_lookups
+                             SET total_msrp = COALESCE(total_msrp, %s),
+                                 base_price = COALESCE(base_price, %s),
+                                 not_available = false, unavailable_reason = NULL,
+                                 looked_up_at = NOW()
+                           WHERE bid_id = %s""",
+                       (_pdf_res.get('msrp'), _pdf_res.get('base_price'), bid_id))
+            _db.commit()
+        _db.close()
+        print('[ipacket-early] bid=%s rescued MSRP=$%s (submit-time, pre-assessment)' % (bid_id, _pdf_res.get('msrp')), flush=True)
+    except Exception as _ee:
+        print('[ipacket-early] err bid=%s: %s' % (bid_id, _ee), flush=True)
+    try:
+        _maybe_fire_assessment(bid_id, require_all=True, source='ipacket')
+    except Exception:
+        pass
+
+
 @app.route('/api/ipacket/submit', methods=['POST'])
 def api_ipacket_submit():
     """Accept iPacket sticker lookup results from worker."""
@@ -14818,6 +15128,21 @@ def api_ipacket_submit():
     db.close()
     # AI assessment still fires in background (saved to ai_assessment column
     # for internal reference) — but the SMS-back no longer waits for it.
+    # IPACKET_EARLY_RESCUE_2026_05_31: worker came back blank/retryable -> pull
+    # the sticker PDF NOW in a bg thread so iPacket is complete before the
+    # assessment fires (instead of the slow assess-time rescue ~100s later).
+    # Claim-gated -> can never double-pull with the assess-side rescue. Excludes
+    # genuine-NA (Tesla/Porsche no-sticker) so we never pull a sticker-less VIN.
+    try:
+        _ies_na = (data.get('unavailable_reason') or '').lower()
+        _ies_genuine = bool(data.get('not_available') and any(_g in _ies_na for _g in ('does not support', 'vehicle is unavailable')))
+        _ies_retryable = bool(data.get('not_available') and any(_g in _ies_na for _g in ('dashboard', 'did not render', 'viewer', 'false_ready', 'blank', 'worker error', 'vin_input', 'rate-limit', 'did not appear', 'recent')))
+        if (not _ies_genuine) and (not data.get('total_msrp') or _ies_retryable):
+            import threading as _ies_th
+            _ies_th.Thread(target=_ipacket_early_rescue, args=(bid_id,), daemon=True).start()
+            print('[ipacket-early] bid=%s submit-time rescue dispatched' % bid_id, flush=True)
+    except Exception as _ies_e:
+        print('[ipacket-early] hook err bid=%s: %s' % (bid_id, _ies_e), flush=True)
     _ipkt_fired = _maybe_fire_assessment(bid_id, require_all=True, source='ipacket')
     if not _ipkt_fired:
         _maybe_reassess_on_late_data(bid_id, 'ipacket')  # F2 LATE_DATA_REASSESS_2026_05_30
@@ -17371,13 +17696,28 @@ def driver_full_page(token):
 
     db.close()
 
+    # DAMAGE_SURFACE_2026_05_31: surface damage on the mini-site from the SAME
+    # sources the dashboard uses (vauto.title_status + AI flags_v2), not just
+    # the conservative damage_signal (which left real-damage bids 'unknown' --
+    # e.g. bid 2342: title_status=accident + flag accident_history but
+    # damage_signal=unknown, so the dashboard showed damage and the mini-site
+    # did not). recall/clean/unknown title statuses are NOT treated as damage.
+    _dmg_flags = {'accident_history','accidents','salvage_title','rebuilt_title',
+                  'fleet_title','total_loss','airbag_deployment','frame_damage'}
+    _dmg_titles = {'accident','salvage','rebuilt','lemon','flood','total_loss','junk','branded'}
+    _ds_title = (vauto.get('title_status') or '').lower() if vauto else ''
+    _ds_flagset = set(flags_v2 or [])
+    show_damage = bool(
+        (bid.get('damage_signal') in ('disagreement','both_damaged','damaged'))
+        or (_ds_title in _dmg_titles)
+        or (_ds_flagset & _dmg_flags))
     return render_template(
         'm_full.html',
         bid=bid, vauto=vauto, accutrade=accutrade, ipacket=ipacket,
         confidence_low=ass.get('confidence_low') if ass else None,
         confidence_high=ass.get('confidence_high') if ass else None,
         reasoning=(ass.get('llm_reasoning') if ass else None) or bid.get('ai_assessment'),
-        flags=flags_v2,
+        flags=flags_v2, show_damage=show_damage,
         manheim=mh, rbook=rb,
         buyer=buyer, dealer=dealer,
         token=token,
@@ -19510,7 +19850,7 @@ def api_opportunity_pitch(opp_id):
     )
 
     try:
-        pitch = gemini_call(prompt, model='gemini-2.5-pro',
+        pitch = gemini_call(prompt, model='gemini-3.5-flash',
                             max_tokens=1500, temperature=0.4)
     except Exception as e:
         db.close()
@@ -20654,7 +20994,7 @@ def api_voice_ai_critique():
         if not client:
             return jsonify({"error": "Gemini client unavailable"}), 503
         resp = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.5-flash',
             contents=prompt,
         )
         answer = (getattr(resp, 'text', None) or '').strip()
@@ -20690,6 +21030,6 @@ def api_voice_ai_critique():
         "question": question,
         "answer": answer,
         "prior_ai_price": float(bid['ai_price']) if bid.get('ai_price') else None,
-        "model_used": "gemini-2.5-flash",
+        "model_used": "gemini-3.5-flash",
     })
 

@@ -44,7 +44,7 @@ import psycopg2.extras
 DB = dict(host='localhost', port=5433, dbname='expwholesale',
           user='expuser', password='ExpWholesale2026!')
 
-GEMINI_MODEL = os.environ.get('DEALER_INTEL_SUMMARY_MODEL', 'gemini-2.5-flash')
+GEMINI_MODEL = os.environ.get('DEALER_INTEL_SUMMARY_MODEL', 'gemini-3.5-flash')
 
 log = logging.getLogger('dealer_intel_summary')
 logging.basicConfig(

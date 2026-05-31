@@ -1450,7 +1450,7 @@ def _parse_transcript(transcript: str, history: list[dict] = None) -> dict:
         prompt += _history_block(history)
     raw = gemini_call(
         prompt,
-        model='gemini-2.5-flash',
+        model='gemini-3.5-flash',
         max_tokens=500,
         temperature=0.2,
         disable_thinking=True,
@@ -2107,7 +2107,7 @@ def _generate_reply(parsed: dict, ctx: dict) -> tuple[str, dict]:
         # Fallback to Gemini Flash if Sonnet errors — never leave the
         # operator with a dead mic.
         from app import gemini_call
-        raw = gemini_call(prompt, model='gemini-2.5-flash',
+        raw = gemini_call(prompt, model='gemini-3.5-flash',
                           max_tokens=1500, temperature=0.3,
                           disable_thinking=True)
     if not raw:
@@ -4009,7 +4009,7 @@ def api_voice_stt():
             thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
         resp = client.models.generate_content(
-            model='gemini-2.5-flash', contents=contents, config=cfg,
+            model='gemini-3.5-flash', contents=contents, config=cfg,
         )
         transcript = (resp.text or '').strip().strip('"').strip()
         return jsonify({'transcript': transcript, 'mime': mime,

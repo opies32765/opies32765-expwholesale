@@ -178,7 +178,7 @@ def _ask_claude(make, model, year, subj_trim, cand_trim):
                 'source': 'disabled'}
     try:
         txt = gemini_text(_SYSTEM + "\n\n" + prompt,
-                          model='gemini-2.5-flash', max_tokens=1024, temperature=0.0, thinking_budget=0) or ""
+                          model='gemini-3.5-flash', max_tokens=1024, temperature=0.0, thinking_budget=0) or ""
         parsed = _parse_json(txt)
         if not parsed or 'match' not in parsed:
             print(f'[claude_trim] parse failed: raw={txt[:200]!r}', flush=True)

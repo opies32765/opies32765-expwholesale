@@ -30,6 +30,82 @@ def _get_ocr_text(ipacket: dict) -> Optional[str]:
     return raw.get('_ocr_text')
 
 
+# -- IPACKET_OCR_DASHBOARD_GUARD_2026_05_31 -------------------------------
+# iPacket screenshots are full_page captures: dashboard-chrome HEADER ->
+# inline sticker MIDDLE -> "Recent Sticker Pulls" FOOTER. Vision reads
+# top-down so OCR leads with chrome even when the sticker is below it in the
+# SAME image. Slice to the sticker region; None for pure-dashboard captures.
+_IPKT_CHROME_MARKERS = (
+    'DASHBOARD INVENTORY CONTACTS', 'WINDOW STICKER/BUILDSHEET LOOKUP',
+    'ENTER YOUR 17-CHARACTER', 'ENTER YOUR 17 CHARACTER',
+)
+_IPKT_STICKER_ANCHORS = (
+    'TOTAL SUGGESTED', 'SUGGESTED RETAIL', 'AS DELIVERED', 'TOTAL PRICE',
+    'M.S.R.P', 'MSRP', 'STANDARD EQUIPMENT', 'STANDARD OPTIONS',
+    'BASE PRICE', 'DESTINATION CHARGE', 'MONRONEY',
+)
+_IPKT_FOOTER_MARKERS = ('RECENT STICKER PULLS', 'STICKER PULL ARCHIVED')
+
+
+def _clean_sticker_ocr(txt):
+    """Slice the iPacket dashboard chrome HEADER off OCR text, KEEPING the
+    sticker header (year/make/model/trim) + body. Return None when there is no
+    real sticker (recent-pulls list / pure dashboard). Pure string ops."""
+    if not txt:
+        return txt
+    up = txt.upper()
+    if not any(m in up for m in _IPKT_CHROME_MARKERS):
+        return txt  # no chrome -> real sticker, untouched
+    # Start right AFTER the lookup-prompt chrome so the sticker header (which
+    # carries the trim) survives. Chrome ends "...Vehicle Identification
+    # Number"; fall back to the latest chrome marker end.
+    start = 0
+    j = up.find('IDENTIFICATION NUMBER')
+    if j != -1:
+        start = j + len('IDENTIFICATION NUMBER')
+    else:
+        for mk in _IPKT_CHROME_MARKERS:
+            i = up.find(mk)
+            if i != -1:
+                start = max(start, i + len(mk))
+    sliced = txt[start:].strip()
+    su = sliced.upper()
+    # Require a real Monroney price anchor; else it's recent-pulls / pure
+    # dashboard -> nothing usable (better blank than chrome).
+    if not any(a in su for a in _IPKT_STICKER_ANCHORS):
+        return None
+    fcut = len(sliced)
+    for fm in _IPKT_FOOTER_MARKERS:
+        k = su.find(fm)
+        if k != -1 and k < fcut:
+            fcut = k
+    sliced = sliced[:fcut].strip()
+    return sliced or None
+
+
+def _persist_ocr_text(conn, bid_id, text):
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE ipacket_lookups SET raw_json = COALESCE(raw_json,'{}'::jsonb) || %s::jsonb WHERE bid_id=%s",
+                    (json.dumps({'_ocr_text': text[:8000]}), bid_id))
+        conn.commit()
+    except Exception as e:
+        print('[ipacket_trim] _persist_ocr_text err bid=%s: %s' % (bid_id, e), flush=True)
+        try: conn.rollback()
+        except Exception: pass
+
+
+def _clear_ocr_text(conn, bid_id):
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE ipacket_lookups SET raw_json = COALESCE(raw_json,'{}'::jsonb) - '_ocr_text' WHERE bid_id=%s", (bid_id,))
+        conn.commit()
+    except Exception as e:
+        print('[ipacket_trim] _clear_ocr_text err bid=%s: %s' % (bid_id, e), flush=True)
+        try: conn.rollback()
+        except Exception: pass
+
+
 def ensure_ipacket_ocr_cached(bid_id: int, ipacket: dict, conn) -> Optional[str]:
     """Idempotently ensure OCR text is cached for this iPacket sticker.
 
@@ -44,7 +120,15 @@ def ensure_ipacket_ocr_cached(bid_id: int, ipacket: dict, conn) -> Optional[str]
         return None
     text = _get_ocr_text(ipacket)
     if text:
-        return text
+        # IPACKET_OCR_DASHBOARD_GUARD_2026_05_31: clean + self-heal stored chrome
+        cleaned = _clean_sticker_ocr(text)
+        if cleaned == text:
+            return text
+        if cleaned:
+            _persist_ocr_text(conn, bid_id, cleaned)
+            return cleaned
+        _clear_ocr_text(conn, bid_id)  # pure dashboard -> drop, re-OCR below
+        text = None
     ss = ipacket.get('screenshot')
     if not ss:
         return None
@@ -80,7 +164,7 @@ def _ocr_screenshot(screenshot_path: str) -> Optional[str]:
     try:
         with open(screenshot_path, 'rb') as f:
             img = f.read()
-        return _google_vision_ocr(img)
+        return _clean_sticker_ocr(_google_vision_ocr(img))
     except Exception as e:
         print(f'[ipacket_trim] OCR err on {screenshot_path}: {e}', flush=True)
         return None

@@ -248,7 +248,7 @@ def _ask_claude(year, make, raw_model, raw_trim, candidates):
                 'source': 'disabled', 'reason': 'gemini unavailable'}
     try:
         txt = gemini_text(_SYSTEM + "\n\n" + prompt,
-                          model='gemini-2.5-flash', max_tokens=1024, temperature=0.0, thinking_budget=0) or ""
+                          model='gemini-3.5-flash', max_tokens=1024, temperature=0.0, thinking_budget=0) or ""
         parsed = _parse_json(txt)
         if not parsed:
             return {'ymmt_id': None, 'confidence': 0.0,

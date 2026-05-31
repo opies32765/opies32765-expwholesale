@@ -15,7 +15,7 @@ Screenshot paths in the DB are relative, e.g. /vauto_reports/carfax_<VIN>.png.
 Resolved as /opt/expwholesale<path>.
 
 gemini_call signature (from app.py):
-    gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-flash',
+    gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-3.5-flash',
                 max_tokens=1024, temperature=0.4, disable_thinking=False)
 
 CARFAX_PROMPT returns JSON with keys:
@@ -67,7 +67,7 @@ def _extract_via_gemini(file_path):
             CARFAX_PROMPT,
             image_bytes=png_bytes,
             mime='image/png',
-            model='gemini-2.5-flash',
+            model='gemini-3.5-flash',
             max_tokens=1024,
             disable_thinking=True,
         )

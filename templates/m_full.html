@@ -133,7 +133,7 @@
 
 
 {# COMBINED_SMS_2026_05_20 ─ damage callout #}
-{% if bid.damage_signal in ('disagreement', 'both_damaged', 'damaged') %}
+{% if show_damage %}
 <div style="background:linear-gradient(135deg,rgba(220,38,38,.22),rgba(127,29,29,.10));border:1.5px solid rgba(220,38,38,.6);border-left-width:6px;border-radius:12px;padding:14px 16px;margin:12px 0 10px;color:#fecaca">
   <div style="font-size:11px;font-weight:800;color:#f87171;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">⚠ Damage reported</div>
   <div style="font-size:14px;line-height:1.45;color:#fee2e2">
