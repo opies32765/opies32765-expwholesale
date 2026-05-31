@@ -81,6 +81,23 @@ def _run_lookup_in_own_browser(profile_dir, runner):
             except Exception: pass
 
 
+def _ipacket_already_good(bid_id):
+    """IPACKET_WORKER_SKIP_2026_05_31: True if the bid already has a GOOD iPacket
+    sticker on the server (available + real MSRP/base). Used to skip re-pulling a
+    good iPacket on reprocess so we never touch it / never hit iPacket again."""
+    if not bid_id:
+        return False
+    try:
+        import os, json as _json, urllib.request as _u
+        _ew = os.environ.get("EW_SERVER", "https://experience-wholesale.net")
+        with _u.urlopen(f"{_ew}/api/ipacket/status/{bid_id}", timeout=8) as _r:
+            _d = _json.loads(_r.read().decode("utf-8"))
+        return bool(_d.get("has_sticker"))
+    except Exception as _e:
+        print(f"[ipacket] skip-check err bid={bid_id}: {_e}")
+        return False
+
+
 def process_bid(vin, miles, trim=None, on_phase=None, bid_id=None):
     """Run all three lookups in parallel.
 
@@ -106,6 +123,7 @@ def process_bid(vin, miles, trim=None, on_phase=None, bid_id=None):
             result[name] = {"error": str(e)}
         _phase(name, "done")
 
+    _skip_ipkt = _ipacket_already_good(bid_id)
     threads = [
         threading.Thread(
             target=_wrap, name="vauto", daemon=True,
@@ -117,12 +135,21 @@ def process_bid(vin, miles, trim=None, on_phase=None, bid_id=None):
             args=("accutrade", ACCUTRADE_PROFILE_DIR,
                   lambda page, ctx: worker_accutrade.lookup(page, ctx, vin, miles, t, trim=trim, bid_id=bid_id)),
         ),
-        threading.Thread(
+    ]
+    # IPACKET_WORKER_SKIP_2026_05_31: if the bid already has a GOOD iPacket, do
+    # NOT launch the iPacket browser at all — no pull, no iPacket hit, the good
+    # sticker is left completely untouched (result['ipacket'] stays None, so
+    # process_one_bid submits nothing). First pass / blank-retry still pull
+    # (has_sticker is False then).
+    if _skip_ipkt:
+        print(f"[ipacket] bid {bid_id} already has a good sticker — SKIP pull (reprocess won't touch it)")
+        _phase("ipacket", "started"); _phase("ipacket", "done")
+    else:
+        threads.append(threading.Thread(
             target=_wrap, name="ipacket", daemon=True,
             args=("ipacket", IPACKET_PROFILE_DIR,
                   lambda page, ctx: worker_ipacket.lookup(page, ctx, vin, t, bid_id=bid_id)),
-        ),
-    ]
+        ))
     for th in threads: th.start()
 
     deadline = time.time() + LOOKUP_TIMEOUT_SEC

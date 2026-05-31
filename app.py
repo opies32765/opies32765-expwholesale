@@ -15604,14 +15604,20 @@ def api_ipacket_status(bid_id):
     db = get_db()
     cur = db.cursor()
     try:
-        cur.execute("SELECT not_available FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
+        cur.execute("SELECT not_available, total_msrp, base_price FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
         row = cur.fetchone()
     except Exception:
         row = None
     db.close()
     if not row:
-        return jsonify({'status': 'pending'})
-    return jsonify({'status': 'not_available' if row.get('not_available') else 'complete'})
+        return jsonify({'status': 'pending', 'has_sticker': False})
+    # IPACKET_WORKER_SKIP_2026_05_31: has_sticker = a GOOD sticker (available +
+    # real MSRP/base). The worker uses this to SKIP re-pulling a bid that already
+    # has a good iPacket, so a reprocess never touches it.
+    _good = bool((not row.get('not_available'))
+                 and (row.get('total_msrp') or row.get('base_price')))
+    return jsonify({'status': 'not_available' if row.get('not_available') else 'complete',
+                    'has_sticker': _good})
 
 
 @app.route('/api/verify-comps', methods=['POST'])
