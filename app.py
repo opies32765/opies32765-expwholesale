@@ -1663,7 +1663,12 @@ def extract_miles_from_text(text, has_vin=False):
                 continue
             if suffix == 'k' and n < 1000:
                 n *= 1000
-        if 100 <= n <= 999999:
+        # LOW_ODO_2026_06_01: an explicit "N miles/mi/mileage" label is trustworthy
+        # even for a near-new car (bid 2377: "33 miles" dead-new) -- the 100 floor
+        # silently dropped it. Bare-number branches below keep the 100 noise-guard.
+        # suffix: miles->s, mi->i, mileage->e, k->k.
+        _floor = 1 if suffix in ('s', 'i', 'e') else 100
+        if _floor <= n <= 999999:
             return n
     m = _MILES_RE_KSHORT.search(text)
     if m:

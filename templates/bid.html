@@ -2145,6 +2145,8 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
 
         {% elif not ipacket_data and bid.vin %}
+        <script>/* IPACKET_LATE_REFRESH_2026_06_01: iPacket pull lands a few sec after vAuto/AccuTrade; do ONE delayed refresh per bid view (guarded, at most once per bid per session) so the late sticker shows without a manual reload. */
+        (function(){ try { var k='ipkt_refresh_{{ bid.id }}'; if(!sessionStorage.getItem(k)){ sessionStorage.setItem(k,'1'); setTimeout(function(){ location.reload(); }, 10000); } } catch(e){} })();</script>
         <div style="font-size:13px;color:#94a3b8;line-height:1.5">
           iPacket sticker not yet available — workers will pull automatically.
         </div>
