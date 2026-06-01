@@ -411,36 +411,95 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
         except Exception:
             return False
 
-    import re as _re_gb
-    _gb_recovered = False
+    import re as _re_sc
+
+    def _scorecard_url():
+        # Build the editable-scorecard URL from the appraisal id in the
+        # CURRENT url. This is the SAME url the AccuTrade-ALONE retry lands on
+        # and which empirically commits (bid 2371 -> $42,600, bid 2373 ->
+        # $218,700). Returns None if no /appraisal/<id> id is present.
+        _m = _re_sc.search(r"/appraisal/(\d+)", page.url or "")
+        if not _m:
+            return None
+        return f"{ACCUTRADE_URL}/appraisal/{_m.group(1)}?backUrl=%2Freport%2Factive"
+
+    def _goto_scorecard_and_wait_mount(_tag, _max_wait=20):
+        # GUIDEBOOK_RECOVER recovery primitive (used by BOTH the early URL
+        # check AND the failure-point symptom recovery). Navigate to the
+        # editable scorecard, then poll up to _max_wait s for the editable
+        # odometer to MOUNT (positive signal — NOT a bare URL check, since the
+        # SPA can still be hydrating). Returns True only when an editable
+        # odometer is actually mounted.
+        _sc = _scorecard_url()
+        if not _sc:
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] {_tag}: no /appraisal/<id> in url "
+                  f"(url={(page.url or '')[:90]}) — cannot build scorecard url")
+            return False
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] {_tag} -> navigating to scorecard "
+              f"(from url={(page.url or '')[:90]})")
+        try:
+            page.goto(_sc, wait_until="domcontentloaded", timeout=30000)
+        except Exception as _navx:
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] {_tag} nav err: {_navx}")
+        _dl = time.time() + _max_wait
+        while time.time() < _dl:
+            if not _is_guidebook(page.url) and _odometer_mounted():
+                print(f"[+{time.time()-t:5.1f}s] [accutrade] {_tag} -> odometer mounted "
+                      f"(url={(page.url or '')[:90]})")
+                return True
+            time.sleep(0.4)
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] {_tag} -> odometer did NOT mount within {_max_wait}s "
+              f"(url={(page.url or '')[:90]}, is_guidebook={_is_guidebook(page.url)})")
+        return False
+
+    def _read_pre_values():
+        # PRE_VALUES snapshot (the 4 dollar panels) BEFORE miles are typed.
+        # Factored out so it can be RE-TAKEN after a GUIDEBOOK_RECOVER navigation
+        # — otherwise the comparison baseline would be the (value-less) guidebook
+        # page and a base-miles scorecard render could read as a false delta.
+        return page.evaluate(r"""() => {
+            const map = [
+                ['Instant Offer','guaranteed_offer'],
+                ['Target Auction','trade_in'],
+                ['Target Retail','trade_market'],
+                ['Wholesale / Average','market_avg'],
+                ['Wholesale/Average','market_avg'],
+                ['Wholesale Average','market_avg']
+            ];
+            const r = {guaranteed_offer:null, trade_in:null, trade_market:null, market_avg:null};
+            const text = document.body.innerText || '';
+            for (const [label, field] of map) {
+                if (r[field] !== null) continue;
+                const idx = text.indexOf(label);
+                if (idx < 0) continue;
+                const win = text.substring(idx + label.length, idx + label.length + 80);
+                if (/^\s*\r?\n?\s*N\/A\b/i.test(win)) { r[field] = null; continue; }
+                const m = win.match(/\$\s*([\d,]+)(?!\d)/);
+                if (m) {
+                    const n = parseInt(m[1].replace(/,/g, ''));
+                    if (n > 100 && n < 10000000) r[field] = n;
+                }
+            }
+            return r;
+        }""") or {}
+
+    # EARLY check (harmless, kept): in the rare case the SPA has ALREADY routed
+    # to the guidebook by the time the trim-select readiness loop breaks, recover
+    # here. The MAIN recovery is at the point of failure (the odometer-acquisition
+    # loop below) because AccuTrade usually routes to the guidebook AFTER this
+    # point — asynchronously, during the +30->+55s DOCK_LIST_EXPAND window — so
+    # this early one-shot URL check passes through on the bids that actually fail
+    # (e.g. bid 2373, where the page was not yet the guidebook at +30s).
+    _gb_recovered_early = False
     for _gb_try in range(3):
         if not _is_guidebook(page.url):
             break
-        _m = _re_gb.search(r"/appraisal/(\d+)", page.url)
-        if not _m:
+        if _goto_scorecard_and_wait_mount(f"GUIDEBOOK_RECOVER early (try {_gb_try+1}/3)"):
+            _gb_recovered_early = True
             break
-        _aid = _m.group(1)
-        _sc_url = f"{ACCUTRADE_URL}/appraisal/{_aid}?backUrl=%2Freport%2Factive"
-        print(f"[+{time.time()-t:5.1f}s] [accutrade] GUIDEBOOK_RECOVER: on read-only guidebook "
-              f"(url={page.url[:90]}) — navigating to scorecard (try {_gb_try+1}/3)")
-        try:
-            page.goto(_sc_url, wait_until="domcontentloaded", timeout=30000)
-        except Exception as _gbnav:
-            print(f"[+{time.time()-t:5.1f}s] [accutrade] GUIDEBOOK_RECOVER nav err: {_gbnav}")
-        # Wait up to 20s for the editable odometer to MOUNT on the scorecard.
-        _gb_deadline = time.time() + 20
-        while time.time() < _gb_deadline:
-            if not _is_guidebook(page.url) and _odometer_mounted():
-                _gb_recovered = True
-                break
-            time.sleep(0.4)
-        if _gb_recovered:
-            print(f"[+{time.time()-t:5.1f}s] [accutrade] GUIDEBOOK_RECOVER ok — scorecard odometer mounted "
-                  f"(url={page.url[:90]})")
-            break
-    if _is_guidebook(page.url) and not _gb_recovered:
-        print(f"[+{time.time()-t:5.1f}s] [accutrade] GUIDEBOOK_RECOVER FAILED — still on guidebook after 3 tries; "
-              f"odometer never mounted (url={page.url[:90]})")
+    if _is_guidebook(page.url) and not _gb_recovered_early:
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] GUIDEBOOK_RECOVER early FAILED — still on guidebook after 3 tries; "
+              f"odometer never mounted (url={(page.url or '')[:90]}) — failure-point recovery will retry")
 
     # PRE_VALUES_BEFORE_DISPATCH_2026_05_28: capture price snapshot BEFORE
     # the JS dispatch. Original v2 detector captured AFTER, which fires
@@ -451,31 +510,7 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     # vm-worker-2) both resolved on different-worker retry — classic
     # synchronous-recalc race symptom. This snapshot is taken before any
     # input event fires so any recalc Cox does post-dispatch is detectable.
-    _pre_values_pre_dispatch = page.evaluate(r"""() => {
-        const map = [
-            ['Instant Offer','guaranteed_offer'],
-            ['Target Auction','trade_in'],
-            ['Target Retail','trade_market'],
-            ['Wholesale / Average','market_avg'],
-            ['Wholesale/Average','market_avg'],
-            ['Wholesale Average','market_avg']
-        ];
-        const r = {guaranteed_offer:null, trade_in:null, trade_market:null, market_avg:null};
-        const text = document.body.innerText || '';
-        for (const [label, field] of map) {
-            if (r[field] !== null) continue;
-            const idx = text.indexOf(label);
-            if (idx < 0) continue;
-            const win = text.substring(idx + label.length, idx + label.length + 80);
-            if (/^\s*\r?\n?\s*N\/A\b/i.test(win)) { r[field] = null; continue; }
-            const m = win.match(/\$\s*([\d,]+)(?!\d)/);
-            if (m) {
-                const n = parseInt(m[1].replace(/,/g, ''));
-                if (n > 100 && n < 10000000) r[field] = n;
-            }
-        }
-        return r;
-    }""") or {}
+    _pre_values_pre_dispatch = _read_pre_values()
 
     # ANGULAR_FILL_2026_05_28: OS-keystroke commit via Playwright locator,
     # BEFORE the legacy JS dispatch. Empirical validation from bid 2208's
@@ -487,122 +522,178 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     # locator.type() sends OS-level keystroke events that arrive trusted,
     # which Angular catches → model updates → recalc fires.
     # JS dispatch below is left in place as harmless belt-and-suspenders.
-    try:
-        _ang_target_miles = str(int(miles))
-
-        # DOCK_LIST_EXPAND_2026_05_29: editable odometer input lives in the
-        # COLLAPSED "Odometer" dock-list row; click to expand before it mounts.
-        _dock_committed = False
-        _committed_loc = None  # RETYPE_ROUNDS_2026_05_31: stash winning input
+    # GUIDEBOOK_RECOVER_FAILPOINT_2026_06_01: the SYMPTOM-tied recovery.
+    # The early URL check above misses the common case because AccuTrade routes
+    # to the read-only guidebook ASYNCHRONOUSLY, during this odometer-acquisition
+    # window (~+30->+55s), AFTER the early check already passed. So we wrap the
+    # whole acquisition step (DOCK_LIST_EXPAND + selector cascade) in a recovery
+    # loop driven by the FAILURE SYMPTOM, not a one-time URL check: if we could
+    # NOT type the miles into an editable odometer AND we're either on the
+    # guidebook url OR no editable odometer is mounted, navigate to the editable
+    # scorecard (the exact url the alone-retry uses to succeed — bid 2373 ->
+    # $218,700), wait for the odometer to MOUNT, and RE-RUN the acquisition.
+    # Loop x3. The happy path (odometer present on the first acquisition) breaks
+    # out on attempt 0 with zero added navigations — behaves exactly as before.
+    _ang_target_miles = str(int(miles))
+    _committed_loc = None  # RETYPE_ROUNDS_2026_05_31: stash winning input
+    # Selector cascade — fallback only if the dock-list expand path did
+    # not commit. Kept for DOM variants where the input IS in the scorecard.
+    _ang_selectors = [
+        "appraisal-widget-scorecard-odometer input",
+        ".scorecard-odometer input",
+        "input[placeholder*='odometer' i]",
+        "input[aria-label*='odometer' i]",
+        "input[id*='odometer' i]",
+        "input[placeholder*='mileage' i]",
+        "input[aria-label*='mileage' i]",
+    ]
+    _ang_filled = False
+    _navigated_since_snapshot = False
+    _gb_recovery_attempted = False   # did we ever detect the guidebook symptom + try to recover?
+    _gb_odometer_ever_mounted = False  # did an editable odometer ever mount (here or after recovery)?
+    for _acq_try in range(3):
+        # If a GUIDEBOOK_RECOVER navigation happened on the previous iteration,
+        # the page is now a FRESH scorecard; re-take the pre-type value baseline
+        # against it so the value-change detector compares scorecard-before-type
+        # vs scorecard-after-type (and never the value-less guidebook baseline).
+        if _navigated_since_snapshot:
+            _pre_values_pre_dispatch = _read_pre_values()
+            _navigated_since_snapshot = False
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] GUIDEBOOK_RECOVER: re-snapshot pre-values on scorecard "
+                  f"(acq {_acq_try+1}/3): {_pre_values_pre_dispatch}")
         try:
-            _dock = page.locator("odometer-dock-list").first
-            if _dock.count() > 0:
-                _dock.scroll_into_view_if_needed(timeout=1500)
-                # Click the row container / chevron to expand it.
-                try:
-                    _dock.locator(".container").first.click(timeout=2000)
-                except Exception:
-                    _dock.click(timeout=2000)
-                print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND: clicked odometer-dock-list to expand")
-                # DOCK_INPUT_WIDEN_2026_05_29: input mounts in a body-level
-                # cdk-overlay, not under the dock-list — search document-wide.
-                _dock_input = None
-                _dl_deadline = time.time() + 25  # MOUNT_WAIT_25_2026_06_01: was 4s; odometer input mounts ~30-55s under render contention -> 1st run committed, no retry
-                _widen_sel = ("input[type='number'], input[inputmode='numeric'], "
-                              "input.mat-input-element, .cdk-overlay-container input, "
-                              "input[formcontrolname*='dometer' i], input[formcontrolname*='ileage' i]")
-                while time.time() < _dl_deadline:
-                    _cand = page.locator(_widen_sel)
-                    try:
-                        _n = _cand.count()
-                    except Exception:
-                        _n = 0
-                    # Pick first VISIBLE candidate that isn't the location picker.
-                    for _ci in range(_n):
-                        try:
-                            _c = _cand.nth(_ci)
-                            if not _c.is_visible(timeout=200):
-                                continue
-                            _cls = (_c.get_attribute('class', timeout=300) or '')
-                            _ph = (_c.get_attribute('placeholder', timeout=300) or '')
-                            if 'location-picker' in _cls or 'Location' in _ph:
-                                continue
-                            _dock_input = _c
-                            break
-                        except Exception:
-                            continue
-                    if _dock_input is not None:
-                        break
-                    time.sleep(0.3)
-                # Always dump the full input inventory for forensics.
-                try:
-                    _inv = page.evaluate(
-                        "() => { const out=[]; const walk=(r)=>{ "
-                        "(r.querySelectorAll('input')||[]).forEach(el=>{ const cs=getComputedStyle(el); "
-                        "out.push({id:el.id,ph:el.placeholder,aria:el.getAttribute('aria-label'),"
-                        "type:el.type,fc:el.getAttribute('formcontrolname'),cls:(el.className||'').slice(0,40),"
-                        "vis:(el.offsetParent!==null)}); }); "
-                        "(r.querySelectorAll('*')||[]).forEach(el=>{ if(el.shadowRoot) walk(el.shadowRoot); }); }; "
-                        "walk(document); return out; }"
-                    )
-                    print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND input-inventory: {_inv}")
-                except Exception:
-                    pass
-                if _dock_input is not None:
-                    _dock_input.scroll_into_view_if_needed(timeout=1500)
-                    _dock_input.click(timeout=2000)
-                    _dock_input.press("Control+A", timeout=1000)
-                    _dock_input.press("Delete", timeout=1000)
-                    _dock_input.type(_ang_target_miles, delay=40, timeout=4000)
-                    _dock_input.press("Tab", timeout=1500)
-                    _dock_committed = True
-                    _committed_loc = _dock_input
-                    print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND ok — typed {_ang_target_miles}")
-                else:
-                    print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND: no editable input found document-wide after expand — see input-inventory above; falling through")
-            else:
-                print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND: odometer-dock-list not present")
-        except Exception as _dl_err:
-            print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND err: {_dl_err}")
-
-        _ang_filled = _dock_committed
-        # Selector cascade — fallback only if the dock-list expand path did
-        # not commit. Kept for DOM variants where the input IS in the scorecard.
-        _ang_selectors = [
-            "appraisal-widget-scorecard-odometer input",
-            ".scorecard-odometer input",
-            "input[placeholder*='odometer' i]",
-            "input[aria-label*='odometer' i]",
-            "input[id*='odometer' i]",
-            "input[placeholder*='mileage' i]",
-            "input[aria-label*='mileage' i]",
-        ]
-        for _sel in ([] if _ang_filled else _ang_selectors):
+            # DOCK_LIST_EXPAND_2026_05_29: editable odometer input lives in the
+            # COLLAPSED "Odometer" dock-list row; click to expand before it mounts.
+            _dock_committed = False
             try:
-                _loc = page.locator(_sel).first
-                if _loc.count() == 0:
-                    continue
-                _loc.scroll_into_view_if_needed(timeout=1500)
-                _loc.click(timeout=2000)
-                # Select-all + Delete (clears any pre-populated default like 45,000)
-                _loc.press("Control+A", timeout=1000)
-                _loc.press("Delete", timeout=1000)
-                # Type with delay so each keystroke arrives as a discrete
-                # trusted event (Angular's CDK input event listener relies
-                # on per-keystroke `input` events to update its model).
-                _loc.type(_ang_target_miles, delay=40, timeout=4000)
-                _loc.press("Tab", timeout=1500)
+                _dock = page.locator("odometer-dock-list").first
+                if _dock.count() > 0:
+                    _dock.scroll_into_view_if_needed(timeout=1500)
+                    # Click the row container / chevron to expand it.
+                    try:
+                        _dock.locator(".container").first.click(timeout=2000)
+                    except Exception:
+                        _dock.click(timeout=2000)
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND: clicked odometer-dock-list to expand")
+                    # DOCK_INPUT_WIDEN_2026_05_29: input mounts in a body-level
+                    # cdk-overlay, not under the dock-list — search document-wide.
+                    _dock_input = None
+                    _dl_deadline = time.time() + 25  # MOUNT_WAIT_25_2026_06_01: was 4s; odometer input mounts ~30-55s under render contention -> 1st run committed, no retry
+                    _widen_sel = ("input[type='number'], input[inputmode='numeric'], "
+                                  "input.mat-input-element, .cdk-overlay-container input, "
+                                  "input[formcontrolname*='dometer' i], input[formcontrolname*='ileage' i]")
+                    while time.time() < _dl_deadline:
+                        _cand = page.locator(_widen_sel)
+                        try:
+                            _n = _cand.count()
+                        except Exception:
+                            _n = 0
+                        # Pick first VISIBLE candidate that isn't the location picker.
+                        for _ci in range(_n):
+                            try:
+                                _c = _cand.nth(_ci)
+                                if not _c.is_visible(timeout=200):
+                                    continue
+                                _cls = (_c.get_attribute('class', timeout=300) or '')
+                                _ph = (_c.get_attribute('placeholder', timeout=300) or '')
+                                if 'location-picker' in _cls or 'Location' in _ph:
+                                    continue
+                                _dock_input = _c
+                                break
+                            except Exception:
+                                continue
+                        if _dock_input is not None:
+                            break
+                        time.sleep(0.3)
+                    # Always dump the full input inventory for forensics.
+                    try:
+                        _inv = page.evaluate(
+                            "() => { const out=[]; const walk=(r)=>{ "
+                            "(r.querySelectorAll('input')||[]).forEach(el=>{ const cs=getComputedStyle(el); "
+                            "out.push({id:el.id,ph:el.placeholder,aria:el.getAttribute('aria-label'),"
+                            "type:el.type,fc:el.getAttribute('formcontrolname'),cls:(el.className||'').slice(0,40),"
+                            "vis:(el.offsetParent!==null)}); }); "
+                            "(r.querySelectorAll('*')||[]).forEach(el=>{ if(el.shadowRoot) walk(el.shadowRoot); }); }; "
+                            "walk(document); return out; }"
+                        )
+                        print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND input-inventory (acq {_acq_try+1}/3): {_inv}")
+                    except Exception:
+                        pass
+                    if _dock_input is not None:
+                        _dock_input.scroll_into_view_if_needed(timeout=1500)
+                        _dock_input.click(timeout=2000)
+                        _dock_input.press("Control+A", timeout=1000)
+                        _dock_input.press("Delete", timeout=1000)
+                        _dock_input.type(_ang_target_miles, delay=40, timeout=4000)
+                        _dock_input.press("Tab", timeout=1500)
+                        _dock_committed = True
+                        _committed_loc = _dock_input
+                        print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND ok — typed {_ang_target_miles}")
+                    else:
+                        print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND: no editable input found document-wide after expand — see input-inventory above; falling through")
+                else:
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND: odometer-dock-list not present")
+            except Exception as _dl_err:
+                print(f"[+{time.time()-t:5.1f}s] [accutrade] DOCK_LIST_EXPAND err: {_dl_err}")
+
+            if _dock_committed:
                 _ang_filled = True
-                _committed_loc = _loc
-                print(f"[+{time.time()-t:5.1f}s] [accutrade] ANGULAR_FILL ok via {_sel!r}")
-                break
-            except Exception as _ang_sel_err:
-                # Selector didn't match or actionability timed out — try next
-                continue
-        if not _ang_filled:
-            print(f"[+{time.time()-t:5.1f}s] [accutrade] ANGULAR_FILL: no selector matched, falling through to JS dispatch")
-    except Exception as _ang_err:
-        print(f"[+{time.time()-t:5.1f}s] [accutrade] ANGULAR_FILL err: {_ang_err}")
+            for _sel in ([] if _ang_filled else _ang_selectors):
+                try:
+                    _loc = page.locator(_sel).first
+                    if _loc.count() == 0:
+                        continue
+                    _loc.scroll_into_view_if_needed(timeout=1500)
+                    _loc.click(timeout=2000)
+                    # Select-all + Delete (clears any pre-populated default like 45,000)
+                    _loc.press("Control+A", timeout=1000)
+                    _loc.press("Delete", timeout=1000)
+                    # Type with delay so each keystroke arrives as a discrete
+                    # trusted event (Angular's CDK input event listener relies
+                    # on per-keystroke `input` events to update its model).
+                    _loc.type(_ang_target_miles, delay=40, timeout=4000)
+                    _loc.press("Tab", timeout=1500)
+                    _ang_filled = True
+                    _committed_loc = _loc
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] ANGULAR_FILL ok via {_sel!r}")
+                    break
+                except Exception as _ang_sel_err:
+                    # Selector didn't match or actionability timed out — try next
+                    continue
+            if not _ang_filled:
+                print(f"[+{time.time()-t:5.1f}s] [accutrade] ANGULAR_FILL: no selector matched (acq {_acq_try+1}/3)")
+        except Exception as _ang_err:
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] ANGULAR_FILL err (acq {_acq_try+1}/3): {_ang_err}")
+
+        # --- recovery decision (symptom-tied) ---
+        _odo_now = _odometer_mounted()
+        if _odo_now:
+            _gb_odometer_ever_mounted = True
+        if _ang_filled:
+            break  # typed into a real editable odometer -> done, no navigation
+        # We did NOT type the miles. Is this the guidebook-routing symptom?
+        _symptom = _is_guidebook(page.url) or (not _odo_now)
+        if not _symptom:
+            # A non-guidebook DOM variant where the input genuinely wasn't found
+            # but the scorecard IS mounted -> let the legacy JS dispatch below
+            # have a go (preserves prior behavior for those cases).
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] acquisition miss but NOT guidebook symptom "
+                  f"(url={(page.url or '')[:90]}) — falling through to JS dispatch")
+            break
+        if _acq_try >= 2:
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] GUIDEBOOK_RECOVER FAILED — odometer never mounted "
+                  f"after {_acq_try+1} acquisition tries (url={(page.url or '')[:90]})")
+            break
+        # SYMPTOM CONFIRMED: navigate to the editable scorecard + wait for mount,
+        # then loop to RE-RUN the acquisition on the now-editable page.
+        _gb_recovery_attempted = True
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] GUIDEBOOK_RECOVER (fail-point): odometer not typed + "
+              f"on guidebook/no-odometer (url={(page.url or '')[:90]}, is_guidebook={_is_guidebook(page.url)}) "
+              f"— recovering (acq {_acq_try+1}/3)")
+        if _goto_scorecard_and_wait_mount(f"GUIDEBOOK_RECOVER fail-point (acq {_acq_try+1}/3)"):
+            _gb_odometer_ever_mounted = True
+        _navigated_since_snapshot = True
+        # loop continues -> re-run DOCK_LIST_EXPAND + cascade against the scorecard
 
     # Set mileage (legacy JS dispatch — kept as belt-and-suspenders fallback)
     page.evaluate(r"""(target) => {
@@ -792,6 +883,12 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     # Instant Offer / Target Auction / Target Retail can come back NULL
     # while only market_avg (which lands earlier) gets captured.
     if mileage_committed:
+        # Single explicit success line so the recovered-run log reads as one
+        # greppable chain: GUIDEBOOK_RECOVER -> navigating to scorecard ->
+        # odometer mounted -> typed <miles> -> committed.
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] committed miles={int(miles)} "
+              f"(guidebook_recovery={'yes' if _gb_recovery_attempted else 'no'}) "
+              f"url={(page.url or '')[:90]}")
         time.sleep(2.5)
 
     # MILEAGE_COMMIT_FIX_V3_2026_05_18 (bid 1779, McLaren GT):
@@ -888,12 +985,17 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
         except Exception as _hx:
             print(f"  [accutrade-fail] html dump err: {_hx}")
             _fail_html = None
-        # GUIDEBOOK_RECOVER_2026_06_01: if we're STILL on the read-only guidebook
-        # at fail time (recovery exhausted its 3 tries), label it precisely so
-        # the app autoretry + operator know this is the guidebook-routing miss,
-        # not a generic commit flake. Still fail-CLOSED (not_available=True) so
-        # base-miles defaults are never stored.
-        _reason = "accutrade_stuck_on_guidebook" if _is_guidebook(page.url) else "mileage_did_not_commit_v2"
+        # GUIDEBOOK_RECOVER_2026_06_01: label the guidebook-routing miss precisely
+        # so the app autoretry + operator know this is the guidebook-routing case,
+        # not a generic commit flake. We now also recover at the failure point, so
+        # by fail-time the url may already be a scorecard — use the precise reason
+        # when we're literally still on the guidebook OR recovery was attempted but
+        # an editable odometer never mounted across all retries. Fail-CLOSED
+        # (not_available=True) either way so base-miles defaults are never stored.
+        if _is_guidebook(page.url) or (_gb_recovery_attempted and not _gb_odometer_ever_mounted):
+            _reason = "accutrade_stuck_on_guidebook"
+        else:
+            _reason = "mileage_did_not_commit_v2"
         if _fail_ss:
             _reason = _reason + " (ss=" + _fail_ss.name + ")"
         if _fail_html:
