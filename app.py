@@ -7521,6 +7521,148 @@ def api_assess_status(bid_id):
     return jsonify({'done': False})
 
 
+# ===== TRANSPORT_ESTIMATOR_2026_06_01 =====
+_pgeo_us = None
+def _pgeo_nom():
+    global _pgeo_us
+    if _pgeo_us is None:
+        import pgeocode
+        _pgeo_us = pgeocode.Nominatim('us')
+    return _pgeo_us
+
+def _zip_coord(z):
+    try:
+        r = _pgeo_nom().query_postal_code(str(z).strip()[:5])
+        lat, lon = float(r.latitude), float(r.longitude)
+        if lat != lat or lon != lon:   # NaN -> unknown ZIP
+            return None
+        return (lat, lon)
+    except Exception:
+        return None
+
+def _haversine_mi(a, b):
+    import math
+    R = 3958.8
+    la1, lo1, la2, lo2 = map(math.radians, [a[0], a[1], b[0], b[1]])
+    h = math.sin((la2 - la1) / 2) ** 2 + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(h))
+
+def estimate_transport(origin_zip, dest_zip, vehicle_class='sedan', enclosed=False):
+    """Distance-based transport cost estimate. Reads the tunable rate model from the
+    DB (transport_rate_bands + transport_config) so Austin's edits apply live."""
+    oc = _zip_coord(origin_zip); dc = _zip_coord(dest_zip)
+    if not oc or not dc:
+        return {'error': 'Could not locate ZIP code(s)', 'origin_ok': bool(oc), 'dest_ok': bool(dc)}
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT band_min_mi, band_max_mi, per_mile FROM transport_rate_bands ORDER BY band_min_mi")
+    bands = cur.fetchall()
+    cur.execute("SELECT key, value FROM transport_config")
+    cfg = {r['key']: float(r['value']) for r in cur.fetchall()}
+    db.close()
+    road_factor = cfg.get('road_factor', 1.22)
+    miles = _haversine_mi(oc, dc) * road_factor
+    per_mile = None
+    for b in bands:
+        lo = b['band_min_mi']; hi = b['band_max_mi']
+        if miles >= lo and (hi is None or miles < hi):
+            per_mile = float(b['per_mile']); break
+    if per_mile is None:
+        per_mile = float(bands[-1]['per_mile']) if bands else 0.41
+    cls_mult = cfg.get('class_' + (vehicle_class or 'sedan'), 1.0)
+    enc_mult = cfg.get('enclosed_mult', 1.70) if enclosed else 1.0
+    base = miles * per_mile * cls_mult * enc_mult
+    cost = max(cfg.get('min_charge', 250), base)
+    return {
+        'origin_zip': str(origin_zip), 'dest_zip': str(dest_zip),
+        'vehicle_class': vehicle_class or 'sedan', 'enclosed': bool(enclosed),
+        'miles': round(miles), 'per_mile': round(per_mile, 3),
+        'estimate': round(cost), 'low': round(cost * cfg.get('range_low', 0.88)),
+        'high': round(cost * cfg.get('range_high', 1.15)),
+    }
+
+@app.route('/transport')
+def transport_page():
+    return render_template('transport.html', logged_in=session.get('logged_in', False))
+
+@app.route('/api/transport/estimate', methods=['POST'])
+def api_transport_estimate():
+    d = request.get_json(silent=True) or request.form
+    oz = (d.get('origin_zip') or '').strip()
+    dz = (d.get('dest_zip') or '').strip()
+    vc = (d.get('vehicle_class') or 'sedan').strip().lower()
+    enc = str(d.get('enclosed') or '').lower() in ('1', 'true', 'yes', 'on')
+    if not oz or not dz:
+        return jsonify({'error': 'origin_zip and dest_zip required'}), 400
+    res = estimate_transport(oz, dz, vc, enc)
+    if 'error' not in res:
+        res['transit'] = _transit_days(res['miles'])
+    return jsonify(res), (422 if 'error' in res else 200)
+
+
+def _transit_days(mi):
+    for lim, lo, hi in ((200,1,2),(600,2,3),(1000,3,5),(1500,4,6),(2000,5,7),(2400,6,8)):
+        if mi < lim:
+            return str(lo) + "-" + str(hi) + " days"
+    return "7-9 days"
+
+
+@app.route('/api/transport/dealers')
+def api_transport_dealers():
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT id, name, city, state, postal_code FROM lsl_suppliers WHERE postal_code IS NOT NULL AND length(trim(postal_code))>=5 AND COALESCE(is_blocked,false)=false ORDER BY name")
+    rows = cur.fetchall(); db.close()
+    out = []
+    for r in rows:
+        out.append({'id': r['id'], 'name': r['name'], 'city': (r['city'] or '').strip(), 'state': (r['state'] or '').strip(), 'zip': (r['postal_code'] or '').strip()[:5]})
+    return jsonify({'dealers': out})
+
+
+_TRANSPORT_SHEET_ID = "1k9_7E3ZKrK-a-cxtlrnGkX100o0NLrw9MFU0zHjbAzs"
+_transport_tracker_cache = {"t": 0.0, "data": None}
+
+def _fetch_transport_tracker():
+    import csv, io, urllib.request, time
+    now = time.time()
+    c = _transport_tracker_cache
+    if c["data"] is not None and (now - c["t"]) < 60:
+        return c["data"]
+    url = "https://docs.google.com/spreadsheets/d/%s/export?format=csv" % _TRANSPORT_SHEET_ID
+    raw = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=20).read().decode("utf-8", "replace")
+    rows = list(csv.reader(io.StringIO(raw)))
+    def g(r, i):
+        return (r[i].strip() if i < len(r) and r[i] else "")
+    pending, in_transit, delivered, mode = [], [], [], "pending"
+    for r in rows:
+        if not any((x or "").strip() for x in r):
+            continue
+        c0 = (r[0] or "").strip()
+        if c0.lower().startswith("vin") and g(r, 2).lower() == "make":
+            continue
+        cl = c0.lower()
+        if "in transit" in cl:
+            mode = "in_transit"; continue
+        if "delivered" in cl:
+            mode = "delivered"; continue
+        if not g(r, 2) and not g(r, 3):
+            continue
+        car = {"vin": g(r, 0), "year": g(r, 1), "make": g(r, 2), "model": g(r, 3),
+               "ymm": (g(r, 1) + " " + g(r, 2) + " " + g(r, 3)).strip(),
+               "pickup": g(r, 4), "delivery": g(r, 5), "est_pickup": g(r, 6),
+               "est_delivery": g(r, 7), "status": g(r, 8), "company": g(r, 9)}
+        {"pending": pending, "in_transit": in_transit, "delivered": delivered}.get(mode, pending).append(car)
+    data = {"pending": pending, "in_transit": in_transit, "delivered": delivered,
+            "counts": {"pending": len(pending), "in_transit": len(in_transit), "delivered": len(delivered)}}
+    c["t"], c["data"] = now, data
+    return data
+
+@app.route('/api/transport/tracker')
+def api_transport_tracker():
+    try:
+        return jsonify(_fetch_transport_tracker())
+    except Exception as e:
+        return jsonify({"error": str(e)[:200], "pending": [], "in_transit": [], "counts": {"pending": 0, "in_transit": 0}})
+# ===== /TRANSPORT_ESTIMATOR_2026_06_01 =====
+
 @app.route('/api/bid/<int:bid_id>/contact', methods=['POST'])
 def update_contact(bid_id):
     data = request.json or {}

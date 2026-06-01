@@ -875,6 +875,8 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
          The AI Assessment card ABOVE stays visible (it carries the ANALYZING
          badge + the ↻ re-run affordance) so a stuck bid is never a dead end. #}
       {% if not show_sources %}
+      <script>/* DISPLAY_HOLD_AUTOREFRESH_2026_06_01: the Analyzing banner promised it refreshes when ready but nothing was wired. Poll assess-status; reload once the bid is assessed so all sources (incl iPacket) reveal without a manual refresh. Bounded ~3min; 8-min aged-reveal is the backstop. */
+      (function(){ try { var bid='{{ bid.id }}', n=0; var t=setInterval(function(){ if(++n>60){ clearInterval(t); return; } fetch('/api/bid/'+bid+'/assess-status',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){ if(d && (d.done || d.ai_price)){ clearInterval(t); location.reload(); } }).catch(function(){}); }, 3000); } catch(e){} })();</script>
       <div class="card" id="display-hold-card" style="flex-shrink:0;border-color:#3b2c0a;background:linear-gradient(180deg,rgba(245,158,11,.07),#0b0f19)">
         <div style="display:flex;align-items:center;gap:12px">
           <span style="width:14px;height:14px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 0 rgba(251,191,36,.6);animation:pulse 2s infinite;flex-shrink:0"></span>
@@ -2145,8 +2147,8 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
 
         {% elif not ipacket_data and bid.vin %}
-        <script>/* IPACKET_LATE_REFRESH_2026_06_01: iPacket pull lands a few sec after vAuto/AccuTrade; do ONE delayed refresh per bid view (guarded, at most once per bid per session) so the late sticker shows without a manual reload. */
-        (function(){ try { var k='ipkt_refresh_{{ bid.id }}'; if(!sessionStorage.getItem(k)){ sessionStorage.setItem(k,'1'); setTimeout(function(){ location.reload(); }, 10000); } } catch(e){} })();</script>
+        <script>/* IPACKET_LATE_REFRESH_2026_06_01 (v2 poll): poll /api/ipacket/status and reload the INSTANT iPacket goes terminal (sticker OR not-available) -- fires as soon as it lands (often 3-5s), not a blind 10s timer, and never reloads early. Once per bid; gives up ~40s. */
+        (function(){ try { var bid='{{ bid.id }}', k='ipkt_refresh_'+bid; if(sessionStorage.getItem(k)) return; var n=0; var t=setInterval(function(){ if(++n>20){ clearInterval(t); return; } fetch('/api/ipacket/status/'+bid,{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){ if(d && d.status && d.status!=='pending'){ clearInterval(t); sessionStorage.setItem(k,'1'); location.reload(); } }).catch(function(){}); }, 2000); } catch(e){} })();</script>
         <div style="font-size:13px;color:#94a3b8;line-height:1.5">
           iPacket sticker not yet available — workers will pull automatically.
         </div>
