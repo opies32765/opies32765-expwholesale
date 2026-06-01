@@ -3422,6 +3422,17 @@ def bid_detail(bid_id):
         show_sources = bool(bid.get('ai_price') or bid.get('ai_assessed_at')
                             or bid.get('ai_assessment'))
         if not show_sources:
+            # DECOUPLE_2026_05_31: reveal all cards together once the 3
+            # sources are terminal -- don't wait for the AI assessment.
+            try:
+                _sdb = get_db(); _sc = _sdb.cursor()
+                _sc.execute("SELECT EXISTS(SELECT 1 FROM vauto_lookups WHERE bid_id=%s) AS v, EXISTS(SELECT 1 FROM accutrade_lookups WHERE bid_id=%s) AS a, EXISTS(SELECT 1 FROM ipacket_lookups WHERE bid_id=%s) AS i", (bid['id'], bid['id'], bid['id']))
+                _sr = _sc.fetchone(); _sdb.close()
+                if _sr and _sr.get('v') and _sr.get('a') and _sr.get('i'):
+                    show_sources = True
+            except Exception:
+                pass
+        if not show_sources:
             _c_at = bid.get('created_at')
             if _c_at is not None:
                 import datetime as _dt_sh
@@ -7368,8 +7379,8 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
                           guaranteed_offer IS NOT NULL OR trade_in IS NOT NULL
                           OR trade_market IS NOT NULL
                           OR (COALESCE(not_available,false)=true
-                              AND COALESCE(unavailable_reason,'') NOT ILIKE '%%mileage_did_not_commit%%')
-                       ) LIMIT 1""", (bid_id,))
+                              AND (%s OR COALESCE(unavailable_reason,'') NOT ILIKE '%%mileage_did_not_commit%%'))
+                       ) LIMIT 1""", (bid_id, os.environ.get('ACCU_RETRY_DISABLED', '0') == '1'))  # RETRY_DISABLED_MDNC_TERMINAL_2026_05_31
         has_accu = cur.fetchone() is not None
         # ALL_THREE_TOGETHER_2026_05_30: gate on the iPacket worker phase
         # EXISTING (success or not) — the REAL MSRP is fetched by the server PDF
@@ -7409,6 +7420,14 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
     print(f'assess-fire bid={bid_id} source={source} require_all={require_all} '
           f'vauto={has_vauto} accu={has_accu} ipkt={has_ipkt}', flush=True)
     threading.Thread(target=_auto_assess, args=(bid_id,), daemon=True).start()
+    # DECOUPLE_2026_05_31: fire the customer SMS NOW, in parallel with the AI
+    # (sources are all terminal here; iPacket is complete via the submit-time
+    # early-rescue). Threaded so the ~1s Twilio send never blocks. Idempotent
+    # -- the _auto_assess _notify_driver_combined becomes a no-op.
+    try:
+        threading.Thread(target=_notify_driver_combined, args=(bid_id,), daemon=True, name=f'sms-{bid_id}').start()
+    except Exception as _dsms:
+        print(f'[combined-sms] decouple-fire err bid={bid_id}: {_dsms}', flush=True)
     # COMBINED_SMS_2026_05_20: fire the customer SMS in parallel with AI.
     # Phase 2 enrichment is complete here (gate above required rb_done +
     # mh_done + accu + ipkt). AI keeps running in the daemon thread above;
@@ -14215,6 +14234,11 @@ def api_trim_select():
 def _maybe_send_miles_verify_sms(bid_id, reason='miles_discrepancy'):
     """Fire one SMS asking the bidder to confirm mileage. Idempotent via
     bids.miles_verify_sms_sent_at. No phone gating, no quiet hours."""
+    # MILES_VERIFY_SMS_DISABLED_2026_05_31: operator removed the customer-facing
+    # "odometer check" SMS. miles_audit_worker still records the discrepancy
+    # internally; we just no longer text the bidder. Re-enable: env MILES_VERIFY_SMS_ENABLED=1.
+    if os.environ.get('MILES_VERIFY_SMS_ENABLED', '0') != '1':
+        return False
     try:
         _db = get_db()
         _cur = _db.cursor()
@@ -14738,7 +14762,7 @@ def api_accutrade_submit():
     # BEFORE the retry fires, so it can never loop (see _accutrade_autoretry).
     try:
         _ar_reason = (data.get('unavailable_reason') or '')
-        if data.get('not_available') and _ar_reason.startswith('mileage_did_not_commit'):
+        if data.get('not_available') and _ar_reason.startswith('mileage_did_not_commit') and os.environ.get('ACCU_RETRY_DISABLED', '0') != '1':  # DECOUPLE_2026_05_31 test-toggle
             _ardb = get_db()
             _arc = _ardb.cursor()
             _arc.execute("UPDATE bids SET accutrade_autoretried=TRUE "

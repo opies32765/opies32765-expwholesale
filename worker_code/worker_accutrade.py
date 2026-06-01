@@ -407,7 +407,7 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     # which Angular catches → model updates → recalc fires.
     # JS dispatch below is left in place as harmless belt-and-suspenders.
     try:
-        _ang_target_miles = str(int(miles))
+        _ang_target_miles = str(int(miles))  # PLAIN_DIGITS_2026_05_31: operator rejected comma-format
 
         # DOCK_LIST_EXPAND_2026_05_29: editable odometer input lives in the
         # COLLAPSED "Odometer" dock-list row; click to expand before it mounts.
@@ -426,7 +426,7 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                 # DOCK_INPUT_WIDEN_2026_05_29: input mounts in a body-level
                 # cdk-overlay, not under the dock-list — search document-wide.
                 _dock_input = None
-                _dl_deadline = time.time() + 4
+                _dl_deadline = time.time() + 25  # INPUT_MOUNT_WAIT_2026_05_31: was 4 -- odometer input mounts late (2355 missed at +4s; 2356 had it ~+55s)
                 _widen_sel = ("input[type='number'], input[inputmode='numeric'], "
                               "input.mat-input-element, .cdk-overlay-container input, "
                               "input[formcontrolname*='dometer' i], input[formcontrolname*='ileage' i]")
@@ -518,6 +518,53 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
             except Exception as _ang_sel_err:
                 # Selector didn't match or actionability timed out — try next
                 continue
+        # RECURSIVE_SHADOW_FIND_2026_05_31: restore the OLD working approach. The
+        # DOCK + cascade use FIXED selectors that miss the odometer input on DOM
+        # variants (bid 2362, black-book guidebook page). The legacy JS walk below
+        # finds it anywhere but JS-sets it UNTRUSTED (reactive form ignores it).
+        # This combines both: recursive shadow-DOM walk to find the odometer input
+        # ANYWHERE (keyword -> nearby-text -> value-pattern, per memory
+        # feedback_accutrade_mileage), then type with TRUSTED OS keystrokes.
+        if not _ang_filled:
+            try:
+                _odo_h = page.evaluate_handle(r"""() => {
+                    const ins = [];
+                    (function gather(root){ try{
+                        root.querySelectorAll('input').forEach(el=>ins.push(el));
+                        root.querySelectorAll('*').forEach(el=>{ if(el.shadowRoot) gather(el.shadowRoot); });
+                    }catch(e){} })(document);
+                    const ok = (i) => {
+                        if(!i) return false;
+                        const ty=((i.type||'')+'').toLowerCase();
+                        if(ty==='radio'||ty==='checkbox'||ty==='hidden'||ty==='button'||ty==='submit') return false;
+                        const cls=((i.className||'')+'').toLowerCase(), ph=((i.placeholder||'')+'').toLowerCase();
+                        if(cls.indexOf('location-picker')>=0 || ph.indexOf('location')>=0) return false;
+                        return true;
+                    };
+                    for(const i of ins){ if(!ok(i)) continue;
+                        const kw=((i.placeholder||'')+' '+(i.getAttribute('aria-label')||'')+' '+(i.id||'')+' '+(i.getAttribute('formcontrolname')||'')).toLowerCase();
+                        if(/odometer|mileage|miles/.test(kw)) return i; }
+                    for(const i of ins){ if(!ok(i)) continue;
+                        let el=i; for(let k=0;k<5&&el;k++){ const tx=((el.textContent||'')+'').toLowerCase(); if(/odometer|mileage|\bmi\b/.test(tx)) return i; el=el.parentElement; } }
+                    for(const i of ins){ if(!ok(i)) continue;
+                        const v=((i.value||'')+'').replace(/[,\s]/g,''); if(/^\d{3,6}$/.test(v)) return i; }
+                    return null;
+                }""")
+                _odo_el = _odo_h.as_element() if _odo_h else None
+                if _odo_el:
+                    _odo_el.scroll_into_view_if_needed(timeout=1500)
+                    _odo_el.click(timeout=2000)
+                    _odo_el.press("Control+A", timeout=1000)
+                    _odo_el.press("Delete", timeout=1000)
+                    _odo_el.type(_ang_target_miles, delay=40, timeout=4000)
+                    _odo_el.press("Tab", timeout=1500)
+                    _ang_filled = True
+                    _committed_loc = _odo_el
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] RECURSIVE_SHADOW_FIND ok -- typed {_ang_target_miles} into shadow-DOM odometer (trusted keystrokes)")
+                else:
+                    print(f"[+{time.time()-t:5.1f}s] [accutrade] RECURSIVE_SHADOW_FIND: no odometer input anywhere in shadow DOM")
+            except Exception as _rsf_err:
+                print(f"[+{time.time()-t:5.1f}s] [accutrade] RECURSIVE_SHADOW_FIND err: {_rsf_err}")
         if not _ang_filled:
             print(f"[+{time.time()-t:5.1f}s] [accutrade] ANGULAR_FILL: no selector matched, falling through to JS dispatch")
     except Exception as _ang_err:
@@ -617,7 +664,7 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     # the now-warm form (a re-blur alone can't commit a value the cold form
     # never registered). Prefer the captured locator; else re-run the cascade.
     def _retype():
-        _t = str(int(miles))
+        _t = str(int(miles))  # PLAIN_DIGITS_2026_05_31
         if _committed_loc is not None:
             try:
                 _committed_loc.click(timeout=2000)
@@ -643,6 +690,16 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                 continue
         return False
 
+    # SELECT_ACTION_FINALIZE_2026_05_31: open Select Action with a real click ->
+    # blurs the odometer = the focusout AccuTrade's recalc needs (Tab misses the
+    # focusout-only DOM variant). Best-effort; Tab + value-poll below still run.
+    try:
+        _sa = page.locator("fixed-selector[label='selectAction']").first
+        if _sa.count() > 0:
+            _sa.click(timeout=2500); time.sleep(0.6)
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] select-action opened (focusout commit)")
+    except Exception as _sae:
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] select-action err: {_sae}")
     deadline_phase1 = time.time() + 12
     mileage_committed = False
     last_post = pre_values
@@ -789,40 +846,38 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                 "unavailable_reason": "accutrade_manual_quote_only",
             }
 
-        # ACCU_CAPTURE_ONFAIL_2026_05_28: dump screenshot + HTML for forensics.
-        # Bid 2182 (2024 Bentley) hit this path with no diagnostic detail
-        # because worker_main.py masked the reason via key-name mismatch.
-        # Now we save the actual page state so operator can SEE what AccuTrade
-        # showed when mileage failed to commit.
-        _fail_ts = int(time.time())
-        _fail_ss = REPORTS_DIR / f"_failed_{vin}_{_fail_ts}.png"
-        _fail_html = REPORTS_DIR / f"_failed_{vin}_{_fail_ts}.html"
-        try:
-            page.screenshot(path=str(_fail_ss), full_page=True)
-        except Exception as _ssx:
-            print(f"  [accutrade-fail] screenshot err: {_ssx}")
-            _fail_ss = None
-        try:
-            _fail_html.write_text(page.content(), encoding="utf-8", errors="ignore")
-        except Exception as _hx:
-            print(f"  [accutrade-fail] html dump err: {_hx}")
-            _fail_html = None
-        _reason = "mileage_did_not_commit_v2"
-        if _fail_ss:
-            _reason = _reason + " (ss=" + _fail_ss.name + ")"
-        if _fail_html:
-            _reason = _reason + " (html=" + _fail_html.name + ")"
-        print(f"[+{time.time()-t:5.1f}s] [accutrade] FAIL: mileage_did_not_commit "
-              f"pre={pre_values} post={last_post} miles={miles} forensics={_reason}")
-        return {
-            "guaranteed_offer": None, "trade_in": None, "trade_market": None,
-            "retail": None, "market_avg": None,
-            "screenshot": str(_fail_ss) if _fail_ss else None,
-            "appraisal_url": page.url if "/appraisal/" in page.url else None,
-            "selected_trim_text": selected_trim_text,
-            "trim_select_source": trim_select_source,
-            "not_available": True, "unavailable_reason": _reason,
-        }
+        # NO_MDNC_2026_05_31: operator removed the mileage_did_not_commit gate.
+        # The inline value-change poll false-negatives ~30-50% of cold forms while
+        # Finalize still SAVES the correct appraisal (bid 2355 EQS saved 16,344
+        # despite a false mdnc). So we no longer fail/return here -- log and fall
+        # through to the value read + Finalize + saved-appraisal read below, which
+        # carry the committed mileage.
+        # ODO_INPUT_GUARD_2026_05_31: if the odometer input was never found,
+        # the miles were never entered -> these are DEFAULT-mileage values, not
+        # the real ones. Do NOT store wrong values; dump the page so we can fix
+        # the input-finding on this DOM variant (e.g. black-book guidebook page).
+        if _committed_loc is None:
+            _og_ts = int(time.time())
+            try:
+                (REPORTS_DIR / f"_odoNF_{vin}_{_og_ts}.html").write_text(page.content(), encoding="utf-8", errors="ignore")
+            except Exception:
+                pass
+            try:
+                page.screenshot(path=str(REPORTS_DIR / f"_odoNF_{vin}_{_og_ts}.png"), full_page=True)
+            except Exception:
+                pass
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] ODO_INPUT_NOT_FOUND -- miles never entered (values are default-mileage, NOT real) url={page.url} pre={pre_values}")
+            return {
+                "guaranteed_offer": None, "trade_in": None, "trade_market": None,
+                "retail": None, "market_avg": None,
+                "screenshot": None,
+                "appraisal_url": page.url if "/appraisal/" in page.url else None,
+                "selected_trim_text": selected_trim_text,
+                "trim_select_source": trim_select_source,
+                "not_available": True,
+                "unavailable_reason": f"accutrade_odometer_input_not_found (odoNF_{vin}_{_og_ts})",
+            }
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] commit-poll unconfirmed -- proceeding (NO_MDNC_2026_05_31) miles={miles} pre={pre_values} post={last_post}")
 
     values = page.evaluate(r"""() => {
         const map = [
@@ -852,6 +907,20 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     }""") or {}
 
     ts = int(time.time())
+    # FINALIZE_APPRAISAL (SELECT_ACTION_FINALIZE_2026_05_31): save the appraisal
+    # like the manual flow; dashboard 'Saved AccuTrade' link then opens a finalized
+    # one. After values are read; best-effort so it never fails the bid.
+    try:
+        _fin = page.locator("[data-qa='cta.types.Finalize.label']").first
+        if _fin.count() > 0:
+            _fin.scroll_into_view_if_needed(timeout=1500)
+            _fin.click(timeout=3000); time.sleep(1.0)
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] finalize appraisal clicked")
+    except Exception as _fe:
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] finalize err: {_fe}")
+    # RM_SAVED_2026_05_31: saved-appraisal-read removed -- row never matched
+    # (SAVED row match=None) and its navigate+goto left the screenshot white.
+    # Inline read + NO_MDNC already return the committed values.
     screenshot = REPORTS_DIR / f"accutrade_{vin}_{ts}.png"
     try:
         page.screenshot(path=str(screenshot), full_page=True)
