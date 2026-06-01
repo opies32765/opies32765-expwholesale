@@ -43,3 +43,4 @@ ml/models/per_make/*.json
 ml/models_v2/per_make/*.json
 ml/models_hybrid/per_make/*.json
 ml/models_hybrid_v2/per_make/*.json
+.dealerdirect_secrets
