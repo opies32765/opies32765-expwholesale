@@ -239,21 +239,6 @@ def lookup(page, ctx, vin, t, bid_id=None):
         page.goto("https://dpapp.autoipacket.com/stickerpull", wait_until="domcontentloaded", timeout=20000)
         time.sleep(3)
 
-    # IPACKET_PDF_PRIMARY_2026_05_31: live-viewer render DISABLED. We are logged
-    # in now (server JWT refreshed via _attach_jwt_capture). Defer the sticker to
-    # the server-side sticker-puller API pull -- it pulls the PDF once, correctly,
-    # and presents it. We do NOT submit a VIN to the UI, so this triggers no pull
-    # here; the server's API PUT is the only pull. Returns a non-genuine NA with
-    # no MSRP, which trips the early-rescue (app.py ~15155) = the primary pull.
-    print(f"[+{time.time()-t:5.1f}s] [ipacket] PDF_PRIMARY: logged in (JWT refreshed); deferring sticker to server API pull")
-    return {
-        "total_msrp": None, "base_price": None,
-        "exterior_color": None, "interior_color": None,
-        "screenshot": None, "raw_json": None,
-        "not_available": True,
-        "unavailable_reason": "server_pdf_primary",
-    }
-
     # ===== V9 fast-path (additive, repeat-VIN only) =====
     # If this VIN is already in iPacket's Recent Sticker Pulls table, the
     # .pull-history-table-download anchor IS the visible "View Sticker" link.

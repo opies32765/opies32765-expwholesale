@@ -361,6 +361,87 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                 break
             time.sleep(0.3)  # was 1s — tighter polling lands on the new URL faster
 
+    # GUIDEBOOK_RECOVER_2026_06_01: under render contention the freshly-created
+    # appraisal sometimes routes to the READ-ONLY Black-Book *guidebook* page
+    # (/appraisal/<id>/valuation/guidebooks/<vin>?guidebook=black-book) instead
+    # of the editable *scorecard* (/appraisal/<id>?backUrl=...). The guidebook
+    # DOM has NO odometer input at all (only a location-picker + 3 country
+    # radios), so the real miles can never be typed -> AccuTrade returns
+    # age-based DEFAULT-mileage values and the value-change detector below
+    # false-fails (pre==post). Proven on bid 2371 (Acura MDX Type S): first run
+    # landed on an 838KB guidebook DOM with 0 fc='odometer' inputs and typed
+    # nothing; the AccuTrade-ALONE retry landed on the scorecard, typed 36381,
+    # and committed $42,600. The old readiness loop above ACCEPTS the guidebook
+    # URL because it only checks "/appraisal/" in url. Detect it and navigate to
+    # the scorecard, then wait for the editable odometer to MOUNT (positive
+    # signal, not URL), up to 3x. This makes the first (contended) run reach the
+    # same editable state the alone-retry already reaches.
+    def _is_guidebook(u):
+        return bool(u) and ("/valuation/guidebooks/" in u or "guidebook=" in u)
+
+    _gb_widen_sel = ("input[type='number'], input[inputmode='numeric'], "
+                     "input.mat-input-element, .cdk-overlay-container input, "
+                     "input[formcontrolname*='dometer' i], input[formcontrolname*='ileage' i], "
+                     "input[formcontrolname='odometer']")
+
+    def _odometer_mounted():
+        # True only when a NON-location-picker editable odometer-ish input is
+        # present + visible (the scorecard's `fc='odometer'` field).
+        try:
+            cand = page.locator(_gb_widen_sel)
+            n = cand.count()
+        except Exception:
+            n = 0
+        for _i in range(n):
+            try:
+                _c = cand.nth(_i)
+                if not _c.is_visible(timeout=200):
+                    continue
+                _cls = (_c.get_attribute('class', timeout=300) or '')
+                _ph = (_c.get_attribute('placeholder', timeout=300) or '')
+                if 'location-picker' in _cls or 'Location' in _ph:
+                    continue
+                return True
+            except Exception:
+                continue
+        # Also accept the collapsed odometer-dock-list presence on the
+        # scorecard (it expands to the input) as a weaker positive.
+        try:
+            return page.locator("odometer-dock-list").first.count() > 0
+        except Exception:
+            return False
+
+    import re as _re_gb
+    _gb_recovered = False
+    for _gb_try in range(3):
+        if not _is_guidebook(page.url):
+            break
+        _m = _re_gb.search(r"/appraisal/(\d+)", page.url)
+        if not _m:
+            break
+        _aid = _m.group(1)
+        _sc_url = f"{ACCUTRADE_URL}/appraisal/{_aid}?backUrl=%2Freport%2Factive"
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] GUIDEBOOK_RECOVER: on read-only guidebook "
+              f"(url={page.url[:90]}) — navigating to scorecard (try {_gb_try+1}/3)")
+        try:
+            page.goto(_sc_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as _gbnav:
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] GUIDEBOOK_RECOVER nav err: {_gbnav}")
+        # Wait up to 20s for the editable odometer to MOUNT on the scorecard.
+        _gb_deadline = time.time() + 20
+        while time.time() < _gb_deadline:
+            if not _is_guidebook(page.url) and _odometer_mounted():
+                _gb_recovered = True
+                break
+            time.sleep(0.4)
+        if _gb_recovered:
+            print(f"[+{time.time()-t:5.1f}s] [accutrade] GUIDEBOOK_RECOVER ok — scorecard odometer mounted "
+                  f"(url={page.url[:90]})")
+            break
+    if _is_guidebook(page.url) and not _gb_recovered:
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] GUIDEBOOK_RECOVER FAILED — still on guidebook after 3 tries; "
+              f"odometer never mounted (url={page.url[:90]})")
+
     # PRE_VALUES_BEFORE_DISPATCH_2026_05_28: capture price snapshot BEFORE
     # the JS dispatch. Original v2 detector captured AFTER, which fires
     # false-fail when AccuTrade commits synchronously on input/blur — by the
@@ -407,7 +488,7 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     # which Angular catches → model updates → recalc fires.
     # JS dispatch below is left in place as harmless belt-and-suspenders.
     try:
-        _ang_target_miles = str(int(miles))  # PLAIN_DIGITS_2026_05_31: operator rejected comma-format
+        _ang_target_miles = str(int(miles))
 
         # DOCK_LIST_EXPAND_2026_05_29: editable odometer input lives in the
         # COLLAPSED "Odometer" dock-list row; click to expand before it mounts.
@@ -426,7 +507,7 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                 # DOCK_INPUT_WIDEN_2026_05_29: input mounts in a body-level
                 # cdk-overlay, not under the dock-list — search document-wide.
                 _dock_input = None
-                _dl_deadline = time.time() + 25  # INPUT_MOUNT_WAIT_2026_05_31: was 4 -- odometer input mounts late (2355 missed at +4s; 2356 had it ~+55s)
+                _dl_deadline = time.time() + 25  # MOUNT_WAIT_25_2026_06_01: was 4s; odometer input mounts ~30-55s under render contention -> 1st run committed, no retry
                 _widen_sel = ("input[type='number'], input[inputmode='numeric'], "
                               "input.mat-input-element, .cdk-overlay-container input, "
                               "input[formcontrolname*='dometer' i], input[formcontrolname*='ileage' i]")
@@ -518,53 +599,6 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
             except Exception as _ang_sel_err:
                 # Selector didn't match or actionability timed out — try next
                 continue
-        # RECURSIVE_SHADOW_FIND_2026_05_31: restore the OLD working approach. The
-        # DOCK + cascade use FIXED selectors that miss the odometer input on DOM
-        # variants (bid 2362, black-book guidebook page). The legacy JS walk below
-        # finds it anywhere but JS-sets it UNTRUSTED (reactive form ignores it).
-        # This combines both: recursive shadow-DOM walk to find the odometer input
-        # ANYWHERE (keyword -> nearby-text -> value-pattern, per memory
-        # feedback_accutrade_mileage), then type with TRUSTED OS keystrokes.
-        if not _ang_filled:
-            try:
-                _odo_h = page.evaluate_handle(r"""() => {
-                    const ins = [];
-                    (function gather(root){ try{
-                        root.querySelectorAll('input').forEach(el=>ins.push(el));
-                        root.querySelectorAll('*').forEach(el=>{ if(el.shadowRoot) gather(el.shadowRoot); });
-                    }catch(e){} })(document);
-                    const ok = (i) => {
-                        if(!i) return false;
-                        const ty=((i.type||'')+'').toLowerCase();
-                        if(ty==='radio'||ty==='checkbox'||ty==='hidden'||ty==='button'||ty==='submit') return false;
-                        const cls=((i.className||'')+'').toLowerCase(), ph=((i.placeholder||'')+'').toLowerCase();
-                        if(cls.indexOf('location-picker')>=0 || ph.indexOf('location')>=0) return false;
-                        return true;
-                    };
-                    for(const i of ins){ if(!ok(i)) continue;
-                        const kw=((i.placeholder||'')+' '+(i.getAttribute('aria-label')||'')+' '+(i.id||'')+' '+(i.getAttribute('formcontrolname')||'')).toLowerCase();
-                        if(/odometer|mileage|miles/.test(kw)) return i; }
-                    for(const i of ins){ if(!ok(i)) continue;
-                        let el=i; for(let k=0;k<5&&el;k++){ const tx=((el.textContent||'')+'').toLowerCase(); if(/odometer|mileage|\bmi\b/.test(tx)) return i; el=el.parentElement; } }
-                    for(const i of ins){ if(!ok(i)) continue;
-                        const v=((i.value||'')+'').replace(/[,\s]/g,''); if(/^\d{3,6}$/.test(v)) return i; }
-                    return null;
-                }""")
-                _odo_el = _odo_h.as_element() if _odo_h else None
-                if _odo_el:
-                    _odo_el.scroll_into_view_if_needed(timeout=1500)
-                    _odo_el.click(timeout=2000)
-                    _odo_el.press("Control+A", timeout=1000)
-                    _odo_el.press("Delete", timeout=1000)
-                    _odo_el.type(_ang_target_miles, delay=40, timeout=4000)
-                    _odo_el.press("Tab", timeout=1500)
-                    _ang_filled = True
-                    _committed_loc = _odo_el
-                    print(f"[+{time.time()-t:5.1f}s] [accutrade] RECURSIVE_SHADOW_FIND ok -- typed {_ang_target_miles} into shadow-DOM odometer (trusted keystrokes)")
-                else:
-                    print(f"[+{time.time()-t:5.1f}s] [accutrade] RECURSIVE_SHADOW_FIND: no odometer input anywhere in shadow DOM")
-            except Exception as _rsf_err:
-                print(f"[+{time.time()-t:5.1f}s] [accutrade] RECURSIVE_SHADOW_FIND err: {_rsf_err}")
         if not _ang_filled:
             print(f"[+{time.time()-t:5.1f}s] [accutrade] ANGULAR_FILL: no selector matched, falling through to JS dispatch")
     except Exception as _ang_err:
@@ -664,7 +698,7 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     # the now-warm form (a re-blur alone can't commit a value the cold form
     # never registered). Prefer the captured locator; else re-run the cascade.
     def _retype():
-        _t = str(int(miles))  # PLAIN_DIGITS_2026_05_31
+        _t = str(int(miles))
         if _committed_loc is not None:
             try:
                 _committed_loc.click(timeout=2000)
@@ -690,16 +724,6 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                 continue
         return False
 
-    # SELECT_ACTION_FINALIZE_2026_05_31: open Select Action with a real click ->
-    # blurs the odometer = the focusout AccuTrade's recalc needs (Tab misses the
-    # focusout-only DOM variant). Best-effort; Tab + value-poll below still run.
-    try:
-        _sa = page.locator("fixed-selector[label='selectAction']").first
-        if _sa.count() > 0:
-            _sa.click(timeout=2500); time.sleep(0.6)
-            print(f"[+{time.time()-t:5.1f}s] [accutrade] select-action opened (focusout commit)")
-    except Exception as _sae:
-        print(f"[+{time.time()-t:5.1f}s] [accutrade] select-action err: {_sae}")
     deadline_phase1 = time.time() + 12
     mileage_committed = False
     last_post = pre_values
@@ -846,38 +870,45 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
                 "unavailable_reason": "accutrade_manual_quote_only",
             }
 
-        # NO_MDNC_2026_05_31: operator removed the mileage_did_not_commit gate.
-        # The inline value-change poll false-negatives ~30-50% of cold forms while
-        # Finalize still SAVES the correct appraisal (bid 2355 EQS saved 16,344
-        # despite a false mdnc). So we no longer fail/return here -- log and fall
-        # through to the value read + Finalize + saved-appraisal read below, which
-        # carry the committed mileage.
-        # ODO_INPUT_GUARD_2026_05_31: if the odometer input was never found,
-        # the miles were never entered -> these are DEFAULT-mileage values, not
-        # the real ones. Do NOT store wrong values; dump the page so we can fix
-        # the input-finding on this DOM variant (e.g. black-book guidebook page).
-        if _committed_loc is None:
-            _og_ts = int(time.time())
-            try:
-                (REPORTS_DIR / f"_odoNF_{vin}_{_og_ts}.html").write_text(page.content(), encoding="utf-8", errors="ignore")
-            except Exception:
-                pass
-            try:
-                page.screenshot(path=str(REPORTS_DIR / f"_odoNF_{vin}_{_og_ts}.png"), full_page=True)
-            except Exception:
-                pass
-            print(f"[+{time.time()-t:5.1f}s] [accutrade] ODO_INPUT_NOT_FOUND -- miles never entered (values are default-mileage, NOT real) url={page.url} pre={pre_values}")
-            return {
-                "guaranteed_offer": None, "trade_in": None, "trade_market": None,
-                "retail": None, "market_avg": None,
-                "screenshot": None,
-                "appraisal_url": page.url if "/appraisal/" in page.url else None,
-                "selected_trim_text": selected_trim_text,
-                "trim_select_source": trim_select_source,
-                "not_available": True,
-                "unavailable_reason": f"accutrade_odometer_input_not_found (odoNF_{vin}_{_og_ts})",
-            }
-        print(f"[+{time.time()-t:5.1f}s] [accutrade] commit-poll unconfirmed -- proceeding (NO_MDNC_2026_05_31) miles={miles} pre={pre_values} post={last_post}")
+        # ACCU_CAPTURE_ONFAIL_2026_05_28: dump screenshot + HTML for forensics.
+        # Bid 2182 (2024 Bentley) hit this path with no diagnostic detail
+        # because worker_main.py masked the reason via key-name mismatch.
+        # Now we save the actual page state so operator can SEE what AccuTrade
+        # showed when mileage failed to commit.
+        _fail_ts = int(time.time())
+        _fail_ss = REPORTS_DIR / f"_failed_{vin}_{_fail_ts}.png"
+        _fail_html = REPORTS_DIR / f"_failed_{vin}_{_fail_ts}.html"
+        try:
+            page.screenshot(path=str(_fail_ss), full_page=True)
+        except Exception as _ssx:
+            print(f"  [accutrade-fail] screenshot err: {_ssx}")
+            _fail_ss = None
+        try:
+            _fail_html.write_text(page.content(), encoding="utf-8", errors="ignore")
+        except Exception as _hx:
+            print(f"  [accutrade-fail] html dump err: {_hx}")
+            _fail_html = None
+        # GUIDEBOOK_RECOVER_2026_06_01: if we're STILL on the read-only guidebook
+        # at fail time (recovery exhausted its 3 tries), label it precisely so
+        # the app autoretry + operator know this is the guidebook-routing miss,
+        # not a generic commit flake. Still fail-CLOSED (not_available=True) so
+        # base-miles defaults are never stored.
+        _reason = "accutrade_stuck_on_guidebook" if _is_guidebook(page.url) else "mileage_did_not_commit_v2"
+        if _fail_ss:
+            _reason = _reason + " (ss=" + _fail_ss.name + ")"
+        if _fail_html:
+            _reason = _reason + " (html=" + _fail_html.name + ")"
+        print(f"[+{time.time()-t:5.1f}s] [accutrade] FAIL: mileage_did_not_commit "
+              f"pre={pre_values} post={last_post} miles={miles} forensics={_reason}")
+        return {
+            "guaranteed_offer": None, "trade_in": None, "trade_market": None,
+            "retail": None, "market_avg": None,
+            "screenshot": str(_fail_ss) if _fail_ss else None,
+            "appraisal_url": page.url if "/appraisal/" in page.url else None,
+            "selected_trim_text": selected_trim_text,
+            "trim_select_source": trim_select_source,
+            "not_available": True, "unavailable_reason": _reason,
+        }
 
     values = page.evaluate(r"""() => {
         const map = [
@@ -907,20 +938,6 @@ def lookup(page, ctx, vin, miles, t, trim=None, bid_id=None):
     }""") or {}
 
     ts = int(time.time())
-    # FINALIZE_APPRAISAL (SELECT_ACTION_FINALIZE_2026_05_31): save the appraisal
-    # like the manual flow; dashboard 'Saved AccuTrade' link then opens a finalized
-    # one. After values are read; best-effort so it never fails the bid.
-    try:
-        _fin = page.locator("[data-qa='cta.types.Finalize.label']").first
-        if _fin.count() > 0:
-            _fin.scroll_into_view_if_needed(timeout=1500)
-            _fin.click(timeout=3000); time.sleep(1.0)
-            print(f"[+{time.time()-t:5.1f}s] [accutrade] finalize appraisal clicked")
-    except Exception as _fe:
-        print(f"[+{time.time()-t:5.1f}s] [accutrade] finalize err: {_fe}")
-    # RM_SAVED_2026_05_31: saved-appraisal-read removed -- row never matched
-    # (SAVED row match=None) and its navigate+goto left the screenshot white.
-    # Inline read + NO_MDNC already return the committed values.
     screenshot = REPORTS_DIR / f"accutrade_{vin}_{ts}.png"
     try:
         page.screenshot(path=str(screenshot), full_page=True)

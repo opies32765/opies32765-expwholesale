@@ -14762,7 +14762,7 @@ def api_accutrade_submit():
     # BEFORE the retry fires, so it can never loop (see _accutrade_autoretry).
     try:
         _ar_reason = (data.get('unavailable_reason') or '')
-        if data.get('not_available') and _ar_reason.startswith('mileage_did_not_commit') and os.environ.get('ACCU_RETRY_DISABLED', '0') != '1':  # DECOUPLE_2026_05_31 test-toggle
+        if data.get('not_available') and (_ar_reason.startswith('mileage_did_not_commit') or _ar_reason.startswith('accutrade_stuck_on_guidebook') or _ar_reason.startswith('accutrade_odometer_input_not_found')) and os.environ.get('ACCU_RETRY_DISABLED', '0') != '1':  # DECOUPLE_2026_05_31 test-toggle
             _ardb = get_db()
             _arc = _ardb.cursor()
             _arc.execute("UPDATE bids SET accutrade_autoretried=TRUE "
@@ -15662,11 +15662,14 @@ def _ipacket_lookup_msrp_for_vin(vin):
                         # OCR fallback for image-only PDFs (Porsche, Cadillac
                         # Escalade dealer-uploaded scans, etc.) where text
                         # layer is empty. Render each page → PNG → Vision.
-                        if len(text.strip()) < 200:
+                        # IPACKET_OCR_ON_EMPTY_2026_06_01: OCR when the text layer is
+                        # missing OR yields NO MSRP (dealer scans carry stray text but
+                        # the price lives only in the image). 300 DPI for legibility.
+                        if (len(text.strip()) < 200) or (not (_parse_sticker_text(text) or {}).get('total_msrp')):
                             ocr_chunks = []
                             for page in pdf.pages:
                                 try:
-                                    pil_img = page.to_image(resolution=200).original
+                                    pil_img = page.to_image(resolution=300).original
                                     buf = _io.BytesIO()
                                     pil_img.save(buf, format='PNG')
                                     ocr_text = _google_vision_ocr(buf.getvalue())
@@ -15684,6 +15687,7 @@ def _ipacket_lookup_msrp_for_vin(vin):
         except Exception as _vex:
             return {'ok': False, 'error': f'viewer fetch: {_vex}'}
         parsed = _parse_sticker_text(text) if text else {}
+        print("[ipacket-pull] vin=%s ct=%r text_chars=%d ocr_used=%s msrp=%s viewer=%r" % (vin, ct, len(text), ocr_used, parsed.get('total_msrp'), (viewer or '')[:90]), flush=True)  # IPACKET_OCR_ON_EMPTY_2026_06_01 diag
         return {'ok': True,
                 'msrp':       parsed.get('total_msrp'),
                 'base_price': parsed.get('base_price'),
