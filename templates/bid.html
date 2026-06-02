@@ -2135,6 +2135,8 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
 
         {% if ipacket_data and ipacket_data.not_available %}
+        <script>/* IPACKET_LATE_REFRESH_2026_06_02 (v3): show_sources/DECOUPLE reveals this card the moment an iPacket ROW exists, but the row starts as a not_available placeholder while the server PDF-pull (background thread ~10-15s) fills it. v2 only polled when NO row existed, so this placeholder state had no poller and the sticker only appeared on a manual refresh. v3 polls here too and reloads the instant a good sticker lands (has_sticker); ~46s give-up leaves genuine no-sticker VINs (Tesla/EV) showing NOT AVAILABLE. One cycle per bid per session. */
+        (function(){ try { var bid='{{ bid.id }}', k='ipkt_refresh_'+bid; if(sessionStorage.getItem(k)) return; var n=0; var t=setInterval(function(){ if(++n>23){ clearInterval(t); sessionStorage.setItem(k,'1'); return; } fetch('/api/ipacket/status/'+bid,{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){ if(d && d.has_sticker){ clearInterval(t); sessionStorage.setItem(k,'1'); location.reload(); } }).catch(function(){}); }, 2000); } catch(e){} })();</script>
         <div style="font-size:13px;color:#64748b;font-style:italic;line-height:1.5">
           OEM window sticker not available for this VIN.
           {% if ipacket_data.unavailable_reason %}
@@ -2148,7 +2150,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
         {% elif not ipacket_data and bid.vin %}
         <script>/* IPACKET_LATE_REFRESH_2026_06_01 (v2 poll): poll /api/ipacket/status and reload the INSTANT iPacket goes terminal (sticker OR not-available) -- fires as soon as it lands (often 3-5s), not a blind 10s timer, and never reloads early. Once per bid; gives up ~40s. */
-        (function(){ try { var bid='{{ bid.id }}', k='ipkt_refresh_'+bid; if(sessionStorage.getItem(k)) return; var n=0; var t=setInterval(function(){ if(++n>20){ clearInterval(t); return; } fetch('/api/ipacket/status/'+bid,{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){ if(d && d.status && d.status!=='pending'){ clearInterval(t); sessionStorage.setItem(k,'1'); location.reload(); } }).catch(function(){}); }, 2000); } catch(e){} })();</script>
+        (function(){ try { var bid='{{ bid.id }}', k='ipkt_refresh_'+bid; if(sessionStorage.getItem(k)) return; var n=0; var t=setInterval(function(){ if(++n>20){ clearInterval(t); return; } fetch('/api/ipacket/status/'+bid,{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){ if(d && d.has_sticker){ clearInterval(t); sessionStorage.setItem(k,'1'); location.reload(); } }).catch(function(){}); }, 2000); } catch(e){} })();</script>
         <div style="font-size:13px;color:#94a3b8;line-height:1.5">
           iPacket sticker not yet available — workers will pull automatically.
         </div>

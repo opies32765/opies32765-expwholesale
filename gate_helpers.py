@@ -75,6 +75,12 @@ def gate_digits(gate_type):
         # Bot Mute (2026-05-19): phones the EW Bot must never auto-text.
         # No env baseline — entirely DB-driven via /admin/phone-gates.
         result = _db_digits('bot_mute')
+    elif gate_type == 'rolling_portal':
+        # Rolling portal (2026-06-02): senders who get the multi-car batch
+        # intake + per-sender /s/<token> portal instead of per-car SMS.
+        # DB-driven only (no env baseline); gated to the operator number
+        # during testing. ROLLING_PORTAL_2026_06_02.
+        result = _db_digits('rolling_portal')
     else:
         raise ValueError(f'unknown gate_type {gate_type!r}')
     _CACHE[gate_type] = result

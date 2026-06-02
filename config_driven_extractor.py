@@ -293,6 +293,31 @@ def fetch_inventory(config, dealer_url, sess=None, max_vehicles=None):
                 except Exception:
                     continue
 
+        elif src_type == "json_script":
+            soup = BeautifulSoup(r.text, "html.parser")
+            sel = src.get("script_selector") or 'script[type="application/json"]'
+            for tag in soup.select(sel):
+                raw = (tag.string or tag.get_text() or "").strip()
+                if raw.startswith("/*<![CDATA[*/"):
+                    raw = raw[13:]
+                if raw.endswith("/*]]>*/"):
+                    raw = raw[:-7]
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except Exception:
+                    continue
+                recs = _jsonpath(rec, list_path) if list_path else [rec]
+                recflt = src.get("record_filter")
+                for rr in recs:
+                    if recflt:
+                        _fv = _first(_jsonpath(rr, recflt.get("path","")))
+                        if str(_fv).strip().lower() != str(recflt.get("equals","")).strip().lower():
+                            continue
+                    vehicles.append(_extract_fields_from_json(rr, fields, base_for_urls))
+
         if max_vehicles and len(vehicles) >= max_vehicles:
             break
 

@@ -1,9 +1,9 @@
 {
   "make_name": "MAZDA",
-  "trained_at": "2026-06-01T08:30:35.231316Z",
-  "n_total": 317,
+  "trained_at": "2026-06-02T08:30:37.147282Z",
+  "n_total": 318,
   "n_train": 311,
-  "n_test": 6,
+  "n_test": 7,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 921.0,
-    "mape_pct": 4.34,
-    "r2": 0.8781,
-    "within_5pct": 83.3,
-    "within_10pct": 83.3
+    "mae_dollars": 844.0,
+    "mape_pct": 4.05,
+    "r2": 0.8905,
+    "within_5pct": 85.7,
+    "within_10pct": 85.7
   },
   "baseline_metrics": {
-    "mae_dollars": 1408.0,
-    "mape_pct": 6.61,
+    "mae_dollars": 1363.0,
+    "mape_pct": 6.6,
     "ratio": 1.013
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.40833088755607605
+      "importance": 0.4116213917732239
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.2524733245372772
+      "importance": 0.2508200407028198
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.06766077131032944
+      "importance": 0.06890024244785309
     },
     {
       "name": "original_msrp",
-      "importance": 0.05304822325706482
+      "importance": 0.05186475068330765
     },
     {
       "name": "year",
-      "importance": 0.023900587111711502
-    },
-    {
-      "name": "supplier_name_Oaklawn Mazda",
-      "importance": 0.01644817925989628
+      "importance": 0.023595573380589485
     },
     {
       "name": "odometer",
-      "importance": 0.01532651111483574
+      "importance": 0.015393649227917194
+    },
+    {
+      "name": "supplier_name_Oaklawn Mazda",
+      "importance": 0.011868573725223541
     },
     {
       "name": "body_type_OTHER",
-      "importance": 0.00927317701280117
+      "importance": 0.009443051181733608
     }
   ]
 }

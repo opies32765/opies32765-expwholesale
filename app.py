@@ -138,6 +138,7 @@ _PUBLIC_PREFIXES = (
     '/api/bid/external', '/api/push-subscribe',
     '/api/push-unsubscribe', '/api/vapid-public-key',
     '/.well-known/', '/api/tesla-vin/', '/share/', '/m/',
+    '/s/',  # ROLLING_PORTAL_2026_06_02 — per-sender rolling portal (token-auth in handler)
     '/api/quick-extract',
     '/api/voice/', '/v/', '/mobile/ewbot', '/model/ewbot', '/ewbot', '/m/ewbot', '/bot',  # VOICE_AGENT_2026_05_20 EW bot — partner-token auth inside handlers
     '/wholesaler-',  # public self-serve signup at /wholesaler-<reviewer>/signup; admin routes still gated by _require_admin().
@@ -876,6 +877,13 @@ DIA_DB_URL = 'postgresql://scraper@127.0.0.1/dealer_intelligence'
 TWILIO_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
 TWILIO_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', '')
 TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '')
+
+# ── ROLLING_PORTAL_2026_06_02 (gated multi-car batch intake + per-sender
+#    /s/<token> rolling portal). Gated to the operator number for testing via
+#    gated_phones gate_type='rolling_portal'. ──────────────────────────────
+BATCH_MAX = 25                   # max cars created from one batch SMS
+PORTAL_MAX_CARS = 10             # cars shown on /s/<token> (newest first)
+PORTAL_NUDGE_THROTTLE_MIN = 10   # min minutes between portal "N ready" nudges
 DEALERCLUB_BUY_FEE_FLAT = int(os.environ.get("DEALERCLUB_BUY_FEE_FLAT", "199"))
 DEALERCLUB_TRANSPORT_EST = int(os.environ.get("DEALERCLUB_TRANSPORT_EST", "350"))
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
@@ -2512,6 +2520,392 @@ def _upsert_bidder_contact(cur, phone, name):
     """, (phone, name))
 
 
+# ── ROLLING_PORTAL_2026_06_02 helpers ──────────────────────────────────────
+def _phone_in_portal_gate(phone):
+    """True if this phone is enrolled in the rolling-portal test gate
+    (multi-car batch intake + per-sender /s/<token> portal + suppressed
+    per-car SMS). DB-driven via gated_phones gate_type='rolling_portal';
+    gated to the operator number during testing. Never raises."""
+    try:
+        return _phone_digits(phone) in gate_helpers.gate_digits('rolling_portal')
+    except Exception:
+        return False
+
+
+def _get_or_create_portal_token(cur, phone):
+    """Stable per-sender portal token for /s/<token>, minted on first use and
+    stored on bidder_contacts (keyed by phone). Caller commits."""
+    if not phone:
+        return None
+    cur.execute("SELECT portal_token FROM bidder_contacts WHERE phone=%s", (phone,))
+    row = cur.fetchone()
+    if row and row.get('portal_token'):
+        return row['portal_token']
+    import secrets as _secrets
+    tok = _secrets.token_urlsafe(10)[:16]
+    if row:
+        cur.execute("UPDATE bidder_contacts SET portal_token=COALESCE(portal_token,%s) "
+                    "WHERE phone=%s", (tok, phone))
+    else:
+        # New contact: name is NOT NULL, so seed a placeholder (a real name
+        # lands via _upsert_bidder_contact on the next named bid; ON CONFLICT
+        # only ever fills the token, never clobbers an existing name).
+        cur.execute("""INSERT INTO bidder_contacts (phone, name, portal_token)
+                       VALUES (%s, %s, %s)
+                       ON CONFLICT (phone) DO UPDATE
+                          SET portal_token = COALESCE(bidder_contacts.portal_token,
+                                                      EXCLUDED.portal_token)""",
+                    (phone, 'Customer', tok))
+    cur.execute("SELECT portal_token FROM bidder_contacts WHERE phone=%s", (phone,))
+    return (cur.fetchone() or {}).get('portal_token')
+
+
+def _parse_one_miles(text):
+    """Extract a single mileage value from a short text fragment. Mirrors the
+    per-pair miles parsing used in #N-stitch / order-indep merge: k-suffix,
+    commas/dots, optional mi/miles, with the bare-4-digit model-year guard."""
+    if not text:
+        return None
+    m = re.search(r'(\d{1,3}(?:[,.]?\d{3})*|\d+)\s*(?:k\b|mi\b|miles?\b)',
+                  text, re.IGNORECASE)
+    if m:
+        s = m.group(1).replace(',', '').replace('.', '')
+        if s.isdigit():
+            v = int(s)
+            if 'k' in (m.group(0) or '').lower() and v < 1000:
+                v *= 1000
+            return v
+    bm = re.search(r'\b(\d{3,6})\b', text)
+    if bm:
+        v = int(bm.group(1))
+        if 100 <= v <= 999_999 and not (1990 <= v <= 2030):
+            return v
+    return None
+
+
+def _parse_batch_pairs(body):
+    """Parse a multi-car batch SMS into ordered (vin, miles) tuples. Positional:
+    each 17-char VIN claims the FIRST numeric mileage token before the next VIN.
+    VIN detection mirrors extract_vin_from_text exactly — a strict [A-HJ-NPR-Z0-9]
+    match is accepted as-is; an I/O/Q-containing run is salvaged only if the
+    O->0/I->1/Q->0 substitution passes the VIN regex AND check digit. miles may
+    be None for a car (handled downstream as missing_miles). Dedups repeated
+    VINs (first wins). Capped at BATCH_MAX. ROLLING_PORTAL_2026_06_02."""
+    if not body:
+        return []
+    up = body.upper()
+    vin_hits = []  # (start, end, vin)
+    for m in re.finditer(r'\b[A-Z0-9]{17}\b', up):
+        cand = m.group(0)
+        if VIN_RE.match(cand):
+            vin = cand
+        else:
+            sal = cand.replace('O', '0').replace('I', '1').replace('Q', '0')
+            vin = sal if (VIN_RE.match(sal) and vin_check_digit_valid(sal)) else None
+        if vin:
+            vin_hits.append((m.start(), m.end(), vin))
+    if not vin_hits:
+        return []
+    pairs, seen = [], set()
+    for i, (s, e, vin) in enumerate(vin_hits):
+        if vin in seen:
+            continue
+        seen.add(vin)
+        nxt = vin_hits[i + 1][0] if i + 1 < len(vin_hits) else len(body)
+        pairs.append((vin, _parse_one_miles(body[e:nxt])))
+    return pairs[:BATCH_MAX]
+
+
+def _handle_batch_intake(db, cur, from_phone, body, pairs, intake_log_id):
+    """Create one bid per (vin, miles) pair from a single batch SMS, fire the
+    worker fleet per bid, send ONE combined ack carrying the rolling-portal
+    link, and finalize the intake log. Returns a TwiML response tuple (handled)
+    or None to fall through to normal routing. ROLLING_PORTAL_2026_06_02."""
+    import secrets as _secrets
+    bidder = _lookup_bidder(cur, from_phone)
+    created, missing = [], []
+    for vin, miles in pairs:
+        driver_token = _secrets.token_urlsafe(8)[:12]
+        cur.execute("""
+            INSERT INTO bids (contact_id, phone, vin, mileage, raw_message, status,
+                              driver_token, driver_phone, bidder_name,
+                              partner_dealer_id, vauto_priority)
+            VALUES (NULL, %s, %s, %s, %s, 'new', %s, %s, %s, %s, TRUE)
+            RETURNING id
+        """, (from_phone, vin, miles, body, driver_token, from_phone,
+              bidder['name'], bidder['partner_dealer_id']))
+        bid_id = cur.fetchone()['id']
+        try:
+            decoded = decode_vin(vin) or {}
+            decoded = {k: v for k, v in decoded.items()
+                       if k in ('year', 'make', 'model', 'trim') and v}
+            if decoded:
+                fields = ', '.join(f'{k}=%s' for k in decoded)
+                cur.execute(f"UPDATE bids SET {fields} WHERE id=%s",
+                            list(decoded.values()) + [bid_id])
+        except Exception as _de:
+            print(f'[batch-intake] decode err bid={bid_id}: {_de}', flush=True)
+        if not miles:
+            cur.execute("""UPDATE bids
+                              SET needs_verification_at = COALESCE(needs_verification_at, NOW()),
+                                  needs_verification_reason = COALESCE(needs_verification_reason, 'missing_miles')
+                            WHERE id=%s AND needs_verification_cleared_at IS NULL""",
+                        (bid_id,))
+            missing.append(bid_id)
+        cur.execute("INSERT INTO bid_messages (bid_id, direction, message, from_phone) "
+                    "VALUES (%s,'inbound',%s,%s)",
+                    (bid_id, f'[batch] VIN {vin}'
+                     + (f' · {miles:,} mi' if miles else ' · miles?'), from_phone))
+        created.append((bid_id, vin, miles))
+    token = _get_or_create_portal_token(cur, from_phone)
+    ids = [c[0] for c in created]
+    _finalize_sms_intake(cur, intake_log_id, 'batch_intake',
+                         bid_id=(ids[0] if ids else None),
+                         reason=f'batch: {len(ids)} bids {ids}; missing_miles={missing}')
+    db.commit()
+    # Fire workers AFTER commit so no DB locks are held across dispatch.
+    for bid_id, vin, miles in created:
+        try:
+            _fire_owner_new_bid(bid_id)
+        except Exception as _oe:
+            print(f'[batch-intake] owner push err bid={bid_id}: {_oe}', flush=True)
+        try:
+            trigger_market_check(bid_id, vin)
+        except Exception as _we:
+            print(f'[batch-intake] market_check err bid={bid_id}: {_we}', flush=True)
+    # ONE combined ack with the stable portal link.
+    base = os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net')
+    if len(ids) >= 2 and ids == list(range(ids[0], ids[-1] + 1)):
+        rng = f"#{ids[0]}–#{ids[-1]}"
+    else:
+        rng = ', '.join('#' + str(i) for i in ids)
+    msg = f"Got {len(ids)} cars ({rng}) — pricing now."
+    if missing:
+        msg += (f" Need miles for {', '.join('#' + str(i) for i in missing)}"
+                f" (reply e.g. \"#{missing[0]} 47k\").")
+    if token:
+        msg += f" Your cars: {base}/s/{token}"
+    try:
+        send_sms(from_phone, msg)
+    except Exception as _ae:
+        print(f'[batch-intake] ack err: {_ae}', flush=True)
+    print(f'[batch-intake] phone={from_phone} created={ids} missing={missing}', flush=True)
+    db.close()
+    return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+            200, {'Content-Type': 'text/xml'})
+
+
+def _portal_nudge_for_phone(cur, phone):
+    """Throttled portal nudge: at most one SMS per PORTAL_NUDGE_THROTTLE_MIN
+    per phone, linking to /s/<token>. The atomic UPDATE...RETURNING claims the
+    nudge so concurrent gunicorn workers can't double-send. Caller commits."""
+    token = _get_or_create_portal_token(cur, phone)
+    if not token:
+        return
+    cur.execute("""
+        UPDATE bidder_contacts
+           SET portal_nudged_at = NOW()
+         WHERE phone = %s
+           AND (portal_nudged_at IS NULL
+                OR portal_nudged_at < NOW() - (%s || ' minutes')::interval)
+        RETURNING phone
+    """, (phone, str(PORTAL_NUDGE_THROTTLE_MIN)))
+    if not cur.fetchone():
+        return  # throttled — another car already nudged within the window
+    cur.execute("""SELECT COUNT(*) AS n FROM bids
+                    WHERE phone=%s AND created_at > NOW() - INTERVAL '7 days'
+                      AND ai_price IS NOT NULL""", (phone,))
+    n = (cur.fetchone() or {}).get('n', 0)
+    base = os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net')
+    msg = (f"{n} cars priced — your dashboard: {base}/s/{token}" if n
+           else f"Your cars: {base}/s/{token}")
+    try:
+        send_sms(phone, msg)
+    except Exception as _ne:
+        print(f'[portal-nudge] sms err phone={phone}: {_ne}', flush=True)
+    print(f'[portal-nudge] phone={phone} n={n}', flush=True)
+
+
+def _handle_photo_batch_intake(db, cur, from_phone, num_media, form, intake_log_id):
+    """ROLLING_PORTAL_2026_06_02 (photo batch): a gated sender attaching >=2
+    images is treated as one car PER IMAGE. Create one bid per photo, attach
+    one image to each, then OCR + dedup + dispatch async. ONE combined ack with
+    the portal link. Returns a TwiML tuple (handled) or None to fall through."""
+    import secrets as _secrets
+    bidder = _lookup_bidder(cur, from_phone)
+    items = []  # (bid_id, photo_bytes, media_type)
+    for i in range(min(num_media, BATCH_MAX)):
+        media_url = form.get(f'MediaUrl{i}')
+        media_type = form.get(f'MediaContentType{i}') or 'image/jpeg'
+        if not media_url:
+            continue
+        driver_token = _secrets.token_urlsafe(8)[:12]
+        cur.execute("""
+            INSERT INTO bids (contact_id, phone, raw_message, status,
+                              driver_token, driver_phone, bidder_name, partner_dealer_id)
+            VALUES (NULL, %s, %s, 'new', %s, %s, %s, %s) RETURNING id
+        """, (from_phone, f'[photo-batch] image {i + 1}/{num_media}',
+              driver_token, from_phone, bidder['name'], bidder['partner_dealer_id']))
+        bid_id = cur.fetchone()['id']
+        res = _ingest_sms_photo(cur, bid_id, media_url, media_type, from_phone=from_phone)
+        fbytes = res[1] if res else None
+        fmime = res[2] if (res and len(res) > 2) else media_type
+        items.append((bid_id, fbytes, fmime))
+    if not items:
+        return None  # nothing ingested — fall through to normal handling
+    token = _get_or_create_portal_token(cur, from_phone)
+    ids = [it[0] for it in items]
+    _finalize_sms_intake(cur, intake_log_id, 'photo_batch_intake',
+                         bid_id=ids[0], reason=f'photo batch: {len(ids)} bids {ids}')
+    db.commit()
+    # Async: OCR each photo once, dedup same-VIN (collapse before any worker
+    # dispatch so a dup never triggers a 2nd iPacket pull), then apply+dispatch.
+    photo_items = [(bid_id, fb, fm) for (bid_id, fb, fm) in items if fb]
+    if photo_items:
+        threading.Thread(target=_process_photo_batch_async,
+                         args=(photo_items, from_phone), daemon=True).start()
+    base = os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net')
+    if len(ids) >= 2 and ids == list(range(ids[0], ids[-1] + 1)):
+        rng = f"#{ids[0]}–#{ids[-1]}"
+    else:
+        rng = ', '.join('#' + str(i) for i in ids)
+    msg = f"Got {len(ids)} photos ({rng}) — reading VINs + pricing now."
+    if token:
+        msg += f" Your cars: {base}/s/{token}"
+    try:
+        send_sms(from_phone, msg)
+    except Exception as _ae:
+        print(f'[photo-batch] ack err: {_ae}', flush=True)
+    print(f'[photo-batch] phone={from_phone} created={ids}', flush=True)
+    db.close()
+    return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+            200, {'Content-Type': 'text/xml'})
+
+
+def _process_photo_batch_async(items, from_phone):
+    """Sequentially OCR each photo-batch image, dedup by VIN within the batch
+    (auto-collapse: a 2nd photo of the SAME car folds into the first bid and the
+    dup is marked status='duplicate' — so 2 angles of one car never double-bid,
+    and the dup never fires a worker/iPacket pull). items: [(bid_id, bytes, mime)]."""
+    seen = {}  # validated VIN -> first bid_id that claimed it
+    for bid_id, fbytes, mime in items:
+        try:
+            info = extract_carfax_multi([(fbytes, mime)]) or {}
+        except Exception as _oe:
+            print(f'[photo-batch] OCR err bid={bid_id}: {_oe}', flush=True)
+            info = {}
+        vin = (info.get('vin') or '').strip().upper()
+        if vin and (len(vin) != 17 or not vin_check_digit_valid(vin)):
+            vin = ''  # invalid read — leave bid photo-only; apply sends "unclear"
+        if vin and vin in seen:
+            _photo_batch_collapse(bid_id, seen[vin])
+            continue
+        applied = _photo_batch_apply(bid_id, info, from_phone)
+        if applied:
+            seen[applied] = bid_id
+
+
+def _photo_batch_apply(bid_id, info, from_phone):
+    """Apply one photo's OCR result to its bid (VIN/miles/notes + NHTSA decode),
+    then owner-push + market check (fires the fleet exactly once). Mirrors the
+    apply core of _process_carfax_async but for a single pre-OCR'd photo so the
+    batch can dedup before dispatch. Returns the final VIN or None."""
+    db = get_db()
+    cur = db.cursor()
+    final_vin = None
+    try:
+        cur.execute("SELECT vin, mileage, notes FROM bids WHERE id=%s", (bid_id,))
+        row = cur.fetchone()
+        if not row:
+            db.close()
+            return None
+        sets, vals = [], []
+        _vin = (info.get('vin') or '').strip().upper()
+        if _vin and len(_vin) == 17 and vin_check_digit_valid(_vin) and not row.get('vin'):
+            sets.append('vin=%s'); vals.append(_vin)
+        if info.get('mileage') is not None and not row.get('mileage'):
+            sets.append('mileage=%s'); vals.append(info['mileage'])
+        bits = []
+        if info.get('title_status'):
+            bits.append(f"Title: {info['title_status']}")
+        if info.get('accidents') is not None:
+            bits.append(f"Accidents: {info['accidents']}")
+        if info.get('owners') is not None:
+            bits.append(f"Owners: {info['owners']}")
+        if bits and '[Carfax via SMS]' not in (row.get('notes') or ''):
+            note = '[Carfax via SMS] ' + ' · '.join(bits)
+            existing = row.get('notes') or ''
+            sets.append('notes=%s')
+            vals.append(((existing + '\n' + note).strip()) if existing else note)
+        if sets:
+            vals.append(bid_id)
+            cur.execute(f"UPDATE bids SET {', '.join(sets)}, updated_at=NOW() WHERE id=%s", vals)
+        cur.execute("SELECT vin FROM bids WHERE id=%s", (bid_id,))
+        final_vin = (cur.fetchone() or {}).get('vin')
+        if final_vin and len(final_vin) == 17:
+            cur.execute("UPDATE bids SET vauto_priority=TRUE WHERE id=%s", (bid_id,))
+            try:
+                dec = decode_vin(final_vin) or {}
+                dec = {k: v for k, v in dec.items() if k in ('year', 'make', 'model', 'trim') and v}
+                if dec:
+                    ds, dv = [], []
+                    for k, v in dec.items():
+                        ds.append(f'{k}=COALESCE({k}, %s)' if k == 'trim' else f'{k}=%s')
+                        dv.append(v)
+                    cur.execute(f"UPDATE bids SET {', '.join(ds)} WHERE id=%s", dv + [bid_id])
+            except Exception as _de:
+                print(f'[photo-batch] decode err bid={bid_id}: {_de}', flush=True)
+        db.commit()
+        db.close()
+        try:
+            _fire_owner_new_bid(bid_id)
+        except Exception as _oe:
+            print(f'[photo-batch] owner push err bid={bid_id}: {_oe}', flush=True)
+        if final_vin:
+            try:
+                trigger_market_check(bid_id, final_vin)
+            except Exception as _me:
+                print(f'[photo-batch] market_check err bid={bid_id}: {_me}', flush=True)
+        else:
+            try:
+                send_sms(from_phone, f"Bid #{bid_id} — couldn't read the VIN from that "
+                                     f"photo. Text the 17-char VIN and we'll process it.")
+            except Exception:
+                pass
+        return final_vin
+    except Exception as _ae:
+        print(f'[photo-batch] apply err bid={bid_id}: {_ae}', flush=True)
+        try:
+            db.close()
+        except Exception:
+            pass
+        return final_vin
+
+
+def _photo_batch_collapse(dup_bid_id, orig_bid_id):
+    """Two photos in one batch resolved to the same VIN: re-point the dup's
+    photo onto the original bid and mark the dup status='duplicate' (excluded
+    from the portal + never dispatched). Keeps one bid per real car."""
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("UPDATE bid_photos SET bid_id=%s WHERE bid_id=%s", (orig_bid_id, dup_bid_id))
+        cur.execute("""UPDATE bids
+                          SET status='duplicate', updated_at=NOW(),
+                              notes = COALESCE(notes,'') || %s
+                        WHERE id=%s""",
+                    (f'\n[photo-batch] collapsed into #{orig_bid_id} (same VIN)', dup_bid_id))
+        db.commit()
+        db.close()
+        print(f'[photo-batch] collapsed dup bid={dup_bid_id} into #{orig_bid_id}', flush=True)
+    except Exception as _ce:
+        print(f'[photo-batch] collapse err {dup_bid_id}->{orig_bid_id}: {_ce}', flush=True)
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
 def time_ago(dt):
     if not dt:
         return ''
@@ -3834,6 +4228,56 @@ def twilio_webhook():
             db.rollback()
         except Exception:
             pass
+
+    # ── ROLLING_PORTAL_2026_06_02: multi-car batch intake (gated) ──────────
+    # A single text with >=2 VINs from a portal-gated sender creates one bid
+    # per (VIN, miles) pair instead of one bid. Gated to the rolling_portal
+    # allowlist (operator number for testing) so every other sender keeps
+    # today's exact single-VIN behavior. Text-only: with media attached we fall
+    # through to the normal single-bid path so a photo can't be mis-assigned to
+    # the wrong VIN. Runs first so a multi-VIN body can't be pre-empted by the
+    # sourcing/share/stitch routers below.
+    if (from_phone and num_media == 0 and body
+            and _phone_in_portal_gate(from_phone)):
+        try:
+            _batch_pairs = _parse_batch_pairs(body)
+        except Exception as _bpe:
+            print(f'[batch-intake] parse err phone={from_phone}: {_bpe}', flush=True)
+            _batch_pairs = []
+        if len(_batch_pairs) >= 2:
+            try:
+                _batch_resp = _handle_batch_intake(db, cur, from_phone, body,
+                                                   _batch_pairs, intake_log_id)
+                if _batch_resp is not None:
+                    return _batch_resp
+            except Exception as _bhe:
+                print(f'[batch-intake] handler err phone={from_phone}: {_bhe}', flush=True)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+    # ── end ROLLING_PORTAL batch intake ────────────────────────────────────
+
+    # ── ROLLING_PORTAL_2026_06_02: multi-PHOTO batch intake (gated) ────────
+    # A gated sender attaching >=2 images = one car per image (e.g. two Carfax
+    # pics in one bubble). Without this, both photos attach to a SINGLE bid and
+    # extract_carfax_multi merges them (first-non-null wins) -> the 2nd car is
+    # silently lost. Here we make one bid per photo, then OCR + auto-collapse
+    # same-VIN (2 angles of one car fold back to one bid) async. Gated so every
+    # other sender keeps today's multi-photo-as-one-car behavior.
+    if (from_phone and num_media >= 2 and _phone_in_portal_gate(from_phone)):
+        try:
+            _pb_resp = _handle_photo_batch_intake(db, cur, from_phone, num_media,
+                                                  request.form, intake_log_id)
+            if _pb_resp is not None:
+                return _pb_resp
+        except Exception as _pbe:
+            print(f'[photo-batch] handler err phone={from_phone}: {_pbe}', flush=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    # ── end ROLLING_PORTAL photo batch ─────────────────────────────────────
 
     # HASH_BID_REF_2026_05_23: explicit #N bid-reference routing.
     # Restores the operator's trained behavior: "#1234 12,000 miles" stitches
@@ -5527,6 +5971,15 @@ def trigger_market_check(bid_id, vin):
         canonicalize_bid_vin_async(bid_id, get_db)
     except Exception as _ce:
         print(f'[canonicalize] kick failed bid={bid_id}: {_ce}', flush=True)
+
+    # IPACKET_PREWARM_CACHE_2026_06_02: warm the VIN sticker cache now so the
+    # worker-submit donor finds it and iPacket shows on first paint instead of
+    # ~13s later. Daemon thread; never blocks the request hot path. Additive --
+    # if it fails/races, the existing submit-time rescue still runs.
+    try:
+        threading.Thread(target=_ipacket_prewarm_cache, args=(bid_id, vin), daemon=True).start()
+    except Exception as _ppe:
+        print(f'[ipacket-prewarm] kick failed bid={bid_id}: {_ppe}', flush=True)
 
 
 @app.route('/api/bid/<int:bid_id>/market-check', methods=['POST'])
@@ -14988,6 +15441,68 @@ def _claim_ipacket_rescue(bid_id):
         return False
 
 
+def _ipacket_prewarm_cache(bid_id, vin):
+    """IPACKET_PREWARM_CACHE_2026_06_02: warm the VIN-keyed iPacket sticker cache
+    at bid-creation (VIN known) so the worker-submit donor (IPACKET_VIN_CACHE_DONOR)
+    finds it and the sticker is present the instant the cards reveal -- instead of
+    the ~13s server pull only starting after the worker finishes vAuto/AccuTrade.
+    Runs in a daemon thread off trigger_market_check (the single intake hook).
+    SAFE + ADDITIVE: touches ONLY ipacket_vin_cache (never ipacket_lookups or the
+    rescue claim), skips if the VIN is already cached (<21d -> no iPacket re-pull),
+    never throws into the caller. Net iPacket load unchanged: one pull per uncached
+    VIN; the worker submit then reads the cache (no second pull). If it fails/races,
+    the existing submit-time rescue still runs (today's path)."""
+    try:
+        _v = (vin or '').upper().strip()
+        if not _v or len(_v) != 17:
+            return
+        _db = get_db(); _c = _db.cursor()
+        _c.execute("SELECT 1 FROM ipacket_vin_cache WHERE vin=%s "
+                   "AND (total_msrp IS NOT NULL OR base_price IS NOT NULL) "
+                   "AND captured_at > NOW() - INTERVAL '21 days' LIMIT 1", (_v,))
+        _have = _c.fetchone() is not None
+        _db.close()
+        if _have:
+            return
+        _pdf = _ipacket_lookup_msrp_for_vin(_v)
+        if not (_pdf and _pdf.get('ok') and _pdf.get('msrp')):
+            return
+        _ss = None
+        _viewer = _pdf.get('viewer_url')
+        if _viewer:
+            try:
+                import requests as _rr3, pdfplumber as _pp3, io as _io3
+                _vr = _rr3.get(_viewer, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
+                if _vr.status_code == 200:
+                    with _pp3.open(_io3.BytesIO(_vr.content)) as _doc:
+                        _pil = _doc.pages[0].to_image(resolution=200).original
+                        _fn = 'ipacket_%s_%d_pdf.png' % (_v, int(time.time()))
+                        _pil.save(os.path.join(IPACKET_REPORTS_DIR, _fn), format='PNG')
+                        _ss = '/ipacket_reports/%s' % _fn
+            except Exception as _re:
+                print('[ipacket-prewarm] render err bid=%s: %s' % (bid_id, _re), flush=True)
+        _db = get_db(); _c = _db.cursor()
+        _c.execute("""
+            INSERT INTO ipacket_vin_cache
+                (vin, total_msrp, base_price, exterior_color, interior_color,
+                 screenshot, raw_json, captured_at, source_bid_id)
+            VALUES (%s, %s, %s, %s, %s, %s, NULL, NOW(), %s)
+            ON CONFLICT (vin) DO UPDATE SET
+                total_msrp     = EXCLUDED.total_msrp,
+                base_price     = EXCLUDED.base_price,
+                exterior_color = EXCLUDED.exterior_color,
+                interior_color = EXCLUDED.interior_color,
+                screenshot     = COALESCE(EXCLUDED.screenshot, ipacket_vin_cache.screenshot),
+                captured_at    = NOW(),
+                source_bid_id  = EXCLUDED.source_bid_id
+        """, (_v, _pdf.get('msrp'), _pdf.get('base_price'),
+              _pdf.get('exterior_color'), _pdf.get('interior_color'), _ss, bid_id))
+        _db.commit(); _db.close()
+        print('[ipacket-prewarm] bid=%s vin=%s cached MSRP=$%s (creation-time prewarm)' % (bid_id, _v, _pdf.get('msrp')), flush=True)
+    except Exception as _pe:
+        print('[ipacket-prewarm] err bid=%s: %s' % (bid_id, _pe), flush=True)
+
+
 def _ipacket_early_rescue(bid_id):
     """Submit-time iPacket PDF rescue (runs in a daemon thread). Claim-gated so
     it never double-pulls with the assess-side rescue. Pulls ONCE, renders the
@@ -17899,6 +18414,195 @@ def driver_full_page(token):
     )
 
 
+def _portal_bid_context(cur, bid):
+    """ROLLING_PORTAL_2026_06_02: assemble the same per-car source data as
+    /m/<token>/full (vAuto books, AccuTrade, iPacket w/ same-VIN fallback,
+    Manheim, rBook closest-3 + comp MSRPs, LSL buyer, dealer intel, damage)
+    for ONE bid, returned as a dict. Isolated copy of driver_full_page's
+    assembly so the proven customer page is never touched by portal changes.
+    Uses the caller's cursor; caller owns the db lifecycle."""
+    bid_id = bid['id']
+    cur.execute("SELECT * FROM vauto_lookups WHERE bid_id = %s", (bid_id,))
+    vauto = cur.fetchone()
+    cur.execute("SELECT * FROM accutrade_lookups WHERE bid_id = %s", (bid_id,))
+    accutrade = cur.fetchone()
+    cur.execute("SELECT * FROM ipacket_lookups WHERE bid_id = %s", (bid_id,))
+    ipacket = cur.fetchone()
+    if ipacket and bid.get('vin'):
+        _cur_path = (ipacket.get('screenshot') or '').lstrip('/')
+        _cur_size = 0
+        try:
+            if _cur_path:
+                _abs = os.path.join('/opt/expwholesale', _cur_path)
+                _cur_size = os.path.getsize(_abs) if os.path.exists(_abs) else 0
+        except Exception:
+            _cur_size = 0
+        _cur_has_data = bool(ipacket.get('total_msrp') or ipacket.get('base_price') or ipacket.get('exterior_color'))
+        if not _cur_has_data and _cur_size < 80_000:
+            try:
+                cur.execute("""SELECT * FROM ipacket_lookups
+                                WHERE vin=%s AND bid_id != %s
+                                ORDER BY looked_up_at DESC LIMIT 10""",
+                            (bid['vin'], bid_id))
+                best = None; best_score = 0
+                for c in cur.fetchall():
+                    cp = (c.get('screenshot') or '').lstrip('/'); cs = 0
+                    try:
+                        if cp:
+                            ap = os.path.join('/opt/expwholesale', cp)
+                            cs = os.path.getsize(ap) if os.path.exists(ap) else 0
+                    except Exception:
+                        pass
+                    has_data = bool(c.get('total_msrp') or c.get('base_price') or c.get('exterior_color'))
+                    score = (1_000_000 if has_data else 0) + cs
+                    if score > best_score:
+                        best_score = score; best = c
+                if best and best_score > _cur_size:
+                    ipacket = best
+            except Exception:
+                pass
+    cur.execute("""
+        SELECT confidence_low, confidence_high, llm_reasoning, flags_v2,
+               buyer_intel, dealer_intel, market_intel
+          FROM ai_assessment_log
+         WHERE bid_id = %s ORDER BY created_at DESC LIMIT 1
+    """, (bid_id,))
+    ass = cur.fetchone() or {}
+
+    def _j(v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except Exception:
+                return None
+        return v
+
+    buyer = _j(ass.get('buyer_intel') if ass else None)
+    dealer = _j(ass.get('dealer_intel') if ass else None)
+    flags_v2 = _j(ass.get('flags_v2') if ass else None) or []
+
+    mh = None
+    if vauto and vauto.get('manheim_transactions'):
+        mh_data = _j(vauto['manheim_transactions']) or {}
+        txns = mh_data.get('transactions') or []
+        if txns:
+            prices = sorted(int(t.get('sale_price') or 0) for t in txns if t.get('sale_price'))
+            mh = {'count': len(txns),
+                  'median': prices[len(prices) // 2] if prices else None,
+                  'lo': prices[0] if prices else None,
+                  'hi': prices[-1] if prices else None}
+            if bid.get('mileage'):
+                bm = int(bid['mileage'])
+                twm = [t for t in txns if t.get('odometer')]
+                if twm:
+                    closest = min(twm, key=lambda t: abs(int(t.get('odometer') or 0) - bm))
+                    mh['closest'] = {'mileage': closest.get('odometer'),
+                                     'price': closest.get('sale_price'),
+                                     'date': closest.get('date_sold') or closest.get('sold_at'),
+                                     'condition': closest.get('condition'),
+                                     'region': closest.get('region') or closest.get('auction_region')}
+
+    rb = None
+    if vauto and vauto.get('market_intel_cached'):
+        cached = _j(vauto['market_intel_cached']) or {}
+        if cached.get('rbook'):
+            rb = dict(cached['rbook'])
+            rb['count'] = rb.get('n_rows') or len(rb.get('all_rows') or [])
+            rb['median'] = rb.get('retail_median')
+            rb['p25'] = rb.get('retail_p25')
+            rb['p75'] = rb.get('retail_p75')
+            rb['median_dol'] = rb.get('median_days_on_lot')
+            rb['implied_gross'] = cached.get('implied_buyer_gross')
+            rb['min'] = rb.get('retail_min')
+            rb['max'] = rb.get('retail_max')
+    if rb and not rb.get('closest_3') and bid.get('mileage') and vauto and vauto.get('rbook_competitive_set'):
+        rcs = _j(vauto['rbook_competitive_set']) or {}
+        rows, _drop, _src = filter_rbook_to_strict_peers(bid.get('vin'), rcs.get('rows') or [])
+        if rows:
+            bm = int(bid['mileage'])
+            rb['closest_3'] = sorted(rows, key=lambda r: abs(int(r.get('mileage') or 0) - bm))[:3]
+    if not rb and vauto and vauto.get('rbook_competitive_set'):
+        rcs = _j(vauto['rbook_competitive_set']) or {}
+        rows, _drop, _src = filter_rbook_to_strict_peers(bid.get('vin'), rcs.get('rows') or [])
+        if rows:
+            asks = sorted(int(r.get('price') or 0) for r in rows if r.get('price'))
+            rb = {'count': len(rows),
+                  'median': asks[len(asks) // 2] if asks else None,
+                  'p25': asks[len(asks) // 4] if len(asks) >= 4 else None,
+                  'p75': asks[(3 * len(asks)) // 4] if len(asks) >= 4 else None}
+            if bid.get('mileage'):
+                bm = int(bid['mileage'])
+                rb['closest_3'] = sorted(rows, key=lambda r: abs(int(r.get('mileage') or 0) - bm))[:3]
+    if rb and rb.get('closest_3'):
+        vins = [c.get('vin') for c in rb['closest_3'] if c.get('vin')]
+        if vins:
+            cur.execute("SELECT vin, msrp, base_price, status FROM comp_msrps WHERE vin = ANY(%s)", (vins,))
+            cmap = {r['vin']: {'msrp': r['msrp'], 'base_price': r['base_price'], 'status': r['status']}
+                    for r in cur.fetchall()}
+            for c in rb['closest_3']:
+                v = c.get('vin')
+                if v and v in cmap:
+                    c['msrp_lookup'] = cmap[v]
+
+    _dmg_flags = {'accident_history', 'accidents', 'salvage_title', 'rebuilt_title',
+                  'fleet_title', 'total_loss', 'airbag_deployment', 'frame_damage'}
+    _dmg_titles = {'accident', 'salvage', 'rebuilt', 'lemon', 'flood', 'total_loss', 'junk', 'branded'}
+    _ds_title = (vauto.get('title_status') or '').lower() if vauto else ''
+    show_damage = bool((bid.get('damage_signal') in ('disagreement', 'both_damaged', 'damaged'))
+                       or (_ds_title in _dmg_titles)
+                       or (set(flags_v2 or []) & _dmg_flags))
+
+    ready = bool(bid.get('ai_price')
+                 or (vauto and (vauto.get('mmr') or vauto.get('rbook')))
+                 or (accutrade and accutrade.get('guaranteed_offer'))
+                 or (ipacket and ipacket.get('total_msrp')))
+
+    return {'bid': bid, 'vauto': vauto, 'accutrade': accutrade, 'ipacket': ipacket,
+            'manheim': mh, 'rbook': rb, 'buyer': buyer, 'dealer': dealer,
+            'flags': flags_v2, 'show_damage': show_damage,
+            'confidence_low': ass.get('confidence_low') if ass else None,
+            'confidence_high': ass.get('confidence_high') if ass else None,
+            'reasoning': (ass.get('llm_reasoning') if ass else None) or bid.get('ai_assessment'),
+            'ready': ready}
+
+
+@app.route('/s/<token>')
+def sender_portal(token):
+    """ROLLING_PORTAL_2026_06_02: per-sender rolling mini-site. Lists this
+    phone's last PORTAL_MAX_CARS bids newest-first as an accordion (newest
+    auto-open); each car expands in place to the same source cards as
+    /m/<token>/full. Unguessable token (bidder_contacts.portal_token); no
+    login. Gated by enrollment — only enrolled phones have a token."""
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT phone, name FROM bidder_contacts WHERE portal_token=%s", (token,))
+    owner = cur.fetchone()
+    if not owner:
+        db.close()
+        return 'Not found', 404
+    cur.execute("""
+        SELECT * FROM bids
+         WHERE phone=%s
+           AND COALESCE(status,'') NOT IN ('cancelled', 'archived', 'dead', 'duplicate')
+         ORDER BY id DESC LIMIT %s
+    """, (owner['phone'], PORTAL_MAX_CARS))
+    rows = cur.fetchall()
+    cars = []
+    for b in rows:
+        try:
+            cars.append(_portal_bid_context(cur, b))
+        except Exception as _pe:
+            print(f'[portal] ctx err bid={b.get("id")}: {_pe}', flush=True)
+            cars.append({'bid': b, 'vauto': None, 'accutrade': None, 'ipacket': None,
+                         'manheim': None, 'rbook': None, 'buyer': None, 'dealer': None,
+                         'flags': [], 'show_damage': False, 'ready': False,
+                         'confidence_low': None, 'confidence_high': None, 'reasoning': None})
+    db.close()
+    return render_template('portal.html', owner=owner, cars=cars, token=token)
+
+
 def _notify_driver_combined(bid_id):
     """COMBINED_SMS_2026_05_20: the ONE customer SMS, fired when Phase 2
     enrichment lands (rbook + manheim + accu + ipkt all complete). NOT
@@ -17957,6 +18661,22 @@ def _notify_driver_combined(bid_id):
                   flush=True)
             db.close()
             return False
+        # ROLLING_PORTAL_2026_06_02: portal-gated senders do NOT get a per-car
+        # link. Suppress this per-car SMS, stamp notified so it won't retry,
+        # and fire a throttled "N cars ready" nudge pointing at their
+        # /s/<token> portal (the batch ack already gave them the link).
+        if _phone_in_portal_gate(bid.get('driver_phone')):
+            try:
+                _portal_nudge_for_phone(cur, bid['driver_phone'])
+            except Exception as _pne:
+                print(f'[combined-sms] portal nudge err bid={bid_id}: {_pne}', flush=True)
+            cur.execute("UPDATE bids SET driver_notified_at=NOW(), "
+                        "phase2_notified_at=NOW() WHERE id=%s", (bid_id,))
+            db.commit()
+            db.close()
+            print(f'[combined-sms] bid={bid_id} suppressed (portal) → nudge', flush=True)
+            return True
+
         # Full-broker phone gate (matches legacy PHASE2_PHONE_GATE behavior).
         gate = (os.environ.get('PHASE2_PHONE_GATE') or '').strip()
         if gate:

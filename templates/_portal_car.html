@@ -1,0 +1,320 @@
+{# ROLLING_PORTAL_2026_06_02 — per-car body for the rolling portal. Expects
+   bid, vauto, accutrade, ipacket, manheim, rbook, buyer, dealer, show_damage
+   in context (aliased by portal.html's loop). Card markup mirrors m_full.html
+   (kept as a separate copy so the proven /m/<token>/full page is untouched). #}
+
+<div class="vin-row">
+  <span class="vin">{{ bid.vin or '—' }}</span>
+  <span class="miles">{{ '{:,}'.format(bid.mileage|int) if bid.mileage else '—' }}<small>mi</small></span>
+</div>
+<div class="meta">
+  {% if bid.color %}<span><b>EXT</b> {{ bid.color }}</span>{% endif %}
+  {% if bid.int_color %}<span><b>INT</b> {{ bid.int_color }}</span>{% endif %}
+  {% if bid.asking_price %}<span><b>ASK</b> ${{ '{:,}'.format(bid.asking_price|int) }}</span>{% endif %}
+</div>
+
+{% if not car.ready %}
+<div class="pricing-note">⏳ Still pricing — sources are being pulled. This page refreshes automatically.</div>
+{% endif %}
+
+{% if show_damage %}
+<div style="background:linear-gradient(135deg,rgba(220,38,38,.22),rgba(127,29,29,.10));border:1.5px solid rgba(220,38,38,.6);border-left-width:6px;border-radius:12px;padding:14px 16px;margin:12px 0 10px;color:#fecaca">
+  <div style="font-size:11px;font-weight:800;color:#f87171;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">⚠ Damage reported</div>
+  <div style="font-size:14px;line-height:1.45;color:#fee2e2">
+    {% if bid.damage_signal == 'disagreement' %}
+      Carfax and AutoCheck disagree — one source reports damage/accident history. Operator review needed.
+    {% elif bid.damage_signal == 'both_damaged' %}
+      Both Carfax and AutoCheck report damage or accident history on this VIN.
+    {% else %}
+      Damage or accident history reported.
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if bid.miles_discrepancy and bid.miles_discrepancy > 0 %}
+<div style="background:linear-gradient(135deg,rgba(245,158,11,.18),rgba(180,83,9,.08));border:1.5px solid rgba(245,158,11,.55);border-left-width:6px;border-radius:12px;padding:14px 16px;margin:12px 0 10px;color:#fde68a">
+  <div style="font-size:11px;font-weight:800;color:#fbbf24;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">⚠ Mileage discrepancy</div>
+  <div style="font-size:14px;line-height:1.45;color:#fef3c7">
+    Customer reported <b style="color:#fff">{{ '{:,}'.format(bid.mileage|int) }} mi</b>.
+    {% if bid.miles_higher_source == 'carfax' %}Carfax{% else %}AutoCheck{% endif %}
+    shows <b style="color:#fff">{{ '{:,}'.format((bid.miles_carfax if bid.miles_higher_source == 'carfax' else bid.miles_autocheck)|int) }} mi</b>
+    as the most recent odometer (Δ +{{ '{:,}'.format(bid.miles_discrepancy|int) }} mi).
+  </div>
+</div>
+{% endif %}
+
+{# vAuto #}
+{% if vauto and (vauto.appraisal_url or vauto.rbook or vauto.mmr or vauto.black_book or vauto.kbb or vauto.kbb_com or vauto.jd_power) %}
+<details class="card vauto">
+  <summary>
+    <span class="title">vAuto</span>
+    <span class="summary-text">{% if vauto.mmr %}MMR ${{ '{:,}'.format(vauto.mmr|int) }}{% elif vauto.rbook %}rBook ${{ '{:,}'.format(vauto.rbook|int) }}{% else %}saved appraisal{% endif %}</span>
+  </summary>
+  <div class="body">
+    {% if vauto.appraisal_url and vauto.appraisal_url.startswith('http') %}
+    <a href="{{ vauto.appraisal_url }}" target="_blank" rel="noopener"
+       style="display:inline-block;padding:9px 14px;margin-bottom:12px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#67e8f9;text-decoration:none;font-size:12px;font-weight:600">
+      🔗 Open saved vAuto appraisal →
+    </a>
+    {% endif %}
+    {% if vauto.rbook %}<div class="row"><span class="lbl">vAuto rBook</span><span class="val">${{ '{:,}'.format(vauto.rbook|int) }}</span></div>{% endif %}
+    {% if vauto.mmr %}<div class="row"><span class="lbl">MMR</span><span class="val">${{ '{:,}'.format(vauto.mmr|int) }}</span></div>{% endif %}
+    {% if vauto.black_book %}<div class="row"><span class="lbl">Black Book</span><span class="val">${{ '{:,}'.format(vauto.black_book|int) }}</span></div>{% endif %}
+    {% if vauto.jd_power %}<div class="row"><span class="lbl">J.D. Power</span><span class="val">${{ '{:,}'.format(vauto.jd_power|int) }}</span></div>{% endif %}
+    {% if vauto.kbb %}<div class="row"><span class="lbl">KBB</span><span class="val">${{ '{:,}'.format(vauto.kbb|int) }}</span></div>{% endif %}
+    {% if vauto.kbb_com %}<div class="row"><span class="lbl">KBB.com</span><span class="val">${{ '{:,}'.format(vauto.kbb_com|int) }}</span></div>{% endif %}
+  </div>
+</details>
+{% endif %}
+
+{# AccuTrade #}
+{% if accutrade and (accutrade.appraisal_url or accutrade.guaranteed_offer or accutrade.trade_in or accutrade.market_avg or accutrade.retail or accutrade.screenshot) %}
+<details class="card accutrade">
+  <summary>
+    <span class="title">AccuTrade</span>
+    <span class="summary-text">{% if accutrade.guaranteed_offer %}Cash Offer ${{ '{:,}'.format(accutrade.guaranteed_offer|int) }}{% elif accutrade.trade_in %}Trade ${{ '{:,}'.format(accutrade.trade_in|int) }}{% else %}saved appraisal{% endif %}</span>
+  </summary>
+  <div class="body">
+    {% if accutrade.appraisal_url and accutrade.appraisal_url.startswith('http') %}
+    <a href="{{ accutrade.appraisal_url }}" target="_blank" rel="noopener"
+       style="display:inline-block;padding:9px 14px;margin-bottom:12px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#67e8f9;text-decoration:none;font-size:12px;font-weight:600">
+      🔗 Open saved AccuTrade →
+    </a>
+    {% endif %}
+    {% if accutrade.guaranteed_offer %}<div class="row"><span class="lbl">Cash Offer (Guaranteed)</span><span class="val">${{ '{:,}'.format(accutrade.guaranteed_offer|int) }}</span></div>{% endif %}
+    {% if accutrade.trade_in %}<div class="row"><span class="lbl">Trade-in</span><span class="val">${{ '{:,}'.format(accutrade.trade_in|int) }}</span></div>{% endif %}
+    {% if accutrade.trade_market %}<div class="row"><span class="lbl">Trade Market</span><span class="val">${{ '{:,}'.format(accutrade.trade_market|int) }}</span></div>{% endif %}
+    {% if accutrade.retail %}<div class="row"><span class="lbl">Retail</span><span class="val">${{ '{:,}'.format(accutrade.retail|int) }}</span></div>{% endif %}
+    {% if accutrade.market_avg %}<div class="row"><span class="lbl">Market Avg</span><span class="val">${{ '{:,}'.format(accutrade.market_avg|int) }}</span></div>{% endif %}
+    {% if accutrade.screenshot %}
+    <div style="margin-top:14px">
+      <a href="{{ accutrade.screenshot }}" target="_blank">
+        <img src="{{ accutrade.screenshot }}" style="width:100%;border-radius:6px;border:1px solid #1f2937;display:block" alt="AccuTrade Report">
+      </a>
+    </div>
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+{# Carfax #}
+{% if vauto and (vauto.carfax_screenshot or vauto.carfax_share_url) %}
+<details class="card carfax">
+  <summary>
+    <span class="title">Carfax</span>
+    <span class="summary-text">vehicle history</span>
+  </summary>
+  <div class="body">
+    {% if vauto.carfax_share_url %}
+    <a href="{{ vauto.carfax_share_url }}" target="_blank" rel="noopener"
+       style="display:inline-block;padding:9px 14px;margin-bottom:12px;background:#1e293b;border:1px solid #334155;border-radius:6px;color:#67e8f9;text-decoration:none;font-size:12px;font-weight:600">
+      🔗 Open shareable Carfax →
+    </a>
+    {% endif %}
+    {% if vauto.carfax_screenshot %}
+    <a href="{{ vauto.carfax_screenshot }}" target="_blank">
+      <img src="{{ vauto.carfax_screenshot }}" style="width:100%;border-radius:6px;border:1px solid #1f2937;display:block" alt="Carfax Report">
+    </a>
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+{# AutoCheck #}
+{% if vauto and vauto.autocheck_screenshot %}
+<details class="card autocheck">
+  <summary>
+    <span class="title">AutoCheck</span>
+    <span class="summary-text">vehicle history</span>
+  </summary>
+  <div class="body">
+    <a href="{{ vauto.autocheck_screenshot }}" target="_blank">
+      <img src="{{ vauto.autocheck_screenshot }}" style="width:100%;border-radius:6px;border:1px solid #1f2937;display:block" alt="AutoCheck Report">
+    </a>
+  </div>
+</details>
+{% endif %}
+
+{# iPacket #}
+{% if ipacket and (ipacket.total_msrp or ipacket.base_price or ipacket.screenshot or ipacket.exterior_color or ipacket.interior_color) %}
+<details class="card ipacket">
+  <summary>
+    <span class="title">iPacket Sticker</span>
+    <span class="summary-text">{% if ipacket.total_msrp %}MSRP ${{ '{:,}'.format(ipacket.total_msrp|int) }}{% else %}original sticker{% endif %}</span>
+  </summary>
+  <div class="body">
+    {% if ipacket.total_msrp %}<div class="row"><span class="lbl">Original MSRP</span><span class="val">${{ '{:,}'.format(ipacket.total_msrp|int) }}</span></div>{% endif %}
+    {% if ipacket.base_price %}<div class="row"><span class="lbl">Base price</span><span class="val">${{ '{:,}'.format(ipacket.base_price|int) }}</span></div>{% endif %}
+    {% if ipacket.exterior_color %}<div class="row"><span class="lbl">Exterior</span><span class="val">{{ ipacket.exterior_color }}</span></div>{% endif %}
+    {% if ipacket.interior_color %}<div class="row"><span class="lbl">Interior</span><span class="val">{{ ipacket.interior_color }}</span></div>{% endif %}
+    {% if ipacket.screenshot %}
+    <div style="margin-top:14px">
+      <a href="{{ ipacket.screenshot }}" target="_blank">
+        <img src="{{ ipacket.screenshot }}" style="width:100%;border-radius:6px;border:1px solid #1f2937;display:block" alt="iPacket Sticker">
+      </a>
+    </div>
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+{# Manheim Auction #}
+{% if manheim and manheim.count %}
+<details class="card manheim">
+  <summary>
+    <span class="title">Manheim Auction</span>
+    <span class="summary-text">{{ manheim.count }} sale{% if manheim.count != 1 %}s{% endif %}{% if manheim.median %} · median ${{ '{:,}'.format(manheim.median|int) }}{% endif %}</span>
+  </summary>
+  <div class="body">
+    <div class="row"><span class="lbl">Total sales</span><span class="val">{{ manheim.count }}</span></div>
+    {% if manheim.median %}<div class="row"><span class="lbl">Median</span><span class="val">${{ '{:,}'.format(manheim.median|int) }}</span></div>{% endif %}
+    {% if manheim.lo and manheim.hi %}<div class="row"><span class="lbl">Range</span><span class="val">${{ '{:,}'.format(manheim.lo|int) }} – ${{ '{:,}'.format(manheim.hi|int) }}</span></div>{% endif %}
+    {% if manheim.closest %}
+    <div style="margin-top:10px;font-size:11px;color:#c4b5fd;text-transform:uppercase;letter-spacing:.5px;font-weight:700">★ Closest-mile sale</div>
+    <div class="comp top">
+      <div class="top-line">
+        <span class="miles-l">{{ '{:,}'.format(manheim.closest.mileage|int) if manheim.closest.mileage else '?' }} mi</span>
+        <span class="price-l">${{ '{:,}'.format(manheim.closest.price|int) if manheim.closest.price else '—' }}</span>
+      </div>
+      <div class="meta-line">
+        {% if manheim.closest.date %}{{ manheim.closest.date }}{% endif %}
+        {% if manheim.closest.condition %} · {{ manheim.closest.condition }}{% endif %}
+        {% if manheim.closest.region %} · {{ manheim.closest.region }}{% endif %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+{# rBook Market #}
+{% if rbook and rbook.count %}
+<details class="card rbook">
+  <summary>
+    <span class="title">rBook Market</span>
+    <span class="summary-text">{{ rbook.count }} comp{% if rbook.count != 1 %}s{% endif %}{% if rbook.median %} · median ${{ '{:,}'.format(rbook.median|int) }}{% endif %}</span>
+  </summary>
+  <div class="body">
+    <div class="row"><span class="lbl">Comps available</span><span class="val">{{ rbook.count }}</span></div>
+    {% if rbook.median %}<div class="row"><span class="lbl">Median ask</span><span class="val">${{ '{:,}'.format(rbook.median|int) }}</span></div>{% endif %}
+    {% if rbook.min and rbook.max %}<div class="row"><span class="lbl">Range (low–high)</span><span class="val">${{ '{:,}'.format(rbook.min|int) }} – ${{ '{:,}'.format(rbook.max|int) }}</span></div>{% endif %}
+    {% if rbook.p25 and rbook.p75 %}<div class="row"><span class="lbl">p25 – p75</span><span class="val">${{ '{:,}'.format(rbook.p25|int) }} – ${{ '{:,}'.format(rbook.p75|int) }}</span></div>{% endif %}
+    {% if rbook.avg_mileage %}<div class="row"><span class="lbl">Avg mileage in comps</span><span class="val">{{ '{:,}'.format(rbook.avg_mileage|int) }} mi</span></div>{% endif %}
+    {% if rbook.median_dol %}<div class="row"><span class="lbl">Median days on lot</span><span class="val">{{ rbook.median_dol }}</span></div>{% endif %}
+    {% if rbook.implied_gross %}<div class="row"><span class="lbl">Retail−MMR spread</span><span class="val">${{ '{:,}'.format(rbook.implied_gross|int) }}</span></div>{% endif %}
+
+    {% if rbook.closest_3 %}
+    <div style="margin-top:14px;font-size:11px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.5px">
+      ★ Top-3 Closest Miles · subject {{ '{:,}'.format(bid.mileage|int) if bid.mileage else '?' }} mi
+    </div>
+    {% for c in rbook.closest_3 %}
+    {% set is_top = loop.index == 1 %}
+    <div class="comp{% if is_top %} top{% endif %}" style="margin-top:6px">
+      <div class="top-line">
+        <span class="miles-l">#{{ loop.index }}{% if is_top %} ★{% endif %} {{ '{:,}'.format(c.mileage|int) }} mi{% if bid.mileage %}{% set delta = (c.mileage|int) - (bid.mileage|int) %}{% set sign = '+' if delta >= 0 else '' %} <span style="font-size:11px;font-weight:400;color:#64748b">({{ sign }}{{ '{:,}'.format(delta|int) }})</span>{% endif %}</span>
+        <span class="price-l">${{ '{:,}'.format(c.price|int) if c.price else '—' }}</span>
+      </div>
+      <div class="meta-line">
+        {% if c.detail_uri %}<a href="{{ c.detail_uri }}" target="_blank" rel="noopener noreferrer">{{ c.dealer or 'unknown dealer' }}</a>{% else %}{{ c.dealer or 'unknown dealer' }}{% endif %}{% if c.dealer_city %} · {{ c.dealer_city }}{% if c.dealer_state %}, {{ c.dealer_state }}{% endif %}{% endif %}
+      </div>
+      <div class="meta-line">
+        {% if c.days_on_lot is not none %}{{ c.days_on_lot }}d on lot{% endif %}
+        {% if c.is_certified %} <span class="badge cpo">CPO</span>{% endif %}
+        {% if c.pending_sale %} <span class="badge pending">pending</span>{% endif %}
+        {% if c.carfax_clean_title %} <span class="badge clean">clean</span>{% endif %}
+        {% if c.msrp_lookup and c.msrp_lookup.msrp %}<br><b style="color:#cbd5e1">MSRP ${{ '{:,}'.format(c.msrp_lookup.msrp|int) }}</b>{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+{# LSL Same-Vehicle History #}
+{% if buyer and buyer.deals and buyer.deals|length > 0 %}
+<details class="card lsl">
+  <summary>
+    <span class="title">LSL Sales Ledger</span>
+    <span class="summary-text">{{ buyer.deals|length }} prev sold</span>
+  </summary>
+  <div class="body">
+    {% if buyer.patterns %}
+      {% if buyer.patterns.total_deals %}<div class="row"><span class="lbl">Total deals</span><span class="val">{{ buyer.patterns.total_deals }}</span></div>{% endif %}
+      {% if buyer.patterns.avg_sale_price %}<div class="row"><span class="lbl">Avg sale price</span><span class="val">${{ '{:,}'.format(buyer.patterns.avg_sale_price|int) }}</span></div>{% endif %}
+      {% if buyer.patterns.avg_front_value %}<div class="row"><span class="lbl">Avg front value</span><span class="val">${{ '{:,}'.format(buyer.patterns.avg_front_value|int) }}</span></div>{% endif %}
+    {% endif %}
+    <div style="margin-top:10px;font-size:11px;color:#6ee7b7;text-transform:uppercase;letter-spacing:.5px;font-weight:700">Recent matched deals</div>
+    {% for d in buyer.deals[:5] %}
+    <div class="comp">
+      <div class="top-line">
+        <span class="miles-l" style="font-size:13px">{{ d.vehicle_info or '?' }}</span>
+        <span class="price-l">${{ '{:,}'.format(d.sale_price|int) if d.sale_price else '—' }}</span>
+      </div>
+      <div class="meta-line">{{ d.customer_name or '?' }}{% if d.sold_at %} · sold {{ d.sold_at[:10] }}{% endif %}{% if d.purchase_cost %} · cost ${{ '{:,}'.format(d.purchase_cost|int) }}{% endif %}</div>
+    </div>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
+
+{# Dealer Network Intel #}
+{% if dealer and (dealer.active or dealer.recent_sales or dealer.top_pitch or dealer.patterns) %}
+<details class="card dealer">
+  <summary>
+    <span class="title">Dealer Network Intel</span>
+    <span class="summary-text">{{ dealer.active|default([])|length }} active · {{ dealer.recent_sales|default([])|length }} sales{% if dealer.top_pitch %} · {{ dealer.top_pitch|length }} pitch{% endif %}</span>
+  </summary>
+  <div class="body">
+    {% if dealer.active %}
+    <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin:4px 0 8px">Currently at partner dealers</div>
+    {% for a in dealer.active %}
+    <div class="comp">
+      <div class="top-line">
+        <span class="miles-l">{{ a.dealer_name or '?' }}</span>
+        {% if a.price %}<span class="price-l" style="color:#fbbf24">${{ '{:,}'.format(a.price|int) }}</span>{% endif %}
+      </div>
+      <div class="meta-line">
+        {{ a.year or '' }} {{ a.make or '' }} {{ a.model or '' }}{% if a.trim %} · {{ a.trim }}{% endif %}{% if a.mileage %} · {{ '{:,}'.format(a.mileage|int) }} mi{% endif %}
+      </div>
+      <div class="meta-line">
+        {% if a.city or a.state %}{{ a.city or '' }}{% if a.city and a.state %}, {% endif %}{{ a.state or '' }} · {% endif %}
+        <span style="color:{% if a.days_on_lot and a.days_on_lot > 60 %}#ef4444{% elif a.days_on_lot and a.days_on_lot > 30 %}#fbbf24{% else %}#86efac{% endif %};font-weight:600">{{ a.days_on_lot if a.days_on_lot is not none else '?' }}d on lot</span>
+      </div>
+      {% if a.url %}<a href="{{ a.url }}" target="_blank" rel="noopener" style="display:inline-block;margin-top:5px;font-size:11px">Open listing →</a>{% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% set sold_patterns = dealer.patterns | selectattr('sold_count', 'gt', 0) | list if dealer.patterns else [] %}
+    {% if sold_patterns %}
+    <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px">
+      Sold at partner dealers · last {{ dealer.config_used.recent_days if dealer.config_used else 90 }}d
+    </div>
+    {% for p in sold_patterns %}
+    <div class="row">
+      <span class="lbl" style="color:#e8ebf0;font-weight:600">{{ p.dealer_name }}</span>
+      <span class="val" style="font-family:ui-monospace,Consolas,monospace;color:#9aa3b2;font-weight:500">
+        {{ p.sold_count }} sold · avg {{ p.avg_days_to_sell }}d{% if p.avg_days_to_sell and p.avg_days_to_sell < 10 %} 🔥{% endif %}
+      </span>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if dealer.top_pitch %}
+    <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px;margin:14px 0 8px">Top pitch candidates</div>
+    {% for tp in dealer.top_pitch %}
+    <div style="padding:8px 10px;background:linear-gradient(90deg,rgba(217,119,6,.12),rgba(217,119,6,.02));border-left:3px solid #d97706;border-radius:4px;margin-bottom:6px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">
+        <span style="font-size:13px;font-weight:700;color:#fbbf24">🎯 {{ tp.dealer_name or tp.name or '?' }}</span>
+        {% set _ps = tp.pitch_score if tp.pitch_score is defined else tp.score %}
+        {% if _ps is not none %}<span style="font-size:10px;color:#94a3b8;font-family:ui-monospace,Consolas,monospace">score {{ _ps|int }}</span>{% endif %}
+      </div>
+      {% if tp.reason %}<div style="margin-top:2px;font-size:11px;color:#94a3b8">{{ tp.reason }}</div>{% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+  </div>
+</details>
+{% endif %}

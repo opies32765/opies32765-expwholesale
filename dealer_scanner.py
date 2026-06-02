@@ -280,7 +280,37 @@ def detect_platform(html):
         return ('wordpress', 'jsonld+html')
     if 'vinsolutions' in h:
         return ('vinsolutions', 'jsonld')
+    if 'data-class="vehicle"' in h:
+        return ('jsonvehicle', 'json_script')
     return ('custom', 'sitemap+jsonld')
+
+
+def _build_jsonvehicle_config(base_url):
+    """Default config for schema.org/Vehicle JSON-in-<script> sites (HGreg-type).
+    Scopes to one rooftop via the /used-car-<slug> URL (these sites paginate a GLOBAL feed)."""
+    import re as _re
+    cfg = {
+        "platform": "jsonvehicle",
+        "inventory_source": {
+            "type": "json_script",
+            "url_template": "{base}?page={page}",
+            "script_selector": 'script[data-class="Vehicle"]',
+            "pagination": {"type": "page_param", "start": 1, "max_pages": 60},
+        },
+        "extraction": {
+            "list_path": "",
+            "fields": {
+                "vin": "VIN", "year": "Year", "make": "Make", "model": "BestModelName",
+                "trim": "Trim", "price": "Price", "miles": "Odometer",
+                "exterior_color": "ExteriorColor", "interior_color": "InteriorColor",
+                "stock_number": "Stock", "photos": "MainImage",
+            },
+        },
+    }
+    m = _re.search(r'/used-car-([a-z0-9\-]+)', (base_url or '').lower())
+    if m:
+        cfg["inventory_source"]["record_filter"] = {"path": "FullLocation.city_slug", "equals": m.group(1)}
+    return cfg
 
 
 # ── AAN platform — JSON API extractor ───────────────────────────────────
@@ -2894,6 +2924,19 @@ class DealerScanner:
             # Auto-spawn AI discovery when no fingerprint matched ('custom').
             # Skipped if a discovery already failed today (don't burn $4 every
             # hour on a stuck dealer).
+            elif platform == 'jsonvehicle':
+                import json as _jv_json
+                _cfg = _build_jsonvehicle_config(self.base_url)
+                try:
+                    with get_conn() as cn, cn.cursor() as cu:
+                        cu.execute("UPDATE dealers SET scrape_config=%s::jsonb, scrape_config_version=COALESCE(scrape_config_version,0)+1, scrape_config_at=now(), platform='ai-generated', scrape_method='config-driven' WHERE id=%s", (_jv_json.dumps(_cfg), self.dealer_id))
+                        cn.commit()
+                    self.dealer['scrape_config'] = _cfg
+                    print('  jsonvehicle platform - auto-built config-driven config', flush=True)
+                except Exception as e:
+                    print('  jsonvehicle auto-config failed: ' + str(e), flush=True)
+                platform = 'ai-generated'
+                method = 'config-driven'
             elif platform == 'custom':
                 already_tried = self._discovery_tried_today()
                 if not already_tried:
