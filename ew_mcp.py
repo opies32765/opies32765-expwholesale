@@ -1174,6 +1174,34 @@ async def lookup_vin(vin: str) -> dict:
     return data
 
 
+@mcp.tool()
+async def transport_status(query: str = "") -> dict:
+    """Vehicle transport tracker (Dealer Direct, via the ops sheet). USE for: how many cars are in
+    transit, what is in transit, or whether a specific car (VIN or year/make/model) is picked up vs
+    still in transit. query: a VIN, year/make/model text, or empty for counts only. Returns counts
+    {pending, in_transit, delivered} and matching car(s) with their section (pending=not picked up
+    yet, in_transit=on the truck, delivered=dropped off)."""
+    import asyncio as _a
+    try:
+        from app import _fetch_transport_tracker
+        data = await _a.to_thread(_fetch_transport_tracker)
+    except Exception as e:
+        return {"error": f"transport tracker unavailable: {str(e)[:140]}"}
+    counts = data.get("counts", {})
+    q = (query or "").strip().lower()
+    if not q:
+        return {"counts": counts}
+    hits = []
+    for section in ("in_transit", "pending", "delivered"):
+        for car in data.get(section, []):
+            blob = ((car.get("vin") or "") + " " + (car.get("ymm") or "")).lower()
+            if q in blob:
+                hits.append({"section": section, "vin": car.get("vin"), "vehicle": car.get("ymm"),
+                             "pickup": car.get("pickup"), "delivery": car.get("delivery"),
+                             "status": car.get("status"), "company": car.get("company")})
+    return {"counts": counts, "matches": hits[:5]}
+
+
 # OWNER_WHITELIST_2026_05_22 — names that unlock LSL accounting queries.
 # Case-insensitive match; accepts variants like "this is Oscar" via the
 # system prompt extraction layer (LLM passes the bare first name).

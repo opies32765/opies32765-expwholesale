@@ -4237,7 +4237,15 @@ def twilio_webhook():
     # through to the normal single-bid path so a photo can't be mis-assigned to
     # the wrong VIN. Runs first so a multi-VIN body can't be pre-empted by the
     # sourcing/share/stitch routers below.
-    if (from_phone and num_media == 0 and body
+    #
+    # GUARD (2026-06-02 regression fix): a #N hash-ref ("#2423 ...") must NOT be
+    # hijacked into batch intake — it belongs to the HASH_BID_REF stitch below
+    # (which attaches photos/miles to bid #N). "#2423 + 4 photos" opened 4 new
+    # bids because the photo-batch branch ran before hash-ref — the bid 2006->
+    # 2007 incident class that e922411 was written to kill. Both batch branches
+    # now skip when the body is a #N reference.
+    _is_hashref = bool(re.match(r'^\s*#\d{3,5}\b', (body or '').strip()))
+    if (from_phone and num_media == 0 and body and not _is_hashref
             and _phone_in_portal_gate(from_phone)):
         try:
             _batch_pairs = _parse_batch_pairs(body)
@@ -4265,7 +4273,8 @@ def twilio_webhook():
     # silently lost. Here we make one bid per photo, then OCR + auto-collapse
     # same-VIN (2 angles of one car fold back to one bid) async. Gated so every
     # other sender keeps today's multi-photo-as-one-car behavior.
-    if (from_phone and num_media >= 2 and _phone_in_portal_gate(from_phone)):
+    if (from_phone and num_media >= 2 and not _is_hashref
+            and _phone_in_portal_gate(from_phone)):
         try:
             _pb_resp = _handle_photo_batch_intake(db, cur, from_phone, num_media,
                                                   request.form, intake_log_id)
