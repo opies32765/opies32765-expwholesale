@@ -1,9 +1,9 @@
 {
   "make_name": "LINCOLN",
-  "trained_at": "2026-06-02T08:30:40.615201Z",
-  "n_total": 180,
+  "trained_at": "2026-06-03T08:30:48.357995Z",
+  "n_total": 181,
   "n_train": 174,
-  "n_test": 6,
+  "n_test": 7,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -211,49 +211,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1222.0,
-    "mape_pct": 3.64,
-    "r2": 0.9535,
-    "within_5pct": 66.7,
+    "mae_dollars": 1305.0,
+    "mape_pct": 4.05,
+    "r2": 0.9641,
+    "within_5pct": 57.1,
     "within_10pct": 100.0
   },
   "baseline_metrics": {
-    "mae_dollars": 2252.0,
-    "mape_pct": 6.34,
+    "mae_dollars": 2073.0,
+    "mape_pct": 6.11,
     "ratio": 1.0062
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.3992479741573334
+      "importance": 0.39527982473373413
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.36586734652519226
+      "importance": 0.3634492754936218
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.15955230593681335
+      "importance": 0.16551044583320618
     },
     {
       "name": "original_msrp",
-      "importance": 0.019717758521437645
+      "importance": 0.014232020825147629
     },
     {
       "name": "model_name_Continental Reserve Sedan",
-      "importance": 0.0043058996088802814
-    },
-    {
-      "name": "year",
-      "importance": 0.004234699532389641
-    },
-    {
-      "name": "odometer",
-      "importance": 0.0039276666939258575
+      "importance": 0.005228930152952671
     },
     {
       "name": "supplier_name_Parks Ford",
-      "importance": 0.0032771402038633823
+      "importance": 0.003979641478508711
+    },
+    {
+      "name": "year",
+      "importance": 0.003847741521894932
+    },
+    {
+      "name": "odometer",
+      "importance": 0.003579135984182358
     }
   ]
 }

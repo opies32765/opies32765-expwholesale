@@ -1,9 +1,9 @@
 {
   "make_name": "BMW",
-  "trained_at": "2026-06-02T08:30:20.674954Z",
-  "n_total": 1672,
+  "trained_at": "2026-06-03T08:30:22.928868Z",
+  "n_total": 1674,
   "n_train": 1558,
-  "n_test": 114,
+  "n_test": 116,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -221,49 +221,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3144.0,
-    "mape_pct": 8.42,
-    "r2": 0.973,
-    "within_5pct": 52.6,
-    "within_10pct": 80.7
+    "mae_dollars": 3432.0,
+    "mape_pct": 8.86,
+    "r2": 0.9683,
+    "within_5pct": 50.0,
+    "within_10pct": 80.2
   },
   "baseline_metrics": {
-    "mae_dollars": 3532.0,
-    "mape_pct": 9.87,
+    "mae_dollars": 3575.0,
+    "mape_pct": 9.82,
     "ratio": 1.0233
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.383598655462265
+      "importance": 0.3710700273513794
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.3066776990890503
+      "importance": 0.33074262738227844
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.16895560920238495
-    },
-    {
-      "name": "supplier_name_Ultimo Warrenville",
-      "importance": 0.009325768798589706
+      "importance": 0.15216241776943207
     },
     {
       "name": "supplier_name_Marshall Goldman Motor Sls & Leasing Llc",
-      "importance": 0.0073464419692754745
+      "importance": 0.01249129418283701
+    },
+    {
+      "name": "supplier_name_Ultimo Warrenville",
+      "importance": 0.006397150456905365
     },
     {
       "name": "model_name_M4 Competition Coupe",
-      "importance": 0.0058531565591692924
+      "importance": 0.005907861981540918
     },
     {
-      "name": "supplier_name_Jaguar Land Rover Lakeland",
-      "importance": 0.0045804213732481
+      "name": "year",
+      "importance": 0.005751397460699081
     },
     {
       "name": "odometer",
-      "importance": 0.004453558940440416
+      "importance": 0.005629244260489941
     }
   ]
 }

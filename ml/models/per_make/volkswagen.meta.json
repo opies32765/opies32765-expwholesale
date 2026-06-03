@@ -1,9 +1,9 @@
 {
   "make_name": "VOLKSWAGEN",
-  "trained_at": "2026-06-02T08:30:35.346724Z",
-  "n_total": 340,
+  "trained_at": "2026-06-03T08:30:44.494162Z",
+  "n_total": 341,
   "n_train": 323,
-  "n_test": 17,
+  "n_test": 18,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1240.0,
-    "mape_pct": 10.25,
-    "r2": 0.9147,
-    "within_5pct": 41.2,
-    "within_10pct": 76.5
+    "mae_dollars": 1302.0,
+    "mape_pct": 10.67,
+    "r2": 0.9118,
+    "within_5pct": 44.4,
+    "within_10pct": 72.2
   },
   "baseline_metrics": {
-    "mae_dollars": 1960.0,
-    "mape_pct": 11.75,
+    "mae_dollars": 2036.0,
+    "mape_pct": 12.64,
     "ratio": 1.0176
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.44350466132164
+      "importance": 0.4396413564682007
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.12980078160762787
+      "importance": 0.12845270335674286
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.11599823087453842
+      "importance": 0.11899711191654205
     },
     {
       "name": "body_type_Convertible",
-      "importance": 0.03849110007286072
+      "importance": 0.03948620334267616
     },
     {
       "name": "original_msrp",
-      "importance": 0.02746029756963253
+      "importance": 0.02575661614537239
     },
     {
       "name": "year",
-      "importance": 0.0177215114235878
+      "importance": 0.017061447724699974
     },
     {
       "name": "odometer",
-      "importance": 0.01493796892464161
+      "importance": 0.01446531806141138
     },
     {
       "name": "supplier_name_Brickell Luxury Motors ",
-      "importance": 0.013201759196817875
+      "importance": 0.013543061912059784
     }
   ]
 }

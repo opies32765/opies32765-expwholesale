@@ -313,6 +313,148 @@ def _sigterm(*_):
     _running = False
 
 
+# --- bid_alerts pass (added 2026-06-03) -------------------------------------
+# "Text me when a [year][make][model] hits the bid listing."
+# Independent of the bill_watchlists cursor: rescans the last
+# BID_ALERT_WINDOW_MIN of status='new' bids each tick and relies on the
+# bid_alert_hits UNIQUE(alert_id,bid_id) to fire EXACTLY once per (alert,bid).
+# Only fires for bids that arrived at/after the alert was created (no
+# retroactive texts). Gated to the operator cell via gate_type='bid_alert'.
+BID_ALERT_WINDOW_MIN = int(os.environ.get("BID_ALERT_WINDOW_MIN", "30"))
+_BID_ALERT_GATE = {"ts": 0.0, "digits": set()}
+
+
+def _bid_alert_gate_digits():
+    # Test-gate: only these numbers actually receive alert SMS. Defaults to the
+    # operator cell; widen via BID_ALERT_GATE_DIGITS env (comma/space separated).
+    raw = os.environ.get("BID_ALERT_GATE_DIGITS", "4074309675")
+    out = set()
+    for tok in raw.replace(",", " ").split():
+        d = "".join(ch for ch in tok if ch.isdigit())
+        if len(d) >= 10:
+            out.add(d[-10:])
+    return out
+
+
+def _load_active_bid_alerts():
+    with _connect() as c:
+        with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, created_by, notify_phone, phone_digits, make, model, trim_contains, year_min, year_max, price_max, label, created_at FROM bid_alerts WHERE active = TRUE")
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _load_recent_bids_for_alerts():
+    with _connect() as c:
+        with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, COALESCE(canon_year, year) AS year,"
+                " COALESCE(canon_make, make) AS make,"
+                " COALESCE(canon_model, model) AS model,"
+                " COALESCE(canon_trim, trim) AS trim,"
+                " mileage, ai_price, asking_price, created_at"
+                " FROM bids WHERE status = 'new'"
+                " AND created_at > NOW() - (%s || ' minutes')::interval"
+                " AND COALESCE(canon_make, make) IS NOT NULL"
+                " ORDER BY id ASC LIMIT 500", (str(BID_ALERT_WINDOW_MIN),))
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _alert_to_conds(a):
+    conds = {}
+    if a.get("make"):
+        conds["make_any"] = [str(a["make"]).strip().lower()]
+    if a.get("model"):
+        conds["model_any"] = [str(a["model"]).strip().lower()]
+    if a.get("year_min") is not None:
+        conds["year_min"] = a["year_min"]
+    if a.get("year_max") is not None:
+        conds["year_max"] = a["year_max"]
+    if a.get("price_max") is not None:
+        conds["price_max"] = a["price_max"]
+    if a.get("trim_contains"):
+        conds["trim_contains"] = a["trim_contains"]
+    return conds
+
+
+def _format_alert_message(bid, a):
+    want = " ".join(str(x) for x in [a.get("make"), a.get("model")] if x).strip()
+    y = bid.get("year") or ""
+    mk = bid.get("make") or ""
+    if mk:
+        mk = str(mk).title()
+    md = bid.get("model") or ""
+    tr = bid.get("trim") or ""
+    veh = " ".join(str(x) for x in [y, mk, md, tr] if x).strip()
+    msg = ("Hey, it's Anna at Experience Wholesale - you asked me to flag any "
+           + want + ". One just hit our bid dashboard: Bid #" + str(bid["id"])
+           + ", a " + veh)
+    miles = bid.get("mileage")
+    if miles:
+        try:
+            msg = msg + " with " + format(int(miles), ",") + " miles"
+        except Exception:
+            pass
+    msg = msg + ". https://experience-wholesale.net/bid/" + str(bid["id"])
+    return msg
+
+
+def _claim_alert_hit(alert_id, bid_id, message):
+    with _connect() as c, c.cursor() as cur:
+        try:
+            cur.execute("INSERT INTO bid_alert_hits (alert_id, bid_id, message) VALUES (%s, %s, %s) ON CONFLICT (alert_id, bid_id) DO NOTHING RETURNING id",
+                        (alert_id, bid_id, message))
+            row = cur.fetchone()
+            return row[0] if row else None
+        except Exception as e:
+            log.exception("_claim_alert_hit failed: %s" % e)
+            return None
+
+
+def _mark_alert(alert_id, bid_id, notified, skip_reason=None):
+    with _connect() as c, c.cursor() as cur:
+        if notified:
+            cur.execute("UPDATE bid_alert_hits SET notified_at=NOW() WHERE alert_id=%s AND bid_id=%s", (alert_id, bid_id))
+            cur.execute("UPDATE bid_alerts SET match_count=match_count+1, last_matched_at=NOW(), updated_at=NOW() WHERE id=%s", (alert_id,))
+        else:
+            cur.execute("UPDATE bid_alert_hits SET skip_reason=%s WHERE alert_id=%s AND bid_id=%s", (skip_reason, alert_id, bid_id))
+
+
+def _scan_bid_alerts():
+    alerts = _load_active_bid_alerts()
+    if not alerts:
+        return
+    bids = _load_recent_bids_for_alerts()
+    if not bids:
+        return
+    gate = _bid_alert_gate_digits()
+    for bid in bids:
+        bcreated = bid.get("created_at")
+        for a in alerts:
+            acreated = a.get("created_at")
+            if bcreated and acreated and bcreated < acreated:
+                continue
+            try:
+                if not _matches(bid, _alert_to_conds(a)):
+                    continue
+            except Exception as e:
+                log.exception("alert match error a=%s bid=%s: %s" % (a.get("id"), bid.get("id"), e))
+                continue
+            body = _format_alert_message(bid, a)
+            hit_id = _claim_alert_hit(a["id"], bid["id"], body)
+            if not hit_id:
+                continue
+            if a.get("phone_digits") not in gate:
+                _mark_alert(a["id"], bid["id"], False, "gated_off")
+                log.info("  BID_ALERT gated_off alert=%s bid=%s phone=%s" % (a["id"], bid["id"], a.get("notify_phone")))
+                continue
+            ok = _dispatch_sms(a["notify_phone"], body, hit_id)
+            if ok:
+                _mark_alert(a["id"], bid["id"], True)
+                log.info("  BID_ALERT sent alert=%s bid=%s to=%s" % (a["id"], bid["id"], a.get("notify_phone")))
+            else:
+                _mark_alert(a["id"], bid["id"], False, "send_sms_false")
+
+
 def main():
     signal.signal(signal.SIGTERM, _sigterm)
     signal.signal(signal.SIGINT, _sigterm)
@@ -323,6 +465,10 @@ def main():
             last_id = tick(last_id)
         except Exception:
             log.exception("tick failed")
+        try:
+            _scan_bid_alerts()
+        except Exception:
+            log.exception("bid_alerts scan failed")
         for _ in range(WATCH_INTERVAL):
             if not _running:
                 break

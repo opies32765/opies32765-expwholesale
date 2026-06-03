@@ -1174,6 +1174,107 @@ async def lookup_vin(vin: str) -> dict:
     return data
 
 
+def _lsl_data_query_impl(agg="list", agg_field="", group_by="", filters="", period="", order="desc", limit=25):
+    import sqlite3, os as _os, re as _re
+    PATH = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+    ALLOWED = {"id","code","customer_name","customer_type","sales_person","sales_manager","booked_by",
+        "finance_person","sale_type","vehicle_sale_type","status","type","stock_no","vin_no","make_name",
+        "vehicle_info","sale_price","purchase_cost","msrp","front_value","total_value","deal_total_value",
+        "recon_cost","total_supp_costs","total_fi","supp_costs_desc","promise_date","sold_at","delivery_date",
+        "days_on_lot","days_since_purchase","days_since_booked","has_trade","trade_vehicle","trade_vin",
+        "supplier_name","created_at","modified_at","source_name","referral_fee","buyer_name","transport_fee",
+        "inventory_pack","mcd_live_fee","broker_fee","buyer_fee","sell_fee","write_down"}
+    OPS = {"eq":"=","ne":"!=","gt":">","gte":">=","lt":"<","lte":"<=","like":"LIKE"}
+    def _col(x):
+        x = (x or "").strip().lower()
+        return x if x in ALLOWED else None
+    if not _os.path.exists(PATH):
+        return {"error": "lsl ledger not found"}
+    where, params, ignored = [], [], []
+    p = (period or "").strip().lower()
+    pmap = {
+        "today": "date(sold_at)=date('now')",
+        "yesterday": "date(sold_at)=date('now','-1 day')",
+        "last_7_days": "sold_at >= date('now','-7 days')",
+        "last_30_days": "sold_at >= date('now','-30 days')",
+        "this_month": "strftime('%Y-%m',sold_at)=strftime('%Y-%m','now')",
+        "last_month": "strftime('%Y-%m',sold_at)=strftime('%Y-%m','now','-1 month')",
+        "ytd": "strftime('%Y',sold_at)=strftime('%Y','now')",
+        "this_year": "strftime('%Y',sold_at)=strftime('%Y','now')",
+        "last_year": "strftime('%Y',sold_at)=strftime('%Y','now','-1 year')",
+    }
+    if p in pmap:
+        where.append(pmap[p])
+    elif _re.match(r"^\d{4}-\d{2}-\d{2}:\d{4}-\d{2}-\d{2}$", p):
+        a, b = p.split(":"); where.append("date(sold_at) BETWEEN ? AND ?"); params += [a, b]
+    elif p and p != "all":
+        ignored.append("period:" + p)
+    for f in [x.strip() for x in (filters or "").split(";") if x.strip()]:
+        parts = f.split(":", 2)
+        if len(parts) != 3:
+            ignored.append(f); continue
+        col, op, val = _col(parts[0]), parts[1].strip().lower(), parts[2].strip()
+        sqlop = OPS.get(op)
+        if not col or not sqlop:
+            ignored.append(f); continue
+        if op == "like":
+            where.append("UPPER(%s) LIKE UPPER(?)" % col); params.append("%%%s%%" % val)
+        else:
+            try: v = float(val)
+            except Exception: v = val
+            where.append("%s %s ?" % (col, sqlop)); params.append(v)
+    wsql = (" WHERE " + " AND ".join(where)) if where else ""
+    gb = _col(group_by) if group_by else None
+    af = _col(agg_field) if agg_field else None
+    agg = (agg or "list").strip().lower()
+    lim = max(1, min(int(limit) if limit else 25, 200))
+    od = "ASC" if str(order).lower() == "asc" else "DESC"
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % PATH, uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        cur = c.cursor()
+        try:
+            if agg == "list":
+                cur.execute("SELECT make_name,vehicle_info,sales_person,sale_price,front_value,days_on_lot,supplier_name,buyer_name,sold_at FROM deals%s ORDER BY sold_at %s LIMIT ?" % (wsql, od), params + [lim])
+                out = {"n": cur.rowcount, "rows": [dict(r) for r in cur.fetchall()]}
+            else:
+                fn = {"count": "COUNT(*)", "sum": "SUM(%s)" % af if af else None, "avg": "ROUND(AVG(%s),1)" % af if af else None,
+                      "min": "MIN(%s)" % af if af else None, "max": "MAX(%s)" % af if af else None}.get(agg)
+                if not fn:
+                    out = {"error": "agg must be list/count/sum/avg/min/max; sum/avg/min/max need a valid agg_field"}
+                elif gb:
+                    cur.execute("SELECT %s AS grp, COUNT(*) AS n, %s AS val FROM deals%s GROUP BY %s ORDER BY val %s LIMIT ?" % (gb, fn, wsql, gb, od), params + [lim])
+                    out = {"group_by": gb, "agg": agg, "field": af, "rows": [dict(r) for r in cur.fetchall()]}
+                else:
+                    cur.execute("SELECT COUNT(*) AS n, %s AS val FROM deals%s" % (fn, wsql), params)
+                    r = dict(cur.fetchone()); out = {"agg": agg, "field": af, "n": r["n"], "value": r["val"]}
+        finally:
+            c.close()
+        if ignored:
+            out["ignored_filters"] = ignored
+        return out
+    except Exception as e:
+        return {"error": "query failed: %s" % e}
+
+
+@mcp.tool()
+async def lsl_data_query(agg: str = "list", agg_field: str = "", group_by: str = "", filters: str = "", period: str = "", order: str = "desc", limit: int = 25) -> dict:
+    """OWNER. Flexible READ-ONLY query over the LSL sales ledger ('deals', ~28k sold cars). Use for ANY deals
+    question the fixed tools don't cover: totals, averages, counts, rankings, lists by any field.
+    agg: 'list' | 'count' | 'sum' | 'avg' | 'min' | 'max'. For sum/avg/min/max set agg_field.
+    Columns for agg_field / group_by / filters: make_name, sales_person, sales_manager, supplier_name,
+    buyer_name, customer_name, status, sale_price, purchase_cost, msrp, front_value (GROSS PROFIT per deal),
+    total_supp_costs, recon_cost, days_on_lot, sold_at.
+    filters: semicolon-separated 'field:op:value' (op = eq,ne,gt,gte,lt,lte,like).
+      e.g. 'make_name:like:Porsche;front_value:lt:0'
+    period: ''|today|yesterday|this_month|last_month|last_7_days|last_30_days|ytd|last_year, or 'YYYY-MM-DD:YYYY-MM-DD'.
+    Examples: most profitable supplier YTD -> agg='sum', agg_field='front_value', group_by='supplier_name', period='ytd'.
+    Avg days-on-lot per make -> agg='avg', agg_field='days_on_lot', group_by='make_name'.
+    Count money-losing deals YTD -> agg='count', filters='front_value:lt:0', period='ytd'."""
+    import asyncio
+    return await asyncio.to_thread(_lsl_data_query_impl, agg, agg_field, group_by, filters, period, order, limit)
+
+
 @mcp.tool()
 async def transport_status(query: str = "") -> dict:
     """Vehicle transport tracker (Dealer Direct, via the ops sheet). USE for: how many cars are in
@@ -3996,6 +4097,164 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         return await auth_middleware(request, call_next)
 
+
+# --- bid alert tools (added 2026-06-03) -------------------------------------
+# "Text me when a [year][make][model] hits the bid listing." Inserted before
+# app=Starlette so they register on the :9004 MCP server. Env-only DB URL.
+
+def _ba_digits(p):
+    d = "".join(c for c in (p or "") if c.isdigit())
+    return d[-10:] if len(d) >= 10 else d
+
+
+@mcp.tool()
+async def create_bid_alert(caller_name: str, notify_phone: str, make: str,
+                           model: str, trim_contains: str = None,
+                           year_min: int = None, year_max: int = None,
+                           year_exact: int = None, price_max: int = None,
+                           label: str = None) -> dict:
+    """OWNER. Register an SMS alert: text notify_phone ONCE when a NEW bid hits
+    the listing matching this make + model. USE WHEN the caller asks to be texted
+    or notified when a certain car comes in, like text me when a 2022 Toyota
+    Tacoma hits the board. BOTH make and model are required. Always read the make,
+    model, year (or range) and the phone number back and get a clear yes BEFORE
+    calling this. year_exact sets both year_min and year_max."""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    if not (make and str(make).strip()) or not (model and str(model).strip()):
+        return {"error": "both make and model are required for a bid alert"}
+    digits = _ba_digits(notify_phone)
+    if len(digits) != 10:
+        return {"error": "notify_phone must be a 10-digit US number, got " + str(notify_phone)}
+    e164 = "+1" + digits
+    if year_exact is not None:
+        year_min = year_exact
+        year_max = year_exact
+    mk = make.strip().lower()
+    md = str(model).strip()
+    import psycopg2, psycopg2.extras
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        return {"error": "DATABASE_URL not configured"}
+    try:
+        with psycopg2.connect(db_url) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "INSERT INTO bid_alerts (created_by, notify_phone, phone_digits,"
+                    " make, model, trim_contains, year_min, year_max, price_max,"
+                    " label, active) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)"
+                    " RETURNING id",
+                    ((caller_name or "").strip().lower(), e164, digits, mk, md,
+                     (trim_contains or None), year_min, year_max, price_max,
+                     (label or None)))
+                aid = cur.fetchone()["id"]
+    except Exception as e:
+        log.exception("create_bid_alert failed")
+        return {"error": "db: " + type(e).__name__ + ": " + str(e)}
+    if year_min and year_max and year_min == year_max:
+        yr = str(year_min)
+    elif year_min and year_max:
+        yr = str(year_min) + "-" + str(year_max)
+    elif year_min:
+        yr = str(year_min) + "+"
+    else:
+        yr = ""
+    return {"ok": True, "alert_id": aid, "notify_phone": e164, "make": mk,
+            "model": md, "year_min": year_min, "year_max": year_max,
+            "price_max": price_max, "label": label,
+            "summary": "Alert #" + str(aid) + ": text " + e164 + " when a " +
+                       (yr + " " if yr else "") + mk + " " + md + " hits the listing."}
+
+
+@mcp.tool()
+async def list_bid_alerts(caller_name: str, include_inactive: bool = False) -> dict:
+    """OWNER. List the caller's bid alerts (text-me-when-X-comes-in SMS alerts)."""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    import psycopg2, psycopg2.extras
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        return {"error": "DATABASE_URL not configured"}
+    try:
+        with psycopg2.connect(db_url) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                q = ("SELECT id, notify_phone, make, model, trim_contains, year_min,"
+                     " year_max, price_max, label, active, match_count,"
+                     " last_matched_at, created_at FROM bid_alerts"
+                     " WHERE LOWER(created_by)=%s")
+                params = [(caller_name or "").strip().lower()]
+                if not include_inactive:
+                    q = q + " AND active=TRUE"
+                q = q + " ORDER BY active DESC, created_at DESC"
+                cur.execute(q, params)
+                rows = cur.fetchall()
+    except Exception as e:
+        log.exception("list_bid_alerts failed")
+        return {"error": "db: " + type(e).__name__ + ": " + str(e)}
+    out = []
+    for r in rows:
+        out.append({
+            "alert_id": r["id"], "notify_phone": r["notify_phone"],
+            "make": r["make"], "model": r["model"],
+            "trim_contains": r["trim_contains"], "year_min": r["year_min"],
+            "year_max": r["year_max"], "price_max": r["price_max"],
+            "label": r["label"], "active": r["active"],
+            "match_count": r["match_count"],
+            "last_matched_at": r["last_matched_at"].isoformat() if r["last_matched_at"] else None,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        })
+    return {"bid_alerts": out, "count": len(out)}
+
+
+@mcp.tool()
+async def cancel_bid_alert(caller_name: str, alert_id: int = None,
+                           name_query: str = None) -> dict:
+    """OWNER. Cancel a bid alert (soft delete, active=FALSE). Provide alert_id, or
+    a name_query that fuzzy-matches the label/make/model."""
+    if not _is_owner(caller_name):
+        return {"error": "owner-only", "owner_required": True}
+    if not alert_id and not name_query:
+        return {"error": "provide alert_id or name_query"}
+    import psycopg2, psycopg2.extras
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        return {"error": "DATABASE_URL not configured"}
+    me = (caller_name or "").strip().lower()
+    try:
+        with psycopg2.connect(db_url) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if alert_id:
+                    cur.execute("SELECT id, label, make, model FROM bid_alerts"
+                                " WHERE id=%s AND LOWER(created_by)=%s AND active=TRUE",
+                                (alert_id, me))
+                    row = cur.fetchone()
+                    if not row:
+                        return {"error": "no active alert " + str(alert_id) + " for " + str(caller_name)}
+                    cur.execute("UPDATE bid_alerts SET active=FALSE, updated_at=NOW() WHERE id=%s",
+                                (alert_id,))
+                    return {"ok": True, "disabled_id": alert_id,
+                            "label": row["label"] or (str(row["make"]) + " " + str(row["model"]))}
+                like = "%" + name_query.strip().lower() + "%"
+                cur.execute("SELECT id, label, make, model FROM bid_alerts"
+                            " WHERE LOWER(created_by)=%s AND active=TRUE AND ("
+                            "LOWER(COALESCE(label,'')) LIKE %s OR"
+                            " LOWER(COALESCE(make,'')) LIKE %s OR"
+                            " LOWER(COALESCE(model,'')) LIKE %s) ORDER BY created_at DESC",
+                            (me, like, like, like))
+                cands = cur.fetchall()
+                if not cands:
+                    return {"error": "no active alert matching " + str(name_query)}
+                if len(cands) > 1:
+                    return {"candidates": [
+                        {"alert_id": r["id"], "label": r["label"] or (str(r["make"]) + " " + str(r["model"]))}
+                        for r in cands]}
+                aid = cands[0]["id"]
+                cur.execute("UPDATE bid_alerts SET active=FALSE, updated_at=NOW() WHERE id=%s", (aid,))
+                return {"ok": True, "disabled_id": aid,
+                        "label": cands[0]["label"] or (str(cands[0]["make"]) + " " + str(cands[0]["model"]))}
+    except Exception as e:
+        log.exception("cancel_bid_alert failed")
+        return {"error": "db: " + type(e).__name__ + ": " + str(e)}
 
 app = Starlette(
     routes=[

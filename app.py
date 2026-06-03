@@ -2583,18 +2583,43 @@ def _parse_one_miles(text):
     return None
 
 
+def _miles_tokens_with_pos(text):
+    """All plausible mileage tokens as (position, value). Comma/k aware,
+    skips bare 4-digit model-years and $-prefixed prices. MIXED_LAYOUT_FIX_2026_06_03."""
+    out = []
+    for m in re.finditer(r'(\d{1,3}(?:[,.]\d{3})+|\d{2,6})\s*(k|mi|miles?)?\b', text, re.IGNORECASE):
+        if m.start() > 0 and text[m.start() - 1] == '$':
+            continue
+        raw = m.group(1)
+        suf = (m.group(2) or '').lower()
+        digits = raw.replace(',', '').replace('.', '')
+        if not digits.isdigit():
+            continue
+        v = int(digits)
+        if suf.startswith('k') and v < 1000:
+            v *= 1000
+        if not suf and len(raw) == 4 and raw.isdigit() and 1990 <= v <= 2030:
+            continue
+        if 100 <= v <= 999999:
+            out.append((m.start(), v))
+    return out
+
+
 def _parse_batch_pairs(body):
-    """Parse a multi-car batch SMS into ordered (vin, miles) tuples. Positional:
-    each 17-char VIN claims the FIRST numeric mileage token before the next VIN.
-    VIN detection mirrors extract_vin_from_text exactly — a strict [A-HJ-NPR-Z0-9]
-    match is accepted as-is; an I/O/Q-containing run is salvaged only if the
-    O->0/I->1/Q->0 substitution passes the VIN regex AND check digit. miles may
-    be None for a car (handled downstream as missing_miles). Dedups repeated
-    VINs (first wins). Capped at BATCH_MAX. ROLLING_PORTAL_2026_06_02."""
+    """Pair each VIN with its mileage for a multi-car batch SMS. Forward-claim
+    (each VIN takes the earliest unclaimed miles token before the next VIN)
+    handles VIN-first cars; a backward fallback (nearest unclaimed token *before*
+    the VIN) handles VIN-at-bottom layouts. Dedups repeated VINs (first wins),
+    capped at BATCH_MAX. VIN detection mirrors extract_vin_from_text (strict, with
+    O->0/I->1/Q->0 salvage gated on check digit). ROLLING_PORTAL_2026_06_02 +
+    MIXED_LAYOUT_FIX_2026_06_03 (was: VIN claimed FIRST miles forward-only, which
+    mis-paired when a car's VIN sat at the bottom of its block, e.g. bid 2456/2457:
+    Viper grabbed the GMC's 32k and the GMC got none)."""
     if not body:
         return []
     up = body.upper()
-    vin_hits = []  # (start, end, vin)
+    vins = []
+    seen = set()
     for m in re.finditer(r'\b[A-Z0-9]{17}\b', up):
         cand = m.group(0)
         if VIN_RE.match(cand):
@@ -2602,18 +2627,43 @@ def _parse_batch_pairs(body):
         else:
             sal = cand.replace('O', '0').replace('I', '1').replace('Q', '0')
             vin = sal if (VIN_RE.match(sal) and vin_check_digit_valid(sal)) else None
-        if vin:
-            vin_hits.append((m.start(), m.end(), vin))
-    if not vin_hits:
+        if vin and vin not in seen:
+            seen.add(vin)
+            vins.append((m.start(), m.end(), vin))
+    if not vins:
         return []
-    pairs, seen = [], set()
-    for i, (s, e, vin) in enumerate(vin_hits):
-        if vin in seen:
+    tokens = _miles_tokens_with_pos(body)
+    used = set()
+    result = []
+    for i, (s, e, vin) in enumerate(vins):
+        nxt = vins[i + 1][0] if i + 1 < len(vins) else len(body)
+        chosen = None
+        for ti, (tp, tv) in enumerate(tokens):
+            if ti in used:
+                continue
+            if e <= tp < nxt:
+                chosen = ti
+                break
+        if chosen is not None:
+            used.add(chosen)
+            result.append([vin, tokens[chosen][1]])
+        else:
+            result.append([vin, None])
+    for idx, (s, e, vin) in enumerate(vins):
+        if result[idx][1] is not None:
             continue
-        seen.add(vin)
-        nxt = vin_hits[i + 1][0] if i + 1 < len(vin_hits) else len(body)
-        pairs.append((vin, _parse_one_miles(body[e:nxt])))
-    return pairs[:BATCH_MAX]
+        best = None
+        for ti, (tp, tv) in enumerate(tokens):
+            if ti in used:
+                continue
+            if tp < s:
+                d = s - tp
+                if best is None or d < best[0]:
+                    best = (d, ti, tv)
+        if best is not None:
+            used.add(best[1])
+            result[idx][1] = best[2]
+    return [(vin, miles) for vin, miles in result][:BATCH_MAX]
 
 
 def _handle_batch_intake(db, cur, from_phone, body, pairs, intake_log_id):
