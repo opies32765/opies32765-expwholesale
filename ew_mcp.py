@@ -1185,8 +1185,15 @@ def _lsl_data_query_impl(agg="list", agg_field="", group_by="", filters="", peri
         "supplier_name","created_at","modified_at","source_name","referral_fee","buyer_name","transport_fee",
         "inventory_pack","mcd_live_fee","broker_fee","buyer_fee","sell_fee","write_down"}
     OPS = {"eq":"=","ne":"!=","gt":">","gte":">=","lt":"<","lte":"<=","like":"LIKE"}
+    _ALIAS = {"pvr": "front_value", "profit": "front_value", "gross": "front_value", "front": "front_value",
+              "margin": "front_value", "cost": "purchase_cost", "price": "sale_price", "sale": "sale_price",
+              "days": "days_on_lot", "age": "days_on_lot", "dol": "days_on_lot",
+              "salesperson": "sales_person", "rep": "sales_person", "seller": "sales_person",
+              "buyer": "buyer_name", "supplier": "supplier_name", "source": "supplier_name",
+              "make": "make_name", "brand": "make_name", "customer": "customer_name", "manager": "sales_manager", "model": "vehicle_info", "trim": "vehicle_info", "vehicle": "vehicle_info"}
     def _col(x):
         x = (x or "").strip().lower()
+        x = _ALIAS.get(x, x)
         return x if x in ALLOWED else None
     if not _os.path.exists(PATH):
         return {"error": "lsl ledger not found"}
@@ -1213,10 +1220,15 @@ def _lsl_data_query_impl(agg="list", agg_field="", group_by="", filters="", peri
         parts = f.split(":", 2)
         if len(parts) != 3:
             ignored.append(f); continue
-        col, op, val = _col(parts[0]), parts[1].strip().lower(), parts[2].strip()
+        _fld = parts[0].strip().lower()
+        if _fld in ("period", "limit", "order", "agg", "agg_field", "group_by", "groupby"):
+            continue
+        col, op, val = _col(_fld), parts[1].strip().lower(), parts[2].strip()
         sqlop = OPS.get(op)
-        if not col or not sqlop:
-            ignored.append(f); continue
+        if not col:
+            return {"error": "cannot filter on '" + str(parts[0]) + "' - not a known field; rephrase or drop that filter"}
+        if not sqlop:
+            return {"error": "unknown filter operator '" + str(op) + "'"}
         if op == "like":
             where.append("UPPER(%s) LIKE UPPER(?)" % col); params.append("%%%s%%" % val)
         else:
