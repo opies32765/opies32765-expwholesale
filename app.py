@@ -2776,6 +2776,260 @@ def _portal_nudge_for_phone(cur, phone):
     print(f'[portal-nudge] phone={phone} n={n}', flush=True)
 
 
+# ── LIST_SCREENSHOT_2026_06_05: multi-vehicle IMAGE intake ────────────────
+# A gated sender can screenshot a dealer inventory list (vAuto "N Selected
+# Vehicles", etc.) holding MANY cars. Flat OCR scrambles the multi-column
+# layout and mis-pairs odometer-vs-$price, so we use the Gemini multimodal
+# model (already used for single-photo VIN/odo OCR) to pull every (VIN,
+# odometer) as structured JSON, then create one bid per car. Odometer is set
+# ONLY when the model returns a plausible value; otherwise the bid is flagged
+# missing_miles (existing flow asks for it) — we never guess miles. Gated to
+# the rolling_portal allowlist; falls through to today's photo handling when
+# no multi-car list is present.
+_IMG_SCAN_CAP = 6  # max images Gemini-scanned synchronously (Twilio 15s budget)
+_IMG_VIN_PROMPT = (
+    "This is a screenshot from a dealer inventory / vAuto tool that may list "
+    "MULTIPLE vehicles. Extract EVERY distinct vehicle you can see. For each "
+    "vehicle return its 17-character VIN and its ODOMETER reading (the number "
+    "labeled 'Odo' / 'Odometer' / 'miles'). Do NOT use the dollar price, the "
+    "stock/unit number, or the model year as the odometer. Return STRICT JSON "
+    "only (no prose, no markdown fences): "
+    '{"vehicles":[{"vin":"<17 chars>","odometer":<integer or null>}]}'
+)
+
+
+def _extract_vehicles_from_image(image_bytes, mime='image/jpeg'):
+    """LIST_SCREENSHOT_2026_06_05: Gemini multimodal -> list of {'vin','miles'}
+    for every check-digit-valid VIN in a multi-vehicle screenshot. Empty list
+    when the image isn't a readable multi-car list (so the caller falls back to
+    today's single-photo handling). Odometer kept only when plausible."""
+    if not image_bytes:
+        return []
+    raw = gemini_call(_IMG_VIN_PROMPT, image_bytes=image_bytes, mime=mime,
+                      model='gemini-3.5-flash', max_tokens=1500, temperature=0)
+    if not raw:
+        return []
+    s = raw.strip()
+    if s.startswith('```'):
+        s = re.sub(r'^```[a-zA-Z]*\s*', '', s)
+        s = re.sub(r'\s*```$', '', s).strip()
+    data = None
+    try:
+        data = json.loads(s)
+    except Exception:
+        m = re.search(r'\{.*\}', s, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                data = None
+    if isinstance(data, dict):
+        vehicles = data.get('vehicles') or []
+    elif isinstance(data, list):
+        vehicles = data
+    else:
+        vehicles = []
+    out, seen = [], set()
+    for v in vehicles:
+        if not isinstance(v, dict):
+            continue
+        vin = str(v.get('vin') or '').strip().upper()
+        if not (len(vin) == 17 and VIN_RE.match(vin) and vin_check_digit_valid(vin)):
+            sal = vin.replace('O', '0').replace('I', '1').replace('Q', '0')
+            vin = sal if (len(sal) == 17 and VIN_RE.match(sal)
+                          and vin_check_digit_valid(sal)) else None
+        if not vin or vin in seen:
+            continue
+        seen.add(vin)
+        miles = v.get('odometer')
+        try:
+            miles = int(str(miles).replace(',', '').strip()) if miles not in (None, '') else None
+        except Exception:
+            miles = None
+        if miles is not None and not (100 <= miles <= 999999):
+            miles = None
+        out.append({'vin': vin, 'miles': miles})
+    return out[:BATCH_MAX]
+
+
+def _img_batch_recent_dup(cur, from_phone, vin):
+    """LIST_SCREENSHOT_2026_06_05: id of a live bid this phone already has for
+    this VIN within 2 days (cross-message dedup — same list texted twice, or a
+    backfill re-run, must not create duplicate bids), else None."""
+    cur.execute("""SELECT id FROM bids
+                     WHERE phone=%s AND vin=%s
+                       AND created_at > NOW() - INTERVAL '2 days'
+                       AND COALESCE(status,'') NOT IN
+                           ('archived','passed','duplicate','rejected')
+                     ORDER BY id DESC LIMIT 1""", (from_phone, vin))
+    r = cur.fetchone()
+    return r['id'] if r else None
+
+
+def _create_image_batch_bid(cur, from_phone, bidder, vin, miles, src_label):
+    """LIST_SCREENSHOT_2026_06_05: create one bid for a (vin, miles) pulled from
+    a multi-vehicle image. Mirrors _handle_batch_intake's per-bid creation
+    (decode, missing_miles flag, audit message); reusable by the live webhook
+    handler AND the backfill/cleanup. Returns the new bid id. Sends NO SMS and
+    does NOT commit — caller owns the transaction + ack."""
+    import secrets as _secrets
+    driver_token = _secrets.token_urlsafe(8)[:12]
+    cur.execute("""
+        INSERT INTO bids (contact_id, phone, vin, mileage, raw_message, status,
+                          driver_token, driver_phone, bidder_name,
+                          partner_dealer_id, vauto_priority)
+        VALUES (NULL, %s, %s, %s, %s, 'new', %s, %s, %s, %s, TRUE)
+        RETURNING id
+    """, (from_phone, vin, miles, src_label, driver_token, from_phone,
+          bidder['name'], bidder['partner_dealer_id']))
+    bid_id = cur.fetchone()['id']
+    try:
+        decoded = decode_vin(vin) or {}
+        decoded = {k: v for k, v in decoded.items()
+                   if k in ('year', 'make', 'model', 'trim') and v}
+        if decoded:
+            fields = ', '.join(f'{k}=%s' for k in decoded)
+            cur.execute(f"UPDATE bids SET {fields} WHERE id=%s",
+                        list(decoded.values()) + [bid_id])
+    except Exception as _de:
+        print(f'[img-batch] decode err bid={bid_id}: {_de}', flush=True)
+    if not miles:
+        cur.execute("""UPDATE bids
+                          SET needs_verification_at = COALESCE(needs_verification_at, NOW()),
+                              needs_verification_reason = COALESCE(needs_verification_reason, 'missing_miles')
+                        WHERE id=%s AND needs_verification_cleared_at IS NULL""",
+                    (bid_id,))
+    cur.execute("INSERT INTO bid_messages (bid_id, direction, message, from_phone) "
+                "VALUES (%s,'inbound',%s,%s)",
+                (bid_id, f'[img-batch] VIN {vin}'
+                 + (f' · {miles:,} mi' if miles else ' · miles?'), from_phone))
+    return bid_id
+
+
+def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
+    """LIST_SCREENSHOT_2026_06_05: gated sender's image(s). Gemini-scan each
+    image; if ANY is a multi-car list (>=2 VINs) we OWN the request and create
+    one bid per car (lists explode; a non-list image in the same message becomes
+    one normal photo bid). Cross-message dedup. ONE combined ack + portal link.
+    Returns a TwiML tuple (handled), or None to fall through to today's
+    photo-batch / single-photo handling (no list found)."""
+    scans = []  # (idx, media_url, media_type, img_bytes, vehicles)
+    n_scan = min(num_media, _IMG_SCAN_CAP)
+    for i in range(n_scan):
+        media_url = form.get(f'MediaUrl{i}')
+        media_type = form.get(f'MediaContentType{i}') or 'image/jpeg'
+        if not media_url or 'image' not in (media_type or ''):
+            scans.append((i, media_url, media_type, None, []))
+            continue
+        img_bytes = None
+        try:
+            _r = requests.get(media_url, auth=(TWILIO_SID, TWILIO_TOKEN), timeout=15)
+            if _r.status_code == 200:
+                img_bytes = _r.content
+        except Exception as _fe:
+            print(f'[img-batch] fetch err {str(media_url)[:60]}: {_fe}', flush=True)
+        vehicles = _extract_vehicles_from_image(img_bytes, media_type) if img_bytes else []
+        scans.append((i, media_url, media_type, img_bytes, vehicles))
+    if not any(len(s[4]) >= 2 for s in scans):
+        return None  # no multi-car list present — let existing paths handle it
+    if num_media > n_scan:
+        print(f'[img-batch] phone={from_phone} scanned first {n_scan} of {num_media} images', flush=True)
+    bidder = _lookup_bidder(cur, from_phone)
+    created, missing, dups = [], [], 0
+    for (i, media_url, media_type, img_bytes, vehicles) in scans:
+        if len(vehicles) >= 2:
+            src = f'[img-batch] list photo {i + 1}/{num_media}'
+            attached = False
+            for veh in vehicles:
+                vin, miles = veh['vin'], veh['miles']
+                if _img_batch_recent_dup(cur, from_phone, vin):
+                    dups += 1
+                    continue
+                bid_id = _create_image_batch_bid(cur, from_phone, bidder, vin, miles, src)
+                if not attached and img_bytes:  # one copy of the source list for provenance
+                    try:
+                        cur.execute("INSERT INTO bid_photos (bid_id, url, is_sms_intake) "
+                                    "VALUES (%s,%s,TRUE) RETURNING id", (bid_id, media_url))
+                        _pid = cur.fetchone()['id']
+                        _local = _save_sms_media_local(bid_id, _pid, img_bytes, media_type)
+                        if _local:
+                            cur.execute("UPDATE bid_photos SET local_path=%s WHERE id=%s",
+                                        (_local, _pid))
+                        attached = True
+                    except Exception as _ae:
+                        print(f'[img-batch] attach err bid={bid_id}: {_ae}', flush=True)
+                created.append((bid_id, vin, miles))
+                if not miles:
+                    missing.append(bid_id)
+        else:
+            if not media_url:
+                continue
+            import secrets as _secrets
+            driver_token = _secrets.token_urlsafe(8)[:12]
+            cur.execute("""
+                INSERT INTO bids (contact_id, phone, raw_message, status,
+                                  driver_token, driver_phone, bidder_name, partner_dealer_id)
+                VALUES (NULL, %s, %s, 'new', %s, %s, %s, %s) RETURNING id
+            """, (from_phone, f'[img-batch] photo {i + 1}/{num_media}',
+                  driver_token, from_phone, bidder['name'], bidder['partner_dealer_id']))
+            _pb_id = cur.fetchone()['id']
+            _ingest_sms_photo(cur, _pb_id, media_url, media_type, from_phone=from_phone)
+            created.append((_pb_id, None, None))
+    token = _get_or_create_portal_token(cur, from_phone)
+    ids = [c[0] for c in created]
+    base = os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net')
+    if not ids:
+        # everything was a cross-message duplicate — ack without creating
+        _finalize_sms_intake(cur, intake_log_id, 'image_vin_scan',
+                             reason=f'image scan: 0 new ({dups} dup)')
+        db.commit()
+        try:
+            msg = f"Those {dups} are already in."
+            if token:
+                msg += f" Your cars: {base}/s/{token}"
+            send_sms(from_phone, msg)
+        except Exception:
+            pass
+        db.close()
+        return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                200, {'Content-Type': 'text/xml'})
+    _finalize_sms_intake(cur, intake_log_id, 'image_vin_scan', bid_id=ids[0],
+                         reason=f'image scan: {len(ids)} bids {ids}; '
+                                f'missing_miles={missing}; dups={dups}')
+    db.commit()
+    for bid_id, vin, miles in created:
+        if not vin:
+            continue  # photo-only bid: bg OCR + worker poll handle dispatch
+        try:
+            _fire_owner_new_bid(bid_id)
+        except Exception as _oe:
+            print(f'[img-batch] owner push err bid={bid_id}: {_oe}', flush=True)
+        try:
+            trigger_market_check(bid_id, vin)
+        except Exception as _we:
+            print(f'[img-batch] market_check err bid={bid_id}: {_we}', flush=True)
+    if len(ids) >= 2 and ids == list(range(ids[0], ids[-1] + 1)):
+        rng = f"#{ids[0]}-#{ids[-1]}"
+    else:
+        rng = ', '.join('#' + str(i) for i in ids)
+    msg = f"Got {len(ids)} cars ({rng}) - pricing now."
+    if dups:
+        msg += f" ({dups} already in.)"
+    if missing:
+        msg += (f" Need miles for {', '.join('#' + str(i) for i in missing[:6])}"
+                f" (reply e.g. \"#{missing[0]} 47k\").")
+    if token:
+        msg += f" Your cars: {base}/s/{token}"
+    try:
+        send_sms(from_phone, msg)
+    except Exception as _ae:
+        print(f'[img-batch] ack err: {_ae}', flush=True)
+    print(f'[img-batch] phone={from_phone} created={ids} missing={missing} dups={dups}', flush=True)
+    db.close()
+    return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+            200, {'Content-Type': 'text/xml'})
+
+
 def _handle_photo_batch_intake(db, cur, from_phone, num_media, form, intake_log_id):
     """ROLLING_PORTAL_2026_06_02 (photo batch): a gated sender attaching >=2
     images is treated as one car PER IMAGE. Create one bid per photo, attach
@@ -4323,6 +4577,27 @@ def twilio_webhook():
     # silently lost. Here we make one bid per photo, then OCR + auto-collapse
     # same-VIN (2 angles of one car fold back to one bid) async. Gated so every
     # other sender keeps today's multi-photo-as-one-car behavior.
+    # ── LIST_SCREENSHOT_2026_06_05: multi-vehicle IMAGE intake (gated) ─────
+    # A gated sender can screenshot a dealer inventory LIST (many VINs in one
+    # image). Gemini-scan the image(s); if any holds >=2 VINs, explode it into
+    # one bid per car (one combined ack). Returns None (falls through to the
+    # single-photo / photo-batch paths below) when no multi-car list is found,
+    # so normal photo behavior is unchanged. Runs before the photo-batch path.
+    if (from_phone and num_media >= 1 and not _is_hashref
+            and _phone_in_portal_gate(from_phone)):
+        try:
+            _iv_resp = _handle_image_vin_scan(db, cur, from_phone, num_media,
+                                              request.form, intake_log_id)
+            if _iv_resp is not None:
+                return _iv_resp
+        except Exception as _ive:
+            print(f'[img-batch] handler err phone={from_phone}: {_ive}', flush=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    # ── end LIST_SCREENSHOT image intake ──────────────────────────────────
+
     if (from_phone and num_media >= 2 and not _is_hashref
             and _phone_in_portal_gate(from_phone)):
         try:

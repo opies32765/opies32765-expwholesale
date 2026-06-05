@@ -1,9 +1,9 @@
 {
   "make_name": "ACURA",
-  "trained_at": "2026-06-04T08:31:13.897758Z",
-  "n_total": 227,
+  "trained_at": "2026-06-05T08:31:08.506992Z",
+  "n_total": 228,
   "n_train": 218,
-  "n_test": 9,
+  "n_test": 10,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,49 +215,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2053.0,
-    "mape_pct": 15.94,
-    "r2": 0.9268,
-    "within_5pct": 55.6,
-    "within_10pct": 66.7
+    "mae_dollars": 2084.0,
+    "mape_pct": 15.55,
+    "r2": 0.9221,
+    "within_5pct": 50.0,
+    "within_10pct": 70.0
   },
   "baseline_metrics": {
-    "mae_dollars": 2671.0,
-    "mape_pct": 15.94,
+    "mae_dollars": 2678.0,
+    "mape_pct": 15.32,
     "ratio": 1.0181
   },
   "top_features": [
     {
       "name": "original_msrp",
-      "importance": 0.7746763825416565
+      "importance": 0.7824333906173706
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.11686968058347702
+      "importance": 0.11409196257591248
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.04476886987686157
+      "importance": 0.0422687791287899
     },
     {
       "name": "market_asking_price",
-      "importance": 0.03310123831033707
+      "importance": 0.03179190680384636
     },
     {
       "name": "odometer",
-      "importance": 0.002169486368075013
+      "importance": 0.002092638984322548
     },
     {
       "name": "body_type_SUV",
-      "importance": 0.0019633248448371887
+      "importance": 0.0020147671457380056
     },
     {
       "name": "model_name_TLX Technology Package Sedan",
-      "importance": 0.00193731056060642
+      "importance": 0.0018291226588189602
     },
     {
       "name": "days_on_lot",
-      "importance": 0.0017699029995128512
+      "importance": 0.0017113867215812206
     }
   ]
 }
