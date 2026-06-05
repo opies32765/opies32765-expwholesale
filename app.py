@@ -2906,13 +2906,69 @@ def _create_image_batch_bid(cur, from_phone, bidder, vin, miles, src_label):
     return bid_id
 
 
+def _identify_photo_vehicle(image_bytes, mime='image/jpeg'):
+    """CAPTION_VIN_MATCH_2026_06_05: Gemini year/make/model of the primary
+    vehicle in a single photo — used to attach a caption-typed VIN to the RIGHT
+    photo when a sender sends several cars + a caption. Returns {'year','make',
+    'model'} (make/model lowercased) or {}."""
+    if not image_bytes:
+        return {}
+    raw = gemini_call(
+        "What is the primary vehicle in this photo? Return STRICT JSON only, no "
+        'markdown fences: {"year":<int or null>,"make":"<brand>","model":"<model>"}. '
+        "If no vehicle is identifiable, use null for make and model.",
+        image_bytes=image_bytes, mime=mime, model='gemini-3.5-flash',
+        max_tokens=120, temperature=0)
+    if not raw:
+        return {}
+    s = raw.strip()
+    if s.startswith('```'):
+        s = re.sub(r'^```[a-zA-Z]*\s*', '', s)
+        s = re.sub(r'\s*```$', '', s).strip()
+    d = None
+    try:
+        d = json.loads(s)
+    except Exception:
+        m = re.search(r'\{.*\}', s, re.DOTALL)
+        if m:
+            try:
+                d = json.loads(m.group(0))
+            except Exception:
+                d = None
+    if not isinstance(d, dict):
+        return {}
+    return {'year': d.get('year'),
+            'make': (str(d.get('make') or '')).strip().lower(),
+            'model': (str(d.get('model') or '')).strip().lower()}
+
+
+def _vehicle_mm_match(cap_make, cap_model, ph_make, ph_model):
+    """CAPTION_VIN_MATCH_2026_06_05: True if a caption VIN's decoded make/model
+    matches a photo's identified make/model — make must agree AND model tokens
+    must overlap (so a Jeep Wrangler VIN does NOT match a Jeep Compass photo)."""
+    cm = (cap_make or '').strip().lower(); pm = (ph_make or '').strip().lower()
+    if not (cm and pm):
+        return False
+    if not (cm == pm or cm in pm or pm in cm):
+        return False
+    cmod = (cap_model or '').strip().lower(); pmod = (ph_model or '').strip().lower()
+    if not (cmod and pmod):
+        return True  # make matches and one model is unknown — accept on make alone
+    ct = set(re.findall(r'[a-z0-9]+', cmod))
+    pt = set(re.findall(r'[a-z0-9]+', pmod))
+    return bool(ct & pt) or cmod in pmod or pmod in cmod
+
+
 def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
-    """LIST_SCREENSHOT_2026_06_05: gated sender's image(s). Gemini-scan each
-    image; if ANY is a multi-car list (>=2 VINs) we OWN the request and create
-    one bid per car (lists explode; a non-list image in the same message becomes
-    one normal photo bid). Cross-message dedup. ONE combined ack + portal link.
-    Returns a TwiML tuple (handled), or None to fall through to today's
-    photo-batch / single-photo handling (no list found)."""
+    """LIST_SCREENSHOT_2026_06_05 + CAPTION_VIN_MATCH_2026_06_05: a gated
+    sender's image(s). Gemini-scan each image. OWN the request when either:
+      (a) an image is a multi-car LIST (>=2 VINs) -> explode into one bid/car; or
+      (b) the text CAPTION contains VIN(s) -> create one bid per photo and attach
+          each caption VIN to the photo whose make/model matches it (Wrangler VIN
+          -> Wrangler photo, not the Santa Fe); leftover caption VINs with no
+          matching photo become text-only bids so no car is lost.
+    Else returns None -> today's photo-batch / single-photo paths handle it.
+    Cross-message dedup; one combined ack + portal link."""
     scans = []  # (idx, media_url, media_type, img_bytes, vehicles)
     n_scan = min(num_media, _IMG_SCAN_CAP)
     for i in range(n_scan):
@@ -2930,14 +2986,50 @@ def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
             print(f'[img-batch] fetch err {str(media_url)[:60]}: {_fe}', flush=True)
         vehicles = _extract_vehicles_from_image(img_bytes, media_type) if img_bytes else []
         scans.append((i, media_url, media_type, img_bytes, vehicles))
-    if not any(len(s[4]) >= 2 for s in scans):
-        return None  # no multi-car list present — let existing paths handle it
+
+    has_list = any(len(s[4]) >= 2 for s in scans)
+    body = (form.get('Body') or '').strip()
+    try:
+        caption_pairs = [(v, m) for (v, m) in (_parse_batch_pairs(body) or []) if v] if body else []
+    except Exception:
+        caption_pairs = []
+    if not has_list and not caption_pairs:
+        return None  # nothing special — let existing paths handle it
     if num_media > n_scan:
         print(f'[img-batch] phone={from_phone} scanned first {n_scan} of {num_media} images', flush=True)
+
     bidder = _lookup_bidder(cur, from_phone)
-    created, missing, dups = [], [], 0
+    created, missing, need_vin, dups = [], [], [], 0
+
+    # Decode each caption VIN once (make/model used to match it to a photo).
+    cap_decoded = []
+    for (cv, cm) in caption_pairs:
+        try:
+            d = decode_vin(cv) or {}
+        except Exception:
+            d = {}
+        cap_decoded.append({'vin': cv, 'miles': cm,
+                            'make': str(d.get('make') or ''),
+                            'model': str(d.get('model') or ''),
+                            'used': False})
+
+    def _attach_sync(bid_id, media_url, img_bytes, media_type):
+        # store the photo on the bid WITHOUT triggering bg OCR (VIN is authoritative).
+        if not img_bytes:
+            return
+        try:
+            cur.execute("INSERT INTO bid_photos (bid_id, url, is_sms_intake) "
+                        "VALUES (%s,%s,TRUE) RETURNING id", (bid_id, media_url))
+            _pid = cur.fetchone()['id']
+            _local = _save_sms_media_local(bid_id, _pid, img_bytes, media_type)
+            if _local:
+                cur.execute("UPDATE bid_photos SET local_path=%s WHERE id=%s", (_local, _pid))
+        except Exception as _ae:
+            print(f'[img-batch] attach err bid={bid_id}: {_ae}', flush=True)
+
     for (i, media_url, media_type, img_bytes, vehicles) in scans:
         if len(vehicles) >= 2:
+            # ── multi-car LIST image: one bid per car ──
             src = f'[img-batch] list photo {i + 1}/{num_media}'
             attached = False
             for veh in vehicles:
@@ -2946,22 +3038,46 @@ def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
                     dups += 1
                     continue
                 bid_id = _create_image_batch_bid(cur, from_phone, bidder, vin, miles, src)
-                if not attached and img_bytes:  # one copy of the source list for provenance
-                    try:
-                        cur.execute("INSERT INTO bid_photos (bid_id, url, is_sms_intake) "
-                                    "VALUES (%s,%s,TRUE) RETURNING id", (bid_id, media_url))
-                        _pid = cur.fetchone()['id']
-                        _local = _save_sms_media_local(bid_id, _pid, img_bytes, media_type)
-                        if _local:
-                            cur.execute("UPDATE bid_photos SET local_path=%s WHERE id=%s",
-                                        (_local, _pid))
-                        attached = True
-                    except Exception as _ae:
-                        print(f'[img-batch] attach err bid={bid_id}: {_ae}', flush=True)
+                if not attached and img_bytes:
+                    _attach_sync(bid_id, media_url, img_bytes, media_type)
+                    attached = True
                 created.append((bid_id, vin, miles))
                 if not miles:
                     missing.append(bid_id)
+            continue
+
+        # ── non-list image (single car / exterior photo) ──
+        own_vin = vehicles[0]['vin'] if (vehicles and vehicles[0].get('vin')) else None
+        own_miles = vehicles[0].get('miles') if vehicles else None
+        match = None
+        if not own_vin and any(not cd['used'] for cd in cap_decoded) and img_bytes:
+            pmm = _identify_photo_vehicle(img_bytes, media_type)
+            for cd in cap_decoded:
+                if cd['used']:
+                    continue
+                if _vehicle_mm_match(cd['make'], cd['model'], pmm.get('make'), pmm.get('model')):
+                    match = cd
+                    break
+        if own_vin:
+            vin, miles, src = own_vin, own_miles, f'[img-batch] photo {i + 1}/{num_media}'
+        elif match:
+            match['used'] = True
+            vin, miles, src = match['vin'], match['miles'], f'[caption-match] photo {i + 1}/{num_media} VIN from text'
         else:
+            vin, miles, src = None, None, None
+
+        if vin:
+            if _img_batch_recent_dup(cur, from_phone, vin):
+                dups += 1
+                continue
+            bid_id = _create_image_batch_bid(cur, from_phone, bidder, vin, miles, src)
+            if img_bytes:
+                _attach_sync(bid_id, media_url, img_bytes, media_type)
+            created.append((bid_id, vin, miles))
+            if not miles:
+                missing.append(bid_id)
+        else:
+            # no VIN for this photo — normal photo bid (bg OCR will try to read one).
             if not media_url:
                 continue
             import secrets as _secrets
@@ -2975,11 +3091,25 @@ def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
             _pb_id = cur.fetchone()['id']
             _ingest_sms_photo(cur, _pb_id, media_url, media_type, from_phone=from_phone)
             created.append((_pb_id, None, None))
+            need_vin.append(_pb_id)
+
+    # Leftover caption VINs with no matching photo — text-only bids so no car is lost.
+    for cd in cap_decoded:
+        if cd['used']:
+            continue
+        if _img_batch_recent_dup(cur, from_phone, cd['vin']):
+            dups += 1
+            continue
+        bid_id = _create_image_batch_bid(cur, from_phone, bidder, cd['vin'], cd['miles'],
+                                         '[caption] VIN from text (no matching photo)')
+        created.append((bid_id, cd['vin'], cd['miles']))
+        if not cd['miles']:
+            missing.append(bid_id)
+
     token = _get_or_create_portal_token(cur, from_phone)
     ids = [c[0] for c in created]
     base = os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net')
     if not ids:
-        # everything was a cross-message duplicate — ack without creating
         _finalize_sms_intake(cur, intake_log_id, 'image_vin_scan',
                              reason=f'image scan: 0 new ({dups} dup)')
         db.commit()
@@ -2995,11 +3125,11 @@ def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
                 200, {'Content-Type': 'text/xml'})
     _finalize_sms_intake(cur, intake_log_id, 'image_vin_scan', bid_id=ids[0],
                          reason=f'image scan: {len(ids)} bids {ids}; '
-                                f'missing_miles={missing}; dups={dups}')
+                                f'missing_miles={missing}; need_vin={need_vin}; dups={dups}')
     db.commit()
     for bid_id, vin, miles in created:
         if not vin:
-            continue  # photo-only bid: bg OCR + worker poll handle dispatch
+            continue
         try:
             _fire_owner_new_bid(bid_id)
         except Exception as _oe:
@@ -3016,15 +3146,16 @@ def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
     if dups:
         msg += f" ({dups} already in.)"
     if missing:
-        msg += (f" Need miles for {', '.join('#' + str(i) for i in missing[:6])}"
-                f" (reply e.g. \"#{missing[0]} 47k\").")
+        msg += f" Miles? {', '.join('#' + str(i) for i in missing[:6])}."
+    if need_vin:
+        msg += f" VIN? {', '.join('#' + str(i) for i in need_vin[:6])}."
     if token:
         msg += f" Your cars: {base}/s/{token}"
     try:
         send_sms(from_phone, msg)
     except Exception as _ae:
         print(f'[img-batch] ack err: {_ae}', flush=True)
-    print(f'[img-batch] phone={from_phone} created={ids} missing={missing} dups={dups}', flush=True)
+    print(f'[img-batch] phone={from_phone} created={ids} missing={missing} need_vin={need_vin} dups={dups}', flush=True)
     db.close()
     return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
             200, {'Content-Type': 'text/xml'})
