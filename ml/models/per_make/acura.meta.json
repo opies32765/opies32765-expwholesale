@@ -1,9 +1,9 @@
 {
   "make_name": "ACURA",
-  "trained_at": "2026-06-03T08:30:47.926736Z",
-  "n_total": 226,
+  "trained_at": "2026-06-04T08:31:13.897758Z",
+  "n_total": 227,
   "n_train": 218,
-  "n_test": 8,
+  "n_test": 9,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,49 +215,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2178.0,
-    "mape_pct": 15.49,
-    "r2": 0.9311,
-    "within_5pct": 50.0,
-    "within_10pct": 62.5
+    "mae_dollars": 2053.0,
+    "mape_pct": 15.94,
+    "r2": 0.9268,
+    "within_5pct": 55.6,
+    "within_10pct": 66.7
   },
   "baseline_metrics": {
-    "mae_dollars": 2909.0,
-    "mape_pct": 17.47,
+    "mae_dollars": 2671.0,
+    "mape_pct": 15.94,
     "ratio": 1.0181
   },
   "top_features": [
     {
       "name": "original_msrp",
-      "importance": 0.7639232873916626
+      "importance": 0.7746763825416565
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.1242111325263977
+      "importance": 0.11686968058347702
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.04514319449663162
+      "importance": 0.04476886987686157
     },
     {
       "name": "market_asking_price",
-      "importance": 0.03423980623483658
-    },
-    {
-      "name": "model_name_TLX Technology Package Sedan",
-      "importance": 0.0022633348125964403
+      "importance": 0.03310123831033707
     },
     {
       "name": "odometer",
-      "importance": 0.00214424473233521
+      "importance": 0.002169486368075013
     },
     {
-      "name": "supplier_name_Manheim Orlando",
-      "importance": 0.0018440020503476262
+      "name": "body_type_SUV",
+      "importance": 0.0019633248448371887
     },
     {
-      "name": "body_type_Sedan",
-      "importance": 0.001715026330202818
+      "name": "model_name_TLX Technology Package Sedan",
+      "importance": 0.00193731056060642
+    },
+    {
+      "name": "days_on_lot",
+      "importance": 0.0017699029995128512
     }
   ]
 }

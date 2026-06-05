@@ -1,9 +1,9 @@
 {
   "make_name": "RAM",
-  "trained_at": "2026-06-03T08:30:36.906656Z",
-  "n_total": 737,
+  "trained_at": "2026-06-04T08:30:47.555405Z",
+  "n_total": 738,
   "n_train": 688,
-  "n_test": 49,
+  "n_test": 50,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -217,49 +217,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2864.0,
-    "mape_pct": 7.57,
-    "r2": 0.959,
-    "within_5pct": 51.0,
-    "within_10pct": 73.5
+    "mae_dollars": 3019.0,
+    "mape_pct": 7.65,
+    "r2": 0.9585,
+    "within_5pct": 50.0,
+    "within_10pct": 72.0
   },
   "baseline_metrics": {
-    "mae_dollars": 3663.0,
-    "mape_pct": 11.2,
+    "mae_dollars": 3921.0,
+    "mape_pct": 11.34,
     "ratio": 1.013
   },
   "top_features": [
     {
       "name": "base_appraised_value",
-      "importance": 0.3707738518714905
+      "importance": 0.3725031316280365
     },
     {
       "name": "market_asking_price",
-      "importance": 0.3089669644832611
+      "importance": 0.30782443284988403
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.21108026802539825
+      "importance": 0.2109878659248352
     },
     {
       "name": "supplier_name_Rick Hendrick Chrysler Dodge Jeep Ram Duluth",
-      "importance": 0.009279518388211727
+      "importance": 0.009322796948254108
     },
     {
       "name": "supplier_name_Alpha One Motors Llc",
-      "importance": 0.0060700601898133755
+      "importance": 0.006098370533436537
     },
     {
       "name": "supplier_name_Crown Euro Cars Inc.",
-      "importance": 0.0051375641487538815
+      "importance": 0.005161525681614876
     },
     {
       "name": "supplier_name_Lifted Trucks",
-      "importance": 0.004772333428263664
+      "importance": 0.00474539864808321
     },
     {
       "name": "model_name_1500 TRX SB Pickup Truck",
-      "importance": 0.004222303628921509
+      "importance": 0.004241995979100466
     }
   ]
 }

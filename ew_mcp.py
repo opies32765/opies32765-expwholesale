@@ -1174,7 +1174,7 @@ async def lookup_vin(vin: str) -> dict:
     return data
 
 
-def _lsl_data_query_impl(agg="list", agg_field="", group_by="", filters="", period="", order="desc", limit=25):
+def _lsl_data_query_impl(agg="list", agg_field="", group_by="", filters="", period="", order="desc", limit=25, basis="sold"):
     import sqlite3, os as _os, re as _re
     PATH = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
     ALLOWED = {"id","code","customer_name","customer_type","sales_person","sales_manager","booked_by",
@@ -1199,21 +1199,22 @@ def _lsl_data_query_impl(agg="list", agg_field="", group_by="", filters="", peri
         return {"error": "lsl ledger not found"}
     where, params, ignored = [], [], []
     p = (period or "").strip().lower()
+    _dc = "created_at" if str(basis).strip().lower().startswith("b") else "sold_at"
     pmap = {
-        "today": "date(sold_at)=date('now')",
-        "yesterday": "date(sold_at)=date('now','-1 day')",
-        "last_7_days": "sold_at >= date('now','-7 days')",
-        "last_30_days": "sold_at >= date('now','-30 days')",
-        "this_month": "strftime('%Y-%m',sold_at)=strftime('%Y-%m','now')",
-        "last_month": "strftime('%Y-%m',sold_at)=strftime('%Y-%m','now','-1 month')",
-        "ytd": "strftime('%Y',sold_at)=strftime('%Y','now')",
-        "this_year": "strftime('%Y',sold_at)=strftime('%Y','now')",
-        "last_year": "strftime('%Y',sold_at)=strftime('%Y','now','-1 year')",
+        "today": f"date({_dc})=date('now')",
+        "yesterday": f"date({_dc})=date('now','-1 day')",
+        "last_7_days": f"{_dc} >= date('now','-7 days')",
+        "last_30_days": f"{_dc} >= date('now','-30 days')",
+        "this_month": f"strftime('%Y-%m',{_dc})=strftime('%Y-%m','now')",
+        "last_month": f"strftime('%Y-%m',{_dc})=strftime('%Y-%m','now','-1 month')",
+        "ytd": f"strftime('%Y',{_dc})=strftime('%Y','now')",
+        "this_year": f"strftime('%Y',{_dc})=strftime('%Y','now')",
+        "last_year": f"strftime('%Y',{_dc})=strftime('%Y','now','-1 year')",
     }
     if p in pmap:
         where.append(pmap[p])
     elif _re.match(r"^\d{4}-\d{2}-\d{2}:\d{4}-\d{2}-\d{2}$", p):
-        a, b = p.split(":"); where.append("date(sold_at) BETWEEN ? AND ?"); params += [a, b]
+        a, b = p.split(":"); where.append(f"date({_dc}) BETWEEN ? AND ?"); params += [a, b]
     elif p and p != "all":
         ignored.append("period:" + p)
     for f in [x.strip() for x in (filters or "").split(";") if x.strip()]:
@@ -1270,7 +1271,7 @@ def _lsl_data_query_impl(agg="list", agg_field="", group_by="", filters="", peri
 
 
 @mcp.tool()
-async def lsl_data_query(agg: str = "list", agg_field: str = "", group_by: str = "", filters: str = "", period: str = "", order: str = "desc", limit: int = 25) -> dict:
+async def lsl_data_query(agg: str = "list", agg_field: str = "", group_by: str = "", filters: str = "", period: str = "", order: str = "desc", limit: int = 25, basis: str = "sold") -> dict:
     """OWNER. Flexible READ-ONLY query over the LSL sales ledger ('deals', ~28k sold cars). Use for ANY deals
     question the fixed tools don't cover: totals, averages, counts, rankings, lists by any field.
     agg: 'list' | 'count' | 'sum' | 'avg' | 'min' | 'max'. For sum/avg/min/max set agg_field.
@@ -1284,7 +1285,50 @@ async def lsl_data_query(agg: str = "list", agg_field: str = "", group_by: str =
     Avg days-on-lot per make -> agg='avg', agg_field='days_on_lot', group_by='make_name'.
     Count money-losing deals YTD -> agg='count', filters='front_value:lt:0', period='ytd'."""
     import asyncio
-    return await asyncio.to_thread(_lsl_data_query_impl, agg, agg_field, group_by, filters, period, order, limit)
+    return await asyncio.to_thread(_lsl_data_query_impl, agg, agg_field, group_by, filters, period, order, limit, basis)
+
+
+def _lsl_deal_parties_impl(query="", limit=10):
+    import sqlite3, os as _os, re as _re
+    PATH = _os.environ.get("LSL_DB_PATH", "/opt/livesaleslog/crm.db")
+    if not _os.path.exists(PATH):
+        return {"error": "lsl ledger not found"}
+    where, params = [], []
+    q = (query or "").strip()
+    if q:
+        if " " not in q and _re.match(r"^[A-Za-z0-9]{11,17}$", q):
+            where.append("UPPER(d.vin_no) LIKE ?"); params.append("%" + q.upper() + "%")
+        else:
+            where.append("(UPPER(d.vehicle_info) LIKE UPPER(?) OR UPPER(d.stock_no) LIKE UPPER(?))")
+            params += ["%" + q + "%", "%" + q + "%"]
+    wsql = (" WHERE " + " AND ".join(where)) if where else ""
+    lim = max(1, min(int(limit) if limit else 10, 50))
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % PATH, uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        cur = c.cursor()
+        cur.execute(
+            "SELECT d.vehicle_info, d.vin_no, d.stock_no, "
+            "COALESCE(i.source, d.supplier_name) AS bought_from, "
+            "i.customer_name AS sold_to, i.sale_status AS sale_status, "
+            "d.sales_person AS sales_rep, d.buyer_name AS our_buyer, "
+            "d.sale_price, d.sold_at "
+            "FROM deals d LEFT JOIN inventory i ON i.stock_no = d.stock_no"
+            + wsql + " ORDER BY d.sold_at DESC LIMIT ?", params + [lim])
+        rows = [dict(r) for r in cur.fetchall()]
+        c.close()
+        return {"n": len(rows), "rows": rows}
+    except Exception as e:
+        return {"error": "query failed: %s" % e}
+
+
+@mcp.tool()
+async def lsl_deal_parties(query: str = "", limit: int = 10) -> dict:
+    """OWNER. Who we BOUGHT a car FROM and who we SOLD it TO (BOTH dealers), plus the rep, for a
+    specific car or recent deals. query = VIN, stock number, or 'year make model' (e.g. '2022 VW Atlas');
+    empty = most recent deals. Returns per car: vehicle_info, bought_from (the dealer we bought from),
+    sold_to (the dealer we sold to), sales_rep, our_buyer, sale_status, sale_price, sold_at."""
+    return await asyncio.to_thread(_lsl_deal_parties_impl, query, limit)
 
 
 @mcp.tool()
@@ -1405,6 +1449,7 @@ async def lsl_deals_booked(
     caller_name: str,
     caller_pin: str = "",
     period: str = "yesterday",
+    basis: str = "sold",
 ) -> dict:
     """OWNER-GATED. Returns LSL deals booked + profit stats for a period.
     period: "yesterday" | "today" | "last_7_days" | "last_30_days" |
@@ -1550,6 +1595,9 @@ async def lsl_deals_booked(
             target = (_now - _td(days=days_back)).strftime("%Y-%m-%d")
             period_sql = f"sold_at >= '{target}' AND sold_at < date('{target}', '+1 day')"
 
+    if str(basis).strip().lower().startswith("b") and period_sql:
+        period_sql = period_sql.replace("sold_at", "created_at")
+
     if not period_sql:
         return {"error": f"unsupported period {period!r}; supported: yesterday/today/last_7_days/last_30_days/this_month/last_month/this_year/ytd/last_year/last_quarter/all_time, ISO date '2026-05-22', ISO range '2026-04-01:2026-04-24', month 'april' / 'april_2026' / 'april_mtd', weekday 'friday'/'last_monday'"}
 
@@ -1580,7 +1628,7 @@ async def lsl_deals_booked(
                    d.sold_at
               FROM deals d
               LEFT JOIN inventory i ON i.stock_no = d.stock_no
-             WHERE {period_sql.replace("sold_at","d.sold_at")}
+             WHERE {period_sql.replace("sold_at","d.sold_at").replace("created_at","d.created_at")}
                AND d.sale_price IS NOT NULL AND d.sale_price > 0
              ORDER BY d.sold_at DESC
              LIMIT 50
