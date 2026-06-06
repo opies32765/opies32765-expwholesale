@@ -377,7 +377,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
   <div class="vehicle-banner">
     <div class="vb-left">
       <div class="vb-meta">
-        <div class="bid-id">Bid #{{ bid.id }} · {{ time_ago(bid.created_at) }} <a href="#" onclick="forceReprocess(event, {{ bid.id }})" style="margin-left:10px;font-size:11px;color:#a78bfa;text-decoration:none;border:1px solid rgba(167,139,250,.3);border-radius:4px;padding:2px 8px;font-weight:600" title="Hard reset: wipe all 3 lookups + claim, queue for fresh worker pick-up">↻ Force re-process</a></div>
+        <div class="bid-id">Bid #{{ bid.id }} · {{ time_ago(bid.created_at) }} <a href="#" onclick="forceReprocess(event, {{ bid.id }})" style="margin-left:10px;font-size:11px;color:#a78bfa;text-decoration:none;border:1px solid rgba(167,139,250,.3);border-radius:4px;padding:2px 8px;font-weight:600" title="Hard reset: wipe all 3 lookups + claim, queue for fresh worker pick-up">↻ Force re-process</a> <a href="#" onclick="deleteBid(event, {{ bid.id }})" style="margin-left:8px;font-size:11px;color:#fca5a5;text-decoration:none;border:1px solid rgba(248,113,113,.4);border-radius:4px;padding:2px 8px;font-weight:600" title="Permanently delete this bid and all its data — cannot be undone">🗑 Delete</a></div>
         <div class="vin-big"{% if bid.vin_invalid_reason %} style="color:#fca5a5;text-decoration:line-through;text-decoration-color:rgba(220,38,38,.55)"{% endif %}>{{ bid.vin or 'No VIN' }}{% if bid.vin_invalid_reason %} <span title="VIN failed structural check: {{ bid.vin_invalid_reason }}. Worker pool will not pick this up — release any in-flight claim with Force re-process if you fix the VIN." style="display:inline-block;margin-left:8px;font-size:11px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:4px;padding:2px 8px;vertical-align:middle;letter-spacing:.5px;text-transform:uppercase;font-family:Inter,system-ui,sans-serif;text-decoration:none">⚠ INVALID VIN · {{ bid.vin_invalid_reason }}</span>{% endif %}{% if bid.needs_verification_at and not bid.needs_verification_cleared_at %} <span title="Awaiting verification — AI assessment paused until VIN/miles is confirmed" style="display:inline-block;margin-left:8px;font-size:11px;font-weight:800;color:#fbbf24;background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.55);border-radius:4px;padding:2px 8px;vertical-align:middle;letter-spacing:.5px;text-transform:uppercase;font-family:Inter,system-ui,sans-serif;text-decoration:none">⚠ VERIFY · {{ bid.needs_verification_reason or "data check" }}</span>{% endif %}</div>{% if bid.needs_verification_at and not bid.needs_verification_cleared_at %}<div style="margin-top:10px;padding:12px 14px;background:linear-gradient(180deg,rgba(245,158,11,.10),rgba(245,158,11,.04));border:1px solid rgba(245,158,11,.45);border-radius:8px;color:#fbbf24;font-size:13px;line-height:1.5;font-family:Inter,system-ui,sans-serif"><div style="font-weight:800;letter-spacing:.5px;text-transform:uppercase;font-size:11px;color:#fbbf24;margin-bottom:6px">⚠ Awaiting verification</div>{% if "miles_discrepancy" in (bid.needs_verification_reason or "") %}<div>Customer reported <b style="color:#fff">{{ "{:,}".format(bid.mileage or 0) }} mi</b>. {% if bid.miles_higher_source == "carfax" %}Carfax{% else %}AutoCheck{% endif %} shows <b style="color:#fff">{{ "{:,}".format(bid.miles_carfax if bid.miles_higher_source == "carfax" else bid.miles_autocheck) }} mi</b> as the most recent odometer (Δ +{{ "{:,}".format(bid.miles_discrepancy) }} mi).</div>{% endif %}{% if "vin_not_found" in (bid.needs_verification_reason or "") %}<div>AccuTrade has no data for VIN <code style="color:#fff;background:rgba(255,255,255,.08);padding:1px 5px;border-radius:3px">{{ bid.vin }}</code> — likely a 1-character typo.</div>{% endif %}{% if "vin_invalid" in (bid.needs_verification_reason or "") or bid.vin_invalid_reason %}<div>VIN failed structural check: {{ bid.vin_invalid_reason }}.</div>{% endif %}<div style="margin-top:8px;font-size:12px;color:#cbd5e1">AI assessment is paused. Edit the VIN or mileage in <b>Vehicle Details</b> below (or wait for SMS reply) — the bid will reprocess automatically once corrected.</div><div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button onclick="clearVerification({{ bid.id }}, true, false)" style="padding:7px 12px;background:#f59e0b;color:#0f172a;border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;font-family:Inter,system-ui,sans-serif;letter-spacing:.3px">✓ Clear flag &amp; reprocess</button><button onclick="clearVerification({{ bid.id }}, false, false)" style="padding:7px 12px;background:transparent;color:#fbbf24;border:1px solid rgba(251,191,36,.5);border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:Inter,system-ui,sans-serif">Clear flag only (skip reprocess)</button></div><!-- NEEDS_VERIFY_BID_HTML_2026_05_15 marker --></div>{% endif %}
         {% if vin_candidate %}
         <div style="margin-top:6px;padding:6px 10px;background:rgba(251,191,36,.10);border:1px solid rgba(251,191,36,.4);border-radius:6px;font-size:12px;color:#fbbf24;display:inline-flex;align-items:center;gap:8px;font-family:'JetBrains Mono',ui-monospace,monospace">
@@ -876,7 +876,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
          badge + the ↻ re-run affordance) so a stuck bid is never a dead end. #}
       {% if not show_sources %}
       <script>/* DISPLAY_HOLD_AUTOREFRESH_2026_06_01: the Analyzing banner promised it refreshes when ready but nothing was wired. Poll assess-status; reload once the bid is assessed so all sources (incl iPacket) reveal without a manual refresh. Bounded ~3min; 8-min aged-reveal is the backstop. */
-      (function(){ try { var bid='{{ bid.id }}', n=0; var t=setInterval(function(){ if(++n>60){ clearInterval(t); return; } fetch('/api/bid/'+bid+'/assess-status',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){ if(d && (d.done || d.ai_price)){ clearInterval(t); location.reload(); } }).catch(function(){}); }, 3000); } catch(e){} })();</script>
+      (function(){ try { var bid='{{ bid.id }}', n=0; var t=setInterval(function(){ if(++n>60){ clearInterval(t); return; } fetch('/api/bid/'+bid+'/assess-status',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){ if(d && (d.done || d.ai_price)){ clearInterval(t); _ewReloadGuarded(); } }).catch(function(){}); }, 3000); } catch(e){} })();</script>
       <div class="card" id="display-hold-card" style="flex-shrink:0;border-color:#3b2c0a;background:linear-gradient(180deg,rgba(245,158,11,.07),#0b0f19)">
         <div style="display:flex;align-items:center;gap:12px">
           <span style="width:14px;height:14px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 0 rgba(251,191,36,.6);animation:pulse 2s infinite;flex-shrink:0"></span>
@@ -2136,7 +2136,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
         {% if ipacket_data and ipacket_data.not_available %}
         <script>/* IPACKET_LATE_REFRESH_2026_06_02 (v3): show_sources/DECOUPLE reveals this card the moment an iPacket ROW exists, but the row starts as a not_available placeholder while the server PDF-pull (background thread ~10-15s) fills it. v2 only polled when NO row existed, so this placeholder state had no poller and the sticker only appeared on a manual refresh. v3 polls here too and reloads the instant a good sticker lands (has_sticker); ~46s give-up leaves genuine no-sticker VINs (Tesla/EV) showing NOT AVAILABLE. One cycle per bid per session. */
-        (function(){ try { var bid='{{ bid.id }}', k='ipkt_refresh_'+bid; if(sessionStorage.getItem(k)) return; var n=0; var t=setInterval(function(){ if(++n>23){ clearInterval(t); sessionStorage.setItem(k,'1'); return; } fetch('/api/ipacket/status/'+bid,{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){ if(d && d.has_sticker){ clearInterval(t); sessionStorage.setItem(k,'1'); location.reload(); } }).catch(function(){}); }, 2000); } catch(e){} })();</script>
+        (function(){ try { var bid='{{ bid.id }}', k='ipkt_refresh_'+bid; if(sessionStorage.getItem(k)) return; var n=0; var t=setInterval(function(){ if(++n>23){ clearInterval(t); sessionStorage.setItem(k,'1'); return; } fetch('/api/ipacket/status/'+bid,{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){ if(d && d.has_sticker){ clearInterval(t); sessionStorage.setItem(k,'1'); _ewReloadGuarded(); } }).catch(function(){}); }, 2000); } catch(e){} })();</script>
         <div style="font-size:13px;color:#64748b;font-style:italic;line-height:1.5">
           OEM window sticker not available for this VIN.
           {% if ipacket_data.unavailable_reason %}
@@ -2150,7 +2150,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
         {% elif not ipacket_data and bid.vin %}
         <script>/* IPACKET_LATE_REFRESH_2026_06_01 (v2 poll): poll /api/ipacket/status and reload the INSTANT iPacket goes terminal (sticker OR not-available) -- fires as soon as it lands (often 3-5s), not a blind 10s timer, and never reloads early. Once per bid; gives up ~40s. */
-        (function(){ try { var bid='{{ bid.id }}', k='ipkt_refresh_'+bid; if(sessionStorage.getItem(k)) return; var n=0; var t=setInterval(function(){ if(++n>20){ clearInterval(t); return; } fetch('/api/ipacket/status/'+bid,{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){ if(d && d.has_sticker){ clearInterval(t); sessionStorage.setItem(k,'1'); location.reload(); } }).catch(function(){}); }, 2000); } catch(e){} })();</script>
+        (function(){ try { var bid='{{ bid.id }}', k='ipkt_refresh_'+bid; if(sessionStorage.getItem(k)) return; var n=0; var t=setInterval(function(){ if(++n>20){ clearInterval(t); return; } fetch('/api/ipacket/status/'+bid,{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){ if(d && d.has_sticker){ clearInterval(t); sessionStorage.setItem(k,'1'); _ewReloadGuarded(); } }).catch(function(){}); }, 2000); } catch(e){} })();</script>
         <div style="font-size:13px;color:#94a3b8;line-height:1.5">
           iPacket sticker not yet available — workers will pull automatically.
         </div>
@@ -2212,7 +2212,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 {# which is a position:fixed overlay outside .page so it has its own       #}
 {# scroll context and doesn't interfere with the AccuTrade card's          #}
 {# height:100% layout dependencies.                                         #}
-<div onclick="lslOpenModal()"
+<div onclick="lslwOpen()"
      style="margin:14px 20px 16px;padding:11px 18px;border:1px solid #7c3aed;border-radius:8px;background:linear-gradient(180deg,rgba(124,58,237,.10),rgba(15,23,42,.0));color:#a78bfa;font-weight:700;font-size:12px;letter-spacing:.5px;text-transform:uppercase;cursor:pointer;display:flex;justify-content:space-between;align-items:center;user-select:none;flex-shrink:0">
   <span>▸ Book to LSL</span>
   {% if bid.lsl_pushed_at %}
@@ -2559,10 +2559,12 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
   // Lazy-load reps on first open so collapsed state has zero cost.
   window.lslOpenModal = function() {
     document.getElementById('lsl-book-modal').style.display = 'block';
+    window.__ewHoldReload = true;
     if (!LSL_REPS_LOADED) { LSL_REPS_LOADED = true; lslLoadReps(); }
   };
   window.lslCloseModal = function() {
     document.getElementById('lsl-book-modal').style.display = 'none';
+    window.__ewHoldReload = false;
   };
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
@@ -3387,7 +3389,7 @@ setInterval(pollMessages, 3000);
       const d = await r.json();
       if (d.status === 'complete') {
         clearInterval(_vautoPoll);
-        location.reload();
+        _ewReloadGuarded();
       }
     } catch(e) {}
   }
@@ -3405,7 +3407,7 @@ setInterval(pollMessages, 3000);
       const d = await r.json();
       if (d.status === 'complete' || d.status === 'not_available') {
         clearInterval(_atPoll);
-        location.reload();
+        _ewReloadGuarded();
       }
     } catch(e) {}
   }
@@ -3423,7 +3425,7 @@ setInterval(pollMessages, 3000);
       const d = await r.json();
       if (d.status === 'complete' || d.status === 'not_available') {
         clearInterval(_ipPoll);
-        location.reload();
+        _ewReloadGuarded();
       }
     } catch(e) {}
   }
@@ -3663,7 +3665,7 @@ async function submitShare(action) {
     try {
       const r = await fetch(`/api/bid/${BID_ID}/assess-status`);
       const d = await r.json();
-      if (d.ai_price != null || d.done) { clearInterval(_assessPoll); location.reload(); }
+      if (d.ai_price != null || d.done) { clearInterval(_assessPoll); _ewReloadGuarded(); }
     } catch(e) {}
   }
   _assessPoll = setInterval(checkAssess, 5000);
@@ -3717,6 +3719,18 @@ function forceReprocess(e, bid_id){
         setTimeout(() => location.reload(), 800);
       } else { alert("Failed: " + (d.error||"unknown")); }
     });
+}
+
+function deleteBid(e, bid_id){
+  e.preventDefault();
+  if(!confirm("Permanently delete bid #" + bid_id + "?\n\nThis removes the bid and ALL its data (photos, valuations, lookups, messages).\nThis cannot be undone.")) return;
+  fetch("/api/admin/bid/" + bid_id + "/delete", {method:"POST"})
+    .then(r => r.json())
+    .then(d => {
+      if(d.ok){ window.location.href = "/"; }
+      else { alert("Delete failed: " + (d.error||"unknown")); }
+    })
+    .catch(err => alert("Delete failed: " + err));
 }
 
 // ── Operator estimate (independent of AI) ──────────────────────────────
@@ -3774,6 +3788,8 @@ async function clearEstimate() {
 //   - the Share modal overlay is open (don't dismiss it mid-action)
 //   - hidden tab (no point reloading in the background)
 //   - <5 s since last reload (avoid double-fires with the 4 enrichment pollers)
+window.__ewHoldReload = window.__ewHoldReload || false;
+window._ewReloadGuarded = function(){ if (window.__ewHoldReload) return false; location.reload(); return true; };
 (function _autoRefresh() {
   // AUTO_REFRESH_MODAL_GUARDS_2026_05_20: don't reload while the user
   // is reading a modal/lightbox. Was only checking .share-overlay.show
@@ -3781,6 +3797,7 @@ async function clearEstimate() {
   // were being yanked closed mid-read. Now bails on ANY visible modal.
   let lastReload = Date.now();
   setInterval(() => {
+    if (window.__ewHoldReload) return;
     if (document.hidden) return;
     if (Date.now() - lastReload < 5000) return;
     const a = document.activeElement;
@@ -3796,5 +3813,6 @@ async function clearEstimate() {
 })();
 </script>
 
+<script src="/static/lsl_wizard.js?v=1"></script>
 </body>
 </html>

@@ -1199,7 +1199,7 @@ def _lsl_data_query_impl(agg="list", agg_field="", group_by="", filters="", peri
         return {"error": "lsl ledger not found"}
     where, params, ignored = [], [], []
     p = (period or "").strip().lower()
-    _dc = "created_at" if str(basis).strip().lower().startswith("b") else "sold_at"
+    _dc = "created_at" if str(basis).strip().lower().startswith("b") else "sold_at"  # bought=acquisition (created_at) vs sold/booked=sold_at; confirmed w/ operator 2026-06-05
     pmap = {
         "today": f"date({_dc})=date('now')",
         "yesterday": f"date({_dc})=date('now','-1 day')",
@@ -1309,10 +1309,12 @@ def _lsl_deal_parties_impl(query="", limit=10):
         cur = c.cursor()
         cur.execute(
             "SELECT d.vehicle_info, d.vin_no, d.stock_no, "
-            "COALESCE(i.source, d.supplier_name) AS bought_from, "
-            "i.customer_name AS sold_to, i.sale_status AS sale_status, "
+            "COALESCE(i.source, d.source_name) AS bought_from, "
+            "COALESCE(i.customer_name, d.customer_name) AS sold_to, i.sale_status AS sale_status, "
             "d.sales_person AS sales_rep, d.buyer_name AS our_buyer, "
-            "d.sale_price, d.sold_at "
+            "d.purchase_cost, d.sale_price, "
+            "(COALESCE(d.sale_price,0) - COALESCE(d.purchase_cost,0) - COALESCE(d.total_supp_costs,0)) AS profit, "
+            "d.sold_at "
             "FROM deals d LEFT JOIN inventory i ON i.stock_no = d.stock_no"
             + wsql + " ORDER BY d.sold_at DESC LIMIT ?", params + [lim])
         rows = [dict(r) for r in cur.fetchall()]
@@ -1595,6 +1597,8 @@ async def lsl_deals_booked(
             target = (_now - _td(days=days_back)).strftime("%Y-%m-%d")
             period_sql = f"sold_at >= '{target}' AND sold_at < date('{target}', '+1 day')"
 
+    # basis=bought -> created_at (acquisition/purchase date); basis=sold -> sold_at (booked date,
+    # matches LSL "Deals - Booked"). Confirmed w/ operator 2026-06-05 (Ferrari bought today; Mon booked=0).
     if str(basis).strip().lower().startswith("b") and period_sql:
         period_sql = period_sql.replace("sold_at", "created_at")
 
