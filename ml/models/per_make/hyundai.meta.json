@@ -1,9 +1,9 @@
 {
   "make_name": "HYUNDAI",
-  "trained_at": "2026-06-05T08:30:55.018140Z",
-  "n_total": 348,
+  "trained_at": "2026-06-06T08:30:56.452329Z",
+  "n_total": 351,
   "n_train": 329,
-  "n_test": 19,
+  "n_test": 22,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1388.0,
-    "mape_pct": 5.92,
-    "r2": 0.9131,
-    "within_5pct": 52.6,
-    "within_10pct": 78.9
+    "mae_dollars": 1356.0,
+    "mape_pct": 6.02,
+    "r2": 0.9159,
+    "within_5pct": 50.0,
+    "within_10pct": 77.3
   },
   "baseline_metrics": {
-    "mae_dollars": 1607.0,
-    "mape_pct": 6.51,
+    "mae_dollars": 1702.0,
+    "mape_pct": 7.31,
     "ratio": 1.0168
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.3504702150821686
+      "importance": 0.3540082275867462
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.21809075772762299
+      "importance": 0.2185058742761612
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.14360739290714264
+      "importance": 0.1370471864938736
     },
     {
       "name": "supplier_name_Lifetime Automotive Group",
-      "importance": 0.049102503806352615
+      "importance": 0.04685942828655243
     },
     {
       "name": "year",
-      "importance": 0.016765043139457703
-    },
-    {
-      "name": "model_name_Tucson",
-      "importance": 0.013018366880714893
+      "importance": 0.018763411790132523
     },
     {
       "name": "original_msrp",
-      "importance": 0.012692463584244251
+      "importance": 0.013485339470207691
+    },
+    {
+      "name": "model_name_Tucson",
+      "importance": 0.012423668056726456
     },
     {
       "name": "model_name_Tucson SE Sport Utility Vehicle",
-      "importance": 0.012445910833775997
+      "importance": 0.011877362616360188
     }
   ]
 }

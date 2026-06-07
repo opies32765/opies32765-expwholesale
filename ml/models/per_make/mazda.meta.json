@@ -1,9 +1,9 @@
 {
   "make_name": "MAZDA",
-  "trained_at": "2026-06-05T08:31:00.046726Z",
-  "n_total": 319,
+  "trained_at": "2026-06-06T08:31:01.721143Z",
+  "n_total": 323,
   "n_train": 311,
-  "n_test": 8,
+  "n_test": 12,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1013.0,
-    "mape_pct": 4.32,
-    "r2": 0.9615,
-    "within_5pct": 62.5,
+    "mae_dollars": 1208.0,
+    "mape_pct": 5.19,
+    "r2": 0.9309,
+    "within_5pct": 41.7,
     "within_10pct": 100.0
   },
   "baseline_metrics": {
-    "mae_dollars": 1278.0,
-    "mape_pct": 6.01,
+    "mae_dollars": 919.0,
+    "mape_pct": 4.3,
     "ratio": 1.013
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.5220986604690552
+      "importance": 0.5177043080329895
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.22981630265712738
+      "importance": 0.23485615849494934
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.04786965996026993
+      "importance": 0.05201828107237816
     },
     {
       "name": "original_msrp",
-      "importance": 0.02083389088511467
-    },
-    {
-      "name": "model_name_MAZDA3 Preferred Hatchback",
-      "importance": 0.0100296251475811
-    },
-    {
-      "name": "model_name_OTHER",
-      "importance": 0.009204288944602013
+      "importance": 0.02277717925608158
     },
     {
       "name": "odometer",
-      "importance": 0.009037669748067856
+      "importance": 0.009394318796694279
+    },
+    {
+      "name": "model_name_OTHER",
+      "importance": 0.00861779972910881
+    },
+    {
+      "name": "model_name_MAZDA3 Preferred Hatchback",
+      "importance": 0.008573060855269432
     },
     {
       "name": "year",
-      "importance": 0.008192714303731918
+      "importance": 0.008476907387375832
     }
   ]
 }

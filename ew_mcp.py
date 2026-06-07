@@ -1248,8 +1248,10 @@ def _lsl_data_query_impl(agg="list", agg_field="", group_by="", filters="", peri
         cur = c.cursor()
         try:
             if agg == "list":
-                cur.execute("SELECT make_name,vehicle_info,sales_person,sale_price,front_value,days_on_lot,supplier_name,buyer_name,sold_at FROM deals%s ORDER BY sold_at %s LIMIT ?" % (wsql, od), params + [lim])
-                out = {"n": cur.rowcount, "rows": [dict(r) for r in cur.fetchall()]}
+                _sortcol = af if af else "sold_at"   # rank lists by the requested field (front_value/days_on_lot/...) not just recency
+                cur.execute("SELECT make_name,vehicle_info,sales_person,sale_price,front_value,days_on_lot,supplier_name,buyer_name,sold_at FROM deals%s ORDER BY %s %s LIMIT ?" % (wsql, _sortcol, od), params + [lim])
+                _rows = [dict(r) for r in cur.fetchall()]
+                out = {"n": len(_rows), "rows": _rows, "sorted_by": _sortcol}
             else:
                 fn = {"count": "COUNT(*)", "sum": "SUM(%s)" % af if af else None, "avg": "ROUND(AVG(%s),1)" % af if af else None,
                       "min": "MIN(%s)" % af if af else None, "max": "MAX(%s)" % af if af else None}.get(agg)
