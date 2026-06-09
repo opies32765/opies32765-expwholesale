@@ -119,6 +119,7 @@ EW_PASSWORD = os.environ.get('EW_PASSWORD', 'Sedecrem3')
 
 # Paths that don't require login
 _PUBLIC_PREFIXES = (
+    '/api/market_check/',  # fleet market_check worker (X-Auth gated in handler)
     '/login', '/mobile', '/webhook/', '/static/', '/thumb', '/p/',
     '/vauto_reports/', '/service-worker', '/privacy', '/terms',
     '/api/mobile-submit', '/api/rep-bids', '/api/register-rep',
@@ -3067,6 +3068,24 @@ def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
         elif match:
             match['used'] = True
             vin, miles, src = match['vin'], match['miles'], f'[caption-match] photo {i + 1}/{num_media} VIN from text'
+            # ODO_FROM_CAPTION_MATCH_2026_06_08: this photo had no VIN (that's
+            # why it landed here) and is usually an odometer/dash shot. The
+            # caption carries the VIN but often not miles -- read the odometer
+            # off the photo instead of flagging missing_miles (mirrors the
+            # lone-photo caption-pair block below). Bid 2655: F-150 dash read
+            # 081627 the old path discarded.
+            if not miles and img_bytes:
+                try:
+                    _odo_raw = gemini_call(ODO_PROMPT, image_bytes=img_bytes,
+                                           mime=media_type, model='gemini-3.5-flash',
+                                           max_tokens=20, temperature=0)
+                    _odo_digits = re.sub(r'[^0-9]', '', _odo_raw or '')
+                    _odo_n = int(_odo_digits) if _odo_digits else 0
+                    if 100 <= _odo_n <= 400000:
+                        miles = _odo_n
+                        print(f'[caption-match] odo read from photo: {miles}', flush=True)
+                except Exception as _oe:
+                    print(f'[caption-match] odo read err: {_oe}', flush=True)
         else:
             vin, miles, src = None, None, None
 
@@ -4291,6 +4310,12 @@ def bid_detail(bid_id):
         print(f'[bid_detail] match_dealers err: {_mm_err}', flush=True)
         match_detail = {}
         no_model_in_network = False
+    # FOUND_AT_2026_06_08: where is this exact VIN currently listed?
+    try:
+        found_at = _found_at_for_bid(bid.get('id'), bid.get('vin'), bid.get('market_check'))
+    except Exception as _fa_e:
+        print(f'[bid_detail] found_at err: {_fa_e}', flush=True)
+        found_at = {'dealers': [], 'marketplaces': []}
     _mark('match_dealers')
 
     _handler_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
@@ -4341,6 +4366,7 @@ def bid_detail(bid_id):
                                 partner_offers=partner_offers,
                                 bid_network_claim=bid_network_claim,
                                 match_dealers=match_dealers,
+                                found_at=found_at,
                                 match_detail=match_detail,
                                 no_model_in_network=no_model_in_network,
                                 time_ago=time_ago)
@@ -6474,8 +6500,9 @@ def trigger_market_check(bid_id, vin):
     if not vin or len(vin) != 17:
         return
     import threading
-    t = threading.Thread(target=_run_market_check_playwright, args=(bid_id, vin), daemon=True)
-    t.start()
+    # MARKET_CHECK_FLEET_2026_06_08: C1 Playwright thread removed (no browser on
+    # C1, it always failed). market_check now runs on the worker fleet via
+    # /api/market_check/pending + /submit -- bid stays NULL until a worker posts.
     # Phase 3 canonicalizer — runs in its own daemon thread, opens its own
     # DB conn, never blocks request hot path.
     try:
@@ -6521,6 +6548,69 @@ def market_status(bid_id):
     if not row:
         return jsonify({'error': 'Not found'}), 404
     return jsonify({'ready': row['market_check'] is not None, 'data': row['market_check']})
+
+
+@app.route('/api/market_check/pending', methods=['GET'])
+def api_market_check_pending():
+    """MARKET_CHECK_FLEET_2026_06_08: a fleet worker (headed Chrome on a home-IP
+    VM) claims one bid that still needs a marketplace check. Auth: X-Auth header
+    == env EW_MARKET_CHECK_SECRET (default below)."""
+    import os as _os
+    _exp = (_os.environ.get('EW_MARKET_CHECK_SECRET') or 'ew-mc-2026').strip()
+    if (request.headers.get('X-Auth') or '').strip() != _exp:
+        return jsonify({'error': 'bad auth'}), 401
+    _w = (request.args.get('worker') or 'mc-worker')[:48]
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("""
+            WITH cand AS (
+              SELECT id FROM bids
+               WHERE vin IS NOT NULL AND length(vin)=17
+                 AND NOT jsonb_exists(COALESCE(market_check,'{}'::jsonb), 'cars_com')
+                 AND (market_check_claimed_at IS NULL
+                      OR market_check_claimed_at < NOW() - INTERVAL '10 minutes')
+                 AND created_at > NOW() - INTERVAL '45 days'
+                 AND COALESCE(status,'') NOT IN ('cancelled','rejected','duplicate','archived','dead')
+               ORDER BY created_at DESC
+               LIMIT 1
+               FOR UPDATE SKIP LOCKED
+            )
+            UPDATE bids b SET market_check_claimed_by=%s, market_check_claimed_at=NOW()
+              FROM cand WHERE b.id=cand.id
+            RETURNING b.id, b.vin
+        """, (_w,))
+        row = cur.fetchone(); db.commit(); db.close()
+        if not row:
+            return jsonify({'pending': None})
+        return jsonify({'pending': {'bid_id': row['id'], 'vin': row['vin']}})
+    except Exception as _e:
+        try: db.close()
+        except Exception: pass
+        return jsonify({'error': str(_e)[:140]}), 500
+
+
+@app.route('/api/market_check/submit', methods=['POST'])
+def api_market_check_submit():
+    """Fleet worker posts marketplace results:
+    {bid_id, results:{cars_com:{found,url}, autotrader:{found,url}, ...}}."""
+    import os as _os, json as _json
+    _exp = (_os.environ.get('EW_MARKET_CHECK_SECRET') or 'ew-mc-2026').strip()
+    if (request.headers.get('X-Auth') or '').strip() != _exp:
+        return jsonify({'error': 'bad auth'}), 401
+    data = request.get_json(silent=True) or {}
+    bid_id = data.get('bid_id'); results = data.get('results')
+    if not bid_id or not isinstance(results, dict):
+        return jsonify({'error': 'bid_id + results(dict) required'}), 400
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("UPDATE bids SET market_check=%s, market_check_claimed_by=NULL WHERE id=%s",
+                    (_json.dumps(results), bid_id))
+        db.commit(); db.close()
+        return jsonify({'ok': True, 'bid_id': bid_id})
+    except Exception as _e:
+        try: db.close()
+        except Exception: pass
+        return jsonify({'error': str(_e)[:140]}), 500
 
 
 @app.route('/api/bid/<int:bid_id>/detect-color', methods=['POST'])
@@ -10481,15 +10571,22 @@ def api_admin_bulk_upload_parse():
     duplicate-VIN check against the existing bids table (open bids only).
     Does NOT insert anything."""
     f = request.files.get('file')
-    if not f:
-        return jsonify({'error': 'file required'}), 400
+    paste_text = (request.form.get('paste_text') or '').strip()
     try:
-        from bulk_upload import parse_upload
-        rows = parse_upload(f.filename, f.read())
+        if f and f.filename:
+            from bulk_upload import parse_upload
+            rows = parse_upload(f.filename, f.read())
+            src_label = f.filename
+        elif paste_text:
+            from bulk_upload import parse_pasted_text
+            rows = parse_pasted_text(paste_text, gemini_call)
+            src_label = 'pasted list'
+        else:
+            return jsonify({'error': 'file or pasted text required'}), 400
     except Exception as e:
         return jsonify({'error': f'parse failed: {type(e).__name__}: {e}'}), 400
     if not rows:
-        return jsonify({'error': 'no recognizable rows found in file'}), 400
+        return jsonify({'error': 'no recognizable vehicles found'}), 400
 
     # Duplicate check: a row is a dupe if a non-cancelled bid with the same
     # VIN exists. Returns the most recent matching bid's id.
@@ -10514,7 +10611,7 @@ def api_admin_bulk_upload_parse():
     for r in rows:
         if r.get('vin') and r['vin'] in dupe_map:
             r['duplicate_of'] = dupe_map[r['vin']]
-    return jsonify({'filename': f.filename, 'rows': rows})
+    return jsonify({'filename': src_label, 'rows': rows})
 
 
 def _stagger_kick_market_check(bid_ids_vins, delay_seconds):
@@ -10983,6 +11080,22 @@ def api_thalist_post():
     post_type_name = (data.get('post_type_name') or '').strip() or None
     if post_type_code and post_type_code not in ('WI', 'BL'):
         post_type_code = None  # ignore anything unexpected from the scraper
+
+    # -- Blocked-poster gate (defense-in-depth; the scraper also filters) --
+    # Calabasas Luxury Motorcars / Michael Simon evades the scraper name
+    # filter by re-posting as test with no company_id from his 91302 lot
+    # (2026-06-07 incident -> bids #2602-2606). Block by name OR by the
+    # Calabasas zip when the post is anonymous (no company_id).
+    _bl_names = ('michael simon', 'calabasas luxury motorcars', 'test')
+    _pn = (poster_name or '').lower()
+    _pc = (poster_company or '').lower()
+    if (any(b in _pn or b in _pc for b in _bl_names)
+            or ((location_zip or '').strip() == '91302' and not poster_company_id)):
+        print(f'[thalist] BLOCKED poster name={_pn!r} company={_pc!r} '
+              f'zip={location_zip!r} company_id={poster_company_id} '
+              f'post={post_id}', flush=True)
+        return jsonify({'ok': True, 'status': 'blocked',
+                        'reason': 'blocked_poster'}), 200
 
     db = get_db()
     cur = db.cursor()
@@ -17977,9 +18090,43 @@ def api_reports():
         group_by = "created_at::date"
         fmt = 'day'
 
+    # REPORTS_EXCLUDE_TEST_BIDS_2026_06_08: never count the operator's own
+    # test traffic in /reports -- texts from the operator cell + quick-drops
+    # from the operator's IP(s). Add to the two lists below to extend.
+    _TEST_BID_DIGITS = '4074309675'
+    _TEST_BID_IPS = ['108.64.163.112']  # operator home IP (50.253.x was NOT operator)
+    _ip_sql = ','.join("'" + _ip.replace("'", "") + "'" for _ip in _TEST_BID_IPS)
+    # NULL-safe: a bid is EXCLUDED from /reports if it is operator test traffic
+    # (cell text or quick-drop from an operator IP) OR a bulk_upload list.
+    # coalesce() everywhere so NULL phone/source/ip rows are KEPT, not dropped.
+    _test_excl = (
+        "NOT ("
+        "regexp_replace(coalesce(phone,''),'[^0-9]','','g') LIKE '%%" + _TEST_BID_DIGITS + "'"
+        " OR (coalesce(creation_source,'')='quick_drop' AND coalesce(creation_ip,'') IN (" + _ip_sql + "))"
+        " OR coalesce(creation_source,'')='bulk_upload'"
+        ")"
+    )
+    # DEDUP_2026_06_08: count each car once. Drop a bid if a LATER bid (higher
+    # id) with the same 17-char VIN exists within the same period+filter --
+    # keep only the most-recent appraisal per VIN. Null/short VINs always kept.
+    _where_b2 = where.replace('created_at', 'b2.created_at')
+    _test_excl_b2 = (
+        "NOT ("
+        "regexp_replace(coalesce(b2.phone,''),'[^0-9]','','g') LIKE '%%" + _TEST_BID_DIGITS + "'"
+        " OR (coalesce(b2.creation_source,'')='quick_drop' AND coalesce(b2.creation_ip,'') IN (" + _ip_sql + "))"
+        " OR coalesce(b2.creation_source,'')='bulk_upload'"
+        ")"
+    )
+    _dedup = (
+        "(vin IS NULL OR length(vin) <> 17 OR NOT EXISTS ("
+        "SELECT 1 FROM bids b2 WHERE b2.vin = bids.vin AND b2.id > bids.id"
+        " AND (" + _where_b2 + ") AND " + _test_excl_b2 + "))"
+    )
+    where_excl = f"({where}) AND {_test_excl} AND {_dedup}"
+
     cur.execute(f"""
         SELECT {group_by} as period, status, COUNT(*) as cnt
-        FROM bids WHERE {where}
+        FROM bids WHERE {where_excl}
         GROUP BY period, status ORDER BY period
     """)
     rows = cur.fetchall()
@@ -17998,7 +18145,7 @@ def api_reports():
         data[d][r['status']] = int(r['cnt'])
         data[d]['total'] += int(r['cnt'])
 
-    cur.execute(f"SELECT status, COUNT(*) as cnt FROM bids WHERE {where} GROUP BY status")
+    cur.execute(f"SELECT status, COUNT(*) as cnt FROM bids WHERE {where_excl} GROUP BY status")
     totals = {'new': 0, 'reviewing': 0, 'bid_sent': 0, 'bought': 0, 'passed': 0, 'total': 0}
     for r in cur.fetchall():
         totals[r['status']] = int(r['cnt'])
@@ -18012,7 +18159,7 @@ def api_reports():
         totals['pass_rate'] = 0
 
     # Date range label
-    cur.execute(f"SELECT MIN(created_at)::date as start_date, MAX(created_at)::date as end_date FROM bids WHERE {where}")
+    cur.execute(f"SELECT MIN(created_at)::date as start_date, MAX(created_at)::date as end_date FROM bids WHERE {where_excl}")
     range_row = cur.fetchone()
     range_label = ''
     if range_row and range_row['start_date']:
@@ -20709,6 +20856,57 @@ def _load_match_detail(cur, bid, dealer_ids):
             _parts.append("Between fills — no exact-fit on the lot right now")
         slot['why_match'] = ". ".join(_parts) + "." if _parts else ""
 
+    return out
+
+
+def _found_at_for_bid(bid_id, vin, market_check=None):
+    """FOUND_AT_2026_06_08: where is THIS exact VIN currently listed? Returns
+    {'dealers':[...], 'marketplaces':[...]}. Dealer rows come from scraped
+    dealer_inventory (price + days-on-lot + url); marketplace rows from the
+    bid's market_check JSONB (cars.com/autotrader/cargurus, fleet-populated)."""
+    out = {'dealers': [], 'marketplaces': [], 'vauto_found': None}
+    if not vin or len(vin) != 17:
+        return out
+    try:
+        _db = get_db(); _c = _db.cursor()
+        _c.execute("""
+            SELECT d.name AS dealer, d.portal_slug AS slug, di.price,
+                   di.url, di.verified_days_on_lot AS dol, di.status
+              FROM dealer_inventory di
+              JOIN dealers d ON d.id = di.dealer_id
+             WHERE upper(di.vin) = upper(%s)
+               AND COALESCE(di.status,'active') NOT IN ('sold','removed','gone','inactive')
+             ORDER BY di.last_seen_at DESC NULLS LAST
+             LIMIT 12
+        """, (vin,))
+        for r in _c.fetchall():
+            out['dealers'].append({'dealer': r['dealer'], 'slug': r['slug'],
+                                   'price': r['price'], 'url': r['url'],
+                                   'dol': r['dol'], 'status': r['status']})
+        _db.close()
+    except Exception as _e:
+        print(f'[found_at] dealer query err: {_e}', flush=True)
+    _mc = market_check or {}
+    for _k, _label in (('cars_com', 'Cars.com'), ('autotrader', 'Autotrader'),
+                       ('cargurus', 'CarGurus'), ('bat', 'Bring a Trailer')):
+        _v = _mc.get(_k)
+        if isinstance(_v, dict) and _v.get('found'):
+            out['marketplaces'].append({'site': _label, 'url': _v.get('url') or ''})
+    try:
+        _db2 = get_db(); _c2 = _db2.cursor()
+        _c2.execute("SELECT rbook_competitive_set->'found_online' AS fo FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+        _r2 = _c2.fetchone(); _db2.close()
+        _fo = _r2['fo'] if _r2 else None
+        if isinstance(_fo, str):
+            import json as _j2
+            try: _fo = _j2.loads(_fo)
+            except Exception: _fo = None
+        if isinstance(_fo, dict) and _fo.get('seller'):
+            out['vauto_found'] = {'seller': _fo.get('seller'), 'age': _fo.get('age'),
+                                  'price': _fo.get('price'), 'url': _fo.get('detail_uri'),
+                                  'distance': _fo.get('distance')}
+    except Exception as _e:
+        print(f'[found_at] found_online err: {_e}', flush=True)
     return out
 
 

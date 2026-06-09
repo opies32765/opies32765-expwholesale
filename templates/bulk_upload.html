@@ -80,8 +80,13 @@
         <input type="file" id="file" accept=".xlsx,.xlsm,.csv,.tsv,.txt" />
       </div>
       <div style="display:flex; align-items:flex-end;">
-        <button id="btn-parse">Parse file</button>
+        <button id="btn-parse">Parse</button>
       </div>
+    </div>
+    <div style="margin-top:14px;">
+      <label>Or paste a dealer's email / auction list here</label>
+      <textarea id="paste_text" rows="8" placeholder="Paste the dealer's email or auction run list - VINs, prices, year/make/model in any layout - then click Parse."></textarea>
+      <div style="font-size:12px; color:#6b7280; margin-top:4px;">AI reads the pasted text and pulls out each vehicle - works with messy forwarded emails, auction run lists, and cell-per-line tables. No odometer? Bids come in flagged for a quick miles add.</div>
     </div>
     <div style="margin-top:10px;">
       <label style="font-weight:normal;">
@@ -161,7 +166,8 @@ document.getElementById('btn-parse').onclick = async () => {
     sourceEl.focus();
     return;
   }
-  if (!f) { statusEl.textContent = 'Pick a file first.'; statusEl.className = 'status-line err'; return; }
+  const pasteText = (document.getElementById('paste_text').value || '').trim();
+  if (!f && !pasteText) { statusEl.textContent = 'Pick a file or paste a list first.'; statusEl.className = 'status-line err'; return; }
   // Reset prior preview state so a second click doesn't show stale rows
   parsed = [];
   document.querySelector('#preview-table tbody').innerHTML = '';
@@ -171,7 +177,7 @@ document.getElementById('btn-parse').onclick = async () => {
   statusEl.className = 'status-line';
   btn.disabled = true;
   const fd = new FormData();
-  fd.append('file', f);
+  if (f) { fd.append('file', f); } else { fd.append('paste_text', pasteText); }
   fd.append('source_name', document.getElementById('source_name').value);
   if (document.getElementById('require_price').checked) {
     fd.append('require_price', '1');

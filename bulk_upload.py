@@ -772,3 +772,106 @@ def parse_upload(filename: str, file_bytes: bytes,
                 if isinstance(r.get('asking_price'), (int, float))
                 and r['asking_price'] > 0]
     return rows
+
+
+# -- PASTE_INTAKE_2026_06_08 -------------------------------------------------
+# Parse a pasted dealer email / auction run-list / freeform vehicle list into
+# the same candidate-row shape as parse_upload(), using an LLM to read any
+# layout (cell-per-line, tab tables, prose emails). The caller passes its
+# gemini_call function so this module stays import-free of app.py.
+import json as _json
+
+
+def _json_array_salvage(raw):
+    """Pull a JSON array of objects out of an LLM response that may include
+    prose, ```fences```, or a truncated tail."""
+    s = (raw or '').strip()
+    if s.startswith('```'):
+        s = re.sub(r'^```[a-zA-Z]*\s*', '', s)
+        s = re.sub(r'\s*```$', '', s).strip()
+    try:
+        v = _json.loads(s)
+        if isinstance(v, list):
+            return v
+        if isinstance(v, dict):
+            for val in v.values():
+                if isinstance(val, list):
+                    return val
+            return [v]
+    except Exception:
+        pass
+    a = s.find('[')
+    b = s.rfind(']')
+    if a != -1 and b > a:
+        try:
+            v = _json.loads(s[a:b + 1])
+            if isinstance(v, list):
+                return v
+        except Exception:
+            pass
+    objs = []
+    for m in re.finditer(r'\{[^{}]*\}', s):
+        try:
+            objs.append(_json.loads(m.group(0)))
+        except Exception:
+            pass
+    return objs
+
+
+_PASTE_PROMPT = (
+    "You are extracting vehicles from a wholesale/auction vehicle list or a "
+    "used-car dealer's email that was pasted in. Return ONLY a JSON array "
+    "(no prose, no markdown fences). One object per VEHICLE with keys: "
+    "desc (verbatim year make model trim/body text as written), "
+    "vin (17-char VIN string or null), "
+    "mileage (odometer integer, or null if not shown), "
+    "price (per-car asking/floor/buy price as an integer, $ and commas "
+    "stripped, or null), "
+    "stock (stock number string or null), "
+    "extra (any other per-car detail: auction grade, MMR/book value, color, "
+    "location, condition).\n"
+    "Rules: one object per distinct vehicle; never invent or merge vehicles. "
+    "Ignore column headers, titles, totals, greetings, signatures, "
+    "disclaimers, and non-vehicle lines. VIN must be exactly 17 chars "
+    "[A-HJ-NPR-Z0-9]; if partial or missing use null. If a row shows both a "
+    "book/MMR value AND a separate asking/floor price, use the asking/floor "
+    "as price and put the MMR in extra. Only report mileage when an actual "
+    "odometer reading is shown; never guess. Return [] if no vehicles.\n\n"
+    "LIST:\n"
+)
+
+
+def parse_pasted_text(text, gemini_fn):
+    """Parse a pasted vehicle list/email into parse_upload()-shaped rows.
+
+    gemini_fn(prompt, max_tokens=..., temperature=...) -> str | None
+    Rows are run through _finalize_record() so they are identical in shape to
+    a spreadsheet upload.
+    """
+    text = (text or '').strip()
+    if not text:
+        return []
+    snippet = text[:24000]
+    raw = gemini_fn(_PASTE_PROMPT + snippet, max_tokens=8192, temperature=0.1)
+    if not raw:
+        raise RuntimeError('AI extraction returned nothing (Gemini unavailable)')
+    items = _json_array_salvage(raw)
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        vin = it.get('vin')
+        vin = '' if (vin is None or str(vin).strip().lower() in ('', 'null', 'none')) else str(vin)
+        rec = {
+            'raw_vehicle': _clean(it.get('desc')),
+            'vin': vin,
+            'mileage': it.get('mileage'),
+            'asking_price': it.get('price'),
+            'stock': it.get('stock'),
+            'notes': _clean(it.get('extra')),
+        }
+        row = _finalize_record(rec)
+        if not row.get('vin') and not row.get('raw_vehicle'):
+            continue
+        out.append(row)
+    return out

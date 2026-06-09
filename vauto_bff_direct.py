@@ -355,7 +355,7 @@ def parse_competitive_set(response: dict) -> dict:
     writes into `vauto_lookups.rbook_competitive_set`.
     """
     rows = _parse_competition_json(response)
-    return {
+    out = {
         'rows': rows,
         'count_text': str(len(rows)),
         'stocking_report': None,
@@ -363,6 +363,22 @@ def parse_competitive_set(response: dict) -> dict:
         'n_visible': len(rows),
         'source': 'competition_api_direct',
     }
+    # FOUND_ONLINE_2026_06_08: the subject car's actual retail listing
+    # (where it physically sits + DOL), from myVehicle.marketData.
+    try:
+        _md = (response.get('myVehicle') or {}).get('marketData')
+        if isinstance(_md, dict) and (_md.get('sellerName') or _md.get('age') is not None):
+            out['found_online'] = {
+                'seller':     _md.get('sellerName'),
+                'age':        _md.get('age'),
+                'price':      _md.get('price'),
+                'odometer':   _md.get('odometer'),
+                'distance':   _md.get('distance'),
+                'detail_uri': _md.get('detailUri'),
+            }
+    except Exception:
+        pass
+    return out
 
 
 def parse_price_guides(response: dict) -> dict:

@@ -975,6 +975,45 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
       </div>
       {% else %}
+      {# FOUND_AT_2026_06_08: where this exact VIN is currently listed #}
+      {% if found_at and (found_at.dealers or found_at.marketplaces or found_at.vauto_found) %}
+      <div class="card" style="border-color:#a855f7;flex-shrink:0">
+        <div class="card-title" style="display:flex;align-items:center;gap:8px">
+          <span>&#128205; Found At</span>
+          <span style="font-size:10px;font-weight:700;color:#d8b4fe;background:rgba(168,85,247,.15);border:1px solid rgba(168,85,247,.5);border-radius:4px;padding:2px 8px;letter-spacing:.4px">{{ (found_at.dealers|length) + (found_at.marketplaces|length) + (1 if found_at.vauto_found else 0) }}</span>
+        </div>
+        {% for fd in found_at.dealers %}
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #1e293b">
+          <div style="min-width:0">
+            {% if fd.url %}<a href="{{ fd.url }}" target="_blank" style="color:#e2e8f0;font-weight:600;text-decoration:none">{{ fd.dealer or 'Dealer' }} &#8599;</a>{% else %}<span style="color:#e2e8f0;font-weight:600">{{ fd.dealer or 'Dealer' }}</span>{% endif %}
+            <span style="color:#64748b;font-size:11px;margin-left:6px">dealer lot</span>
+          </div>
+          <div style="text-align:right;white-space:nowrap">
+            {% if fd.price %}<span style="color:#34d399;font-weight:700;font-size:14px">${{ '{:,}'.format(fd.price|int) }}</span>{% endif %}
+            {% if fd.dol is not none %}<span style="font-size:11px;margin-left:8px;color:{% if fd.dol|int > 60 %}#ef4444{% elif fd.dol|int > 30 %}#fbbf24{% else %}#4ade80{% endif %}">{{ fd.dol|int }}d on lot</span>{% endif %}
+          </div>
+        </div>
+        {% endfor %}
+        {% for mp in found_at.marketplaces %}
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #1e293b">
+          {% if mp.url %}<a href="{{ mp.url }}" target="_blank" style="color:#60a5fa;font-weight:600;text-decoration:none">{{ mp.site }} &#8599;</a>{% else %}<span style="color:#e2e8f0;font-weight:600">{{ mp.site }}</span>{% endif %}
+          <span style="color:#64748b;font-size:11px">listed</span>
+        </div>
+        {% endfor %}
+        {% if found_at.vauto_found %}
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #1e293b">
+          <div style="min-width:0">
+            {% if found_at.vauto_found.url %}<a href="{{ found_at.vauto_found.url }}" target="_blank" style="color:#e2e8f0;font-weight:600;text-decoration:none">{{ found_at.vauto_found.seller }} &#8599;</a>{% else %}<span style="color:#e2e8f0;font-weight:600">{{ found_at.vauto_found.seller }}</span>{% endif %}
+            <span style="color:#64748b;font-size:11px;margin-left:6px">listed online{% if found_at.vauto_found.distance is not none %} &middot; {{ found_at.vauto_found.distance }}mi{% endif %}</span>
+          </div>
+          <div style="text-align:right;white-space:nowrap">
+            {% if found_at.vauto_found.price %}<span style="color:#34d399;font-weight:700;font-size:14px">${{ '{:,}'.format(found_at.vauto_found.price|int) }}</span>{% endif %}
+            {% if found_at.vauto_found.age is not none %}<span style="font-size:11px;margin-left:8px;color:{% if found_at.vauto_found.age|int > 60 %}#ef4444{% elif found_at.vauto_found.age|int > 30 %}#fbbf24{% else %}#4ade80{% endif %}">{{ found_at.vauto_found.age|int }}d on lot</span>{% endif %}
+          </div>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
       {# YMMT_MATCH_2026_05_26: unified Buyer Match card.
          Replaces both the old buyer-match list AND the Dealer Network Intel
          card. Per-dealer in-stock + sold-90d pulled from dealer_inventory

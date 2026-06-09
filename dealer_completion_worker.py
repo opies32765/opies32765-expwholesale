@@ -67,6 +67,11 @@ EMPTY_QUEUE_SLEEP_SEC = int(os.environ.get('COMPLETION_EMPTY_SLEEP', '60'))
 BACKOFF_STEPS = (60, 120, 300, 600)
 BATCH_SIZE = int(os.environ.get('COMPLETION_BATCH', '20'))
 REQUEST_TIMEOUT = int(os.environ.get('DEALER_HTTP_TIMEOUT', '20'))
+# COLOR_ATTEMPT_CAP_2026_06_08: stop re-billing Gemini Vision forever on rows whose
+# photos can't be colored (WAF-blocked dealer CDNs, interior/placeholder shots).
+# After this many failed attempts a row drops out of the queue. Was the cause of
+# ~6.5k useless paid Vision calls/day (Vertex bill +62%).
+COLOR_MAX_ATTEMPTS = int(os.environ.get('COMPLETION_MAX_COLOR_ATTEMPTS', '4'))
 
 _stop = False
 
@@ -92,9 +97,10 @@ def _load_batch():
                        WHERE d.active = TRUE
                          AND i.status = 'active'
                          AND (i.ext_color IS NULL OR i.ext_color = '')
+                         AND COALESCE(i.color_attempts, 0) < %s
                          AND i.photo_url IS NOT NULL AND i.photo_url <> ''
                        ORDER BY i.updated_at ASC
-                       LIMIT %s''', (BATCH_SIZE,))
+                       LIMIT %s''', (COLOR_MAX_ATTEMPTS, BATCH_SIZE))
         return cur.fetchall()
 
 
@@ -176,8 +182,14 @@ def _persist(inv_id, color):
                            SET ext_color=%s, updated_at=NOW()
                            WHERE id=%s''', (color, inv_id))
         else:
-            # touch updated_at so this row drops to the back of the queue
-            cur.execute('UPDATE dealer_inventory SET updated_at=NOW() WHERE id=%s', (inv_id,))
+            # COLOR_ATTEMPT_CAP_2026_06_08: count this failed attempt and touch
+            # updated_at. Once color_attempts reaches COLOR_MAX_ATTEMPTS the row
+            # falls out of _load_batch so we stop paying Gemini to re-read a photo
+            # it already failed on (was an infinite re-bill loop on un-colorable rows).
+            cur.execute('''UPDATE dealer_inventory
+                           SET color_attempts = COALESCE(color_attempts, 0) + 1,
+                               updated_at = NOW()
+                           WHERE id=%s''', (inv_id,))
         conn.commit()
 
 
