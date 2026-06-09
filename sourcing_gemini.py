@@ -304,89 +304,26 @@ def _empty_spec_update():
 
 def _cerebras_call(system_prompt, user_prompt, max_tokens=2500,
                    temperature=0.3, json_mode=True, label='extract'):
-    """Single Cerebras chat-completions call. Pure stdlib + requests, no SDK.
-    Returns the assistant text or None on failure (auth missing, HTTP error,
-    timeout, empty body).
-
-    json_mode=True forces response_format=json_object (extract pass).
-    json_mode=False returns plain text (rewrite pass).
-
-    reasoning_effort='low' on every call: gpt-oss-120b emits chain-of-thought
-    tokens before the visible answer; low effort keeps latency tight without
-    hurting quality on this kind of structured / short-form work."""
-    api_key = os.environ.get('CEREBRAS_API_KEY')
-    if not api_key:
-        print(f'[sourcing-llm:{label}] CEREBRAS_API_KEY not set', flush=True)
-        return None
-    import requests
+    """DECEREBRAS_2026_06_08: was Cerebras qwen-3-235b; now routes to Gemini
+    (gemini-3.5-flash) via gemini_helper.gemini_text per single-vendor policy.
+    Name kept so callers (extract/tone_rewrite) are unchanged. Returns text or None."""
     import time as _time
-    headers = {
-        'Authorization': f'Bearer {api_key}',
-        'Content-Type': 'application/json',
-    }
-    payload = {
-        'model': _MODEL,
-        'max_tokens': max_tokens,
-        'temperature': temperature,
-        'messages': [
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user',   'content': user_prompt},
-        ],
-    }
-    # reasoning_effort is gpt-oss-specific (suppresses chain-of-thought
-    # tokens). Other Cerebras models (qwen-3-*, llama-*, glm-*) reject the
-    # param with HTTP 400 'wrong_api_format'. Only set when targeting gpt-oss.
-    if _MODEL.startswith('gpt-oss'):
-        payload['reasoning_effort'] = 'low'
-    if json_mode:
-        payload['response_format'] = {'type': 'json_object'}
-    # Retry on transient errors (429 queue_exceeded, 502/503/504 transient
-    # backend). Cerebras can burst-cap on shared accounts; most 429s clear
-    # within ~1s. Don't retry on 4xx that aren't 429 (bad request, auth,
-    # model_not_found) — those are deterministic failures.
-    _RETRYABLE_STATUS = {429, 502, 503, 504}
-    max_attempts = 3
-    resp = None
-    _dt = 0
-    for attempt in range(1, max_attempts + 1):
-        _t0 = _time.monotonic()
-        try:
-            resp = requests.post(_CEREBRAS_URL, headers=headers, json=payload,
-                                 timeout=_CEREBRAS_TIMEOUT_SEC)
-        except Exception as e:
-            _dt = (_time.monotonic() - _t0) * 1000
-            print(f'[sourcing-llm:{label}] request error after {_dt:.0f}ms attempt {attempt}/{max_attempts}: {e}', flush=True)
-            if attempt < max_attempts:
-                _time.sleep(0.5 * (2 ** (attempt - 1)))
-                continue
-            return None
-        _dt = (_time.monotonic() - _t0) * 1000
-        if resp.status_code in _RETRYABLE_STATUS and attempt < max_attempts:
-            print(f'[sourcing-llm:{label}] HTTP {resp.status_code} after {_dt:.0f}ms attempt {attempt}/{max_attempts}, retrying...', flush=True)
-            _time.sleep(0.5 * (2 ** (attempt - 1)))
-            continue
-        break
-    if resp is None or resp.status_code != 200:
-        code = resp.status_code if resp is not None else 'no-response'
-        body = (resp.text[:300] if resp is not None else '')
-        print(f'[sourcing-llm:{label}] HTTP {code} final after {_dt:.0f}ms: {body}', flush=True)
-        return None
     try:
-        data = resp.json()
+        from gemini_helper import gemini_text
     except Exception as e:
-        print(f'[sourcing-llm:{label}] JSON parse error: {e} body={resp.text[:300]!r}', flush=True)
+        print(f'[sourcing-llm:{label}] gemini_helper import failed: {e}', flush=True)
         return None
-    try:
-        u = data.get('usage') or {}
-        print(f'[sourcing-llm:{label}] {_dt:.0f}ms in={u.get("prompt_tokens")} out={u.get("completion_tokens")} model={_MODEL}', flush=True)
-    except Exception:
-        pass
-    choices = data.get('choices') or []
-    if not choices:
-        return None
-    msg = (choices[0] or {}).get('message') or {}
-    content = msg.get('content')
-    return content.strip() if content else None
+    _nl = chr(10)
+    prompt = system_prompt
+    if json_mode:
+        prompt += _nl + _nl + 'Output ONLY a single valid JSON object - no markdown, no prose.'
+    prompt += _nl + _nl + user_prompt
+    _t0 = _time.monotonic()
+    out = gemini_text(prompt, model='gemini-3.5-flash', max_tokens=max_tokens,
+                      temperature=temperature)
+    _dt = (_time.monotonic() - _t0) * 1000.0
+    print(f'[sourcing-llm:{label}] {_dt:.0f}ms gemini-3.5-flash out_len={len(out) if out else 0}', flush=True)
+    return out.strip() if out else None
 
 
 _TRANS_PATTERNS = (

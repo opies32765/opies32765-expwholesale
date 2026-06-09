@@ -561,15 +561,10 @@ def pre_bake_narrative(row: dict, dry_run: bool = False) -> dict:
             f"Lead with the wholesale target, cite ONE concrete anchor, "
             f"end naturally."
         )
-        import anthropic
-        client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
-        resp = client.messages.create(
-            model='claude-sonnet-4-6',
-            max_tokens=220, temperature=0.4,
-            system=v._SYSTEM_PROMPT,
-            messages=[{'role': 'user', 'content': prompt}],
-        )
-        narrative = ' '.join(b.text for b in resp.content if b.type == 'text').strip()
+        from gemini_helper import gemini_text
+        narrative = (gemini_text(v._SYSTEM_PROMPT + chr(10) + chr(10) + prompt,
+                                 model='gemini-3.5-flash', max_tokens=240,
+                                 temperature=0.4) or '').strip()
         if not narrative:
             return row
 

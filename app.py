@@ -1278,63 +1278,19 @@ _sonnet_client = None
 
 
 def _sonnet():
-    global _sonnet_client
-    if _sonnet_client is None:
-        try:
-            import anthropic
-            _key = os.environ.get('ANTHROPIC_API_KEY', '').strip()
-            if not _key:
-                print('[sonnet] ANTHROPIC_API_KEY not set', flush=True)
-                _sonnet_client = False
-                return None
-            _sonnet_client = anthropic.Anthropic(api_key=_key)
-        except Exception as e:
-            print(f'[sonnet] init failed: {e}', flush=True)
-            _sonnet_client = False
-    return _sonnet_client if _sonnet_client else None
+    """DECLAUDE_2026_06_08: Anthropic client retired (sonnet_vision_call now uses
+    gemini_call). Kept as a no-op so any stray caller fails safe to None."""
+    return None
 
 
 def sonnet_vision_call(prompt, image_bytes, mime='image/jpeg', max_tokens=64,
                       timeout=15.0):
-    """One-shot Claude Sonnet 4.6 vision call. Returns response text or None.
-    Use this for OCR tasks where Gemini's hallucination cost > 4-5x token cost.
-    """
-    client = _sonnet()
-    if not client:
-        return None
-    try:
-        import base64 as _b64
-        img_b64 = _b64.standard_b64encode(image_bytes).decode('utf-8')
-        # Run in a thread so we can enforce a hard timeout
-        import threading as _th
-        _result = {'text': None}
-        def _runner():
-            try:
-                resp = client.messages.create(
-                    model='claude-sonnet-4-6',
-                    max_tokens=max_tokens,
-                    messages=[{
-                        'role': 'user',
-                        'content': [
-                            {'type': 'image',
-                             'source': {'type': 'base64',
-                                        'media_type': mime,
-                                        'data': img_b64}},
-                            {'type': 'text', 'text': prompt},
-                        ]
-                    }]
-                )
-                if resp.content:
-                    _result['text'] = resp.content[0].text.strip()
-            except Exception as _e:
-                print(f'[sonnet] call error: {_e}', flush=True)
-        t = _th.Thread(target=_runner, daemon=True)
-        t.start()
-        t.join(timeout)
-        return _result['text']
-    except Exception as e:
-        print(f'[sonnet] outer error: {e}', flush=True)
-        return None
+    """DECLAUDE_2026_06_08: was a Claude Sonnet 4.6 vision call; now delegates to
+    gemini_call (gemini-3.5-flash) per single-vendor (Gemini-only) policy.
+    Signature preserved so existing callers are unchanged."""
+    return gemini_call(prompt, image_bytes=image_bytes, mime=mime,
+                       model='gemini-3.5-flash', max_tokens=max(int(max_tokens), 32),
+                       temperature=0.0, disable_thinking=True)
 
 
 def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-3.5-flash',
