@@ -1,3 +1,5 @@
+# LEGACY NAME (2026-06-09): LLM calls in this module are GEMINI (gemini-2.5-flash/pro), NOT Claude/Anthropic.
+# The 'claude'/'sonnet' names are leftovers from the 2026-06-08 de-Claude migration. See memory feedback_ew_llm_is_all_gemini.
 """dealer_match_v2.py — tiered like-vehicle matcher for the EW Dealer Network card.
 
 REPLACES the body of `find_dealer_matches()` in `/opt/expwholesale/dealer_match.py`.

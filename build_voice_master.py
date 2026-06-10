@@ -563,7 +563,7 @@ def pre_bake_narrative(row: dict, dry_run: bool = False) -> dict:
         )
         from gemini_helper import gemini_text
         narrative = (gemini_text(v._SYSTEM_PROMPT + chr(10) + chr(10) + prompt,
-                                 model='gemini-3.5-flash', max_tokens=240,
+                                 model='gemini-2.5-flash', max_tokens=240,
                                  temperature=0.4) or '').strip()
         if not narrative:
             return row

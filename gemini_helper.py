@@ -35,11 +35,11 @@ def _client_get():
     return _client if _client else None
 
 
-def gemini_text(prompt, model='gemini-3.5-flash', max_tokens=2000, temperature=0.0,
+def gemini_text(prompt, model='gemini-2.5-flash', max_tokens=2000, temperature=0.0,
                 thinking_budget=None):
     """One-shot Gemini text completion. Returns stripped text or None.
 
-    Defaults: gemini-3.5-flash, temperature 0.0 (deterministic structured output —
+    Defaults: gemini-2.5-flash, temperature 0.0 (deterministic structured output —
     these callers all want strict JSON). max_tokens defaults high so reasoning
     ('thinking') tokens don't crowd out the JSON answer.
 
@@ -48,6 +48,7 @@ def gemini_text(prompt, model='gemini-3.5-flash', max_tokens=2000, temperature=0
     and truncate the answer (seen on trim-match: pro+thinking truncated the JSON
     mid-reason). Leave None to keep model-default thinking (good for the VIN
     decoder's generation-overlap reasoning). Retries up to 2x on 429."""
+    start_keepalive(warm_now=False)  # keep this process Gemini client hot
     client = _client_get()
     if not client:
         return None
@@ -81,3 +82,59 @@ def gemini_text(prompt, model='gemini-3.5-flash', max_tokens=2000, temperature=0
             break
     print(f'[gemini_helper] call failed ({model}): {last}', flush=True)
     return None
+
+
+# ---- WARM / KEEPALIVE (added 2026-06-09) --------------------------------
+# Keep each process Gemini client + OAuth token + TLS connection hot so the
+# first real call is not a 5-6s cold start. gunicorn runs N worker processes;
+# each forked worker re-warms via the os.register_at_fork hook below. Other
+# long-running processes warm lazily on their first gemini_text() call.
+import os as _os
+
+_keepalive_started = False
+_keepalive_lock = threading.Lock()
+_KEEPALIVE_INTERVAL_SEC = 240
+_WARM_MODEL = "gemini-2.5-flash"
+
+
+def _warm_ping():
+    try:
+        gemini_text("ping", model=_WARM_MODEL, max_tokens=4, thinking_budget=0)
+    except Exception:
+        pass
+
+
+def start_keepalive(warm_now=True):
+    """Idempotent per process: one daemon thread that optionally warm-pings now,
+    then re-pings every _KEEPALIVE_INTERVAL_SEC to keep the client / token /
+    connection from going cold."""
+    global _keepalive_started
+    with _keepalive_lock:
+        if _keepalive_started:
+            return
+        _keepalive_started = True
+
+    def _run():
+        if warm_now:
+            _warm_ping()
+        while True:
+            time.sleep(_KEEPALIVE_INTERVAL_SEC)
+            _warm_ping()
+
+    threading.Thread(target=_run, name="gemini-keepalive", daemon=True).start()
+
+
+def _after_fork_child():
+    # Parent client connection + keepalive thread do NOT survive fork; reset
+    # and re-warm this child (gunicorn worker) process.
+    global _client, _keepalive_started
+    _client = None
+    _keepalive_started = False
+    start_keepalive(warm_now=True)
+
+
+try:
+    _os.register_at_fork(after_in_child=_after_fork_child)
+except Exception:
+    pass
+# ------------------------------------------------------------------------

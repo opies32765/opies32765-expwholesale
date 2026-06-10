@@ -1,3 +1,7 @@
+# LEGACY NAME (2026-06-09): LLM calls here are GEMINI (gemini-2.5-flash via gemini_helper.gemini_text), NOT Claude.
+# The anthropic import / ANTHROPIC_MODEL / decode_vin_via_claude name / 'claude_sonnet_4_6' source tags are DEAD
+# leftover scaffolding from the 2026-06-08 de-Claude migration -- there is NO live .messages.create call here.
+# (ANTHROPIC_API_KEY in env is for the VOICE path only.) See memory feedback_ew_llm_is_all_gemini.
 """Claude Sonnet 4.6 VIN trim decoder.
 
 Replaces the deterministic VDS-table cascade in vin_precise.py with an
@@ -130,7 +134,7 @@ def decode_vin_via_claude(vin, model=ANTHROPIC_MODEL, timeout=CLAUDE_TIMEOUT_SEC
     try:
         t0 = time.time()
         txt = gemini_text(_SYSTEM + "\n\n" + _USER_PROMPT_TEMPLATE.format(vin=vin),
-                          model="gemini-3.5-flash", max_tokens=2000, temperature=0.0) or ""
+                          model="gemini-2.5-flash", max_tokens=2000, temperature=0.0) or ""
         latency_ms = int((time.time() - t0) * 1000)
         parsed = _parse_json(txt)
         if not parsed:

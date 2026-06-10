@@ -1286,14 +1286,14 @@ def _sonnet():
 def sonnet_vision_call(prompt, image_bytes, mime='image/jpeg', max_tokens=64,
                       timeout=15.0):
     """DECLAUDE_2026_06_08: was a Claude Sonnet 4.6 vision call; now delegates to
-    gemini_call (gemini-3.5-flash) per single-vendor (Gemini-only) policy.
+    gemini_call (gemini-2.5-flash) per single-vendor (Gemini-only) policy.
     Signature preserved so existing callers are unchanged."""
     return gemini_call(prompt, image_bytes=image_bytes, mime=mime,
-                       model='gemini-3.5-flash', max_tokens=max(int(max_tokens), 32),
+                       model='gemini-2.5-flash', max_tokens=max(int(max_tokens), 32),
                        temperature=0.0, disable_thinking=True)
 
 
-def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-3.5-flash',
+def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-flash',
                 max_tokens=1024, temperature=0.4, disable_thinking=False):
     # GEMINI_FLASH_MILES_OCR_2026_05_17 (param): pass disable_thinking=True for
     # terse-output OCR tasks (single number, 17-char VIN). With thinking enabled
@@ -1302,7 +1302,7 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-3.5-f
     # on bid 1501 (it didn't; it just got cut off mid-token).
     """One-shot Gemini call. Returns text response or None on failure.
     Pass image_bytes for vision tasks. Defaults to Flash (cheap).
-    Use model='gemini-3.5-flash' for high-quality reasoning (assessments).
+    Use model='gemini-2.5-flash' for high-quality reasoning (assessments).
 
     2026-05-09: Auto-retries up to 2 times on 429 RESOURCE_EXHAUSTED with
     exponential backoff (1s, 2s). Per-minute Vertex quota recovers fast,
@@ -1553,7 +1553,7 @@ def extract_vehicle_info_from_text(body):
         return {}
     try:
         result = gemini_call(_TEXT_EXTRACT_PROMPT + str(body)[:3000],
-                             model='gemini-3.5-flash', max_tokens=1500)
+                             model='gemini-2.5-flash', max_tokens=1500)
         if not result:
             return {}
         raw = result.strip()
@@ -1573,7 +1573,7 @@ def extract_vehicle_info_from_text(body):
             # One retry with Pro (more reliable on edge cases) if Flash truncated
             try:
                 result2 = gemini_call(_TEXT_EXTRACT_PROMPT + str(body)[:3000],
-                                       model='gemini-3.5-flash', max_tokens=2000)
+                                       model='gemini-2.5-flash', max_tokens=2000)
                 if result2:
                     r2 = result2.strip()
                     if r2.startswith('```'):
@@ -1967,7 +1967,7 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
     candidates = []
     for attempt in range(2):
         result = gemini_call(hw_prompt, image_bytes=file_bytes, mime=media_type,
-                             model='gemini-3.5-flash', max_tokens=2000,
+                             model='gemini-2.5-pro', max_tokens=2000,
                              temperature=0.2 + attempt * 0.3)
         if not result:
             continue
@@ -2000,7 +2000,7 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
 
     # Cross-check 2: Gemini Flash. Accept ONLY if check digit valid.
     flash_result = gemini_call(VIN_PROMPT, image_bytes=file_bytes, mime=media_type,
-                               model='gemini-3.5-flash', max_tokens=100)
+                               model='gemini-2.5-flash', max_tokens=100)
     if flash_result:
         flash_vin = flash_result.strip().upper()
         m = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', flash_vin)
@@ -2045,7 +2045,7 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
                 f'Reply ONLY with a check-digit-valid 17-char VIN, or NONE.'
             )
             retry_result = gemini_call(retry_prompt, image_bytes=file_bytes, mime=media_type,
-                                       model='gemini-3.5-flash', max_tokens=200, temperature=0.4)
+                                       model='gemini-2.5-pro', max_tokens=200, temperature=0.4)
             if not retry_result:
                 continue
             mm = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', retry_result.strip().upper())
@@ -2089,7 +2089,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
         "(no commas, no units). If not, reply with the single word NONE."
     )
     gresult = gemini_call(_odo_prompt, image_bytes=file_bytes, mime=media_type,
-                          model='gemini-3.5-flash', max_tokens=64,
+                          model='gemini-2.5-flash', max_tokens=64,
                           temperature=0, disable_thinking=True)
     if gresult:
         up = gresult.strip().upper()
@@ -2125,7 +2125,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
         "integer (no commas, no units). If unsure or it's not visible, NONE."
     )
     gresult2 = gemini_call(_listing_prompt, image_bytes=file_bytes,
-                           mime=media_type, model='gemini-3.5-flash',
+                           mime=media_type, model='gemini-2.5-flash',
                            max_tokens=64, temperature=0, disable_thinking=True)
     if gresult2:
         up = gresult2.strip().upper()
@@ -2148,7 +2148,7 @@ def extract_color_from_file(file_bytes, media_type='image/jpeg'):
         'If you cannot clearly see a vehicle exterior, reply UNKNOWN.'
     )
     result = gemini_call(prompt, image_bytes=file_bytes, mime=media_type,
-                         model='gemini-3.5-flash', max_tokens=20)
+                         model='gemini-2.5-flash', max_tokens=20)
     if result:
         color = result.strip().title()
         if color.upper() != 'UNKNOWN' and color:
@@ -2209,7 +2209,7 @@ def extract_carfax_info(file_bytes, media_type='image/jpeg'):
 
     Uses Gemini 2.5 Pro for better accuracy on handwriting and ambiguous text."""
     raw = gemini_call(CARFAX_PROMPT, image_bytes=file_bytes, mime=media_type,
-                      model='gemini-3.5-flash', max_tokens=3000)
+                      model='gemini-2.5-flash', max_tokens=3000)
     if not raw:
         return {}
     try:
@@ -2763,7 +2763,7 @@ def _extract_vehicles_from_image(image_bytes, mime='image/jpeg'):
     if not image_bytes:
         return []
     raw = gemini_call(_IMG_VIN_PROMPT, image_bytes=image_bytes, mime=mime,
-                      model='gemini-3.5-flash', max_tokens=1500, temperature=0)
+                      model='gemini-2.5-pro', max_tokens=1500, temperature=0)
     if not raw:
         return []
     s = raw.strip()
@@ -2874,7 +2874,7 @@ def _identify_photo_vehicle(image_bytes, mime='image/jpeg'):
         "What is the primary vehicle in this photo? Return STRICT JSON only, no "
         'markdown fences: {"year":<int or null>,"make":"<brand>","model":"<model>"}. '
         "If no vehicle is identifiable, use null for make and model.",
-        image_bytes=image_bytes, mime=mime, model='gemini-3.5-flash',
+        image_bytes=image_bytes, mime=mime, model='gemini-2.5-flash',
         max_tokens=120, temperature=0)
     if not raw:
         return {}
@@ -3033,7 +3033,7 @@ def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
             if not miles and img_bytes:
                 try:
                     _odo_raw = gemini_call(ODO_PROMPT, image_bytes=img_bytes,
-                                           mime=media_type, model='gemini-3.5-flash',
+                                           mime=media_type, model='gemini-2.5-flash',
                                            max_tokens=20, temperature=0)
                     _odo_digits = re.sub(r'[^0-9]', '', _odo_raw or '')
                     _odo_n = int(_odo_digits) if _odo_digits else 0
@@ -3079,7 +3079,7 @@ def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
             if not miles and op['img_bytes']:
                 try:
                     _odo_raw = gemini_call(ODO_PROMPT, image_bytes=op['img_bytes'],
-                                           mime=op['media_type'], model='gemini-3.5-flash',
+                                           mime=op['media_type'], model='gemini-2.5-flash',
                                            max_tokens=20, temperature=0)
                     _odo_digits = re.sub(r'[^0-9]', '', _odo_raw or '')
                     _odo_n = int(_odo_digits) if _odo_digits else 0
@@ -3681,6 +3681,38 @@ def dashboard():
                            time_ago=time_ago,
                            network_claims=network_claims,
                            network_claims_by_bid=network_claims_by_bid)
+
+
+@app.route('/shadow/data')
+def shadow_data_endpoint():
+    from flask import jsonify as _jsonify
+    from shadow_overlay import shadow_data as _sd
+    return _jsonify(_sd(get_db))
+
+
+@app.route('/shadow')
+def shadow_dashboard():
+    """Shadow landing: per-bid Cox-API collection times + parity, links to shadow + live views."""
+    from shadow_overlay import render_shadow_dashboard
+    return render_shadow_dashboard(get_db)
+
+
+@app.route('/shadow/bid/<int:bid_id>')
+def shadow_bid_detail(bid_id):
+    """Read-only preview: the real bid page rendered with shadow Cox-API data."""
+    import re as _re_sh
+    from flask import g as _g_sh, make_response as _mr_sh
+    from shadow_overlay import shadow_banner as _sban
+    _g_sh._ew_shadow = True
+    resp = _mr_sh(bid_detail(bid_id))
+    try:
+        if 'text/html' in (resp.headers.get('Content-Type') or ''):
+            _ban = _sban(get_db, bid_id)
+            _h = resp.get_data(as_text=True)
+            resp.set_data(_re_sh.sub(r'(<body[^>]*>)', lambda m: m.group(1) + _ban, _h, count=1))
+    except Exception:
+        pass
+    return resp
 
 
 @app.route('/bid/<int:bid_id>')
@@ -4307,6 +4339,14 @@ def bid_detail(bid_id):
     # work and template work are different problems with different fixes;
     # need to see both. Phase deltas printed AFTER render so the log line
     # has the full picture.
+    # SHADOW_OVERLAY_2026_06_09: /shadow/bid/<id> preview overlays Cox-API data (read-only, guarded).
+    try:
+        from flask import g as _g_sh
+        if getattr(_g_sh, '_ew_shadow', False):
+            from shadow_overlay import apply_shadow_overlay as _aso
+            bid, vauto_data, accutrade_data = _aso(get_db, bid_id, bid, vauto_data, accutrade_data)
+    except Exception as _soe:
+        print('[shadow-overlay] bid=%s err=%s' % (bid_id, _soe), flush=True)
     _rendered = render_template('bid.html', bid=bid, photos=photos, show_sources=show_sources,
                                 messages=messages, valuations=valuations,
                                 vauto_data=vauto_data,
@@ -7929,14 +7969,14 @@ def _run_assessment(bid_id):
         if not gc:
             raise RuntimeError('Gemini client unavailable')
         resp = gc.models.generate_content(
-            model='gemini-3.5-flash',
+            model='gemini-2.5-flash',
             contents=gemini_parts,
             config=_gtypes.GenerateContentConfig(max_output_tokens=8000, temperature=0.4),
         )
         assessment = (resp.text or '').strip()
         if not assessment:
             raise RuntimeError('Empty Gemini response')
-        print(f'[ASSESS] Bid {bid_id} via Gemini 2.5 Pro ({len(assessment)} chars)', flush=True)
+        print(f'[ASSESS] Bid {bid_id} via Gemini 2.5 Flash ({len(assessment)} chars)', flush=True)
 
         import re as _re
         import json as _json
@@ -14293,7 +14333,7 @@ def api_vauto_find_click_target():
         'If no matching row exists, return: {"found": false}'
     )
     text = gemini_call(prompt, image_bytes=img_bytes, mime='image/png',
-                       model='gemini-3.5-flash', max_tokens=200, temperature=0.1)
+                       model='gemini-2.5-flash', max_tokens=200, temperature=0.1)
     if not text:
         return jsonify({'error': 'gemini call failed'}), 502
     raw = text.strip()
@@ -15348,7 +15388,7 @@ def api_trim_select():
         'No markdown, no commentary.'
     )
 
-    model = 'gemini-3.5-flash'
+    model = 'gemini-2.5-pro'
     raw = gemini_call(prompt, model=model, max_tokens=400, temperature=0.1, disable_thinking=True)  # TRIM_SELECT_FAST_2026_05_20: skip 10-15s Gemini thinking overhead (prompt has explicit rules; Flash follows them fine without extended reasoning)
     if not raw:
         db.close()
@@ -21439,7 +21479,7 @@ def api_opportunity_pitch(opp_id):
     )
 
     try:
-        pitch = gemini_call(prompt, model='gemini-3.5-flash',
+        pitch = gemini_call(prompt, model='gemini-2.5-flash',
                             max_tokens=1500, temperature=0.4)
     except Exception as e:
         db.close()
@@ -22847,7 +22887,7 @@ def api_voice_ai_critique():
         if not client:
             return jsonify({"error": "Gemini client unavailable"}), 503
         resp = client.models.generate_content(
-            model='gemini-3.5-flash',
+            model='gemini-2.5-flash',
             contents=prompt,
         )
         answer = (getattr(resp, 'text', None) or '').strip()
@@ -22883,6 +22923,6 @@ def api_voice_ai_critique():
         "question": question,
         "answer": answer,
         "prior_ai_price": float(bid['ai_price']) if bid.get('ai_price') else None,
-        "model_used": "gemini-3.5-flash",
+        "model_used": "gemini-2.5-flash",
     })
 

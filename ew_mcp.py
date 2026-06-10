@@ -1373,7 +1373,7 @@ def _is_owner(name: Optional[str], pin: Optional[str] = None) -> bool:
     # PIN_DISABLED_2026_05_22 — temporarily allow owners through with just
     # name match while iOS spoken-number quirks settle. PIN field is still
     # in the signature so re-enabling is a one-line change here.
-    return (name or "").strip().lower() in OWNER_WHITELIST
+    return True  # OWNER_GATE_REMOVED_2026_06_09 (operator: no owner rules ever; revert: return (name or "").strip().lower() in OWNER_WHITELIST)
 
 
 # EW canonical profit formula — pulled verbatim from
@@ -3912,11 +3912,22 @@ async def search_bids(
         "postgresql://expuser:ExpWholesale2026!@localhost:5433/expwholesale")
     where = ["b.created_at >= now() - (%s || ' days')::interval"]
     params = [str(since_days)]
-    if make:
+    # CORVETTE_FIX_2026_06_09: callers (incl. the voice model) often put a
+    # MODEL name like "Corvette" in the make slot (or a make in the model slot).
+    # When only one term is given, match it against make OR model so a single
+    # term can never whiff; when BOTH are given keep the precise AND.
+    if make and model:
         where.append("LOWER(b.make) LIKE LOWER(%s)")
         params.append(f"%{make}%")
-    if model:
         where.append("LOWER(b.model) LIKE LOWER(%s)")
+        params.append(f"%{model}%")
+    elif make:
+        where.append("(LOWER(b.make) LIKE LOWER(%s) OR LOWER(b.model) LIKE LOWER(%s))")
+        params.append(f"%{make}%")
+        params.append(f"%{make}%")
+    elif model:
+        where.append("(LOWER(b.make) LIKE LOWER(%s) OR LOWER(b.model) LIKE LOWER(%s))")
+        params.append(f"%{model}%")
         params.append(f"%{model}%")
     if year and year > 1900:
         where.append("b.year = %s")

@@ -305,7 +305,7 @@ def _empty_spec_update():
 def _cerebras_call(system_prompt, user_prompt, max_tokens=2500,
                    temperature=0.3, json_mode=True, label='extract'):
     """DECEREBRAS_2026_06_08: was Cerebras qwen-3-235b; now routes to Gemini
-    (gemini-3.5-flash) via gemini_helper.gemini_text per single-vendor policy.
+    (gemini-2.5-flash) via gemini_helper.gemini_text per single-vendor policy.
     Name kept so callers (extract/tone_rewrite) are unchanged. Returns text or None."""
     import time as _time
     try:
@@ -319,10 +319,10 @@ def _cerebras_call(system_prompt, user_prompt, max_tokens=2500,
         prompt += _nl + _nl + 'Output ONLY a single valid JSON object - no markdown, no prose.'
     prompt += _nl + _nl + user_prompt
     _t0 = _time.monotonic()
-    out = gemini_text(prompt, model='gemini-3.5-flash', max_tokens=max_tokens,
+    out = gemini_text(prompt, model='gemini-2.5-flash', max_tokens=max_tokens,
                       temperature=temperature)
     _dt = (_time.monotonic() - _t0) * 1000.0
-    print(f'[sourcing-llm:{label}] {_dt:.0f}ms gemini-3.5-flash out_len={len(out) if out else 0}', flush=True)
+    print(f'[sourcing-llm:{label}] {_dt:.0f}ms gemini-2.5-flash out_len={len(out) if out else 0}', flush=True)
     return out.strip() if out else None
 
 
