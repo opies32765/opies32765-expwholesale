@@ -1,9 +1,9 @@
 {
   "make_name": "HYUNDAI",
-  "trained_at": "2026-06-09T08:31:05.108339Z",
-  "n_total": 351,
+  "trained_at": "2026-06-10T08:30:47.000306Z",
+  "n_total": 352,
   "n_train": 329,
-  "n_test": 22,
+  "n_test": 23,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1356.0,
-    "mape_pct": 6.02,
-    "r2": 0.9159,
-    "within_5pct": 50.0,
-    "within_10pct": 77.3
+    "mae_dollars": 1323.0,
+    "mape_pct": 5.98,
+    "r2": 0.9212,
+    "within_5pct": 43.5,
+    "within_10pct": 78.3
   },
   "baseline_metrics": {
-    "mae_dollars": 1702.0,
-    "mape_pct": 7.31,
+    "mae_dollars": 1664.0,
+    "mape_pct": 7.23,
     "ratio": 1.0168
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.3540082275867462
+      "importance": 0.37600836157798767
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.2185058742761612
+      "importance": 0.21304257214069366
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.1370471864938736
+      "importance": 0.13872265815734863
     },
     {
       "name": "supplier_name_Lifetime Automotive Group",
-      "importance": 0.04685942828655243
+      "importance": 0.054377779364585876
     },
     {
       "name": "year",
-      "importance": 0.018763411790132523
-    },
-    {
-      "name": "original_msrp",
-      "importance": 0.013485339470207691
+      "importance": 0.014850219711661339
     },
     {
       "name": "model_name_Tucson",
-      "importance": 0.012423668056726456
+      "importance": 0.014416980557143688
     },
     {
-      "name": "model_name_Tucson SE Sport Utility Vehicle",
-      "importance": 0.011877362616360188
+      "name": "original_msrp",
+      "importance": 0.011339133605360985
+    },
+    {
+      "name": "model_name_Santa Fe Limited Sport Utility Vehicle",
+      "importance": 0.00867402832955122
     }
   ]
 }

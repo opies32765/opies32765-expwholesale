@@ -1321,7 +1321,18 @@ def _lsl_deal_parties_impl(query="", limit=10):
             + wsql + " ORDER BY d.sold_at DESC LIMIT ?", params + [lim])
         rows = [dict(r) for r in cur.fetchall()]
         c.close()
-        return {"n": len(rows), "rows": rows}
+        result = {"n": len(rows), "rows": rows}
+        if q and len(rows) > 1:
+            # over-match: a SPECIFIC-car query matched multiple distinct cars -> make the agent ASK
+            # which one instead of silently picking (the G63 bug: 10 matched, agent trimmed to 3).
+            _opts = ", ".join("%s (%s, sold %s)" % (r.get("stock_no") or "?",
+                              (r.get("vehicle_info") or "")[:38], (r.get("sold_at") or "")[:10])
+                              for r in rows[:6])
+            result["ambiguous"] = True
+            result["_must_say"] = ("%d different cars match %r — DO NOT pick one. Ask the caller which "
+                                   "stock number or sold date they mean (or if they want all %d): %s"
+                                   % (len(rows), q, len(rows), _opts))
+        return result
     except Exception as e:
         return {"error": "query failed: %s" % e}
 
@@ -1691,6 +1702,87 @@ async def lsl_deals_booked(
 
 
 @mcp.tool()
+def _period_to_sql(period):
+    """Resolve a period string to a sold_at SQL WHERE clause (EDT-aware).
+    Parity with lsl_deals_booked: fixed keywords, ISO date, ISO range,
+    month name (+_mtd/_YYYY), weekday names. Returns SQL string or None.
+    Emits clauses on sold_at; callers on another date column should substitute."""
+    from datetime import datetime as _dt, timedelta as _td
+    try:
+        from zoneinfo import ZoneInfo as _Z
+        _now = _dt.now(_Z("America/New_York"))
+    except Exception:
+        _now = _dt.now()
+    p_raw = (period or "").lower().strip()
+    p = p_raw.replace("-", "_").replace(" ", "_")
+    _today = _now.strftime("%Y-%m-%d")
+    _yest  = (_now - _td(days=1)).strftime("%Y-%m-%d")
+    _seven = (_now - _td(days=7)).strftime("%Y-%m-%d")
+    _thirty = (_now - _td(days=30)).strftime("%Y-%m-%d")
+    _ninety = (_now - _td(days=90)).strftime("%Y-%m-%d")
+    _mstart = _now.replace(day=1).strftime("%Y-%m-%d")
+    _pmend = _now.replace(day=1).strftime("%Y-%m-%d")
+    _pmstart = (_now.replace(day=1) - _td(days=1)).replace(day=1).strftime("%Y-%m-%d")
+    _ystart = _now.replace(month=1, day=1).strftime("%Y-%m-%d")
+    _pystart = _now.replace(year=_now.year - 1, month=1, day=1).strftime("%Y-%m-%d")
+    _pyend = _now.replace(month=1, day=1).strftime("%Y-%m-%d")
+    period_sql = {
+        "yesterday":    f"sold_at >= '{_yest}' AND sold_at < '{_today}'",
+        "today":        f"sold_at >= '{_today}'",
+        "last_7_days":  f"sold_at >= '{_seven}'",
+        "last_30_days": f"sold_at >= '{_thirty}'",
+        "this_month":   f"sold_at >= '{_mstart}'",
+        "last_month":   f"sold_at >= '{_pmstart}' AND sold_at < '{_pmend}'",
+        "this_quarter": f"sold_at >= '{_ninety}'",
+        "last_quarter": f"sold_at >= '{_ninety}'",
+        "this_year":    f"sold_at >= '{_ystart}'",
+        "ytd":          f"sold_at >= '{_ystart}'",
+        "year_to_date": f"sold_at >= '{_ystart}'",
+        "last_year":    f"sold_at >= '{_pystart}' AND sold_at < '{_pyend}'",
+        "all_time":     "1=1",
+    }.get(p)
+    if not period_sql and len(p_raw) == 10 and p_raw[4] == "-" and p_raw[7] == "-":
+        try:
+            _dt.strptime(p_raw, "%Y-%m-%d")
+            period_sql = f"sold_at >= '{p_raw}' AND sold_at < date('{p_raw}', '+1 day')"
+        except Exception:
+            pass
+    if not period_sql:
+        _sep = next((s for s in (":", "_to_", "..", " to ") if s in p_raw), None)
+        if _sep:
+            try:
+                _a, _b = [x.strip() for x in p_raw.split(_sep, 1)]
+                _dt.strptime(_a, "%Y-%m-%d"); _dt.strptime(_b, "%Y-%m-%d")
+                period_sql = f"sold_at >= '{_a}' AND sold_at < date('{_b}', '+1 day')"
+            except Exception:
+                pass
+    if not period_sql:
+        _months = {"january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
+                   "july":7,"august":8,"september":9,"october":10,"november":11,"december":12}
+        _mtd = p.endswith("_mtd")
+        _parts = p.replace("_mtd", "").split("_")
+        if _parts and _parts[0] in _months:
+            _m = _months[_parts[0]]
+            _y = int(_parts[1]) if len(_parts) > 1 and _parts[1].isdigit() else _now.year
+            _start = f"{_y}-{_m:02d}-01"
+            if _mtd:
+                import calendar as _cal
+                _cap = min(_now.day, _cal.monthrange(_y, _m)[1])
+                period_sql = f"sold_at >= '{_start}' AND sold_at < date('{_y}-{_m:02d}-{_cap:02d}', '+1 day')"
+            else:
+                _nm = _m + 1 if _m < 12 else 1
+                _ny = _y if _m < 12 else _y + 1
+                period_sql = f"sold_at >= '{_start}' AND sold_at < '{_ny}-{_nm:02d}-01'"
+    if not period_sql:
+        _wd = {"monday":0,"tuesday":1,"wednesday":2,"thursday":3,"friday":4,"saturday":5,"sunday":6}
+        _pn = p.replace("last_", "").replace("this_", "")
+        if _pn in _wd:
+            _db = (_now.weekday() - _wd[_pn]) % 7 or 7
+            _t = (_now - _td(days=_db)).strftime("%Y-%m-%d")
+            period_sql = f"sold_at >= '{_t}' AND sold_at < date('{_t}', '+1 day')"
+    return period_sql
+
+
 async def lsl_top_grosses(
     caller_name: str,
     caller_pin: str = "",
@@ -1725,7 +1817,9 @@ async def lsl_top_grosses(
         "all_time":      "1=1",
     }.get(p)
     if not period_sql:
-        return {"error": f"unsupported period {period!r}; use yesterday/today/last_7_days/last_30_days/this_month/last_month/this_year/ytd/last_year/last_quarter/all_time"}
+        period_sql = _period_to_sql(period)   # weekday/month/ISO parity w/ lsl_deals_booked (e.g. 'friday' -> last Fri)
+    if not period_sql:
+        return {"error": f"unsupported period {period!r}; use yesterday/today/last_7_days/last_30_days/this_month/last_month/this_year/ytd/last_year/last_quarter/all_time, a weekday 'friday'/'last_monday', a month 'april'/'april_mtd', an ISO date '2026-05-22' or range '2026-04-01:2026-04-24'"}
     try:
         c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
         c.row_factory = sqlite3.Row
@@ -2354,7 +2448,9 @@ async def lsl_salesperson_stats(
         "all_time":      "1=1",
     }.get(p)
     if not period_sql:
-        return {"error": f"unsupported period {period!r}"}
+        period_sql = _period_to_sql(period)   # weekday/month/ISO parity (e.g. 'friday' -> last Fri)
+    if not period_sql:
+        return {"error": f"unsupported period {period!r}; use yesterday/today/last_7_days/last_30_days/this_month/last_month/this_year/ytd/last_year/last_quarter/all_time, a weekday 'friday', a month 'april', an ISO date or range"}
     try:
         c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
         c.row_factory = sqlite3.Row
@@ -3744,6 +3840,13 @@ def _lsl_resolve_period(period: str):
         else:
             end = "%04d-%02d-%02d" % (yr, mo, last_day)
         return (start, end)
+    weekday_map = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                   "friday": 4, "saturday": 5, "sunday": 6}
+    _wd = p.replace("last_", "").replace("this_", "")
+    if _wd in weekday_map:
+        days_back = (now.weekday() - weekday_map[_wd]) % 7 or 7
+        _d = (now - _td(days=days_back)).strftime("%Y-%m-%d")
+        return (_d, _d)
     return ((now - _td(days=30)).strftime("%Y-%m-%d"), today)
 
 

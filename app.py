@@ -4642,6 +4642,67 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                             print(f'[photo-ocr-miles] bid={bid_id} miles={miles} '
                                   f'cleared missing_miles flag + force-reprocess fired',
                                   flush=True)
+                # OCR_STITCH_WINDOW_2026_06_10 (bids 2814/2815): mirror of
+                # STITCH_WINDOW_FIX (text-VIN path) for the async-OCR path.
+                # The photo delivered a VIN but the bid still has no miles -
+                # without this the bid is INVISIBLE forever: the worker claim
+                # gate requires mileage > 0 and nothing flags or reclaims.
+                # (1) reclaim a bare-miles text staged shortly before the
+                # photo (ORDER_INDEP staging); else (2) flag missing_miles so
+                # a follow-up bare-number SMS verify-stitches here and the
+                # bid shows as awaiting data on the dashboard.
+                if vin:
+                    bg_cur.execute("SELECT mileage FROM bids WHERE id=%s", (bid_id,))
+                    _mrow = bg_cur.fetchone()
+                    if _mrow and not _mrow.get('mileage'):
+                        _os_miles = None
+                        if from_phone:
+                            try:
+                                bg_cur.execute("""
+                                    SELECT id AS log_id, parsed_miles, COUNT(*) OVER () AS n
+                                      FROM sms_intake_log
+                                     WHERE from_phone = %s
+                                       AND created_at > NOW() - INTERVAL '5 minutes'
+                                       AND outcome = 'order_indep_staged'
+                                       AND parsed_miles IS NOT NULL
+                                     ORDER BY id DESC LIMIT 1
+                                """, (from_phone,))
+                                _osr = bg_cur.fetchone()
+                                if _osr and _osr.get('n') == 1 and _osr.get('parsed_miles'):
+                                    bg_cur.execute(
+                                        "UPDATE bids SET mileage=%s, updated_at=NOW() "
+                                        "WHERE id=%s AND mileage IS NULL",
+                                        (int(_osr['parsed_miles']), bid_id))
+                                    if bg_cur.rowcount:
+                                        _os_miles = int(_osr['parsed_miles'])
+                                        bg_cur.execute(
+                                            "UPDATE sms_intake_log SET bid_id=%s, outcome='order_indep_reclaim', "
+                                            "reason = COALESCE(reason,'') || ' [reclaimed to bid #' || %s || ' at photo-OCR]' "
+                                            "WHERE id=%s",
+                                            (bid_id, bid_id, _osr['log_id']))
+                                        print(f'[ocr-stitch] bid={bid_id} reclaimed staged miles={_os_miles}', flush=True)
+                            except Exception as _ose:
+                                print(f'[ocr-stitch] reclaim err bid={bid_id}: {_ose}', flush=True)
+                        if not _os_miles:
+                            try:
+                                bg_cur.execute("""
+                                    UPDATE bids
+                                       SET needs_verification_at = COALESCE(needs_verification_at, NOW()),
+                                           needs_verification_reason = CASE
+                                              WHEN needs_verification_reason IS NULL
+                                                   THEN 'missing_miles'
+                                              WHEN position('missing_miles' IN needs_verification_reason) > 0
+                                                   THEN needs_verification_reason
+                                              ELSE needs_verification_reason || ',missing_miles'
+                                           END
+                                     WHERE id = %s AND needs_verification_cleared_at IS NULL
+                                       AND mileage IS NULL
+                                """, (bid_id,))
+                                if bg_cur.rowcount:
+                                    print(f'[ocr-stitch] bid={bid_id} flagged missing_miles '
+                                          f'(VIN via OCR, no odometer in photo)', flush=True)
+                            except Exception as _osf:
+                                print(f'[ocr-stitch] flag err bid={bid_id}: {_osf}', flush=True)
             conn.commit()
     except Exception as _e:
         print(f'[sms-photo-bg] error bid={bid_id} photo={photo_id}: {_e}', flush=True)
@@ -5111,19 +5172,32 @@ def twilio_webhook():
                 print('[order-indep-merge] skip: %s incomplete bids in 120s window for %s (need exactly 1)' % (_oim_n, from_phone), flush=True)
             elif not _oim_row:
                 # ORDER_INDEP_STAGE_2026_05_31: no mergeable incomplete bid in
-                # the 120s window. Defer to the existing handlers if this phone
-                # has a verify-pending bid (verify-stitch covers missing-miles
-                # up to 24h) or an awaiting_name held bid (name-reply re-ask);
-                # otherwise STAGE the bare-miles so it neither share-replies
-                # onto an old bid nor spawns a vin-less miles-only orphan. A
-                # VIN/photo bid created within 120s reclaims it
-                # (ORDER_INDEP_RECLAIM_2026_05_31). The only thing this drops
-                # is a lone bare number with no vehicle ever arriving.
+                # the 120s window. Defer to the existing handlers ONLY when one
+                # of them can actually consume this text; otherwise STAGE the
+                # bare-miles so it neither share-replies onto an old bid nor
+                # spawns a vin-less miles-only orphan. A VIN/photo bid created
+                # within 120s reclaims it (ORDER_INDEP_RECLAIM_2026_05_31). The
+                # only thing this drops is a lone bare number with no vehicle
+                # ever arriving.
+                # ORDER_INDEP_DEFER_NARROW_2026_06_10 (operator policy, bids
+                # 2814/2815): a STALE verify-pending bid must not hijack new
+                # intake. The old check deferred on ANY uncleared flag in 24h,
+                # but VERIFY_STITCH_SILENT only attaches when the pending bid
+                # is <1 min old - older flags made the miles fall through both
+                # nets into an orphan bid. Defer now only when (a) the pending
+                # bid is <1 min old (silent-stitch will attach), (b) we
+                # explicitly SMS-asked this phone for miles/VIN (the reply
+                # belongs to that bid), or (c) an awaiting_name held bid owns
+                # the next inbound (name-reply flow).
                 cur.execute(
                     "SELECT 1 FROM bids WHERE phone=%s "
                     "AND created_at > NOW() - INTERVAL '24 hours' "
-                    "AND ((needs_verification_at IS NOT NULL AND needs_verification_cleared_at IS NULL) "
-                    "OR COALESCE(awaiting_name, FALSE) = TRUE) LIMIT 1",
+                    "AND (COALESCE(awaiting_name, FALSE) = TRUE "
+                    "OR ((needs_verification_at IS NOT NULL AND needs_verification_cleared_at IS NULL) "
+                    "AND (created_at > NOW() - INTERVAL '1 minute' "
+                    "OR miles_request_sms_sent_at > NOW() - INTERVAL '24 hours' "
+                    "OR miles_verify_sms_sent_at > NOW() - INTERVAL '24 hours' "
+                    "OR vin_verify_sms_sent_at > NOW() - INTERVAL '24 hours'))) LIMIT 1",
                     (from_phone,))
                 if not cur.fetchone():
                     _finalize_sms_intake(

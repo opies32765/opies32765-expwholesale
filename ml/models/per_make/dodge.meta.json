@@ -1,9 +1,9 @@
 {
   "make_name": "DODGE",
-  "trained_at": "2026-06-09T08:30:50.249156Z",
-  "n_total": 757,
+  "trained_at": "2026-06-10T08:30:37.926156Z",
+  "n_total": 760,
   "n_train": 715,
-  "n_test": 42,
+  "n_test": 45,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -223,49 +223,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2489.0,
-    "mape_pct": 8.46,
-    "r2": 0.9536,
-    "within_5pct": 52.4,
-    "within_10pct": 71.4
+    "mae_dollars": 2464.0,
+    "mape_pct": 8.45,
+    "r2": 0.957,
+    "within_5pct": 57.8,
+    "within_10pct": 66.7
   },
   "baseline_metrics": {
-    "mae_dollars": 3018.0,
-    "mape_pct": 12.3,
+    "mae_dollars": 2926.0,
+    "mape_pct": 11.67,
     "ratio": 1.0608
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.5076446533203125
+      "importance": 0.4887857735157013
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.23770059645175934
+      "importance": 0.2383875995874405
     },
     {
       "name": "original_msrp",
-      "importance": 0.08048435300588608
+      "importance": 0.09812112152576447
     },
     {
       "name": "supplier_name_Rountree Moore Ford",
-      "importance": 0.024703072383999825
+      "importance": 0.019385553896427155
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.016097649931907654
-    },
-    {
-      "name": "model_name_Durango SRT Hellcat Sport Utility Vehicle",
-      "importance": 0.008408025838434696
+      "importance": 0.01646284945309162
     },
     {
       "name": "odometer",
-      "importance": 0.007107053883373737
+      "importance": 0.008677714504301548
     },
     {
-      "name": "sold_year",
-      "importance": 0.00503204669803381
+      "name": "model_name_Durango SRT Hellcat Sport Utility Vehicle",
+      "importance": 0.007485313806682825
+    },
+    {
+      "name": "supplier_name_Atlanta Autos",
+      "importance": 0.007236789911985397
     }
   ]
 }

@@ -1,9 +1,9 @@
 {
   "make_name": "AUDI",
-  "trained_at": "2026-06-09T08:30:41.679725Z",
-  "n_total": 1143,
+  "trained_at": "2026-06-10T08:30:33.116184Z",
+  "n_total": 1144,
   "n_train": 1107,
-  "n_test": 36,
+  "n_test": 37,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,15 +219,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3416.0,
-    "mape_pct": 6.03,
-    "r2": 0.9762,
-    "within_5pct": 38.9,
-    "within_10pct": 86.1
+    "mae_dollars": 3372.0,
+    "mape_pct": 6.06,
+    "r2": 0.9765,
+    "within_5pct": 37.8,
+    "within_10pct": 86.5
   },
   "baseline_metrics": {
-    "mae_dollars": 4073.0,
-    "mape_pct": 7.24,
+    "mae_dollars": 4018.0,
+    "mape_pct": 7.26,
     "ratio": 1.0271
   },
   "top_features": [
