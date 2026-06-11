@@ -354,7 +354,7 @@ def api_vauto_verify_queue():
                   AND (i.verify_claimed_at IS NULL
                        OR i.verify_claimed_at < NOW() - INTERVAL '5 minutes')
                   {where_dealer}
-                ORDER BY i.first_seen_at ASC
+                ORDER BY i.first_seen_at DESC NULLS LAST  -- NEWEST_FIRST_2026_06_11: fresh onboards verify before backlog
                 FOR UPDATE SKIP LOCKED
                 LIMIT %s
             )

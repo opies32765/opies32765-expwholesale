@@ -283,15 +283,50 @@ def fetch_inventory(config, dealer_url, sess=None, max_vehicles=None):
             # list_path here isn't used; we treat the response as XML
             soup = BeautifulSoup(r.text, "xml")
             urls = [loc.get_text(strip=True) for loc in soup.find_all("loc")]
+            # REGEX_SITEMAP_FIELDS_2026_06_11: discovery configs (dealer 22)
+            # express URL-derived fields as "regex:<pat>" and url:"." — but
+            # _extract_fields_from_html treats every value as a CSS selector,
+            # so '.' raised SelectorSyntaxError and the per-VDP except
+            # silently skipped EVERY VDP -> 0 vehicles while the scan said ok.
+            # regex fields match the VDP URL first, then the page text (for
+            # embedded-JSON values); url:"."/"$" = the VDP url; other fields
+            # stay CSS-against-page exactly as before.
+            _regex_f = {k: v[6:] for k, v in (fields or {}).items()
+                        if isinstance(v, str) and v.startswith("regex:")}
+            _css_f = {k: v for k, v in (fields or {}).items()
+                      if k not in _regex_f
+                      and not (k == "url" and v in (".", "$"))}
             for vdp_url in urls[:200]:  # safety cap
                 try:
-                    vr = _fetch(vdp_url, sess=sess)
-                    if vr.status_code == 200:
-                        # treat the VDP as a single-record HTML extraction
-                        soup_v = BeautifulSoup(vr.text, "html.parser")
-                        vehicles.append(_extract_fields_from_html(soup_v, fields, base_for_urls))
+                    rec = {}
+                    page_text = ""
+                    if _css_f or _regex_f:
+                        vr = _fetch(vdp_url, sess=sess)
+                        if vr.status_code != 200:
+                            continue
+                        page_text = vr.text
+                    if _css_f:
+                        soup_v = BeautifulSoup(page_text, "html.parser")
+                        rec.update(_extract_fields_from_html(soup_v, _css_f, base_for_urls))
+                    for fname, pat in _regex_f.items():
+                        m = re.search(pat, vdp_url, re.I)
+                        if not m and page_text:
+                            m = re.search(pat, page_text, re.I)
+                        if m:
+                            raw = m.group(1) if m.groups() else m.group(0)
+                            coerce = _FIELD_COERCERS.get(fname)
+                            try:
+                                rec[fname] = coerce(raw) if coerce else raw
+                            except Exception:
+                                rec[fname] = raw
+                    if (fields or {}).get("url") in (".", "$"):
+                        rec["url"] = vdp_url
+                    if any(v not in (None, "", []) for v in rec.values()):
+                        vehicles.append(rec)
                 except Exception:
                     continue
+                if max_vehicles and len(vehicles) >= max_vehicles:
+                    break
 
         elif src_type == "json_script":
             soup = BeautifulSoup(r.text, "html.parser")

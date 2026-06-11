@@ -25,7 +25,7 @@ from urllib.parse import urlparse
 import requests
 
 FLARESOLVERR_URL = os.environ.get('FLARESOLVERR_URL', 'http://127.0.0.1:8191/v1')
-FLARESOLVERR_TIMEOUT_MS = int(os.environ.get('FLARESOLVERR_TIMEOUT_MS', '60000'))
+FLARESOLVERR_TIMEOUT_MS = int(os.environ.get('FLARESOLVERR_TIMEOUT_MS', '115000'))
 
 DATAIMPULSE_HOST = os.environ.get('DATAIMPULSE_HOST', 'gw.dataimpulse.com')
 DATAIMPULSE_PORT = int(os.environ.get('DATAIMPULSE_PORT', '10000'))
@@ -58,7 +58,7 @@ def fetch_direct(url, sess, method='GET'):
 # hang the entire scan for hours. ThreadPool + future.result(timeout=N)
 # guarantees we move on. The orphaned worker thread leaks a single short
 # connection that FS eventually 504s — acceptable cost for forward progress.
-FLARESOLVERR_DEADLINE_SEC = int(os.environ.get('FLARESOLVERR_DEADLINE_SEC', '120'))
+FLARESOLVERR_DEADLINE_SEC = int(os.environ.get('FLARESOLVERR_DEADLINE_SEC', '180'))
 FLARESOLVERR_PROXY_DEADLINE_SEC = int(os.environ.get('FLARESOLVERR_PROXY_DEADLINE_SEC', '180'))
 
 
@@ -103,6 +103,72 @@ def fetch_flaresolverr(url, sess=None, method='GET'):
     # FlareSolverr returns a body wrapped in a <pre> for some servers — unwrap
     if body.startswith('<html><head></head><body><pre'):
         # Strip the <pre> wrapper — leaves raw JSON/XML
+        import re
+        m = re.search(r'<pre[^>]*>([\s\S]*?)</pre>', body)
+        if m:
+            body = m.group(1)
+    return sol.get('status', 200), sol.get('url', url), body
+
+
+# ── Session-aware FlareSolverr (CLOUDFLARE_ESCALATE_2026_06_11) ──────────
+# DealerOn / Dealer-eProcess rooftops behind a Cloudflare managed challenge
+# (e.g. Chatham Parkway Lexus, dealer 102) need a LONG maxTimeout (~110s) for
+# the FIRST solve, but once a `cf_clearance` cookie is minted FlareSolverr can
+# reuse it across subsequent VDPs in the SAME session, dropping per-page cost
+# from ~110s to a few seconds. These helpers let the scanner mint one session,
+# pump all ~45 VDPs through it, then tear it down. maxTimeout is per-call so a
+# warm page can use a smaller budget than the cold solve.
+def flaresolverr_session_create(session_id):
+    """Create a named FlareSolverr browser session (persists cf_clearance).
+    Returns True on success."""
+    try:
+        resp = _flaresolverr_post(
+            {'cmd': 'sessions.create', 'session': session_id},
+            wall_clock_sec=FLARESOLVERR_DEADLINE_SEC)
+        if resp is None:
+            return False
+        return resp.json().get('status') == 'ok'
+    except Exception:
+        return False
+
+
+def flaresolverr_session_destroy(session_id):
+    """Destroy a named FlareSolverr session. Best-effort."""
+    try:
+        _flaresolverr_post(
+            {'cmd': 'sessions.destroy', 'session': session_id},
+            wall_clock_sec=30)
+    except Exception:
+        pass
+
+
+def fetch_flaresolverr_session(url, session_id=None, max_timeout_ms=None,
+                               wall_clock_sec=None, method='GET'):
+    """Like fetch_flaresolverr but with an explicit per-call maxTimeout and an
+    optional reusable session_id (warm cf_clearance). Same (code, url, body)
+    contract."""
+    payload = {
+        'cmd': 'request.get' if method == 'GET' else 'request.post',
+        'url': url,
+        'maxTimeout': int(max_timeout_ms or FLARESOLVERR_TIMEOUT_MS),
+    }
+    if session_id:
+        payload['session'] = session_id
+    deadline = int(wall_clock_sec or FLARESOLVERR_DEADLINE_SEC)
+    try:
+        resp = _flaresolverr_post(payload, wall_clock_sec=deadline)
+        if resp is None:
+            return None, None, f'flaresolverr_deadline_exceeded:{deadline}s'
+        data = resp.json()
+    except Exception as e:
+        return None, None, f'flaresolverr_error:{type(e).__name__}:{e}'
+    if data.get('status') != 'ok':
+        return None, None, f'flaresolverr_bad:{data.get("message","unknown")}'
+    sol = data.get('solution', {}) or {}
+    body = sol.get('response', '') or ''
+    if not body or len(body) < 200:
+        return None, sol.get('url', url), 'flaresolverr_empty'
+    if body.startswith('<html><head></head><body><pre'):
         import re
         m = re.search(r'<pre[^>]*>([\s\S]*?)</pre>', body)
         if m:

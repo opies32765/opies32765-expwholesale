@@ -27,22 +27,44 @@ import psycopg2.extras
 import requests
 
 try:
-    from anthropic import Anthropic
+    from google import genai
+    from google.genai import types
 except ImportError:
-    print("Install: pip install anthropic", file=sys.stderr)
+    print("Install: pip install google-genai", file=sys.stderr)
     sys.exit(1)
 
 DB_URL = os.environ.get("DATABASE_URL", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-MODEL = os.environ.get("DISCOVERY_MODEL", "claude-opus-4-5")  # 4.7 alias maps server-side
+
+
+def _load_gemini_key():
+    """GEMINI_PORT_2026_06_11: operator's post-pay Developer API key
+    (AQ.-prefix, minted in the EW GCP project my-project-dia-492415).
+    Env var wins; falls back to /etc/ew-gemini.env (root, 600) so cron,
+    scanner-spawned, and manual runs all work without unit-file changes."""
+    k = os.environ.get("GEMINI_API_KEY", "").strip()
+    if k:
+        return k
+    try:
+        for line in open("/etc/ew-gemini.env"):
+            line = line.strip()
+            if line.startswith("GEMINI_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return ""
+
+
+GEMINI_API_KEY = _load_gemini_key()
+# GEMINI_PORT_2026_06_11: was Claude Opus — Anthropic account has zero credits.
+MODEL = os.environ.get("DISCOVERY_MODEL", "gemini-2.5-pro")
 MAX_TURNS = 8
-MAX_TOKENS_PER_RESPONSE = 4096
+MAX_TOKENS_PER_RESPONSE = 8192  # 2.5-pro spends ~1-2K thinking tokens before output
 FETCH_BUDGET_BYTES = 250_000   # cap each tool fetch to keep token use predictable
 TOOL_RESULT_CAP_CHARS = 35_000 # trim each tool result before adding to context
 
-# Pricing for cost tracking (Opus 4.x: $15/M input, $75/M output)
-INPUT_PRICE_PER_MTOK = 15.00
-OUTPUT_PRICE_PER_MTOK = 75.00
+# Pricing for cost tracking (Gemini 2.5 Pro <=200K ctx: $1.25/M in, $10/M out)
+INPUT_PRICE_PER_MTOK = 1.25
+OUTPUT_PRICE_PER_MTOK = 10.00
 
 
 def db_conn():
@@ -286,17 +308,21 @@ def extract_jsonpath_hint(body, max_chars=800):
     return sketch(data)[:max_chars]
 
 
-# ─── Tool schema for the model ────────────────────────────────────────────
-TOOLS = [
+# ─── Tool schema for the model (Gemini function declarations) ─────────────
+# GEMINI_PORT_2026_06_11: Gemini function schemas reject free-form object
+# params (objects need fixed properties), so inventory_source and extraction
+# travel as JSON STRINGS and are parsed back in _parse_submit_args() into the
+# exact config shape the Opus version produced.
+GEMINI_TOOL_DECLS = [
     {
         "name": "fetch_url",
         "description": (
             "Fetch any URL on the dealer's site (homepage, inventory page, "
             "an /api/* endpoint, sitemap.xml, etc) and return its body. "
             "Use this to investigate where vehicle inventory data lives. "
-            "Body is truncated to ~600KB."
+            "Body is truncated to ~250KB."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "Absolute URL to fetch"}
@@ -308,9 +334,11 @@ TOOLS = [
         "name": "submit_config",
         "description": (
             "Submit your final scrape config for this dealer. Call this ONCE "
-            "when you've identified how to extract the inventory."
+            "when you've identified how to extract the inventory. "
+            "inventory_source_json and extraction_json must be JSON-encoded "
+            "STRINGS of the respective objects."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "fetch_strategy": {
@@ -318,60 +346,53 @@ TOOLS = [
                     "enum": ["static", "playwright"],
                     "description": "static = plain HTTP fetch works; playwright = needs JS rendering",
                 },
-                "inventory_source": {
-                    "type": "object",
-                    "description": "How to fetch the inventory listing",
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "enum": ["api_json", "html_listing", "next_data", "sitemap"],
-                        },
-                        "url_template": {"type": "string"},
-                        "method": {"type": "string", "default": "GET"},
-                        "headers": {"type": "object"},
-                        "body_template": {"type": "string"},
-                        "pagination": {
-                            "type": "object",
-                            "properties": {
-                                "type": {"type": "string", "enum": ["page_param", "offset", "next_link", "none"]},
-                                "param": {"type": "string"},
-                                "start": {"type": "integer"},
-                                "step": {"type": "integer"},
-                                "max_pages": {"type": "integer"},
-                            },
-                        },
-                    },
-                    "required": ["type", "url_template"],
+                "inventory_source_json": {
+                    "type": "string",
+                    "description": (
+                        'JSON string. Shape: {"type": "api_json|html_listing|next_data|sitemap", '
+                        '"url_template": "...", "method": "GET", "headers": {...}, '
+                        '"body_template": "...", "pagination": {"type": '
+                        '"page_param|offset|next_link|none", "param": "...", '
+                        '"start": 1, "step": 20, "max_pages": 30}}'
+                    ),
                 },
-                "extraction": {
-                    "type": "object",
-                    "description": "How to extract vehicle records from each fetched response",
-                    "properties": {
-                        "list_path": {
-                            "type": "string",
-                            "description": (
-                                "JSONPath (e.g. $.results[*]) for api_json/next_data, "
-                                "or CSS selector (e.g. div.vehicle-card) for html_listing"
-                            ),
-                        },
-                        "fields": {
-                            "type": "object",
-                            "description": (
-                                "Map of vehicle field name to extraction path. "
-                                "Required: vin, year, make, model, price. "
-                                "Optional: trim, miles, stock_number, url, photos, exterior_color, interior_color."
-                            ),
-                        },
-                    },
-                    "required": ["list_path", "fields"],
+                "extraction_json": {
+                    "type": "string",
+                    "description": (
+                        'JSON string. Shape: {"list_path": "$.results[*] (JSONPath) or '
+                        'div.card (CSS selector)", "fields": {"vin": "path", "year": "path", '
+                        '"make": "path", "model": "path", "price": "path", "miles": "path", '
+                        '"url": "path", ...}}. Required fields: vin, year, make, model, price.'
+                    ),
                 },
                 "notes": {"type": "string", "description": "Human-readable notes about quirks, gotchas, manual review needed"},
                 "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
             },
-            "required": ["fetch_strategy", "inventory_source", "extraction", "confidence"],
+            "required": ["fetch_strategy", "inventory_source_json", "extraction_json", "confidence"],
         },
     },
 ]
+
+
+def _parse_submit_args(args):
+    """Rebuild the scrape_config dict from submit_config's JSON-string args.
+    Returns None if the JSON strings don't parse (the agent gets one retry)."""
+    try:
+        inv = args.get("inventory_source_json")
+        ext = args.get("extraction_json")
+        inv = json.loads(inv) if isinstance(inv, str) else inv
+        ext = json.loads(ext) if isinstance(ext, str) else ext
+        if not isinstance(inv, dict) or not isinstance(ext, dict):
+            return None
+        return {
+            "fetch_strategy": args.get("fetch_strategy", "static"),
+            "inventory_source": inv,
+            "extraction": ext,
+            "notes": args.get("notes", ""),
+            "confidence": args.get("confidence", "medium"),
+        }
+    except Exception:
+        return None
 
 
 SYSTEM_PROMPT = """You are a dealer-website reverse-engineering specialist. \
@@ -420,6 +441,10 @@ field for whoever reviews this later.
 If the site genuinely cannot be scraped without browser JS (heavily obfuscated, \
 Cloudflare-walled, or React-only with no embedded data), set fetch_strategy \
 to "playwright" and provide whatever selectors a headless browser would need.
+
+Tool-format note: submit_config takes inventory_source_json and \
+extraction_json as JSON-encoded STRINGS — json-encode those objects when \
+you call submit_config.
 """
 
 
@@ -432,8 +457,9 @@ def cost_usd(input_tokens, output_tokens):
 
 
 def discover(dealer_id, dealer_name, dealer_url):
-    """Run an Opus discovery agent for one dealer. Returns config dict or None."""
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    """Run a Gemini discovery agent for one dealer. Returns config dict or None.
+    GEMINI_PORT_2026_06_11 — same loop contract as the retired Opus version."""
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
     user_msg = (
         f"Dealer: **{dealer_name}**\n"
@@ -443,86 +469,90 @@ def discover(dealer_id, dealer_name, dealer_url):
         "If you find an API endpoint, that's almost always the right answer."
     )
 
-    messages = [{"role": "user", "content": user_msg}]
+    contents = [types.Content(role="user", parts=[types.Part.from_text(text=user_msg)])]
+    gen_cfg = types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        tools=[types.Tool(function_declarations=GEMINI_TOOL_DECLS)],
+        max_output_tokens=MAX_TOKENS_PER_RESPONSE,
+        temperature=0.2,
+    )
+
     total_input = 0
     total_output = 0
     config = None
     error = None
+    turn = 0
 
     for turn in range(MAX_TURNS):
         try:
-            resp = client.messages.create(
-                model=MODEL,
-                max_tokens=MAX_TOKENS_PER_RESPONSE,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=messages,
-            )
+            resp = client.models.generate_content(model=MODEL, contents=contents, config=gen_cfg)
         except Exception as e:
             error = f"API call failed turn {turn}: {e}"
             print(f"  ERROR: {error}", flush=True)
             break
 
-        total_input += resp.usage.input_tokens
-        total_output += resp.usage.output_tokens
-        running_cost = cost_usd(total_input, total_output)
-        print(f"  turn {turn+1}: in={resp.usage.input_tokens} out={resp.usage.output_tokens} running=${running_cost}", flush=True)
+        um = getattr(resp, "usage_metadata", None)
+        t_in = getattr(um, "prompt_token_count", 0) or 0
+        t_out = (getattr(um, "candidates_token_count", 0) or 0) + \
+                (getattr(um, "thoughts_token_count", 0) or 0)
+        total_input += t_in
+        total_output += t_out
+        print(f"  turn {turn+1}: in={t_in} out={t_out} running=${cost_usd(total_input, total_output)}", flush=True)
 
-        if resp.stop_reason == "end_turn":
-            error = "model stopped without submitting config"
+        fcs = list(resp.function_calls or [])
+        if not fcs:
+            _txt = ""
+            try:
+                _txt = (resp.text or "")[:200]
+            except Exception:
+                pass
+            error = f"turn {turn+1} produced no tool calls; text={_txt!r}"
             break
 
-        # Append assistant message
-        messages.append({"role": "assistant", "content": resp.content})
+        # Append the model turn (with its function calls) to the history
+        contents.append(resp.candidates[0].content)
 
-        # Process tool calls
-        tool_results = []
+        parts = []
         submitted = False
-        for block in resp.content:
-            if block.type != "tool_use":
-                continue
-            if block.name == "submit_config":
-                config = block.input
+        for fc in fcs:
+            args = dict(fc.args or {})
+            if fc.name == "submit_config":
+                config = _parse_submit_args(args)
+                if config is None:
+                    # bad JSON strings — bounce it back once, agent retries
+                    parts.append(types.Part.from_function_response(
+                        name="submit_config",
+                        response={"result": "REJECTED: inventory_source_json / "
+                                            "extraction_json were not valid JSON "
+                                            "strings. Fix and call submit_config again."}))
+                    continue
                 submitted = True
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": "Config received. Thank you.",
-                })
+                parts.append(types.Part.from_function_response(
+                    name="submit_config",
+                    response={"result": "Config received. Thank you."}))
                 break
-            elif block.name == "fetch_url":
-                url = block.input.get("url", "")
+            elif fc.name == "fetch_url":
+                url = args.get("url", "")
                 print(f"    → fetch_url({url[:80]})", flush=True)
                 result = fetch_url(url)
                 # Add a JSON sketch if the body looks like JSON, to help the model
-                if isinstance(result, dict) and "body" in result and result.get("content_type", "").startswith("application/json"):
+                if isinstance(result, dict) and "body" in result and str(result.get("content_type", "")).startswith("application/json"):
                     sketch = extract_jsonpath_hint(result["body"])
                     if sketch:
                         result["json_structure_sketch"] = sketch
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps(result)[:TOOL_RESULT_CAP_CHARS],
-                })
+                parts.append(types.Part.from_function_response(
+                    name="fetch_url",
+                    response={"result": json.dumps(result)[:TOOL_RESULT_CAP_CHARS]}))
 
         if submitted:
             break
-        if not tool_results:
-            error = f"turn {turn+1} produced no tool calls; stop_reason={resp.stop_reason}"
+        if not parts:
+            error = f"turn {turn+1}: unknown tool call(s) {[fc.name for fc in fcs]}"
             break
-
-        messages.append({"role": "user", "content": tool_results})
-
-        # Memory hygiene: replace tool_result contents from older turns with
-        # a one-line summary so context doesn't balloon. Keep the last 2 fetches.
-        old_tool_msgs = [i for i, m in enumerate(messages) if isinstance(m.get("content"), list)
-                         and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in m["content"])]
-        for idx in old_tool_msgs[:-2]:  # all but the most recent two
-            for block in messages[idx]["content"]:
-                if isinstance(block, dict) and block.get("type") == "tool_result":
-                    content_str = str(block.get("content", ""))
-                    if len(content_str) > 500:
-                        block["content"] = content_str[:300] + "...[older fetch result trimmed]"
+        contents.append(types.Content(role="user", parts=parts))
+        # NOTE: the Opus version trimmed older tool results to control context
+        # cost. gemini-2.5-pro has 1M context at $1.25/M input — 8 turns of
+        # 35KB results stay well under $1, so no trimming is needed here.
 
     if not config and not error:
         error = f"hit MAX_TURNS={MAX_TURNS} without submitting config"
@@ -534,7 +564,7 @@ def discover(dealer_id, dealer_name, dealer_url):
         "output_tokens": total_output,
         "cost_usd": cost_usd(total_input, total_output),
         "model": MODEL,
-        "turns_used": turn + 1 if 'turn' in dir() else 0,
+        "turns_used": turn + 1,
     }
 
 
@@ -594,7 +624,7 @@ def run_discovery(dealer_id, force=False):
         print(f"  [stage 1] error: {e}")
 
     # ── STAGE 2: AI fallback (Opus) ──
-    print("  [stage 2] falling back to Opus 4.7 agent...")
+    print(f"  [stage 2] falling back to Gemini agent ({MODEL})...")
     cur.execute(
         "INSERT INTO dealer_discovery_runs (dealer_id, model) VALUES (%s, %s) RETURNING id",
         (dealer_id, MODEL),
@@ -653,16 +683,33 @@ def main():
                     help="Process all dealers where platform IS NULL")
     ap.add_argument("--force", action="store_true",
                     help="Re-discover even if platform is already set")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Run the discovery agent and print the config — write NOTHING to the DB")
     args = ap.parse_args()
 
-    if not ANTHROPIC_API_KEY:
-        print("ANTHROPIC_API_KEY not set", file=sys.stderr)
+    if not GEMINI_API_KEY:
+        print("GEMINI_API_KEY not set (env var or /etc/ew-gemini.env)", file=sys.stderr)
         return 1
     if not DB_URL:
         print("DATABASE_URL not set", file=sys.stderr)
         return 1
 
     if args.dealer_id:
+        if args.dry_run:
+            conn = db_conn()
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT id, name, url FROM dealers WHERE id=%s", (args.dealer_id,))
+            dealer = cur.fetchone()
+            conn.close()
+            if not dealer:
+                print(f"dealer #{args.dealer_id} not found")
+                return 1
+            print(f"=== DRY-RUN discovery for #{dealer['id']} {dealer['name']} (no DB writes) ===")
+            result = discover(dealer["id"], dealer["name"], dealer["url"])
+            meta = {k: v for k, v in result.items() if k != "config"}
+            print(json.dumps(meta, indent=2))
+            print(json.dumps(result["config"], indent=2) if result["config"] else "NO CONFIG PRODUCED")
+            return 0 if result["config"] else 1
         ok = run_discovery(args.dealer_id, force=args.force)
         return 0 if ok else 1
 

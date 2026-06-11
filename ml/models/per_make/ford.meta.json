@@ -1,9 +1,9 @@
 {
   "make_name": "FORD",
-  "trained_at": "2026-06-10T08:30:23.500602Z",
-  "n_total": 2157,
+  "trained_at": "2026-06-11T08:30:25.871626Z",
+  "n_total": 2160,
   "n_train": 1972,
-  "n_test": 185,
+  "n_test": 188,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -227,15 +227,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 6227.0,
-    "mape_pct": 11.71,
-    "r2": 0.8734,
+    "mae_dollars": 6314.0,
+    "mape_pct": 11.83,
+    "r2": 0.8727,
     "within_5pct": 33.5,
-    "within_10pct": 61.6
+    "within_10pct": 61.2
   },
   "baseline_metrics": {
-    "mae_dollars": 6157.0,
-    "mape_pct": 15.7,
+    "mae_dollars": 6248.0,
+    "mape_pct": 15.75,
     "ratio": 1.0945
   },
   "top_features": [

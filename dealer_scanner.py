@@ -14,6 +14,7 @@ Usage:
     python dealer_scanner.py --dealer-id 1
 """
 import argparse
+import html as _html
 import json as _json
 import os
 import re
@@ -37,6 +38,14 @@ USER_AGENT = os.environ.get('DEALER_SCANNER_UA',
     'Mozilla/5.0 (compatible; EW-DealerScanner/1.0; +https://experience-wholesale.net)')
 REQUEST_TIMEOUT = 20
 CRAWL_MAX_URLS = 2000          # hard cap per scan
+# CRAWL_WALLCLOCK_2026_06_11: hard wall-clock budget for ONE universal per-VDP
+# crawl pass. The per-FlareSolverr-call deadline (dealer_fetchers, 120s) caps a
+# single fetch, but a CRAWL_MAX_URLS-deep loop of slow-but-not-timing-out fetches
+# can still run for hours and is re-run once per escalation tier. This stops a
+# pass mid-loop so the scan returns whatever it has rather than wedging the queue
+# (Tamiami Ford dealer 98: 781 generic URLs crawled to urls_fetched=555, never
+# finished). 25 min default leaves headroom under scan_all's 30-min per-dealer cap.
+CRAWL_PASS_DEADLINE_SEC = int(os.environ.get('CRAWL_PASS_DEADLINE_SEC', '1500'))
 SOLD_CONFIDENCE_THRESHOLD = 0.6
 # Probe the URL on the FIRST missing scan. Previously was 2 (wait 2 scans
 # before even checking URL), which meant sitemap-only dealers (WordPress)
@@ -276,6 +285,14 @@ def detect_platform(html):
     # ridemotive handler instead of falling through to 'custom'.
     if 'app.ridemotive.com' in h or 'omniscience.ridemotive.com' in h:
         return ('ridemotive', 'jsonld+flaresolverr')
+    # JAZEL_FINGERPRINT_2026_06_11: Jazel 'auto5' sites are WordPress-based
+    # but render the SRP server-side with per-card data-vehicle JSON blobs.
+    # Detect BEFORE the generic wordpress branch so the jazel SRP fast-path
+    # (platform=='jazel') fires -- otherwise they fall to the universal crawl
+    # and hang 10+ min returning 0 (as Tamiami Ford dealer 98 did). 200+ jazel
+    # markers on a real jazel homepage, 0 on DealerOn dealers (verified).
+    if 'jazel' in h or 'auto5' in h or 'jzlrocket' in h:
+        return ('jazel', 'srp-data-vehicle')
     if 'wp-content' in h or 'wp-includes' in h:
         return ('wordpress', 'jsonld+html')
     if 'vinsolutions' in h:
@@ -1021,6 +1038,109 @@ def fetch_carscommerce_inventory(cfg):
         if page * 100 >= (total or 0):
             break
         page += 1
+    return out
+
+
+# ── Jazel (jazelauto / "auto5" / jzl) WordPress+Elementor platform ───────
+# JAZEL_DATAVEHICLE_2026_06_11: Jazel-built dealer sites (Tamiami Ford, et al)
+# render their SRP server-side with each vehicle card carrying a complete,
+# HTML-escaped JSON record in a `data-vehicle="{...}"` attribute. No DDC
+# /ws-inv-data API, no dealer.com markers — fingerprint is the jazel/auto5/jzl
+# bundle on a WordPress homepage. One plain GET per SRP page (12 cars/page)
+# returns full data (vin/year/make/model/trim/price/mileage/color/condition),
+# paginated via `<list>/srp-page-N/`. Replaces the universal per-VDP crawl
+# that discovered ~781 generic URLs and hung 10+ min returning 0 vehicles.
+_JAZEL_DATA_VEHICLE_RE = re.compile(r'data-vehicle="(\{.*?\})"\s', re.S)
+JAZEL_USED_LIST_PATH = '/inventory/used-vehicles/'
+
+
+def _normalize_jazel(o, base_url):
+    """Convert one Jazel data-vehicle JSON object to our AAN-shaped dict.
+    Skips 'new' condition (EW sources pre-owned + certified only)."""
+    vin = (o.get('vin') or '').strip().upper()
+    if not vin:
+        return None
+    cond_raw = (o.get('condition') or '').strip().lower()
+    if cond_raw in ('new', 'demo', 'loaner', 'courtesy'):
+        return None
+    # `conditions` is a list like ["Gold Certified,Certified,Used"]; treat any
+    # Certified marker as CPO, else used.
+    conds = o.get('conditions')
+    conds_s = (' '.join(conds) if isinstance(conds, list) else str(conds or '')).lower()
+    condition = 'cpo' if 'certif' in conds_s else 'used'
+    price = None
+    pr = o.get('price')
+    if pr is not None:
+        digits = re.sub(r'[^0-9]', '', str(pr))
+        price = int(digits) if digits else None
+    miles = o.get('mileage')
+    if miles is not None and not isinstance(miles, int):
+        digits = re.sub(r'[^0-9]', '', str(miles))
+        miles = int(digits) if digits else None
+    year = o.get('year')
+    try:
+        year = int(year)
+    except (ValueError, TypeError):
+        year = None
+    return {
+        'vin': vin, 'year': year,
+        'make': (o.get('make') or '').strip() or None,
+        'model': (o.get('model') or '').strip() or None,
+        'trim': (o.get('trim') or '').strip() or None,
+        'body_style': None,
+        'mileage': miles, 'price': price,
+        'ext_color': (o.get('exterior_color') or '').strip() or None,
+        'condition': condition,
+        'stock_number': (o.get('stockNumber') or '').strip() or None,
+        # The data-vehicle blob carries no VDP link, but Jazel VDP URLs are
+        # /vehicle/<VIN>/<slug>/ and the slug is cosmetic — /vehicle/<VIN>/
+        # resolves. Gives the upsert a stable URL dedup key + a working link.
+        'url': urljoin(base_url, '/vehicle/%s/' % vin),
+        'photo_url': None, 'photos': [],
+        'source_added_at': None,
+        '_aan_sold': False, '_aan_pending': False, '_aan_coming_soon': False,
+    }
+
+
+def fetch_jazel_inventory(base_url, sess, list_path=None, max_pages=80):
+    """Jazel SRP data-vehicle fetch. Walks `<list_path>` + `srp-page-N/` and
+    parses the inline `data-vehicle` JSON on each card. Returns a list of
+    normalized used/cpo dicts, or None on a hard failure (page-1 fetch error)
+    so the caller can decide abort-vs-fall-through. An empty list means the
+    SRP loaded but had no used vehicles."""
+    list_path = list_path or JAZEL_USED_LIST_PATH
+    out, seen = [], set()
+    for page in range(1, max_pages + 1):
+        if page == 1:
+            url = urljoin(base_url, list_path)
+        else:
+            url = urljoin(base_url, list_path.rstrip('/') + '/srp-page-%d/' % page)
+        code, _f, body = fetch(url, sess)
+        if code != 200 or not body:
+            # Page-1 failure is a hard failure (let caller abort/escalate);
+            # a later page just means we've walked off the end of pagination.
+            if page == 1:
+                return None
+            break
+        blobs = _JAZEL_DATA_VEHICLE_RE.findall(body)
+        if not blobs:
+            break  # past the last populated SRP page
+        added = 0
+        for b in blobs:
+            try:
+                o = _json.loads(_html.unescape(b))
+            except Exception:
+                continue
+            v = _normalize_jazel(o, base_url)
+            if not v or v['vin'] in seen:
+                continue
+            seen.add(v['vin'])
+            out.append(v)
+            added += 1
+        if added == 0:
+            break  # page rendered cards but all dupes — pagination cycled
+        if len(out) >= CRAWL_MAX_URLS:
+            break
     return out
 
 
@@ -2704,6 +2824,189 @@ def upsert_vehicle(cur, dealer_id, scan_id, veh):
         return (inv_id, True, None)
 
 
+
+
+# -- DealerOn / Dealer-eProcess sitemap inventory (CLOUDFLARE_ESCALATE_2026_06_11) --
+# Some DealerOn / Dealer-eProcess rooftops (e.g. Chatham Parkway Lexus, dealer
+# 102) sit behind a Cloudflare "managed challenge" that FlareSolverr 3.4.6
+# CANNOT solve (it times out after 60s, returns code=None / flaresolverr_bad)
+# and that residential proxies are IP-banned from. Every HTML page and every
+# JSON/data API (/apis/widget/.../getInventory, /api/vhcliaa/..., /resrc/
+# searchabledata) returns HTTP 403. The ONE family of endpoints Cloudflare
+# lets through un-challenged is the XML sitemaps under /resrc/xmlsitemap/.
+#
+# The per-rooftop inventory sitemap (/resrc/xmlsitemap/sitemap-inventory-search/
+# <city>-<st>-<zip>/) lists every VDP and -- for most units -- embeds a
+# <video:video> block whose <video:title> carries "Used <year> <make> <model>
+# <trim> <VIN>" and whose <video:thumbnail_loc> carries the hero photo. The VDP
+# URL path itself reliably encodes condition/year/make/model for 100% of units.
+#
+# This yields vin (where the title is populated)/year/make/model/trim/photo/url
+# for the full pre-owned lot with NO browser and NO FlareSolverr. price and
+# mileage are NOT exposed on any un-challenged endpoint on these sites, so they
+# come back NULL -- the upsert stores the row on (vin|url) regardless, and a
+# later valuation pass can backfill from VIN. See agent-A2 report 2026-06-11.
+_DEALERON_SITEMAP_INDEX = '/resrc/xmlsitemap/xml-sitemaps/'
+_SM_LOC = '{http://www.sitemaps.org/schemas/sitemap/0.9}loc'
+_SM_URL = '{http://www.sitemaps.org/schemas/sitemap/0.9}url'
+_VID = '{http://www.google.com/schemas/sitemap-video/1.1}video'
+_VID_TITLE = '{http://www.google.com/schemas/sitemap-video/1.1}title'
+_VID_THUMB = '{http://www.google.com/schemas/sitemap-video/1.1}thumbnail_loc'
+# /auto/<condition>-<year>-<make>-<model...>-<city>_<st>-<st>/<id>/  -- make is a
+# single token; model is everything up to the trailing "-<city>-<2-letter-st>/".
+_DEALERON_VDP_RE = re.compile(
+    r'/auto/(?P<cond>[a-z]+)-(?P<year>\d{4})-(?P<make>[a-z0-9]+)-'
+    r'(?P<model>[a-z0-9\-]+?)-[a-z0-9_]+-[a-z]{2}/\d+/?$', re.I)
+_VIN_RE = re.compile(r'\b([A-HJ-NPR-Z0-9]{17})\b')
+
+
+def _dealeron_zip_from_url(base_url):
+    """Pull a 5-digit rooftop zip from the dealer's stored URL query (cy=NNNNN)
+    if present -- lets us target the dealer's own rooftop sitemap on multi-store
+    domains. Returns the zip string or None."""
+    m = re.search(r'[?&]cy=(\d{5})', base_url or '')
+    return m.group(1) if m else None
+
+
+def _parse_dealeron_vdp(loc, title_text, thumb):
+    """Build a vehicle dict from one sitemap <url> entry. Returns None for
+    non-inventory or new-car URLs."""
+    m = _DEALERON_VDP_RE.search(loc)
+    if not m:
+        return None
+    cond = (m.group('cond') or '').lower()
+    # Only pre-owned side. 'new' VDPs share the same URL shape.
+    if cond == 'new':
+        return None
+    year = int(m.group('year'))
+    make = m.group('make').replace('-', ' ').strip().title()
+    model = m.group('model').replace('-', ' ').strip().upper()
+    veh = {
+        'year': year,
+        'make': make,
+        'model': model,
+        'url': loc,
+        'condition': 'certified' if cond in ('certified', 'cpo') else 'used',
+    }
+    title_text = (title_text or '').strip()
+    if title_text:
+        vm = _VIN_RE.search(title_text)
+        if vm:
+            veh['vin'] = vm.group(1).upper()
+        # Trim = text after "<year> <make> <model> " and before the VIN.
+        # e.g. "Used 2022 Lexus LX 600 F SPORT JTJMB7CX7N4005853"
+        t = title_text
+        if vm:
+            t = t[:vm.start()].strip()
+        t = re.sub(r'^(?:used|certified|pre[- ]?owned|new)\s+', '', t, flags=re.I)
+        t = re.sub(r'^\d{4}\s+', '', t)
+        t = re.sub(r'^' + re.escape(make) + r'\s+', '', t, flags=re.I)
+        for mw in model.split():
+            t = re.sub(r'^' + re.escape(mw) + r'\s+', '', t, flags=re.I)
+        t = t.strip()
+        if t:
+            veh['trim'] = t[:60]
+    if thumb:
+        veh['photo_url'] = thumb.strip()
+    return veh
+
+
+def fetch_dealeron_sitemap_inventory(base_url, sess, home_zip=None):
+    """Pull pre-owned inventory for a DealerOn / Dealer-eProcess rooftop from its
+    un-challenged XML sitemaps (no FlareSolverr; works through Cloudflare).
+
+    Returns a list of vehicle dicts (vin?/year/make/model/trim?/photo?/url), or
+    None if the sitemap index is unreachable (hard failure -> caller preserves
+    existing inventory rather than wiping it)."""
+    base = base_url.rstrip('/')
+    idx_url = base + _DEALERON_SITEMAP_INDEX
+    # /resrc/ endpoints answer to a direct GET; force the direct tier so a
+    # dealer pinned to preferred_tier='flaresolverr' (because the HTML is
+    # CF-walled) doesn't route the sitemap through FS and trip the same
+    # unsolvable challenge.
+    code, _f, body = fetch(idx_url, sess, tier='direct')
+    if code != 200 or not body or '<sitemapindex' not in body:
+        print('  [dealeron] sitemap index ' + idx_url + ' -> code=' + str(code) +
+              ' len=' + str(len(body or '')) + ' (no index) -- aborting handler',
+              flush=True)
+        return None
+    try:
+        root = ET.fromstring(body.encode('utf-8') if isinstance(body, str) else body)
+    except Exception as e:
+        print('  [dealeron] sitemap index parse error: ' + str(e), flush=True)
+        return None
+    inv_sitemaps = []
+    for loc in root.iter(_SM_LOC):
+        u = (loc.text or '').strip()
+        if 'sitemap-inventory-search/' in u:
+            # only the per-rooftop ones (.../sitemap-inventory-search/<rooftop>/),
+            # not the bare .../sitemap-inventory-search/ index sub-map.
+            tail = u.rstrip('/').rsplit('/sitemap-inventory-search/', 1)[-1]
+            if tail and '/' not in tail:
+                inv_sitemaps.append(u)
+    if not inv_sitemaps:
+        print('  [dealeron] no per-rooftop inventory sitemaps in index', flush=True)
+        return None
+    # Prefer the rooftop whose zip matches the dealer's own URL (cy=NNNNN);
+    # otherwise take the first (DealerOn lists the home rooftop first).
+    home_zip = home_zip or _dealeron_zip_from_url(base_url)
+    chosen = None
+    if home_zip:
+        for u in inv_sitemaps:
+            if u.rstrip('/').endswith(home_zip) or ('-' + home_zip + '/') in u:
+                chosen = [u]
+                break
+    if not chosen:
+        chosen = [inv_sitemaps[0]]
+    print('  [dealeron] inventory sitemaps found=' + str(len(inv_sitemaps)) +
+          ' home_zip=' + (home_zip or '-') + ' using=' +
+          chosen[0].rsplit('/sitemap-inventory-search/', 1)[-1], flush=True)
+
+    vehicles = []
+    seen = set()
+    for sm_url in chosen:
+        code, _f, sbody = fetch(sm_url, sess, tier='direct')
+        if code != 200 or not sbody:
+            print('  [dealeron] inventory sitemap ' + sm_url + ' -> code=' +
+                  str(code) + ' skip', flush=True)
+            continue
+        try:
+            sroot = ET.fromstring(sbody.encode('utf-8') if isinstance(sbody, str) else sbody)
+        except Exception as e:
+            print('  [dealeron] inventory sitemap parse error: ' + str(e), flush=True)
+            continue
+        for url_el in sroot.iter(_SM_URL):
+            loc_el = url_el.find(_SM_LOC)
+            if loc_el is None or not loc_el.text:
+                continue
+            loc = loc_el.text.strip()
+            if '/auto/' not in loc:
+                continue
+            title_text = ''
+            thumb = ''
+            vid = url_el.find(_VID)
+            if vid is not None:
+                t_el = vid.find(_VID_TITLE)
+                if t_el is not None and t_el.text:
+                    title_text = _html.unescape(t_el.text)
+                th_el = vid.find(_VID_THUMB)
+                if th_el is not None and th_el.text:
+                    thumb = th_el.text.strip()
+            veh = _parse_dealeron_vdp(loc, title_text, thumb)
+            if not veh:
+                continue
+            key = veh.get('vin') or veh.get('url')
+            if key in seen:
+                continue
+            seen.add(key)
+            vehicles.append(veh)
+    n_vin = sum(1 for v in vehicles if v.get('vin'))
+    print('  [dealeron] parsed ' + str(len(vehicles)) + ' pre-owned VDPs (' +
+          str(n_vin) + ' with VIN, ' + str(len(vehicles) - n_vin) +
+          ' VIN-less) -- price/mileage not exposed (CF-walled), stored NULL',
+          flush=True)
+    return vehicles
+
 # ── Scanner ──────────────────────────────────────────────────────────────
 class DealerScanner:
     def __init__(self, dealer_row):
@@ -2751,6 +3054,20 @@ class DealerScanner:
                  'platform_detected': None, 'status': 'running', 'error': None,
                  'tier': 'direct'}
         try:
+            # 0. DealerOn / Dealer-eProcess sitemap+JSON-LD fast-path
+            #    (CLOUDFLARE_ESCALATE_2026_06_11). Fires BEFORE the platform
+            #    fingerprint so it works even when the stored `platform` column
+            #    is a generic value (Chatham Parkway Lexus dealer 102 is stored
+            #    as 'ai-generated', which is in _STORED_KNOWN and would otherwise
+            #    skip the homepage-403 rescue entirely). Gated purely on the
+            #    dealer's scrape_config so no other rooftop is affected.
+            _sc = self.dealer.get('scrape_config') or {}
+            if isinstance(_sc, dict) and (_sc.get('platform') == 'dealeron') \
+                    and (_sc.get('strategy') == 'sitemap+jsonld'):
+                stats['platform_detected'] = 'dealeron'
+                self._scan_dealeron_jsonld(scan_id, _sc, stats, started)
+                return stats
+
             # 1. Platform fingerprint.
             # If the dealer has a known stored platform from onboarding, skip
             # the homepage probe entirely. The probe was the wedge point on
@@ -2767,7 +3084,7 @@ class DealerScanner:
                 'frazer', 'dealercenter', 'dealer.com', 'dealerinspire',
                 'greenlight', 'ridemotive', 'dealer-eprocess', 'vinsolutions',
                 'cdk', 'homenet', 'ect', 'dealeron', 'autotrader-embed',
-                'ai-generated',
+                'ai-generated', 'jazel',
             }
             if stored_platform in _STORED_KNOWN:
                 platform = stored_platform
@@ -2777,15 +3094,43 @@ class DealerScanner:
             else:
                 _CURRENT_TIER['tier'] = 'direct'
                 code, _f, body = fetch(self.base_url, self.sess)
-                if code in (403, 503, 401) and dealer_fetchers.flaresolverr_healthy():
-                    # Homepage is blocked — jump straight to FlareSolverr for the whole scan
+                # CLOUDFLARE_ESCALATE_2026_06_11: a 403/503/401 on the homepage
+                # is the Cloudflare "Just a moment..." interstitial (or an
+                # Akamai/WAF block). The committed 9a0a663 escalation jumped to
+                # FlareSolverr, but (a) it only fired when flaresolverr_healthy()
+                # and (b) it treated FS's OWN challenge-solve failure (code=None,
+                # body='flaresolverr_bad:...') as a usable page. On hardened CF
+                # rooftops (Chatham Parkway Lexus, dealer 102) FlareSolverr 3.4.6
+                # times out solving the managed challenge, so neither direct nor
+                # FS yields HTML. Before aborting blocked, try the DealerOn /
+                # Dealer-eProcess sitemap rescue, whose /resrc/ XML endpoints
+                # Cloudflare serves un-challenged.
+                cf_blocked = (code in (403, 503, 401)) or (not body) \
+                    or (isinstance(body, str) and (
+                        'Just a moment' in body or body.startswith('flaresolverr')))
+                if cf_blocked and dealer_fetchers.flaresolverr_healthy():
+                    # Homepage is blocked — try FlareSolverr for the whole scan.
                     _CURRENT_TIER['tier'] = 'flaresolverr'
                     code, _f, body = fetch(self.base_url, self.sess)
-                if code in (403, 503, 401) or not body:
-                    stats['status'] = 'blocked'
-                    stats['error'] = f'HTTP {code} on homepage even via {_CURRENT_TIER["tier"]}'
-                    self._update_dealer(None, None, scan_id, stats['error'][:200])
-                    self._finalize(scan_id, stats, started)
+                    cf_blocked = (code != 200) or (not body) \
+                        or (isinstance(body, str) and (
+                            'Just a moment' in body or body.startswith('flaresolverr')))
+                if cf_blocked:
+                    # Last resort before giving up: DealerOn/eProcess sitemap.
+                    # Reset tier to direct — the /resrc/ sitemap is the ONE thing
+                    # CF lets through, and routing it via FS would re-trip the
+                    # unsolvable challenge.
+                    _CURRENT_TIER['tier'] = 'direct'
+                    stats['tier'] = 'direct'
+                    # AUTO_DISCOVER_DEALERON_2026_06_11: CF-walled DealerOn ->
+                    # full per-VDP JSON-LD path (price+mileage), which
+                    # auto-discovers its rooftop sitemap from the un-challenged
+                    # /resrc/ index. Self-finalizes (sets status ok/blocked).
+                    # Locks in Chatham-quality for any NEW CF DealerOn dealer
+                    # with zero hand-config (was: sitemap-only, no price/miles).
+                    self._scan_dealeron_jsonld(
+                        scan_id, (self.dealer.get('scrape_config') or {}),
+                        stats, started)
                     return stats
                 platform, method = detect_platform(body or '')
 
@@ -3092,6 +3437,38 @@ class DealerScanner:
                     return stats
                 print('  dealer.com getInventory path failed — falling through to crawl', flush=True)
 
+            # Jazel SRP data-vehicle fast-path (JAZEL_DATAVEHICLE_2026_06_11).
+            # Gated on stored platform='jazel'. One GET per SRP page parses the
+            # inline data-vehicle JSON — replaces the universal ~781-URL crawl
+            # that hung 10+ min returning 0 vehicles (Tamiami Ford, dealer 98).
+            # Optional scrape_config.jazel_list_path overrides the used-vehicles
+            # listing path for non-standard rooftops.
+            if self.dealer.get('platform') == 'jazel':
+                jz = fetch_jazel_inventory(
+                    self.base_url, self.sess,
+                    list_path=(self.dealer.get('scrape_config') or {}).get('jazel_list_path'))
+                if jz is not None:
+                    if not jz:
+                        prior = self._zero_vehicle_abort_check()
+                        if prior:
+                            stats['status'] = 'blocked'
+                            stats['error'] = ('jazel SRP returned 0 vehicles but '
+                                              f'{prior} active — SRP markup/list path '
+                                              'may have changed, scan aborted, '
+                                              'inventory preserved')
+                            self._update_dealer('jazel', 'srp-data-vehicle', scan_id,
+                                                stats['error'][:200], stats['tier'])
+                            self._finalize(scan_id, stats, started)
+                            return stats
+                    print(f'  jazel SRP returned {len(jz)} vehicles', flush=True)
+                    self._process_aan(scan_id, jz, stats)
+                    stats['colors_detected'] = self._detect_colors()
+                    self._update_dealer('jazel', 'srp-data-vehicle', scan_id, 'ok', stats['tier'])
+                    stats['status'] = 'ok'
+                    self._finalize(scan_id, stats, started)
+                    return stats
+                print('  jazel SRP path failed (page-1 fetch) — falling through to crawl', flush=True)
+
             # AI-generated config-driven extraction (Ferrari, novel platforms).
             # Reads dealers.scrape_config JSONB produced by discover_dealer.py
             # and runs config_driven_extractor.fetch_inventory against it.
@@ -3163,7 +3540,17 @@ class DealerScanner:
                     pass  # progress tracking is best-effort, never fail the scan
                 fails = 0
                 vehs = []
+                _pass_started = time.time()
                 for idx, u in enumerate(urls):
+                    # CRAWL_WALLCLOCK_2026_06_11: bail out of a runaway crawl
+                    # pass so a slow site can't wedge the queue for hours. We
+                    # return what we have; the zero/fetch-fail guards below
+                    # still protect existing inventory from a bad partial.
+                    if time.time() - _pass_started > CRAWL_PASS_DEADLINE_SEC:
+                        print(f'  crawl pass hit {CRAWL_PASS_DEADLINE_SEC}s wall-clock '
+                              f'deadline at {idx}/{len(urls)} URLs — stopping pass',
+                              flush=True)
+                        break
                     c, _ff, vbody = fetch(u, self.sess)
                     # Per-URL retry on a fresh session+IP. DataImpulse rotates
                     # exit nodes per fresh TCP connection — using a new Session
@@ -3314,6 +3701,199 @@ class DealerScanner:
             row = cur.fetchone()
             prior = (row['n'] if isinstance(row, dict) else row[0]) if row else 0
         return prior if prior >= 20 else None
+
+    # ─── DealerOn / Dealer-eProcess sitemap + per-VDP JSON-LD ───
+    #     (CLOUDFLARE_ESCALATE_2026_06_11)
+    def _dealeron_discover_sitemap(self):
+        """AUTO_DISCOVER_DEALERON_2026_06_11: return the per-rooftop DealerOn
+        inventory-search sitemap URL from the un-challenged /resrc/ index, or
+        None. Lets a NEW Cloudflare-walled DealerOn rooftop onboard at full
+        JSON-LD quality with zero hand-config."""
+        idx_url = self.base_url.rstrip('/') + _DEALERON_SITEMAP_INDEX
+        code, _f, body = fetch(idx_url, self.sess, tier='direct')
+        if code != 200 or not body or '<sitemapindex' not in body:
+            return None
+        try:
+            root = ET.fromstring(body.encode('utf-8') if isinstance(body, str) else body)
+        except Exception:
+            return None
+        inv = []
+        for loc in root.iter(_SM_LOC):
+            u = (loc.text or '').strip()
+            if 'sitemap-inventory-search/' in u:
+                tail = u.rstrip('/').rsplit('/sitemap-inventory-search/', 1)[-1]
+                if tail and '/' not in tail:
+                    inv.append(u)
+        if not inv:
+            return None
+        hz = _dealeron_zip_from_url(self.base_url)
+        if hz:
+            for u in inv:
+                if u.rstrip('/').endswith(hz) or ('-' + hz + '/') in u:
+                    return u
+        return inv[0]
+
+    def _scan_dealeron_jsonld(self, scan_id, sc, stats, started):
+        """Pre-owned scan for a Cloudflare-walled DealerOn rooftop.
+
+        Discovery: configured /resrc/ inventory sitemap(s) — fetched DIRECT
+        (Cloudflare serves /resrc/ un-challenged). Filter VDP URLs to the
+        configured pre-owned regex.
+        Data: each VDP fetched via a WARM FlareSolverr session (one session
+        mints cf_clearance once, then reuses it — first solve ~110s, warm
+        pages much faster). Per-VDP JSON-LD parsed by _extract_jsonld_vehicle
+        (vin/year/make/model/trim/price/mileage/color/photos). URL-slug
+        fallback (_parse_dealeron_vdp) backfills year/make/model if a VDP
+        yields no JSON-LD.
+        """
+        inv_src = sc.get('inventory_source') or {}
+        sm_urls = inv_src.get('sitemap_urls') or []
+        vdp_re = inv_src.get('vdp_url_regex')
+        # AUTO_DISCOVER_DEALERON_2026_06_11: a NEW CF-walled DealerOn rooftop
+        # reaches here (via the CF-escalation) with no configured sitemap.
+        # Derive the rooftop inventory sitemap from the index and default the
+        # pre-owned VDP pattern so full-quality JSON-LD needs zero hand-config.
+        if not sm_urls:
+            try:
+                _disc = self._dealeron_discover_sitemap()
+            except Exception as _de:
+                _disc = None
+                print('  [dealeron-jsonld] auto-discover err: ' + str(_de), flush=True)
+            if _disc:
+                sm_urls = [_disc]
+                print('  [dealeron-jsonld] auto-discovered sitemap: ' + _disc, flush=True)
+        if not vdp_re:
+            vdp_re = r"/auto/(preowned|used|certified)[^\"']*?/\d+/?$"
+        max_to_ms = int(inv_src.get('flaresolverr_max_timeout_ms')
+                        or dealer_fetchers.FLARESOLVERR_TIMEOUT_MS)
+        try:
+            vdp_pat = re.compile(vdp_re, re.I) if vdp_re else None
+        except re.error as e:
+            print('  [dealeron-jsonld] bad vdp_url_regex: ' + str(e), flush=True)
+            vdp_pat = None
+
+        # 1. Discover VDP URLs from the configured sitemap(s) — direct fetch.
+        vdp_urls = []
+        seen_u = set()
+        for sm_url in sm_urls:
+            code, _f, sbody = fetch(sm_url, self.sess, tier='direct')
+            if code != 200 or not sbody:
+                print('  [dealeron-jsonld] sitemap ' + sm_url + ' -> code=' +
+                      str(code) + ' len=' + str(len(sbody or '')) + ' skip',
+                      flush=True)
+                continue
+            try:
+                sroot = ET.fromstring(
+                    sbody.encode('utf-8') if isinstance(sbody, str) else sbody)
+            except Exception as e:
+                print('  [dealeron-jsonld] sitemap parse error: ' + str(e),
+                      flush=True)
+                continue
+            for loc_el in sroot.iter(_SM_LOC):
+                loc = (loc_el.text or '').strip()
+                if not loc or '/auto/' not in loc:
+                    continue
+                if vdp_pat and not vdp_pat.search(loc):
+                    continue
+                if loc in seen_u:
+                    continue
+                seen_u.add(loc)
+                vdp_urls.append(loc)
+        print('  [dealeron-jsonld] ' + str(len(vdp_urls)) +
+              ' pre-owned VDP urls discovered (maxTimeout=' + str(max_to_ms) +
+              'ms)', flush=True)
+
+        if not vdp_urls:
+            # Discovery itself failed — preserve any prior inventory.
+            prior = self._zero_vehicle_abort_check()
+            stats['status'] = 'blocked'
+            stats['error'] = ('dealeron sitemap discovery found 0 pre-owned VDPs'
+                              + (' (%s prior rows preserved)' % prior if prior else ''))
+            self._update_dealer('dealeron', None, scan_id, stats['error'][:200])
+            self._finalize(scan_id, stats, started)
+            return
+
+        # 2. Per-VDP JSON-LD via a warm FlareSolverr session.
+        if not dealer_fetchers.flaresolverr_healthy():
+            stats['status'] = 'blocked'
+            stats['error'] = 'flaresolverr not healthy; cannot fetch CF-walled VDPs'
+            self._update_dealer('dealeron', None, scan_id, stats['error'][:200])
+            self._finalize(scan_id, stats, started)
+            return
+
+        stats['tier'] = 'flaresolverr'
+        session_id = 'dealeron-%s' % self.dealer_id
+        have_session = dealer_fetchers.flaresolverr_session_create(session_id)
+        if not have_session:
+            print('  [dealeron-jsonld] session create failed — sessionless fetch',
+                  flush=True)
+            session_id = None
+
+        vehicles = []
+        timings = []
+        n_ok = n_jsonld = n_slug = n_fail = 0
+        try:
+            for i, vurl in enumerate(vdp_urls, 1):
+                t0 = time.time()
+                code, _f, body = dealer_fetchers.fetch_flaresolverr_session(
+                    vurl, session_id=session_id, max_timeout_ms=max_to_ms)
+                dt = time.time() - t0
+                timings.append(dt)
+                if code != 200 or not body:
+                    n_fail += 1
+                    print('  [dealeron-jsonld] %d/%d FAIL code=%s %.1fs %s'
+                          % (i, len(vdp_urls), code, dt, vurl), flush=True)
+                    continue
+                veh = _extract_jsonld_vehicle(body)
+                if veh:
+                    n_jsonld += 1
+                else:
+                    # JSON-LD missing — fall back to URL-slug for y/m/m.
+                    veh = _parse_dealeron_vdp(vurl, '', '')
+                    if veh:
+                        n_slug += 1
+                if not veh:
+                    n_fail += 1
+                    print('  [dealeron-jsonld] %d/%d no-data %.1fs %s'
+                          % (i, len(vdp_urls), dt, vurl), flush=True)
+                    continue
+                veh.setdefault('url', vurl)
+                veh['condition'] = veh.get('condition') or 'used'
+                vehicles.append(veh)
+                n_ok += 1
+                print('  [dealeron-jsonld] %d/%d ok %.1fs vin=%s price=%s miles=%s'
+                      % (i, len(vdp_urls), dt, veh.get('vin', '-'),
+                         veh.get('price', '-'), veh.get('mileage', '-')),
+                      flush=True)
+        finally:
+            if session_id:
+                dealer_fetchers.flaresolverr_session_destroy(session_id)
+
+        if timings:
+            print('  [dealeron-jsonld] timing: first=%.1fs warm_median=%.1fs '
+                  'total=%.1fs (%d ok / %d jsonld / %d slug / %d fail)'
+                  % (timings[0], sorted(timings[1:])[len(timings[1:]) // 2]
+                     if len(timings) > 1 else timings[0],
+                     sum(timings), n_ok, n_jsonld, n_slug, n_fail), flush=True)
+
+        if not vehicles:
+            prior = self._zero_vehicle_abort_check()
+            stats['status'] = 'blocked'
+            stats['error'] = ('dealeron per-VDP fetch yielded 0 vehicles'
+                              + (' (%s prior rows preserved)' % prior if prior else ''))
+            self._update_dealer('dealeron', 'sitemap+jsonld', scan_id,
+                                stats['error'][:200], stats['tier'])
+            self._finalize(scan_id, stats, started)
+            return
+
+        # 3. Upsert via the AAN path (full reconcile marks vanished VINs sold).
+        self._process_aan(scan_id, vehicles, stats)
+        stats['colors_detected'] = self._detect_colors()
+        self._update_dealer('dealeron', 'sitemap+jsonld', scan_id, 'ok',
+                            stats['tier'])
+        stats['status'] = 'ok'
+        self._finalize(scan_id, stats, started)
+        return
 
     # ─── AAN: feed-driven upsert + direct sold marking ───
     def _process_aan(self, scan_id, aan_vehicles, stats):

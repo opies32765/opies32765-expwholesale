@@ -2060,6 +2060,52 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
     return None
 
 
+def extract_stated_mileage_from_image(file_bytes, media_type='image/jpeg'):
+    """STATED_MILEAGE_OCR_2026_06_11: read an EXPLICITLY-STATED mileage written
+    as TEXT in an image (a texted screenshot/note like '21k', '21,000 mi',
+    '45k miles') -- the fallback for when extract_mileage_from_file (odometer-
+    ONLY by design) returns None on a non-dashboard photo. Pattern-constrained
+    to a stated mileage value (expands 'k' shorthand; excludes $prices, years,
+    VINs, phones), so it does NOT reintroduce the phantom-miles hallucination
+    the odometer-strict prompt prevents. Returns int miles or None.
+    Bid 2892: screenshot of 'VIN + 21k' -> odometer-OCR None; this reads 21000."""
+    prompt = (
+        "This image is a screenshot or photo of a text message, listing, or "
+        "note about a used vehicle. Find the vehicle's MILEAGE only if it is "
+        "written as TEXT in the image. "
+        "Rules: "
+        "Expand 'k' shorthand to thousands: 21k = 21000, 45k = 45000, 9.5k = 9500. "
+        "The mileage is a number (or k-value) that is NOT preceded by '$', is "
+        "NOT a 4-digit model year (1990-2027), is NOT the 17-character VIN, and "
+        "is NOT a phone or stock number. "
+        "IGNORE dollar amounts/prices, years, VINs, phone numbers, and dates. "
+        "Reply with ONLY the mileage as a plain integer (no commas, no units). "
+        "If no mileage is stated in text, reply exactly NONE."
+    )
+    try:
+        raw = gemini_call(prompt, image_bytes=file_bytes, mime=media_type,
+                          model='gemini-2.5-flash', max_tokens=32, temperature=0)
+    except Exception as e:
+        print('[stated-miles] gemini err: ' + str(e), flush=True)
+        return None
+    if not raw:
+        return None
+    txt = raw.strip().upper()
+    if 'NONE' in txt or not any(c.isdigit() for c in txt):
+        return None
+    m = re.search(r'(\d[\d,.]*)\s*(K)?', txt)
+    if not m:
+        return None
+    try:
+        val = float(m.group(1).replace(',', ''))
+    except ValueError:
+        return None
+    if m.group(2):
+        val *= 1000
+    val = int(round(val))
+    return val if 100 <= val <= 999999 else None
+
+
 def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
     """Extract odometer mileage from an image.
 
@@ -4503,6 +4549,19 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     print(f'[sms-ocr] miles via Gemini bid={bid_id}: {miles}', flush=True)
             except Exception as _e:
                 print(f'[sms-ocr] miles err bid={bid_id} photo={photo_id}: {_e}', flush=True)
+
+        # STATED_MILEAGE_OCR_2026_06_11: the odometer OCR above is dashboard-only
+        # and returns None on a texted screenshot (bid 2892: 'VIN + 21k'). Fall
+        # back to reading a STATED mileage (incl. k-shorthand) from the image
+        # text so screenshots auto-price without manual entry.
+        if miles is None:
+            try:
+                _sm = extract_stated_mileage_from_image(img_bytes, mime)
+                if _sm:
+                    miles = int(_sm)
+                    print(f'[sms-ocr] stated-miles via text-read bid={bid_id}: {miles}', flush=True)
+            except Exception as _e:
+                print(f'[sms-ocr] stated-miles err bid={bid_id} photo={photo_id}: {_e}', flush=True)
 
         # Write everything in one transaction
         with get_db() as conn:
