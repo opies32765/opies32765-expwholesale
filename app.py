@@ -7687,18 +7687,36 @@ def _run_assessment(bid_id):
     for photo in photos:
         url = photo['url']
         try:
-            photo_path = os.path.join(UPLOAD_DIR, os.path.basename(url))
-            if os.path.exists(photo_path):
-                with open(photo_path, 'rb') as f:
-                    img_bytes = f.read()
-                media_type = 'image/jpeg'
-            else:
-                resp = requests.get(url, timeout=10,
-                                    auth=(TWILIO_SID, TWILIO_TOKEN) if 'twilio' in url else None)
-                if resp.status_code != 200:
-                    continue
-                img_bytes = resp.content
-                media_type = resp.headers.get('Content-Type', 'image/jpeg').split(';')[0]
+            # ASSESS_PHOTO_LOCAL_2026_06_10: SMS-intake photos store a
+            # site-relative url (/static/uploads/sms/<bid>/<id>.jpg). That is
+            # a local file, not a fetchable URL -- requests.get raised
+            # "No scheme supplied" and the photo was silently skipped on
+            # every SMS bid (seen on bid 2833). Read it from disk instead;
+            # real http(s) URLs keep the old fetch path.
+            img_bytes = None
+            media_type = 'image/jpeg'
+            if url.startswith('/') and not url.startswith('//'):
+                _lp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   url.lstrip('/'))
+                if os.path.exists(_lp):
+                    with open(_lp, 'rb') as f:
+                        img_bytes = f.read()
+                    if url.lower().endswith('.png'):
+                        media_type = 'image/png'
+                    print(f'[assess-photo] local file loaded: {url}', flush=True)
+            if img_bytes is None:
+                photo_path = os.path.join(UPLOAD_DIR, os.path.basename(url))
+                if os.path.exists(photo_path):
+                    with open(photo_path, 'rb') as f:
+                        img_bytes = f.read()
+                    media_type = 'image/jpeg'
+                else:
+                    resp = requests.get(url, timeout=10,
+                                        auth=(TWILIO_SID, TWILIO_TOKEN) if 'twilio' in url else None)
+                    if resp.status_code != 200:
+                        continue
+                    img_bytes = resp.content
+                    media_type = resp.headers.get('Content-Type', 'image/jpeg').split(';')[0]
             try:
                 img_bytes, media_type = resize_for_claude(img_bytes)
             except Exception:

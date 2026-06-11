@@ -165,10 +165,11 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
 /* ====== RESPONSIVE ====== */
 
-/* Tablet 1024-1439: single column */
-@media(max-width:1439px){
-  .columns-area{grid-template-columns:1fr}
-}
+/* RESPONSIVE_FITZOOM_2026_06_10 (v3): the 1024-1439px band keeps the FULL
+   4-column widescreen layout; the fitZoom() script at the bottom of the page
+   scales the whole body (zoom = width/1440) so everything is simply smaller
+   on smaller monitors — per operator ("the same, just smaller"). The v2
+   two-column reflow was removed. <=1023 mobile rules below are unchanged. */
 
 /* Tablet 640-1023: single column, page scrolls */
 @media(max-width:1023px){
@@ -535,6 +536,9 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
   <input type="file" id="bid-dropzone-input" multiple accept="image/*" style="display:none">
 </div>
 <style>
+  /* DROPZONE_HIDDEN_2026_06_10: operator request — drag-drop photo bar unused.
+     Markup + upload JS left intact; set display:block here to restore. */
+  #bid-dropzone{display:none !important}
   #bid-dropzone.dragover { border-color:#60a5fa; background:#0a1a33; color:#93c5fd }
   #bid-dropzone.uploading { opacity:.6; pointer-events:none }
   .dealer-gallery-group { margin-bottom:10px }
@@ -3853,5 +3857,37 @@ window._ewReloadGuarded = function(){ if (window.__ewHoldReload) return false; l
 </script>
 
 <script src="/static/lsl_wizard.js?v=1"></script>
+
+<script>
+/* RESPONSIVE_FITZOOM_2026_06_10: on smaller monitors (1024-1439 CSS px) keep
+   the full 4-column widescreen layout and shrink the entire page with zoom
+   (factor = width/1440 -> effective layout width is always exactly 1440px).
+   100vh heights are compensated by 1/zoom so the locked-viewport layout still
+   fills the screen. Recomputes on resize (covers dragging the window between
+   monitors). >=1440 and <=1023 are untouched (zoom cleared). */
+(function(){
+  function fitZoom(){
+    var w = window.innerWidth;
+    var body = document.body;
+    var page = document.querySelector('.page');
+    if (w >= 1024 && w <= 1439) {
+      var z = w / 1440;
+      body.style.zoom = z;
+      body.style.height = 'calc(100vh / ' + z + ')';
+      if (page) page.style.height = 'calc(100vh / ' + z + ' - 60px)';
+    } else {
+      body.style.zoom = '';
+      body.style.height = '';
+      if (page) page.style.height = '';
+    }
+  }
+  window.addEventListener('resize', fitZoom);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', fitZoom);
+  } else {
+    fitZoom();
+  }
+})();
+</script>
 </body>
 </html>

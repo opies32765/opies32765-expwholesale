@@ -140,7 +140,7 @@ tr:last-child td{border-bottom:none}
 
 .time-col{font-size:14px;color:#7a9bb5;white-space:nowrap}
 
-.btn-view{padding:8px 18px;background:#2a3f54;border:1px solid #3d5a74;border-radius:8px;color:#a8c0d6;font-size:14px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-decoration:none}
+.btn-view{padding:8px 18px;background:#2a3f54;border:1px solid #3d5a74;border-radius:8px;color:#a8c0d6;font-size:14px;font-weight:600;font-family:'Inter',sans-serif;cursor:pointer;transition:all .15s;text-decoration:none;display:inline-block;white-space:nowrap}
 .btn-view:hover{background:#344f68;color:#e2e8f0}
 
 /* Empty state */
@@ -1039,6 +1039,47 @@ document.addEventListener('DOMContentLoaded', function() {
   });
 });
 
+</script>
+<script>
+/* RESPONSIVE_FITZOOM_2026_06_10 v2 (auto-measure): the bid table's natural
+   min-content width is wider than the viewport on smaller monitors (VINs,
+   photos, nowrap cells) -> right side cut off. Measure the page's natural
+   width with zoom cleared, then scale the whole body so it fits EXACTLY:
+   zoom = viewport / naturalWidth. No hardcoded design width — adapts to any
+   monitor and any future columns. Ultrawide gets no zoom; <1024px keeps the
+   existing mobile rules; floor 0.6 keeps text readable. Recomputes on resize
+   (dragging between monitors adjusts live). */
+(function(){
+  /* v3: measure ONLY the bid table. Off-canvas elements inflated the v2
+     document-wide measurement and wrongly zoomed the ultrawide (wrapped the
+     View buttons). If the table fits, zoom is left untouched entirely. */
+  function fitZoom(){
+    var body = document.body;
+    body.style.zoom = '';
+    body.style.minHeight = '';
+    var w = document.documentElement.clientWidth;
+    if (w < 1024 || w >= 1600) return;  /* v4: wide monitors are NEVER zoomed */
+    var table = document.querySelector('table');
+    if (!table) return;
+    var natural = table.scrollWidth;
+    if (natural > w + 8) {
+      var z = Math.max(0.6, w / natural);
+      body.style.zoom = z;
+      body.style.minHeight = 'calc(100vh / ' + z + ')';
+    }
+  }
+  var _fzT = null;
+  window.addEventListener('resize', function(){
+    clearTimeout(_fzT);
+    _fzT = setTimeout(fitZoom, 120);
+  });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', fitZoom);
+  } else {
+    fitZoom();
+  }
+  window.addEventListener('load', fitZoom);
+})();
 </script>
 </body>
 </html>
