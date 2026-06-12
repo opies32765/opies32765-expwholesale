@@ -2339,6 +2339,14 @@ def send_sms(to, body):
     SMS_BOT_SKIP_PHONES gives the operator a per-number kill switch — handy
     for high-volume submitters who shouldn't see automated questions.
     """
+    # NO_DATA_REQUEST_2026_06_12 (operator): never text a dealer asking for VIN/miles.
+    try:
+        import re as _re_ndr
+        if body and _re_ndr.search("(send|text|reply|provide|verify|confirm)[^.!?]{0,40}(vin|mileage|miles|odometer)", body, _re_ndr.I):
+            print("[no-data-request] suppressed: " + repr(body[:90]), flush=True)
+            return False
+    except Exception:
+        pass
     if not to or to.startswith('field:') or not TWILIO_SID or not TWILIO_TOKEN or not TWILIO_PHONE:
         return False
     _digits = gate_helpers.phone_digits(to)
@@ -2385,6 +2393,7 @@ def _bid_full_gate_digits():
 
 def _is_full_broker_phone(phone):
     """True if this phone is in the 4-number Phase 1/2 whitelist."""
+    return True  # ALL_PHASES_OPEN_2026_06_12 (operator): everyone is full-broker / gets the mini-site
     allowed = _bid_full_gate_digits()
     if allowed is None:
         return True  # no gating configured → everyone is full-broker
@@ -2548,6 +2557,7 @@ def _phone_in_portal_gate(phone):
     (multi-car batch intake + per-sender /s/<token> portal + suppressed
     per-car SMS). DB-driven via gated_phones gate_type='rolling_portal';
     gated to the operator number during testing. Never raises."""
+    return True  # ALL_PHASES_OPEN_2026_06_12 (operator): everyone gets the rolling portal
     try:
         return _phone_digits(phone) in gate_helpers.gate_digits('rolling_portal')
     except Exception:
@@ -2752,7 +2762,7 @@ def _handle_batch_intake(db, cur, from_phone, body, pairs, intake_log_id):
     else:
         rng = ', '.join('#' + str(i) for i in ids)
     msg = f"Got {len(ids)} cars ({rng}) — pricing now."
-    if missing:
+    if False:  # NEED_MILES_ASK_REMOVED_2026_06_12 (operator)
         msg += (f" Need miles for {', '.join('#' + str(i) for i in missing)}"
                 f" (reply e.g. \"#{missing[0]} 47k\").")
     if token:
@@ -3310,6 +3320,7 @@ def _process_photo_batch_async(items, from_phone):
     dup is marked status='duplicate' — so 2 angles of one car never double-bid,
     and the dup never fires a worker/iPacket pull). items: [(bid_id, bytes, mime)]."""
     seen = {}  # validated VIN -> first bid_id that claimed it
+    novin = []  # ONE_CAR_ONE_BID_2026_06_12: (bid_id, info) photos with no readable VIN
     for bid_id, fbytes, mime in items:
         try:
             info = extract_carfax_multi([(fbytes, mime)]) or {}
@@ -3322,9 +3333,34 @@ def _process_photo_batch_async(items, from_phone):
         if vin and vin in seen:
             _photo_batch_collapse(bid_id, seen[vin])
             continue
+        if not vin:
+            novin.append((bid_id, info))  # ONE_CAR_ONE_BID_2026_06_12: defer; may be same car (odometer pic)
+            continue
         applied = _photo_batch_apply(bid_id, info, from_phone)
         if applied:
             seen[applied] = bid_id
+    # ONE_CAR_ONE_BID_2026_06_12: a VIN-less photo in a batch that produced
+    # EXACTLY ONE VIN is the same car (VIN sticker + odometer) -> carry its
+    # miles onto the VIN bid and collapse, instead of orphaning an empty bid.
+    if len(seen) == 1 and novin:
+        _orig = next(iter(seen.values())); _ovin = next(iter(seen.keys()))
+        for _nb_id, _nb_info in novin:
+            try:
+                _nm = _nb_info.get("mileage")
+                if _nm is not None:
+                    _pbdb = get_db(); _pbcur = _pbdb.cursor()
+                    _pbcur.execute("UPDATE bids SET mileage=%s, updated_at=NOW() WHERE id=%s AND mileage IS NULL", (_nm, _orig))
+                    _pbdb.commit(); _pbdb.close()
+                    try:
+                        trigger_market_check(_orig, _ovin)
+                    except Exception:
+                        pass
+            except Exception as _me:
+                print("[photo-batch] carry-miles err " + str(_nb_id) + "->" + str(_orig) + ": " + str(_me), flush=True)
+            _photo_batch_collapse(_nb_id, _orig)
+    elif novin:
+        for _nb_id, _nb_info in novin:
+            _photo_batch_apply(_nb_id, _nb_info, from_phone)
 
 
 def _photo_batch_apply(bid_id, info, from_phone):
@@ -4740,7 +4776,7 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                                     SELECT id AS log_id, parsed_miles, COUNT(*) OVER () AS n
                                       FROM sms_intake_log
                                      WHERE from_phone = %s
-                                       AND created_at > NOW() - INTERVAL '5 minutes'
+                                       AND created_at > NOW() - INTERVAL '60 seconds'
                                        AND outcome = 'order_indep_staged'
                                        AND parsed_miles IS NOT NULL
                                      ORDER BY id DESC LIMIT 1
@@ -4781,6 +4817,40 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                                           f'(VIN via OCR, no odometer in photo)', flush=True)
                             except Exception as _osf:
                                 print(f'[ocr-stitch] flag err bid={bid_id}: {_osf}', flush=True)
+                # SIBLING_PIC_MERGE_2026_06_12: one car sent as a VIN pic + an
+                # odometer pic in separate texts (any order). After this photo's OCR,
+                # if the bid is half-done (VIN xor miles), pull the matching half from a
+                # same-phone sibling bid within 60s and fold to ONE bid (keep the
+                # VIN-bearing bid; FIFO oldest). Closes the cross-photo timing race.
+                if from_phone:
+                    try:
+                        bg_cur.execute("SELECT vin, mileage FROM bids WHERE id=%s", (bid_id,))
+                        _me = bg_cur.fetchone() or {}
+                        _has_vin = bool((_me.get("vin") or "").strip())
+                        _has_mi = _me.get("mileage") is not None
+                        _keep = _drop = _carry = None
+                        if _has_vin and not _has_mi:
+                            bg_cur.execute("SELECT id, mileage FROM bids WHERE phone=%s AND id<>%s AND (vin IS NULL OR vin='') AND mileage IS NOT NULL AND created_at > NOW() - INTERVAL '60 seconds' AND COALESCE(status,'') NOT IN ('duplicate','dead','rejected','sold','archived') ORDER BY id ASC LIMIT 1", (from_phone, bid_id))
+                            _sib = bg_cur.fetchone()
+                            if _sib:
+                                _keep, _drop, _carry = bid_id, _sib["id"], _sib.get("mileage")
+                        elif _has_mi and not _has_vin:
+                            bg_cur.execute("SELECT id FROM bids WHERE phone=%s AND id<>%s AND vin IS NOT NULL AND vin<>'' AND mileage IS NULL AND created_at > NOW() - INTERVAL '60 seconds' AND COALESCE(status,'') NOT IN ('duplicate','dead','rejected','sold','archived') AND ai_assessed_at IS NULL ORDER BY id ASC LIMIT 1", (from_phone, bid_id))
+                            _sib = bg_cur.fetchone()
+                            if _sib:
+                                _keep, _drop, _carry = _sib["id"], bid_id, _me.get("mileage")
+                        if _keep and _drop:
+                            if _carry is not None:
+                                bg_cur.execute("UPDATE bids SET mileage=%s, updated_at=NOW() WHERE id=%s AND mileage IS NULL", (_carry, _keep))
+                            bg_cur.execute("UPDATE bid_photos SET bid_id=%s WHERE bid_id=%s", (_keep, _drop))
+                            bg_cur.execute("UPDATE bids SET status='duplicate', updated_at=NOW(), needs_verification_cleared_at=COALESCE(needs_verification_cleared_at,NOW()), notes=COALESCE(notes,'') || %s WHERE id=%s", ("\n[sibling-pic-merge] folded into #" + str(_keep), _drop))
+                            bg_cur.execute("UPDATE bids SET needs_verification_cleared_at=NOW(), needs_verification_cleared_by='auto:sibling_pic_merge' WHERE id=%s AND needs_verification_at IS NOT NULL AND needs_verification_cleared_at IS NULL", (_keep,))
+                            bg_cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s", (_keep,))
+                            bg_cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s", (_keep,))
+                            bg_cur.execute("UPDATE bids SET vauto_claimed_by=NULL, vauto_claimed_at=NULL, ai_assessed_at=NULL, ai_price=NULL, ai_assessment=NULL, miles_audit_at=NULL WHERE id=%s", (_keep,))
+                            print("[sibling-pic-merge] kept #" + str(_keep) + " dropped #" + str(_drop), flush=True)
+                    except Exception as _spm_e:
+                        print("[sibling-pic-merge] err bid=" + str(bid_id) + ": " + str(_spm_e), flush=True)
             conn.commit()
     except Exception as _e:
         print(f'[sms-photo-bg] error bid={bid_id} photo={photo_id}: {_e}', flush=True)
@@ -5180,19 +5250,19 @@ def twilio_webhook():
             cur.execute("""
                 SELECT id FROM bids
                  WHERE phone = %s
-                   AND created_at > NOW() - INTERVAL '120 seconds'
+                   AND created_at > NOW() - INTERVAL '60 seconds'
                    AND status = 'new'
                    AND COALESCE(awaiting_name, FALSE) = FALSE
                    AND mileage IS NULL
                    AND ai_assessed_at IS NULL
                    AND ai_price IS NULL
-                 ORDER BY id DESC LIMIT 1
+                 ORDER BY id ASC LIMIT 1  -- FIFO_PAIR_2026_06_12
             """, (from_phone,))
             _oim_row = cur.fetchone()
             cur.execute("""
                 SELECT COUNT(*) AS n FROM bids
                  WHERE phone = %s
-                   AND created_at > NOW() - INTERVAL '120 seconds'
+                   AND created_at > NOW() - INTERVAL '60 seconds'
                    AND status = 'new'
                    AND COALESCE(awaiting_name, FALSE) = FALSE
                    AND mileage IS NULL
@@ -5200,7 +5270,7 @@ def twilio_webhook():
                    AND ai_price IS NULL
             """, (from_phone,))
             _oim_n = (cur.fetchone() or {}).get('n', 0)
-            if _oim_row and _oim_n == 1:
+            if _oim_row:  # FIFO_PAIR_2026_06_12: oldest still-missing-miles bid takes these miles (was exactly-1)
                 _oim_bid_id = _oim_row['id']
                 cur.execute(
                     "UPDATE bids SET mileage=%s, updated_at=NOW() "
@@ -5951,7 +6021,7 @@ def twilio_webhook():
                   FROM sms_intake_log
                  WHERE from_phone = %s
                    AND id <> COALESCE(%s, -1)
-                   AND created_at > NOW() - INTERVAL '120 seconds'
+                   AND created_at > NOW() - INTERVAL '60 seconds'
                    AND outcome = 'order_indep_staged'
                    AND parsed_miles IS NOT NULL
                  ORDER BY id DESC LIMIT 1
@@ -6759,6 +6829,206 @@ def api_market_check_submit():
         try: db.close()
         except Exception: pass
         return jsonify({'error': str(_e)[:140]}), 500
+
+
+
+# --- PROMO_VIDEO_ROUTES_2026_06_12: "Create Video" social promo (Veo) ---
+@app.route('/api/bid/<int:bid_id>/promo-video', methods=['POST'])
+def create_promo_video(bid_id):
+    """Queue a promo video job for a bid photo. Body: {photo_id, price?}.
+    ew_promo_video_worker.py (systemd ew-promo-video) picks it up."""
+    data = request.get_json(silent=True) or {}
+    photo_id = data.get('photo_id')
+    price = (str(data.get('price') or '')).strip() or None
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT id FROM bids WHERE id=%s", (bid_id,))
+    if not cur.fetchone():
+        db.close()
+        return jsonify({'error': 'bid not found'}), 404
+    if photo_id:
+        cur.execute("SELECT id FROM bid_photos WHERE id=%s AND bid_id=%s", (photo_id, bid_id))
+        if not cur.fetchone():
+            db.close()
+            return jsonify({'error': 'photo not on this bid'}), 400
+    script = (str(data.get('script') or '')).strip() or None
+    try:
+        scenes = max(2, min(int(data.get('scenes') or 4), 6))
+    except (TypeError, ValueError):
+        scenes = 4
+    quality = 'max' if data.get('quality') == 'max' else 'fast'
+    notify = 'telegram' if data.get('notify') == 'telegram' else None
+    cur.execute("INSERT INTO promo_video_jobs (bid_id, photo_id, price, script, scenes, quality, notify) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                (bid_id, photo_id, price, script, scenes, quality, notify))
+    job_id = cur.fetchone()['id']
+    db.commit()
+    db.close()
+    return jsonify({'success': True, 'job_id': job_id})
+
+
+@app.route('/api/promo-video/<int:job_id>', methods=['GET'])
+def promo_video_status(job_id):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT id, bid_id, status, url, error FROM promo_video_jobs WHERE id=%s",
+                (job_id,))
+    row = cur.fetchone()
+    db.close()
+    if not row:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify(dict(row))
+# --- end PROMO_VIDEO_ROUTES_2026_06_12 ---
+
+
+
+
+
+# --- PROMO_PHOTOS_2026_06_12: photo picker + original-pic upload for /promo-videos ---
+@app.route('/api/bid/<int:bid_id>/promo-photos', methods=['GET'])
+def promo_photos(bid_id):
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT id, COALESCE(local_path, url) AS src FROM bid_photos "
+                "WHERE bid_id=%s ORDER BY id", (bid_id,))
+    photos = [{'id': r['id'], 'thumb': thumb_url_filter(r['src'], 'strip')}
+              for r in cur.fetchall()]
+    db.close()
+    return jsonify({'photos': photos})
+
+
+@app.route('/api/bid/<int:bid_id>/promo-photo-upload', methods=['POST'])
+def promo_photo_upload(bid_id):
+    f = request.files.get('photo')
+    if not f or not f.filename:
+        return jsonify({'error': 'no file'}), 400
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext not in ('.jpg', '.jpeg', '.png', '.webp', '.heic'):
+        return jsonify({'error': 'unsupported file type'}), 400
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT id FROM bids WHERE id=%s", (bid_id,))
+    if not cur.fetchone():
+        db.close()
+        return jsonify({'error': 'bid not found'}), 404
+    seed_dir = os.path.join(UPLOAD_DIR, 'promo_seeds')
+    os.makedirs(seed_dir, exist_ok=True)
+    fname = 'bid%d_%d%s' % (bid_id, int(time.time()), ext)
+    f.save(os.path.join(seed_dir, fname))
+    web_path = '/static/uploads/promo_seeds/' + fname
+    cur.execute("INSERT INTO bid_photos (bid_id, url, local_path, is_sms_intake) "
+                "VALUES (%s, %s, %s, false) RETURNING id",
+                (bid_id, web_path, web_path))
+    photo_id = cur.fetchone()['id']
+    db.commit()
+    db.close()
+    return jsonify({'photo_id': photo_id, 'thumb': thumb_url_filter(web_path, 'strip')})
+# --- end PROMO_PHOTOS_2026_06_12 ---
+
+
+# --- PROMO_NARRATION_2026_06_12: Jen's pre-filled narration macro ---
+@app.route('/api/bid/<int:bid_id>/promo-narration', methods=['GET'])
+def promo_narration(bid_id):
+    import re as _re
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT year, make, model, trim, mileage, color, int_color, vin "
+                "FROM bids WHERE id=%s", (bid_id,))
+    b = cur.fetchone()
+    if not b:
+        db.close()
+        return jsonify({'error': 'bid not found'}), 404
+    cur.execute("SELECT total_msrp, exterior_color, interior_color, raw_json::text AS raw "
+                "FROM ipacket_lookups WHERE (bid_id=%s OR vin=%s) AND total_msrp IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1", (bid_id, b.get('vin')))
+    s = cur.fetchone() or {}
+    db.close()
+
+    # raw_json::text escapes newlines as the 2-char sequence backslash-n; flatten
+    # them to spaces so the color phrases become single-line and easy to slice
+    raw = (s.get('raw') or '').replace(chr(92) + 'n', ' ')
+    bullet = chr(0x2022)
+
+    def _slice(text, start_token, stop_tokens):
+        i = text.find(start_token)
+        if i < 0:
+            return ''
+        seg = text[i + len(start_token):i + len(start_token) + 60]
+        cut = len(seg)
+        for t in stop_tokens:
+            k = seg.find(t)
+            if 0 <= k < cut:
+                cut = k
+        return ' '.join(seg[:cut].split()).title()
+
+    ext = (s.get('exterior_color') or '').strip()
+    if not ext and raw:
+        ext = _slice(raw, 'EXTERIOR:', ['INTERIOR:', bullet])
+    inte = (s.get('interior_color') or '').strip()
+    if not inte and raw:
+        inte = _slice(raw, 'INTERIOR:', [bullet, 'EXTERIOR:'])
+    ext = ext or (b.get('color') or '').strip().title()
+    inte = inte or (b.get('int_color') or '').strip().title()
+
+    car = ' '.join(str(x) for x in [b.get('year'), (b.get('make') or '').title(),
+                                    b.get('model'), (b.get('trim') or '').strip()] if x).strip()
+    parts = ["Hi, this is Jen with Experience Wholesale. Today we have a %s." % car]
+    msrp = s.get('total_msrp')
+    if msrp:
+        parts.append("The original MSRP was over $%s." % format(int(msrp) // 1000 * 1000, ','))
+    if ext and inte:
+        parts.append("It's %s on %s." % (ext, inte))
+    elif ext:
+        parts.append("It's finished in %s." % ext)
+    if b.get('mileage'):
+        parts.append("Only %s miles." % format(int(b['mileage']), ','))
+    return jsonify({'script': ' '.join(parts), 'msrp': msrp,
+                    'exterior': ext or None, 'interior': inte or None})
+# --- end PROMO_NARRATION_2026_06_12 ---
+
+
+# --- PROMO_VIDEO_PAGE_2026_06_12: promo video management page ---
+@app.route('/promo-videos')
+def promo_videos_page():
+    from flask import render_template
+    return render_template('promo_videos.html')
+
+
+@app.route('/api/promo-videos/data', methods=['GET'])
+def promo_videos_data():
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        SELECT b.id, b.year, b.make, b.model, b.trim,
+               (SELECT i.total_msrp FROM ipacket_lookups i
+                 WHERE (i.bid_id = b.id OR i.vin = b.vin) AND i.total_msrp IS NOT NULL
+                 ORDER BY i.id DESC LIMIT 1) AS msrp,
+               (SELECT count(*) FROM bid_photos p WHERE p.bid_id = b.id) AS photos,
+               (SELECT count(*) FROM promo_video_jobs v
+                 WHERE v.bid_id = b.id AND v.status = 'done') AS videos
+        FROM bids b
+        WHERE b.created_at > now() - interval '14 days'
+        ORDER BY b.id DESC LIMIT 200""")
+    bids = [{'id': r['id'],
+             'vehicle': ' '.join(str(x) for x in [r['year'], (r['make'] or '').title(),
+                                                  r['model'], r['trim'] or ''] if x).strip(),
+             'msrp': r['msrp'], 'photos': r['photos'], 'videos': r['videos']}
+            for r in cur.fetchall()]
+    cur.execute("""
+        SELECT j.id, j.bid_id, j.price, j.status, j.url, j.error, j.scenes, j.quality,
+               j.progress, j.created_at, b.year, b.make, b.model
+        FROM promo_video_jobs j JOIN bids b ON b.id = j.bid_id
+        ORDER BY j.id DESC LIMIT 40""")
+    jobs = [{'id': r['id'], 'bid_id': r['bid_id'], 'price': r['price'], 'status': r['status'],
+             'url': r['url'], 'error': r['error'], 'scenes': r['scenes'], 'quality': r['quality'],
+             'progress': r['progress'],
+             'created_at': r['created_at'].isoformat() if r['created_at'] else None,
+             'vehicle': ' '.join(str(x) for x in [r['year'], (r['make'] or '').title(),
+                                                  r['model']] if x).strip()}
+            for r in cur.fetchall()]
+    db.close()
+    return jsonify({'bids': bids, 'jobs': jobs})
+# --- end PROMO_VIDEO_PAGE_2026_06_12 ---
 
 
 @app.route('/api/bid/<int:bid_id>/detect-color', methods=['POST'])
@@ -15740,6 +16010,9 @@ def _maybe_send_vin_verify_sms(bid_id, reason='accutrade_vin_not_found'):
     on bids.vin_verify_sms_sent_at IS NULL so we never re-send. If a photo on
     this bid OCR'd a DIFFERENT 17-char VIN, include it as a suggestion.
     No phone gating, no quiet hours (operator direction)."""
+    # VIN_VERIFY_SMS_DISABLED_2026_06_12 (operator: no dealer VIN-request texts)
+    if os.environ.get('VIN_VERIFY_SMS_ENABLED','0') != '1':
+        return False
     try:
         _db = get_db()
         _cur = _db.cursor()

@@ -1,9 +1,9 @@
 {
   "make_name": "ACURA",
-  "trained_at": "2026-06-11T08:30:59.885510Z",
-  "n_total": 229,
+  "trained_at": "2026-06-12T08:30:47.187092Z",
+  "n_total": 230,
   "n_train": 218,
-  "n_test": 11,
+  "n_test": 12,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,15 +215,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1904.0,
-    "mape_pct": 14.17,
-    "r2": 0.9222,
-    "within_5pct": 54.5,
-    "within_10pct": 72.7
+    "mae_dollars": 1787.0,
+    "mape_pct": 13.08,
+    "r2": 0.9406,
+    "within_5pct": 58.3,
+    "within_10pct": 75.0
   },
   "baseline_metrics": {
-    "mae_dollars": 2607.0,
-    "mape_pct": 14.59,
+    "mae_dollars": 2392.0,
+    "mape_pct": 13.38,
     "ratio": 1.0181
   },
   "top_features": [

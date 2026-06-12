@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Promo Videos — Experience Wholesale</title>
+<style>
+  :root { --bg:#0b0f17; --card:#111827; --line:#1e293b; --txt:#e2e8f0; --mut:#64748b; --red:#e04444; --grn:#34d399; }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--txt); font-family:'Inter',-apple-system,sans-serif; font-size:14px }
+  .wrap { max-width:1200px; margin:0 auto; padding:20px 16px }
+  h1 { font-size:20px; margin:0 0 4px } .sub { color:var(--mut); font-size:12px; margin-bottom:18px }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.8px; color:var(--mut); margin:0 0 12px }
+  .grid { display:grid; grid-template-columns: 380px 1fr; gap:16px; align-items:start }
+  @media (max-width:900px){ .grid { grid-template-columns:1fr } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px }
+  label { display:block; font-size:11px; color:var(--mut); font-weight:600; margin:12px 0 4px; text-transform:uppercase; letter-spacing:.5px }
+  input, textarea, select { width:100%; background:#0d1320; border:1px solid var(--line); border-radius:6px; color:var(--txt); padding:8px 10px; font-size:14px; font-family:inherit }
+  textarea { resize:vertical }
+  .row2 { display:flex; gap:8px } .row2 > * { flex:1 }
+  button.primary { width:100%; margin-top:14px; background:var(--red); border:0; border-radius:8px; color:#fff; font-weight:700; font-size:15px; padding:11px; cursor:pointer }
+  button.primary:disabled { opacity:.5; cursor:default }
+  #msg { margin-top:10px; font-size:13px; min-height:18px }
+  table { width:100%; border-collapse:collapse; font-size:13px }
+  th { text-align:left; color:var(--mut); font-size:11px; text-transform:uppercase; letter-spacing:.5px; padding:6px 8px; border-bottom:1px solid var(--line) }
+  td { padding:8px; border-bottom:1px solid #16202f; vertical-align:middle }
+  tr.pick { cursor:pointer } tr.pick:hover { background:#162033 }
+  tr.selected { background:#1a2a44 }
+  .chip { display:inline-block; padding:2px 9px; border-radius:999px; font-size:11px; font-weight:700 }
+  .c-queued { background:#3b3416; color:#fbbf24 } .c-processing { background:#16303b; color:#38bdf8 }
+  .c-done { background:#143226; color:var(--grn) } .c-error { background:#3a1620; color:#f87171 } .c-cancelled { background:#262b36; color:#94a3b8 }
+  .mut { color:var(--mut) } .sm { font-size:12px }
+  a.lnk { color:#7dd3fc; text-decoration:none; word-break:break-all }
+  button.copy { background:#1e293b; border:1px solid #334155; color:#e2e8f0; border-radius:5px; padding:3px 10px; font-size:12px; cursor:pointer; margin-left:6px }
+  .scroll { max-height:420px; overflow-y:auto }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎬 Promo Videos</h1>
+  <div class="sub">Pick a bid (or type one), set the price &amp; what she says, submit — the social link appears below when it's done. No photo needed: specs, MSRP and factory colors come from the VIN + window sticker.</div>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h2>Create a video</h2>
+        <label>Bid #</label>
+        <input id="bidId" type="number" placeholder="e.g. 2928" oninput="bidTyped()" onchange="loadNarration(this.value); loadPhotos(this.value)">
+        <div id="bidInfo" class="mut sm" style="margin-top:6px">Select a bid from the list →</div>
+        <label>Photo (optional — seeds the video with the real car's look)</label>
+        <div id="photoStrip" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"></div>
+        <input type="file" id="photoFile" accept="image/*" style="display:none" onchange="uploadPhoto(this)">
+        <label>Price shown on the video (optional)</label>
+        <input id="price" inputmode="numeric" placeholder="98000">
+        <label>Narration — she reads exactly this (blank = auto-written from specs)</label>
+        <textarea id="script" rows="5" placeholder="Welcome to Experience Wholesale. ... (≈75 words fills 30s, ≈110 fills 45s)"></textarea>
+        <div class="row2">
+          <div><label>Length</label>
+            <select id="scenes"><option value="4">30 sec (~$5)</option><option value="6" selected>45 sec (~$7)</option></select></div>
+          <div><label>Quality</label>
+            <select id="quality"><option value="fast" selected>Fast</option><option value="max">Max (~2.7× cost)</option></select></div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;color:var(--txt)">
+          <input type="checkbox" id="tg" checked style="width:auto"> Also send finished link to Telegram</label>
+        <button class="primary" id="go" onclick="createVideo()">Create Video</button>
+        <div id="msg"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Recent bids (14 days)</h2>
+      <div class="scroll">
+        <table id="bidsTable">
+          <thead><tr><th>Bid</th><th>Vehicle</th><th>Sticker MSRP</th><th>Photos</th><th>Videos</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Videos</h2>
+    <table id="jobsTable">
+      <thead><tr><th>#</th><th>Bid</th><th>Vehicle</th><th>Price</th><th>Spec</th><th>Status</th><th>ETA</th><th>Link for social</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+var BIDS = {};
+var SEL_PHOTO = null;
+
+function renderPhotoStrip(photos){
+  var s = document.getElementById("photoStrip");
+  s.innerHTML = "";
+  var none = document.createElement("button");
+  none.className = "copy"; none.id = "ph-none";
+  none.textContent = "📄 Specs only";
+  none.style.borderColor = SEL_PHOTO === null ? "#e04444" : "#334155";
+  none.onclick = function(){ selectPhoto(null); };
+  s.appendChild(none);
+  (photos || []).forEach(function(p){
+    var img = document.createElement("img");
+    img.src = p.thumb; img.id = "ph-" + p.id;
+    img.style.cssText = "width:64px;height:46px;object-fit:cover;border-radius:5px;cursor:pointer;border:2px solid " +
+                        (SEL_PHOTO === p.id ? "#e04444" : "#1e293b");
+    img.onclick = function(){ selectPhoto(p.id); };
+    s.appendChild(img);
+  });
+  var up = document.createElement("button");
+  up.className = "copy";
+  up.textContent = "⬆ Upload pic";
+  up.onclick = function(){ document.getElementById("photoFile").click(); };
+  s.appendChild(up);
+}
+
+function selectPhoto(id){
+  SEL_PHOTO = id;
+  document.querySelectorAll("#photoStrip img").forEach(function(i){
+    i.style.borderColor = ("ph-" + id) === i.id ? "#e04444" : "#1e293b";
+  });
+  var none = document.getElementById("ph-none");
+  if (none) none.style.borderColor = id === null ? "#e04444" : "#334155";
+}
+
+async function loadPhotos(bid){
+  SEL_PHOTO = null;
+  try {
+    var r = await fetch("/api/bid/" + bid + "/promo-photos");
+    var d = await r.json();
+    renderPhotoStrip(d.photos || []);
+  } catch (e) { renderPhotoStrip([]); }
+}
+
+async function uploadPhoto(input){
+  var bid = document.getElementById("bidId").value;
+  if (!bid || !input.files.length) return;
+  var fd = new FormData();
+  fd.append("photo", input.files[0]);
+  var msg = document.getElementById("msg");
+  msg.textContent = "Uploading photo..."; msg.style.color = "#94a3b8";
+  try {
+    var r = await fetch("/api/bid/" + bid + "/promo-photo-upload", {method: "POST", body: fd});
+    var d = await r.json();
+    if (d.photo_id) {
+      msg.textContent = "✓ Photo uploaded";
+      msg.style.color = "#34d399";
+      await loadPhotos(bid);
+      selectPhoto(d.photo_id);
+    } else { msg.textContent = "Upload failed: " + (d.error || ""); msg.style.color = "#f87171"; }
+  } catch (e) { msg.textContent = "Upload failed: " + e; msg.style.color = "#f87171"; }
+  input.value = "";
+}
+
+function fmtMoney(v){ return v ? "$" + Number(String(v).replace(/[^\d]/g,"")).toLocaleString() : "—"; }
+
+function bidTyped(){
+  var b = BIDS[document.getElementById("bidId").value];
+  document.getElementById("bidInfo").textContent = b
+    ? b.vehicle + " • sticker " + fmtMoney(b.msrp) + " • " + b.photos + " photo(s)"
+    : "Bid not in the recent list — it will still work if the bid exists.";
+}
+
+async function loadNarration(id){
+  if (!id) return;
+  var ta = document.getElementById("script");
+  ta.placeholder = "Loading Jen's script...";
+  try {
+    var r = await fetch("/api/bid/" + id + "/promo-narration");
+    var d = await r.json();
+    if (d.script) {
+      ta.value = d.script;
+      document.getElementById("bidInfo").textContent =
+        (BIDS[id] ? BIDS[id].vehicle + " • " : "") +
+        "sticker " + fmtMoney(d.msrp) +
+        (d.exterior ? " • " + d.exterior : "") +
+        (d.interior ? " on " + d.interior : "");
+    }
+  } catch (e) {}
+  ta.placeholder = "Welcome to Experience Wholesale. ...";
+}
+
+function pickBid(id){
+  document.getElementById("bidId").value = id;
+  bidTyped();
+  loadNarration(id);
+  loadPhotos(id);
+  document.querySelectorAll("#bidsTable tr.selected").forEach(function(r){ r.classList.remove("selected"); });
+  var row = document.getElementById("bidrow-" + id);
+  if (row) row.classList.add("selected");
+  window.scrollTo({top:0, behavior:"smooth"});
+}
+
+function renderBids(bids){
+  var tb = document.querySelector("#bidsTable tbody"); tb.innerHTML = "";
+  bids.forEach(function(b){
+    BIDS[b.id] = b;
+    var tr = document.createElement("tr");
+    tr.className = "pick"; tr.id = "bidrow-" + b.id;
+    tr.onclick = function(){ pickBid(b.id); };
+    tr.innerHTML = "<td><b>#" + b.id + "</b></td><td>" + b.vehicle + "</td><td>" + fmtMoney(b.msrp) +
+                   "</td><td>" + b.photos + "</td><td>" + (b.videos || "") + "</td>";
+    tb.appendChild(tr);
+  });
+}
+
+function eta(j){
+  if (j.status === "done" || j.status === "error" || j.status === "cancelled") return "";
+  var per = j.quality === "max" ? 135 : 115;
+  if (j.status === "queued") return "waiting in line (~" + Math.ceil(((j.scenes||4)*per+150)/60) + " min once started)";
+  if (j.progress) {
+    var m = j.progress.match(/scene (\d+)\/(\d+)/);
+    if (m) {
+      var remainScenes = parseInt(m[2]) - parseInt(m[1]) + 1;
+      return "🎞 " + j.progress + " • ~" + Math.ceil((remainScenes*per+150)/60) + " min left";
+    }
+    return "🎞 " + j.progress;
+  }
+  return "rendering...";
+}
+
+function renderJobs(jobs){
+  var tb = document.querySelector("#jobsTable tbody"); tb.innerHTML = "";
+  jobs.forEach(function(j){
+    var link = "";
+    if (j.status === "done" && j.url) {
+      link = '<a class="lnk" href="' + j.url + '" target="_blank">' + j.url.split("/").slice(-2).join("/") + "</a>" +
+             '<button class="copy" onclick="navigator.clipboard.writeText(\'' + j.url + '\'); this.textContent=\'✓ copied\'">Copy</button>';
+    } else if (j.status === "error") {
+      link = '<span class="mut sm">' + (j.error || "").slice(0, 90) + "</span>";
+    }
+    var tr = document.createElement("tr");
+    tr.innerHTML = "<td class='mut'>" + j.id + "</td><td><b>#" + j.bid_id + "</b></td><td>" + (j.vehicle || "") +
+      "</td><td>" + (j.price ? fmtMoney(j.price) : "—") +
+      "</td><td class='sm mut'>" + (j.scenes * 7.5 + 0.5) + "s " + j.quality +
+      "</td><td><span class='chip c-" + j.status + "'>" + j.status + "</span></td>" +
+      "<td class='sm mut'>" + eta(j) + "</td><td>" + link + "</td>";
+    tb.appendChild(tr);
+  });
+}
+
+async function load(){
+  try {
+    var r = await fetch("/api/promo-videos/data");
+    var d = await r.json();
+    renderBids(d.bids || []);
+    renderJobs(d.jobs || []);
+  } catch (e) {}
+}
+
+async function createVideo(){
+  var bid = document.getElementById("bidId").value;
+  var msg = document.getElementById("msg");
+  if (!bid) { msg.textContent = "Enter or pick a bid number first."; msg.style.color = "#f87171"; return; }
+  var btn = document.getElementById("go");
+  btn.disabled = true; msg.textContent = "Submitting..."; msg.style.color = "#94a3b8";
+  try {
+    var r = await fetch("/api/bid/" + bid + "/promo-video", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        photo_id: SEL_PHOTO,
+        price: document.getElementById("price").value.trim(),
+        script: document.getElementById("script").value.trim(),
+        scenes: parseInt(document.getElementById("scenes").value),
+        quality: document.getElementById("quality").value,
+        notify: document.getElementById("tg").checked ? "telegram" : ""
+      })
+    });
+    var d = await r.json();
+    if (d.job_id) {
+      msg.textContent = "✓ Queued as video #" + d.job_id + " — watch the Videos table below.";
+      msg.style.color = "#34d399";
+      document.getElementById("price").value = ""; document.getElementById("script").value = "";
+      load();
+    } else {
+      msg.textContent = "Failed: " + (d.error || "unknown"); msg.style.color = "#f87171";
+    }
+  } catch (e) { msg.textContent = "Failed: " + e; msg.style.color = "#f87171"; }
+  btn.disabled = false;
+}
+
+load();
+setInterval(load, 8000);
+</script>
+</body>
+</html>

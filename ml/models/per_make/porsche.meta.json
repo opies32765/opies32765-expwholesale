@@ -1,9 +1,9 @@
 {
   "make_name": "PORSCHE",
-  "trained_at": "2026-06-11T08:30:28.393955Z",
-  "n_total": 2026,
+  "trained_at": "2026-06-12T08:30:22.551197Z",
+  "n_total": 2028,
   "n_train": 1866,
-  "n_test": 160,
+  "n_test": 162,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -221,15 +221,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 10719.0,
-    "mape_pct": 9.34,
-    "r2": 0.9142,
-    "within_5pct": 43.1,
-    "within_10pct": 70.6
+    "mae_dollars": 10672.0,
+    "mape_pct": 9.32,
+    "r2": 0.9145,
+    "within_5pct": 42.6,
+    "within_10pct": 71.0
   },
   "baseline_metrics": {
-    "mae_dollars": 9169.0,
-    "mape_pct": 11.46,
+    "mae_dollars": 9148.0,
+    "mape_pct": 11.42,
     "ratio": 1.0376
   },
   "top_features": [
