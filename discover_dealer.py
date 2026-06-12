@@ -13,6 +13,7 @@ Run:
 
 Cost: ~$1-3 per dealer (Opus 4.7, ~50-150K input tokens, multi-turn).
 """
+import local_brain_shim  # EW_SHIM_2026_06_11: route ALL genai generate_content -> 9B brain, Gemini fallback
 import argparse
 import json
 import os

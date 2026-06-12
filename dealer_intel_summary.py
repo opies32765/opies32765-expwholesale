@@ -27,6 +27,7 @@ CLI:
 Runs AFTER dealer_intel.py + dealer_intel_network.py in the cron chain.
 """
 from __future__ import annotations
+import local_brain_shim  # EW_SHIM_2026_06_11: route ALL genai generate_content -> 9B brain, Gemini fallback
 import argparse
 import json
 import logging

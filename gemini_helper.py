@@ -10,6 +10,7 @@ Uses the same Vertex AI service account already configured for EW
 (GOOGLE_APPLICATION_CREDENTIALS -> google_vision_key.json,
 project my-project-dia-492415, location global).
 """
+import local_brain_shim  # EW_SHIM_2026_06_11: route ALL genai generate_content -> 9B brain, Gemini fallback
 import threading
 import time
 

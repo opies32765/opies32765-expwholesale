@@ -884,7 +884,7 @@ TWILIO_PHONE = os.environ.get('TWILIO_PHONE', '')
 #    gated_phones gate_type='rolling_portal'. ──────────────────────────────
 BATCH_MAX = 25                   # max cars created from one batch SMS
 PORTAL_MAX_CARS = 10             # cars shown on /s/<token> (newest first)
-PORTAL_NUDGE_THROTTLE_MIN = 10   # min minutes between portal "N ready" nudges
+PORTAL_NUDGE_THROTTLE_MIN = int(os.environ.get("PORTAL_NUDGE_THROTTLE_MIN", "0"))  # NO_THROTTLE_2026_06_11: 0=nudge every car   # min minutes between portal "N ready" nudges
 DEALERCLUB_BUY_FEE_FLAT = int(os.environ.get("DEALERCLUB_BUY_FEE_FLAT", "199"))
 DEALERCLUB_TRANSPORT_EST = int(os.environ.get("DEALERCLUB_TRANSPORT_EST", "350"))
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
@@ -1291,6 +1291,9 @@ def sonnet_vision_call(prompt, image_bytes, mime='image/jpeg', max_tokens=64,
     return gemini_call(prompt, image_bytes=image_bytes, mime=mime,
                        model='gemini-2.5-flash', max_tokens=max(int(max_tokens), 32),
                        temperature=0.0, disable_thinking=True)
+
+
+import local_brain_shim  # EW_SHIM_2026_06_11: route ALL genai generate_content -> 9B brain, Gemini fallback
 
 
 def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-flash',
@@ -1968,7 +1971,7 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
     for attempt in range(2):
         result = gemini_call(hw_prompt, image_bytes=file_bytes, mime=media_type,
                              model='gemini-2.5-pro', max_tokens=2000,
-                             temperature=0.2 + attempt * 0.3)
+                             temperature=(0.0 if attempt == 0 else 0.4))  # HARDEN_OCR_TEMP_2026_06_11
         if not result:
             continue
         m = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', result.strip().upper())
@@ -2000,13 +2003,29 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
 
     # Cross-check 2: Gemini Flash. Accept ONLY if check digit valid.
     flash_result = gemini_call(VIN_PROMPT, image_bytes=file_bytes, mime=media_type,
-                               model='gemini-2.5-flash', max_tokens=100)
+                               model='gemini-2.5-flash', max_tokens=100, temperature=0.0)  # HARDEN_OCR_TEMP_2026_06_11
     if flash_result:
         flash_vin = flash_result.strip().upper()
         m = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', flash_vin)
         if m and vin_check_digit_valid(m.group(0)):
             print(f'[OCR] VIN via Gemini Flash cross-check (check digit OK): {m.group(0)}', flush=True)
             return m.group(0)
+
+    # COMBINED_EXTRACTOR_FALLBACK_2026_06_11: the strict VIN-only prompts make the
+    # local 9B ramble / misread a clean char (e.g. L->1 on the photographed-screen
+    # VIN in bid 2909) or self-reject to NONE, while the CARFAX JSON extractor reads
+    # the SAME image correctly (verified live on 1GKS2EKLXRR400751). Use it as a
+    # cross-check BEFORE the best-guess fallback; accept ONLY if the ISO-3779 check
+    # digit validates, so a misread can never ship the wrong car.
+    try:
+        _ci = extract_carfax_info(file_bytes, media_type)
+        _cv = str((_ci or {}).get('vin') or '').strip().upper()
+        _cm = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', _cv)
+        if _cm and vin_check_digit_valid(_cm.group(0)):
+            print(f'[OCR] VIN via combined CARFAX extractor (check digit OK): {_cm.group(0)}', flush=True)
+            return _cm.group(0)
+    except Exception as _cee:
+        print(f'[OCR] combined-extractor VIN fallback err: {_cee}', flush=True)
 
     # VIN_OCR_V2_2026_05_27 — closed-loop retry. Before returning the best-guess
     # (which lets a bad VIN through to workers that spin on it), give Gemini
@@ -2255,7 +2274,7 @@ def extract_carfax_info(file_bytes, media_type='image/jpeg'):
 
     Uses Gemini 2.5 Pro for better accuracy on handwriting and ambiguous text."""
     raw = gemini_call(CARFAX_PROMPT, image_bytes=file_bytes, mime=media_type,
-                      model='gemini-2.5-flash', max_tokens=3000)
+                      model='gemini-2.5-flash', max_tokens=3000, temperature=0.0)  # HARDEN_OCR_TEMP_2026_06_11
     if not raw:
         return {}
     try:

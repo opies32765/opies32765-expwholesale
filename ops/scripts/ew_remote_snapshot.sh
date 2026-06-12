@@ -42,7 +42,7 @@ log "=== snapshot $TS starting (primary) ==="
 # 1. DB dump
 log 'pg_dump...'
 export PGPASSWORD='ExpWholesale2026!'
-if ! pg_dump -h localhost -p 5433 -U expuser -d expwholesale -F custom -f "$WORK/db_${TS}.dump" 2>>"$LOG"; then
+if ! pg_dump -h localhost -p 5433 -U expuser -d expwholesale --exclude-schema=shadow -F custom -f "$WORK/db_${TS}.dump" 2>>"$LOG"; then
     log 'ERROR: pg_dump failed'
     tg "🔥 EW snapshot FAILED ($TS): pg_dump error. See $LOG"
     exit 1
