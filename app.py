@@ -3147,7 +3147,16 @@ def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
     # mismatched photo is a genuinely different car, so keep those separate.
     leftovers = [cd for cd in cap_decoded if not cd['used']]
     paired = False
-    if len(orphan_photos) == 1 and len(leftovers) == 1 and not orphan_photos[0]['pmm_make']:
+    # ONE_PHOTO_ONE_VIN_2026_06_12: a single-photo message whose own VIN didn't
+    # OCR, plus a single leftover caption VIN, is ONE car by construction -- pair
+    # them even if _identify_photo_vehicle guessed a (mismatched) make, because a
+    # VIN-sticker/odometer/interior close-up is exactly what it mis-IDs. The
+    # pmm_make guard still applies with MULTIPLE photos, where per-photo make
+    # discrimination is real. Fixes 2936/2937: lone VIN photo (OCR miss) + caption
+    # "VIN .. miles?" had split into a dead need_vin orphan + a text-only bid.
+    _one_photo_msg = (num_media == 1)
+    if len(orphan_photos) == 1 and len(leftovers) == 1 and (
+            _one_photo_msg or not orphan_photos[0]['pmm_make']):
         op, cd = orphan_photos[0], leftovers[0]
         if not _img_batch_recent_dup(cur, from_phone, cd['vin']):
             miles = cd['miles']
