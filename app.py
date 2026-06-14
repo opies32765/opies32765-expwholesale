@@ -4644,21 +4644,62 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     # check-digit-valid candidate. Tiebreaker: earliest
                     # arrival. Only sets bids.vin when still NULL/empty,
                     # preserving operator dashboard edits.
+                    # ARRIVAL_ORDER_VIN_2026_06_13 (operator: first-by-ARRIVAL
+                    # wins; text & photo equal; NOT whoever OCR'd first). The bid
+                    # VIN is the earliest-ARRIVING candidate across photos
+                    # (bid_photos.created_at) + text (raw_message + inbound
+                    # bid_messages). Overwrites an intake-sourced VIN when an
+                    # earlier-arriving one exists (corrects a later photo that
+                    # raced ahead); never clobbers a manual dashboard VIN (one
+                    # not present in any intake source).
+                    bg_cur.execute("SELECT vin FROM bids WHERE id=%s", (bid_id,))
+                    _vin_before = (bg_cur.fetchone() or {}).get('vin')
                     bg_cur.execute("""
-                        SELECT vin_extracted AS v, COUNT(*) AS n
-                          FROM bid_photos
-                         WHERE bid_id=%s
-                           AND vin_extracted IS NOT NULL
-                           AND LENGTH(vin_extracted) = 17
-                         GROUP BY vin_extracted
-                         ORDER BY n DESC, MIN(created_at) ASC
-                         LIMIT 1
-                    """, (bid_id,))
-                    _vrow = bg_cur.fetchone()
-                    _winner = (_vrow.get('v') if _vrow else vin) or vin
-                    bg_cur.execute("""UPDATE bids SET vin=%s, updated_at=NOW()
-                                      WHERE id=%s AND (vin IS NULL OR vin='')""",
-                                   (_winner, bid_id))
+                        WITH cands AS (
+                            SELECT vin_extracted AS v, created_at AS t
+                              FROM bid_photos
+                             WHERE bid_id=%(b)s
+                               AND vin_extracted ~ '^[A-HJ-NPR-Z0-9]{17}$'
+                            UNION ALL
+                            SELECT substring(upper(raw_message) from '[A-HJ-NPR-Z0-9]{17}'), created_at
+                              FROM bids
+                             WHERE id=%(b)s
+                               AND upper(COALESCE(raw_message,'')) ~ '[A-HJ-NPR-Z0-9]{17}'
+                            UNION ALL
+                            SELECT substring(upper(message) from '[A-HJ-NPR-Z0-9]{17}'), created_at
+                              FROM bid_messages
+                             WHERE bid_id=%(b)s AND direction='inbound'
+                               AND upper(COALESCE(message,'')) ~ '[A-HJ-NPR-Z0-9]{17}'
+                        )
+                        UPDATE bids
+                           SET vin = (SELECT v FROM cands WHERE v IS NOT NULL ORDER BY t ASC, v ASC LIMIT 1),
+                               updated_at = NOW()
+                         WHERE id=%(b)s
+                           AND (SELECT v FROM cands WHERE v IS NOT NULL ORDER BY t ASC, v ASC LIMIT 1) IS NOT NULL
+                           AND (vin IS NULL OR vin='' OR vin IN (SELECT v FROM cands WHERE v IS NOT NULL))
+                    """, {'b': bid_id})
+                    bg_cur.execute("SELECT vin FROM bids WHERE id=%s", (bid_id,))
+                    _winner = (bg_cur.fetchone() or {}).get('vin') or vin
+                    _vin_changed = bool(_winner) and (_winner != _vin_before)
+                    # DROP_MISMATCHED_PHOTO_2026_06_13 (operator: one car, one
+                    # bid; drop the rest): a photo whose OCR'd VIN is a DIFFERENT
+                    # car than the winning first-arrival VIN is a fat-fingered
+                    # second vehicle -- remove it so it can't poison enrichment
+                    # (iPacket/AccuTrade OCR the wrong sticker -> garbage
+                    # canon_trim + no AccuTrade: bid 2946). VIN-less photos
+                    # (odometer/exterior of the SAME car) keep vin_extracted NULL
+                    # so they are never dropped. Proven: 2946 accu=0 -> accu=1 the
+                    # instant the wrong-car photo was removed.
+                    if _winner:
+                        bg_cur.execute("""DELETE FROM bid_photos
+                                          WHERE bid_id=%s
+                                            AND vin_extracted IS NOT NULL
+                                            AND vin_extracted ~ '^[A-HJ-NPR-Z0-9]{17}$'
+                                            AND vin_extracted <> %s""",
+                                       (bid_id, _winner))
+                        if bg_cur.rowcount:
+                            print('[drop-mismatch] bid=%s dropped %d different-VIN photo(s) (winner=%s) -- one car one bid'
+                                  % (bid_id, bg_cur.rowcount, _winner), flush=True)
                     # VIN_OCR_V2_COMMIT_2026_05_28: commit before retrigger so the
                     # canonicalize daemon thread (opens a NEW connection via get_db())
                     # reads the just-written VIN. Without this, the thread sees vin=NULL
@@ -4685,10 +4726,11 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     _vin_related = any(k in _vreason for k in (
                         'missing_vin', 'vin_invalid', 'invalid_vin',
                         'vin_not_found'))
-                    if (_vrow and _vrow.get('vin')
-                            and _vrow.get('needs_verification_at')
-                            and not _vrow.get('needs_verification_cleared_at')
-                            and _vin_related):
+                    if (_vrow and _vrow.get('vin') and (
+                            (_vrow.get('needs_verification_at')
+                             and not _vrow.get('needs_verification_cleared_at')
+                             and _vin_related)
+                            or _vin_changed)):  # ARRIVAL_ORDER_VIN_2026_06_13: reprocess on VIN change
                             bg_cur.execute("""
                                 UPDATE bids
                                    SET needs_verification_cleared_at = NOW(),
@@ -4717,9 +4759,11 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     # multiple photos is most likely the real odometer (the
                     # smaller hits are usually trim badges / sale prices /
                     # climate displays that Gemini fell back to).
+                    # ARRIVAL_ORDER_VIN_2026_06_13: first miles to land wins;
+                    # a photo never overrides an earlier (text or photo) value.
                     bg_cur.execute("""UPDATE bids SET mileage=%s, updated_at=NOW()
-                                      WHERE id=%s AND (mileage IS NULL OR mileage < %s)""",
-                                   (miles, bid_id, miles))
+                                      WHERE id=%s AND mileage IS NULL""",
+                                   (miles, bid_id))
                     # CLEAR_VERIFY_STATE_BASED_2026_05_16: state-based gate.
                     # If the bid has miles now (set by us or an earlier
                     # photo's OCR) AND the flag is open AND reason is
@@ -4967,7 +5011,7 @@ def twilio_webhook():
     # 2007 incident class that e922411 was written to kill. Both batch branches
     # now skip when the body is a #N reference.
     _is_hashref = bool(re.match(r'^\s*#\d{3,5}\b', (body or '').strip()))
-    if (from_phone and num_media == 0 and body and not _is_hashref
+    if (False and from_phone and num_media == 0 and body and not _is_hashref  # ONE_BID_PER_WINDOW_2026_06_13: multi-car TEXT intake disabled
             and _phone_in_portal_gate(from_phone)):
         try:
             _batch_pairs = _parse_batch_pairs(body)
@@ -5001,7 +5045,7 @@ def twilio_webhook():
     # one bid per car (one combined ack). Returns None (falls through to the
     # single-photo / photo-batch paths below) when no multi-car list is found,
     # so normal photo behavior is unchanged. Runs before the photo-batch path.
-    if (from_phone and num_media >= 1 and not _is_hashref
+    if (False and from_phone and num_media >= 1 and not _is_hashref  # ONE_BID_PER_WINDOW_2026_06_13: LIST/caption multi-VIN IMAGE intake disabled
             and _phone_in_portal_gate(from_phone)):
         try:
             _iv_resp = _handle_image_vin_scan(db, cur, from_phone, num_media,
@@ -5016,7 +5060,7 @@ def twilio_webhook():
                 pass
     # ── end LIST_SCREENSHOT image intake ──────────────────────────────────
 
-    if (from_phone and num_media >= 2 and not _is_hashref
+    if (False and from_phone and num_media >= 2 and not _is_hashref  # ONE_BID_PER_WINDOW_2026_06_13: photo-batch one-bid-per-image disabled
             and _phone_in_portal_gate(from_phone)):
         try:
             _pb_resp = _handle_photo_batch_intake(db, cur, from_phone, num_media,
@@ -5357,12 +5401,15 @@ def twilio_webhook():
                     "OR vin_verify_sms_sent_at > NOW() - INTERVAL '24 hours'))) LIMIT 1",
                     (from_phone,))
                 if not cur.fetchone():
+                    # NO_STAGING_2026_06_13 (operator: "nothing staged ever"): a bare
+                    # number with no open bid is DROPPED (logged), never staged -- so
+                    # it can never be reclaimed onto a later unrelated bid.
                     _finalize_sms_intake(
-                        cur, intake_log_id, 'order_indep_staged',
+                        cur, intake_log_id, 'bare_miles_dropped',
                         parsed_miles=_oim_miles,
-                        reason='bare miles %s staged (no vehicle yet); awaits VIN within 120s' % _oim_miles)
+                        reason='bare miles %s dropped (no open bid in window; staging disabled)' % _oim_miles)
                     db.commit()
-                    print('[order-indep-merge] staged miles=%s from=%s (awaiting vehicle)' % (_oim_miles, from_phone), flush=True)
+                    print('[order-indep-merge] dropped bare miles=%s from=%s (no open bid; no staging)' % (_oim_miles, from_phone), flush=True)
                     db.close()
                     return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                             200, {'Content-Type': 'text/xml'})
@@ -5468,6 +5515,109 @@ def twilio_webhook():
             return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                     200, {'Content-Type': 'text/xml'})
 
+    # ── ONE_BID_PER_WINDOW_2026_06_13 (operator: kill multi-car; clean day-1 model) ─
+    # EVERYTHING a sender sends within a HARD 60s window of their FIRST item folds
+    # into ONE bid: first VIN wins, first miles wins, all photos attach. This
+    # authoritative front door pre-empts every legacy stitch/merge layer below
+    # (stitch-precedence, partner-reply, share-reply, verify-stitch) for the 60s
+    # window -- if the sender has a bid created <60s ago, THIS item goes onto it,
+    # full stop, no second bid. A per-sender PG advisory xact-lock serializes the
+    # same-second race (two messages -> two workers -> two bids: 2918/2919). Runs
+    # AFTER #N hash-ref and the name-reply handler (those are explicit replies),
+    # and falls through to the normal single-bid create path ONLY when no open
+    # window bid exists (that path makes exactly ONE bid -- the splitters above
+    # are disabled, so one message can never fan out).
+    if from_phone and not _is_hashref:
+        _win_row = None
+        try:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (from_phone,))
+            cur.execute("""SELECT id FROM bids
+                            WHERE phone = %s
+                              AND created_at > NOW() - INTERVAL '60 seconds'
+                              AND status NOT IN ('cancelled','archived','dead','duplicate')
+                            ORDER BY id DESC LIMIT 1""", (from_phone,))
+            _win_row = cur.fetchone()
+        except Exception as _win_e:
+            print('[window-merge] lookup err phone=%s: %s' % (from_phone, _win_e), flush=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            _win_row = None
+        if _win_row:
+            _wb = _win_row['id']
+            _w_applied = []
+            # First VIN wins (from text body)
+            try:
+                _w_vin = extract_vin_from_text(body) if body else None
+            except Exception:
+                _w_vin = None
+            if _w_vin:
+                cur.execute("UPDATE bids SET vin=%s, updated_at=NOW() "
+                            "WHERE id=%s AND (vin IS NULL OR vin='')", (_w_vin, _wb))
+                if cur.rowcount:
+                    _w_applied.append('vin=%s' % _w_vin)
+                    try:
+                        _retrigger_canonicalize_after_vin(_wb)
+                    except Exception as _wce:
+                        print('[window-merge] canon err bid=%s: %s' % (_wb, _wce), flush=True)
+            # First miles wins (from text body) -- same parse as order-indep/verify-stitch
+            _w_miles = None
+            if body:
+                _wmm = re.search(r'(\d{1,3}(?:[,.]?\d{3})*|\d+)\s*(?:k\b|mi\b|miles?\b)',
+                                 body, re.IGNORECASE)
+                if _wmm:
+                    try:
+                        _ws = _wmm.group(1).replace(',', '').replace('.', '')
+                        if _ws.isdigit():
+                            _w_miles = int(_ws)
+                            if 'k' in (_wmm.group(0) or '').lower() and _w_miles < 1000:
+                                _w_miles *= 1000
+                    except Exception:
+                        _w_miles = None
+                if not _w_miles:
+                    _wbm = re.match(r'^\s*(\d{3,6})\s*$', body)
+                    if _wbm:
+                        _wn = int(_wbm.group(1))
+                        if 100 <= _wn <= 999_999 and not (1990 <= _wn <= 2030):
+                            _w_miles = _wn
+            if _w_miles:
+                cur.execute("UPDATE bids SET mileage=%s, updated_at=NOW() "
+                            "WHERE id=%s AND mileage IS NULL", (_w_miles, _wb))
+                if cur.rowcount:
+                    _w_applied.append('miles=%s' % _w_miles)
+            # All photos attach onto the one bid
+            _w_n_media = 0
+            try:
+                _w_n_media = int(request.form.get('NumMedia', 0))
+            except (TypeError, ValueError):
+                _w_n_media = 0
+            for _wi in range(_w_n_media):
+                _wu = request.form.get('MediaUrl%d' % _wi)
+                _wt = request.form.get('MediaContentType%d' % _wi) or 'image/jpeg'
+                if not _wu:
+                    continue
+                try:
+                    _ingest_sms_photo(cur, _wb, _wu, _wt, from_phone=from_phone)
+                    _w_applied.append('photo')
+                except Exception as _wpe:
+                    print('[window-merge] photo err bid=%s: %s' % (_wb, _wpe), flush=True)
+            if body:
+                cur.execute("INSERT INTO bid_messages (bid_id, direction, message, from_phone) "
+                            "VALUES (%s,'inbound',%s,%s)", (_wb, body, from_phone))
+            cur.execute("UPDATE bids SET updated_at=NOW(), has_unread=TRUE WHERE id=%s", (_wb,))
+            try:
+                _finalize_sms_intake(cur, intake_log_id, 'window_merge', bid_id=_wb,
+                                     reason='60s window -> bid #%s: %s'
+                                            % (_wb, ', '.join(_w_applied) or 'noop'))
+            except Exception:
+                pass
+            db.commit()
+            db.close()
+            print('[window-merge] phone=%s -> bid #%s: %s' % (from_phone, _wb, _w_applied), flush=True)
+            return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                    200, {'Content-Type': 'text/xml'})
+    # ── end ONE_BID_PER_WINDOW front door ─────────────────────────
     # ── Stitch precedence over share-reply ──
     # If this phone has a bid created via SMS in the last 60 seconds, that's
     # almost always a follow-up (VIN-then-miles, photo-then-text). Treat it
@@ -7331,21 +7481,14 @@ def _run_assessment(bid_id):
         try:
             _ai_ver, _ai_cfg = get_active_ai_config()
             _ai_cap = float(_ai_cfg.get('llm_adjustment_cap_pct', 15))
-            _bid_for_bucket = {
-                'make': bid.get('make'),
-                'model': bid.get('model'),
-                'year': bid.get('year'),
-                'asking_price': bid.get('asking_price'),
-            }
-            _bucket = classify_bucket(_bid_for_bucket, _ai_cfg)
-            _baseline_result = compute_baseline(
-                _bucket,
-                dict(vauto) if vauto else {},
-                dict(accutrade) if accutrade else {},
-            )
-            print(f'[ASSESS] Bid {bid_id} classified as "{_bucket.get("name")}" — '
-                  f'baseline ${(_baseline_result or {}).get("baseline_price") or 0:,}',
-                  flush=True)
+            # LEGACY_LEVERS_REMOVED_2026_06_13 (operator): the v2 assessment does
+            # NOT use the bucket/baseline classification "ai levers" --
+            # ai_assessment_v2 abandoned them ("NO bucket classification, NO
+            # percentage offsets"). The dead classify_bucket/compute_baseline +
+            # their misleading 'classified as mainstream_sub50k' log are gone;
+            # they never affected the price. (_ai_cfg load above is kept -- used
+            # downstream.) _bucket/_baseline_result stay None (unused).
+            pass
         except Exception as _cls_err:
             print(f'hybrid classify/baseline error: {_cls_err}', flush=True)
 
@@ -8420,7 +8563,7 @@ def _run_assessment(bid_id):
         resp = gc.models.generate_content(
             model='gemini-2.5-flash',
             contents=gemini_parts,
-            config=_gtypes.GenerateContentConfig(max_output_tokens=8000, temperature=0.4),
+            config=_gtypes.GenerateContentConfig(max_output_tokens=8000, temperature=0),  # DETERMINISTIC_ASSESS_2026_06_13: 0.4->0 so the same car always prices the same (was sampling $173-178k on identical inputs)
         )
         assessment = (resp.text or '').strip()
         if not assessment:
@@ -15297,6 +15440,46 @@ def api_vauto_status(bid_id):
 
 # ── AccuTrade worker API ────────────────────────────────────────────────────
 
+@app.route('/api/ipacket/pending')
+def api_ipacket_pending():
+    """IPACKET_ONLY_QUEUE_2026_06_13 (vAuto API cutover): return a bid EXPLICITLY
+    marked for an iPacket-only retry — ipacket_retry_at set + fresh (<15m) + no
+    ipacket_lookups row yet + unclaimed-or-stale. Atomic claim via FOR UPDATE
+    SKIP LOCKED. Mirrors /api/accutrade/pending. The marker is set only by the
+    vauto_api poller (enqueue_solo), so this returns nothing in normal operation."""
+    worker_id = (request.args.get('worker_id') or 'trainer').strip()
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""
+        WITH eligible AS (
+            SELECT b.id
+            FROM bids b
+            WHERE b.vin IS NOT NULL AND length(b.vin) = 17
+              AND b.ipacket_retry_at IS NOT NULL
+              AND b.ipacket_retry_at > NOW() - INTERVAL '15 minutes'
+              AND NOT EXISTS (SELECT 1 FROM ipacket_lookups il WHERE il.bid_id = b.id)
+              AND (b.ipacket_retry_claimed_at IS NULL
+                   OR b.ipacket_retry_claimed_at < NOW() - INTERVAL '3 minutes')
+            ORDER BY b.ipacket_retry_at ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        UPDATE bids
+           SET ipacket_retry_claimed_at = NOW()
+          FROM eligible
+         WHERE bids.id = eligible.id
+        RETURNING bids.id AS bid_id, bids.vin, bids.mileage,
+                  bids.year, bids.make, bids.model
+    """)
+    rows = cur.fetchall()
+    for row in rows:
+        cur.execute("INSERT INTO worker_jobs (bid_id, worker_id, job_type, status, claimed_at) "
+                    "VALUES (%s, %s, 'ipacket', 'in_progress', NOW())", (row['bid_id'], worker_id))
+    db.commit()
+    db.close()
+    return jsonify({'pending': [dict(r) for r in rows]})
+
+
 @app.route('/api/accutrade/pending')
 def api_accutrade_pending():
     """Return bids EXPLICITLY marked for an AccuTrade-only retry, atomically
@@ -16243,6 +16426,72 @@ def api_accutrade_submit():
     db = get_db()
     cur = db.cursor()
     bid_id = data['bid_id']
+
+    # ACCU_VISION_BACKFILL_2026_06_13: when the worker's DOM scrape captured NO
+    # buy values (exotic appraisals whose Instant Offer / Target Auction /
+    # Average tiles render N/A but a Target/Median Retail or market value IS on
+    # the page -- e.g. 2026 Lamborghini Temerario -> Target Retail $476,021),
+    # read the appraisal SCREENSHOT with the local 9B (gemini_call -> brain
+    # shim, Gemini fallback) and backfill. FALLBACK ONLY: skips entirely when
+    # the scrape already returned any value, so vAuto/Carfax/AutoCheck and the
+    # normal AccuTrade path are untouched. Fully guarded -- never breaks submit.
+    try:
+        _adv_has = any(data.get(_k) for _k in
+                       ('guaranteed_offer', 'trade_in', 'trade_market', 'market_avg', 'retail'))
+        _adv_scr = data.get('screenshot')
+        if (not _adv_has) and _adv_scr:
+            _adv_path = os.path.join(ACCUTRADE_REPORTS_DIR, os.path.basename(str(_adv_scr)))
+            if os.path.exists(_adv_path) and os.path.getsize(_adv_path) > 5000:
+                with open(_adv_path, 'rb') as _adv_f:
+                    _adv_bytes = _adv_f.read()
+                _adv_mime = 'image/png' if _adv_path.lower().endswith('.png') else 'image/jpeg'
+                _adv_prompt = (
+                    "This is a screenshot of an AccuTrade vehicle appraisal page. Near the "
+                    "top are up to four labeled valuation tiles, left to right: 'Instant "
+                    "Offer', 'Target Auction', a retail tile labeled 'Target Retail' OR "
+                    "'Median Retail', and 'Average' (sometimes 'Wholesale'/'Avg'). Ignore "
+                    "any 'Manheim' tile. Each tile shows EITHER a dollar amount (e.g. "
+                    "$476,021) OR 'N/A'. Return ONLY a compact JSON object with integer "
+                    "dollars (no $, no commas) or null when a tile reads N/A or is absent. "
+                    'Keys exactly: {"instant_offer":null,"target_auction":null,'
+                    '"target_retail":null,"average":null}. Return only the JSON.'
+                )
+                _adv_txt = gemini_call(_adv_prompt, image_bytes=_adv_bytes, mime=_adv_mime,
+                                       model='gemini-2.5-flash', max_tokens=200,
+                                       temperature=0.0, disable_thinking=True)
+                if _adv_txt:
+                    _adv_s = _adv_txt.strip()
+                    if _adv_s.startswith('```'):
+                        _adv_s = _adv_s.split('\n', 1)[-1]
+                        _adv_s = _adv_s.rsplit('```', 1)[0]
+                    _adv_obj = json.loads(_adv_s[_adv_s.index('{'):_adv_s.rindex('}') + 1])
+                    def _adv_num(_x):
+                        try:
+                            _n = int(round(float(_x)))
+                            return _n if 100 < _n < 10000000 else None
+                        except Exception:
+                            return None
+                    _adv_map = {
+                        'guaranteed_offer': _adv_num(_adv_obj.get('instant_offer')),
+                        'trade_in': _adv_num(_adv_obj.get('target_auction')),
+                        'trade_market': _adv_num(_adv_obj.get('target_retail')),
+                        'market_avg': _adv_num(_adv_obj.get('average')),
+                    }
+                    if any(_v is not None for _v in _adv_map.values()):
+                        for _ak, _av in _adv_map.items():
+                            if _av is not None:
+                                data[_ak] = _av
+                        data['not_available'] = False
+                        if (data.get('unavailable_reason') or '').startswith('accutrade_manual_quote'):
+                            data['unavailable_reason'] = 'vision_backfill_from_screenshot'
+                        print('[accu-vision] bid=%s backfilled %s from %s'
+                              % (bid_id, _adv_map, os.path.basename(_adv_path)), flush=True)
+                    else:
+                        print('[accu-vision] bid=%s no values read from %s'
+                              % (bid_id, os.path.basename(_adv_path)), flush=True)
+    except Exception as _adv_e:
+        print('[accu-vision] bid=%s backfill error: %s: %s'
+              % (bid_id, type(_adv_e).__name__, _adv_e), flush=True)
 
     cur.execute("""
         INSERT INTO accutrade_lookups
