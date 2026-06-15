@@ -13771,7 +13771,6 @@ def _kick_direct_for_intake(bid_id):
 _WORKER_VMID_MAP = {
     'vm-worker-1': 9000,
     'vm-worker-2': 100,
-    'vm-worker-4': 102,
     'vm-worker-5': 103,
     'vm-worker-6': 116,
     'vm-worker-7': 111,

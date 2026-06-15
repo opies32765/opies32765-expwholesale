@@ -105,6 +105,12 @@
         <span class="pill" id="preview-counts"></span>
       </div>
       <div class="toolbar">
+        <label style="font-size:13px; color:#374151; margin-right:8px;">
+          Stagger (s)
+          <input type="number" id="stagger_seconds" value="60" min="0" max="60" step="5"
+                 title="Seconds between each enrichment kick (0-60). Higher = gentler on workers/AccuTrade."
+                 style="width:60px; margin-left:4px;" />
+        </label>
         <button class="secondary" id="btn-toggle-skip">Skip duplicates</button>
         <button id="btn-commit">Create selected bids →</button>
       </div>
@@ -256,6 +262,9 @@ document.getElementById('btn-commit').onclick = async () => {
   });
   if (!keep.length) { statusEl.textContent = 'Nothing selected.'; statusEl.className = 'status-line err'; return; }
   const source = document.getElementById('source_name').value;
+  let staggerSecs = parseInt(document.getElementById('stagger_seconds').value, 10);
+  if (!Number.isFinite(staggerSecs)) staggerSecs = 60;
+  staggerSecs = Math.max(0, Math.min(60, staggerSecs));
   statusEl.textContent = `Creating ${keep.length} bids…`;
   statusEl.className = 'status-line';
   document.getElementById('btn-commit').disabled = true;
@@ -264,7 +273,7 @@ document.getElementById('btn-commit').onclick = async () => {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       credentials: 'same-origin',
-      body: JSON.stringify({ rows: keep, source_name: source }),
+      body: JSON.stringify({ rows: keep, source_name: source, delay_seconds: staggerSecs }),
     });
     if (!ok || j.error) {
       statusEl.textContent = 'Commit failed: ' + (j.error || 'unknown');
