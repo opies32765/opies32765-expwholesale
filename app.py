@@ -6956,6 +6956,7 @@ def api_market_check_pending():
                       OR market_check_claimed_at < NOW() - INTERVAL '10 minutes')
                  AND created_at > NOW() - INTERVAL '45 days'
                  AND COALESCE(status,'') NOT IN ('cancelled','rejected','duplicate','archived','dead')
+                 AND (enrich_release_at IS NULL OR enrich_release_at <= NOW())  -- DRIBBLE_GATE_2026_06_15
                ORDER BY created_at DESC
                LIMIT 1
                FOR UPDATE SKIP LOCKED
@@ -8748,12 +8749,9 @@ def _run_assessment(bid_id):
         try:
             cur = db.cursor()
 
-            # Ensure ai_price column exists (migration)
-            try:
-                cur.execute("ALTER TABLE bids ADD COLUMN IF NOT EXISTS ai_price NUMERIC(10,2)")
-                db.commit()
-            except Exception:
-                db.rollback()
+            # DRIBBLE_NODDL_2026_06_15: ai_price column exists; removed the
+            # per-assessment runtime ALTER that took ACCESS EXCLUSIVE on bids
+            # on every assessment (root cause of the 2026-06-15 lock storm).
 
             if buy_price:
                 cur.execute("UPDATE bids SET ai_assessment=%s, ai_assessed_at=NOW(), ai_price=%s WHERE id=%s",
@@ -11307,7 +11305,7 @@ def api_admin_bulk_upload_commit():
         bulk_upload_id = cur.fetchone()['id']
 
         created = []
-        for r in keep:
+        for _i, r in enumerate(keep):
             year     = r.get('year')
             # BULK_UPLOAD_TRUNCATION_FIX_2026_05_18 (B): slice to MATCH
             # the DB column limits, not exceed them. Previous values
@@ -11355,11 +11353,11 @@ def api_admin_bulk_upload_commit():
                     (contact_id, phone, vin, year, make, model, trim,
                      mileage, color, raw_message, asking_price, notes,
                      status, creation_ip, creation_source, bulk_upload_id,
-                     vauto_priority)
+                     vauto_priority, enrich_release_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s,
                         'new', %s, 'bulk_upload', %s,
-                        TRUE)
+                        FALSE, NOW() + (%s * INTERVAL '1 second'))
                 RETURNING id
             """, (
                 contact_id, contact_phone, r['vin'],
@@ -11369,6 +11367,7 @@ def api_admin_bulk_upload_commit():
                 color or None, raw_message,
                 int(asking) if asking else None, full_notes,
                 client_ip, bulk_upload_id,
+                _i * delay_seconds,
             ))
             new_bid_id = cur.fetchone()['id']
             created.append((new_bid_id, r['vin']))
@@ -12421,6 +12420,7 @@ def api_vauto_pending():
               )
               AND (b.vauto_claimed_at IS NULL
                    OR b.vauto_claimed_at < NOW() - INTERVAL '5 minutes')
+              AND (b.enrich_release_at IS NULL OR b.enrich_release_at <= NOW())  -- DRIBBLE_GATE_2026_06_15
             ORDER BY b.vauto_priority DESC, b.created_at DESC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
@@ -18741,7 +18741,7 @@ def _ensure_share_columns():
     except Exception:
         pass
 
-_ensure_share_columns()
+# _ensure_share_columns()  # DRIBBLE_NODDL_2026_06_15: all cols exist; disabled boot/hot-path DDL
 
 
 @app.route('/reports')

@@ -107,8 +107,8 @@
       <div class="toolbar">
         <label style="font-size:13px; color:#374151; margin-right:8px;">
           Stagger (s)
-          <input type="number" id="stagger_seconds" value="60" min="0" max="60" step="5"
-                 title="Seconds between each enrichment kick (0-60). Higher = gentler on workers/AccuTrade."
+          <input type="number" id="stagger_seconds" value="20" min="0" max="60" step="5"
+                 title="Real dribble: seconds between releasing each bulk bid into the worker queue (0-60). Live bids always jump ahead."
                  style="width:60px; margin-left:4px;" />
         </label>
         <button class="secondary" id="btn-toggle-skip">Skip duplicates</button>
