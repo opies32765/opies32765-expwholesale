@@ -65,6 +65,14 @@ try:
 except Exception as _e:
     print(f'[partner_portal] blueprint not loaded: {_e}', flush=True)
 
+# EW app push notifications (TestFlight app: device token registration + Expo push)
+try:
+    from ew_push import bp as _push_bp, ensure_table as _push_ensure
+    app.register_blueprint(_push_bp)
+    _push_ensure()
+except Exception as _e:
+    print(f'[ew_push] blueprint not loaded: {_e}', flush=True)
+
 # Cost analysis dashboard (admin-only — /admin/costs)
 try:
     from cost_dashboard import bp as _cost_bp
@@ -141,7 +149,7 @@ _PUBLIC_PREFIXES = (
     '/.well-known/', '/api/tesla-vin/', '/share/', '/m/',
     '/s/',  # ROLLING_PORTAL_2026_06_02 — per-sender rolling portal (token-auth in handler)
     '/api/quick-extract',
-    '/api/voice/', '/v/', '/mobile/ewbot', '/model/ewbot', '/ewbot', '/m/ewbot', '/bot',  # VOICE_AGENT_2026_05_20 EW bot — partner-token auth inside handlers
+    '/api/voice/', '/api/app/', '/v/', '/mobile/ewbot', '/model/ewbot', '/ewbot', '/m/ewbot', '/bot',  # VOICE_AGENT_2026_05_20 EW bot — partner-token auth inside handlers
     '/wholesaler-',  # public self-serve signup at /wholesaler-<reviewer>/signup; admin routes still gated by _require_admin().
 )
 

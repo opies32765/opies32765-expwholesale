@@ -1,9 +1,9 @@
 {
   "make_name": "ROLLS-ROYCE",
-  "trained_at": "2026-06-13T08:31:02.552863Z",
-  "n_total": 127,
+  "trained_at": "2026-06-14T08:30:55.183371Z",
+  "n_total": 128,
   "n_train": 114,
-  "n_test": 13,
+  "n_test": 14,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -189,15 +189,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 14025.0,
-    "mape_pct": 11.24,
-    "r2": 0.9577,
-    "within_5pct": 46.2,
-    "within_10pct": 61.5
+    "mae_dollars": 15227.0,
+    "mape_pct": 11.1,
+    "r2": 0.9549,
+    "within_5pct": 42.9,
+    "within_10pct": 64.3
   },
   "baseline_metrics": {
-    "mae_dollars": 16904.0,
-    "mape_pct": 10.55,
+    "mae_dollars": 17516.0,
+    "mape_pct": 10.35,
     "ratio": 1.0238
   },
   "top_features": [
