@@ -5976,3 +5976,123 @@ def ai_critique(
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
 
+
+# ───────────────────────── Anna: SMS + PDF report tools (v2 groups, 2026-06-15) ─────────────────────────
+_ANNA_GROUPS_FILE = "/opt/expwholesale/anna_sms_groups.json"
+
+
+def _ew_anna_esc(s):
+    return (str(s or "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _ew_norm_phone(to_number):
+    import re as _re
+    d = _re.sub(r"\D", "", to_number or "")
+    if len(d) == 10:
+        return "+1" + d
+    if len(d) == 11 and d.startswith("1"):
+        return "+" + d
+    if (to_number or "").startswith("+"):
+        return to_number
+    return None
+
+
+def _ew_load_groups():
+    import json as _j, os as _os
+    p = _os.environ.get("ANNA_SMS_GROUPS_FILE", _ANNA_GROUPS_FILE)
+    try:
+        with open(p) as f:
+            return _j.load(f)
+    except Exception:
+        return {}
+
+
+def _ew_send_one(to, body):
+    import os as _os
+    sid = _os.environ.get("TWILIO_ACCOUNT_SID") or _os.environ.get("TWILIO_SID")
+    tok = _os.environ.get("TWILIO_AUTH_TOKEN") or _os.environ.get("TWILIO_TOKEN")
+    frm = _os.environ.get("TWILIO_PHONE")
+    if not (sid and tok and frm):
+        return {"to": to, "error": "twilio not configured on server"}
+    try:
+        from twilio.rest import Client as _TwClient
+        m = _TwClient(sid, tok).messages.create(to=to, from_=frm, body=(body or "")[:1500])
+        return {"to": to, "sent": True, "sid": m.sid}
+    except Exception as e:
+        return {"to": to, "error": f"{type(e).__name__}: {e}"}
+
+
+def _ew_send_sms_raw(to_number="", body="", to_group=""):
+    """Send an SMS to a single number or every member of a named group."""
+    if to_group:
+        groups = _ew_load_groups()
+        g = groups.get((to_group or "").strip().lower())
+        if not g:
+            return {"error": f"unknown group {to_group!r}; known groups: {list(groups.keys())}"}
+        targets = g
+    elif to_number:
+        n = _ew_norm_phone(to_number)
+        if not n:
+            return {"error": f"invalid phone number {to_number!r}"}
+        targets = [n]
+    else:
+        return {"error": "provide either to_number or to_group"}
+    results = [_ew_send_one(t, body) for t in targets]
+    return {"sent_count": sum(1 for r in results if r.get("sent")),
+            "total": len(targets), "results": results}
+
+
+@mcp.tool()
+def send_sms(message: str, to_number: str = "", to_group: str = "", caller_name: str = "") -> dict:
+    """Send a TEXT MESSAGE (SMS) via the dealership Twilio line, to one number OR a named group.
+    Use when the caller says "text me", "text it to <number>", or "text the <group> group".
+    Args: message = text body; to_number = single recipient (US 10-digit or +E.164);
+    to_group = a saved group name (e.g. "partners") to text everyone in it. Provide one of the two.
+    """
+    return _ew_send_sms_raw(to_number=to_number, body=message, to_group=to_group)
+
+
+@mcp.tool()
+def generate_report_pdf(title: str, body: str, to_number: str = "", to_group: str = "", caller_name: str = "") -> dict:
+    """Generate a PDF report, host it, and return a shareable link; optionally text the link to one
+    number OR a named group. Use for "send me a PDF", "make a report", "text the partners a report".
+    Args: title; body = full report text (blank lines separate sections, '# ' = header, '- ' = bullet);
+    to_number = single recipient; to_group = saved group name (e.g. "partners"). Returns {url, ...}.
+    """
+    import os as _os, uuid as _uuid
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.units import inch
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    except Exception as e:
+        return {"error": f"reportlab unavailable: {e}"}
+    rid = _uuid.uuid4().hex
+    base = _os.environ.get("UPLOAD_DIR", "/opt/expwholesale/static/uploads")
+    rdir = _os.path.join(base, "reports")
+    try:
+        _os.makedirs(rdir, exist_ok=True)
+    except Exception as e:
+        return {"error": f"cannot create report dir: {e}"}
+    path = _os.path.join(rdir, rid + ".pdf")
+    styles = getSampleStyleSheet()
+    flow = [Paragraph(_ew_anna_esc(title or "Report"), styles["Title"]), Spacer(1, 0.2 * inch)]
+    for raw in (body or "").split("\n"):
+        ln = raw.rstrip()
+        if not ln:
+            flow.append(Spacer(1, 0.12 * inch))
+        elif ln.startswith("# "):
+            flow.append(Paragraph(_ew_anna_esc(ln[2:]), styles["Heading2"]))
+        elif ln.startswith("- "):
+            flow.append(Paragraph("&bull;&nbsp; " + _ew_anna_esc(ln[2:]), styles["BodyText"]))
+        else:
+            flow.append(Paragraph(_ew_anna_esc(ln), styles["BodyText"]))
+    try:
+        SimpleDocTemplate(path, pagesize=letter, title=str(title or "Report")).build(flow)
+    except Exception as e:
+        return {"error": f"pdf build failed: {type(e).__name__}: {e}"}
+    url = "https://experience-wholesale.net/static/uploads/reports/" + rid + ".pdf"
+    out = {"url": url, "title": title, "report_id": rid}
+    if to_group or to_number:
+        out["sms"] = _ew_send_sms_raw(to_number=to_number, body=f"{title}\n{url}", to_group=to_group)
+    return out
