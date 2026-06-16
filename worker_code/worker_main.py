@@ -520,14 +520,25 @@ def process_one_bid(item):
             # "unavailable_reason" not "reason"; the old lookup masked every
             # failure mode as the generic literal "unavailable", losing
             # diagnostic detail like "mileage_did_not_commit_v2".
+            # ACCU_FAIL_SCREENSHOT_2026_06_16: forward the saved-appraisal
+            # screenshot even on the not_available / mileage_did_not_commit path.
+            # The worker captured it (_failed_<vin>.png); the server 9B-vision
+            # reads the on-screen tiles and RECOVERS the bid (clears not_available)
+            # when the DOM value-change detector false-failed but the appraisal IS
+            # saved correctly. Mirrors the iPacket Refinement-C forward.
+            _na_shot = accutrade_upload(accu.get("screenshot")) if accu.get("screenshot") else None
             ok = ew_submit_accutrade({
                 "bid_id": bid_id, "vin": vin,
                 "not_available": True,
                 "unavailable_reason": (accu.get("unavailable_reason")
                                        or accu.get("reason")
                                        or "unavailable"),
+                "screenshot": _na_shot,
+                "appraisal_url": accu.get("appraisal_url"),
+                "selected_trim_text": accu.get("selected_trim_text"),
+                "trim_select_source": accu.get("trim_select_source"),
             })
-            print(f"  AccuTrade {'OK' if ok else 'FAIL'}: NOT AVAILABLE")
+            print(f"  AccuTrade {'OK' if ok else 'FAIL'}: NOT AVAILABLE (ss fwd={'y' if _na_shot else 'n'})")
         else:
             screenshot_path = accutrade_upload(accu.get("screenshot"))
             a_payload = {

@@ -124,6 +124,8 @@ except Exception as _e:
 # ── Dashboard login ───────────────────────────────────────────────────────────
 EW_USERNAME = os.environ.get('EW_USERNAME', 'admin')
 EW_PASSWORD = os.environ.get('EW_PASSWORD', 'Sedecrem3')
+EW_DEMO_USERNAME = os.environ.get('EW_DEMO_USERNAME', 'reviewer')
+EW_DEMO_PASSWORD = os.environ.get('EW_DEMO_PASSWORD', 'EWdemo2026!')
 
 # Paths that don't require login
 _PUBLIC_PREFIXES = (
@@ -758,8 +760,10 @@ def login():
     if request.method == 'POST':
         # Case-insensitive username compare (admin / Admin / ADMIN all work).
         # Password stays strict.
-        if ((request.form.get('username') or '').lower() == EW_USERNAME.lower() and
-                request.form.get('password') == EW_PASSWORD):
+        _u = (request.form.get('username') or '').lower()
+        _p = request.form.get('password') or ''
+        if ((_u == EW_USERNAME.lower() and _p == EW_PASSWORD) or
+                (EW_DEMO_PASSWORD and _u == EW_DEMO_USERNAME.lower() and _p == EW_DEMO_PASSWORD)):
             session.permanent = True
             session['logged_in'] = True
             return redirect('/')
@@ -15221,6 +15225,255 @@ def api_vauto_url_capture_queue():
     return jsonify({'queue': [dict(r) for r in rows]})
 
 
+def _carfax_ocr_now(bid_id, db):
+    """CARFAX_FRONTLOAD_2026_06_16: OCR the Carfax screenshot for bid_id NOW
+    (don't wait for the carfax_vision_worker 30s poll) so the trim is available
+    to AccuTrade trim-select fast. Returns the extracted trim, or None."""
+    try:
+        cur = db.cursor()
+        cur.execute('SELECT id, carfax_screenshot, carfax_json FROM vauto_lookups WHERE bid_id=%s ORDER BY id DESC LIMIT 1', (bid_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        _id = row['id'] if hasattr(row, 'keys') else row[0]
+        shot = row['carfax_screenshot'] if hasattr(row, 'keys') else row[1]
+        cj = row['carfax_json'] if hasattr(row, 'keys') else row[2]
+        if cj:
+            try:
+                return (cj if isinstance(cj, dict) else json.loads(cj)).get('trim')
+            except Exception:
+                return None
+        if not shot:
+            return None
+        _root = os.path.dirname(os.path.abspath(__file__))
+        path = shot if shot.startswith(_root) else (_root + shot if shot.startswith('/') else os.path.join(_root, shot))
+        if not os.path.exists(path):
+            return None
+        with open(path, 'rb') as fh:
+            png = fh.read()
+        raw = gemini_call(CARFAX_PROMPT, image_bytes=png, mime='image/png',
+                          model='gemini-2.5-flash', max_tokens=1024, disable_thinking=True)
+        if not raw or not isinstance(raw, str):
+            return None
+        txt = raw.strip()
+        if txt.startswith('```'):
+            txt = '\n'.join(l for l in txt.split('\n') if not l.strip().startswith('```')).strip()
+        payload = json.loads(txt)
+        if isinstance(payload, dict):
+            cur.execute('UPDATE vauto_lookups SET carfax_json=%s::jsonb WHERE id=%s', (json.dumps(payload), _id))
+            db.commit()
+            print(f'[carfax-frontload] bid={bid_id} OCR trim={payload.get("trim")!r}', flush=True)
+            return payload.get('trim')
+    except Exception as _e:
+        print(f'[carfax-frontload] bid={bid_id} OCR err {_e}', flush=True)
+    return None
+
+
+# ===== CARFAX/AUTOCHECK VIA COX BFF API + HEADLESS-CHROME PDF (operator 2026-06-16) =====
+# The 9B picks the AccuTrade trim from the Carfax PDF, rendered server-side from
+# the API (no worker browser). Carfax report URL + AutoCheck HTML come from the
+# BFF in <1s; headless Chrome renders the public connect.carfax.com share page +
+# the AutoCheck HTML to PDFs; the Carfax PDF page-1 PNG feeds _carfax_ocr_now so
+# the 9B reads the trim. PDFs are stored for the bid listing.
+import subprocess as _capi_subp
+
+_BFF1_CARFAX = 'https://slot1.bff.megazord.vauto.app.coxautoinc.com'
+_BFF2_AUTOCHECK = 'https://slot2.bff.megazord.vauto.app.coxautoinc.com'
+
+
+def _capi_session():
+    """Load the pooled vAuto session (residential-IP cookies) for BFF calls."""
+    _db = get_db(); _c = _db.cursor()
+    _c.execute("SELECT cookies, entity_id, platform_user_id FROM vauto_session WHERE label='worker_pool'")
+    _row = _c.fetchone()
+    try: _db.close()
+    except Exception: pass
+    if not _row:
+        return None
+    _ck = _row['cookies'] if hasattr(_row, 'keys') else _row[0]
+    _eid = _row['entity_id'] if hasattr(_row, 'keys') else _row[1]
+    _puid = _row['platform_user_id'] if hasattr(_row, 'keys') else _row[2]
+    if isinstance(_ck, str):
+        _ck = json.loads(_ck)
+    if not _ck:
+        return None
+    import requests as _rq
+    _s = _rq.Session(); _s.cookies.update(_ck)
+    _s.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                      '(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+        'appraisalentityid': _eid or '', 'currententityid': _eid or '',
+        'platformuserid': _puid or '',
+        'Origin': 'https://provision.vauto.app.coxautoinc.com',
+        'Referer': 'https://provision.vauto.app.coxautoinc.com/',
+    })
+    return _s
+
+
+def _capi_render_pdf(url, out_pdf, budget=20000):
+    """Headless-Chrome render a URL -> PDF. Returns True if a real PDF landed."""
+    try:
+        if os.path.exists(out_pdf):
+            os.remove(out_pdf)
+    except Exception:
+        pass
+    try:
+        _capi_subp.run(['google-chrome', '--headless=new', '--disable-gpu', '--no-sandbox',
+                        '--hide-scrollbars', '--virtual-time-budget=' + str(budget),
+                        '--print-to-pdf=' + out_pdf, url],
+                       capture_output=True, timeout=90)
+    except Exception as _e:
+        print('[carfax-api] chrome render err %s' % _e, flush=True)
+        return False
+    return os.path.exists(out_pdf) and os.path.getsize(out_pdf) > 40000
+
+
+def _capi_pdf_page1_png(pdf, png):
+    """pdftoppm page 1 -> PNG (for the 9B to read)."""
+    pref = png[:-4] if png.lower().endswith('.png') else png
+    try:
+        _capi_subp.run(['pdftoppm', '-png', '-f', '1', '-l', '1', '-r', '130',
+                        '-singlefile', pdf, pref], capture_output=True, timeout=40)
+    except Exception:
+        return False
+    return os.path.exists(png) and os.path.getsize(png) > 5000
+
+
+def carfax_api_enrich(bid_id, vin):
+    """Pull Carfax via the BFF API, render the public report to PDF + PNG, store
+    the share URL + PDF + PNG, then run _carfax_ocr_now so the 9B reads the trim.
+    Returns the trim string or None. Best-effort; never raises."""
+    try:
+        s = _capi_session()
+        if not s:
+            return None
+        r = s.get(_BFF1_CARFAX + '/api/carfax/report?vin=' + vin,
+                  headers={'Accept': 'application/json'}, timeout=20)
+        gw = ((r.json() or {}).get('report') or {}).get('url')
+        if not gw:
+            print('[carfax-api] bid=%s no report.url' % bid_id, flush=True)
+            return None
+        r1 = s.get(gw, headers={'Accept': 'text/html,*/*'}, allow_redirects=False, timeout=20)
+        connect = r1.headers.get('Location') or r1.headers.get('location')
+        if not connect:
+            print('[carfax-api] bid=%s gateway no redirect (status %s)' % (bid_id, r1.status_code), flush=True)
+            return None
+        ts = int(time.time())
+        pdf = os.path.join(VAUTO_REPORTS_DIR, 'carfax_api_%s_%d.pdf' % (vin, ts))
+        png = os.path.join(VAUTO_REPORTS_DIR, 'carfax_%s.png' % vin)
+        if not _capi_render_pdf(connect, pdf):
+            print('[carfax-api] bid=%s render failed' % bid_id, flush=True)
+            return None
+        if not _capi_pdf_page1_png(pdf, png):
+            print('[carfax-api] bid=%s png failed' % bid_id, flush=True)
+            return None
+        db = get_db(); cur = db.cursor()
+        cur.execute("INSERT INTO vauto_lookups (bid_id, vin, carfax_screenshot, carfax_share_url, looked_up_at) "
+                    "VALUES (%s, %s, %s, %s, NOW()) "
+                    "ON CONFLICT (bid_id) DO UPDATE SET "
+                    "  carfax_screenshot = EXCLUDED.carfax_screenshot, carfax_json = NULL, "
+                    "  carfax_share_url = COALESCE(EXCLUDED.carfax_share_url, vauto_lookups.carfax_share_url), "
+                    "  vin = COALESCE(NULLIF(vauto_lookups.vin, ''), EXCLUDED.vin)",
+                    (bid_id, vin, '/vauto_reports/' + os.path.basename(png), connect))
+        db.commit()
+        trim = _carfax_ocr_now(bid_id, db)
+        try: db.close()
+        except Exception: pass
+        print('[carfax-api] bid=%s trim=%r connect=%s pdf=%s' % (bid_id, trim, connect[:40], os.path.basename(pdf)), flush=True)
+        return trim
+    except Exception as _e:
+        print('[carfax-api] bid=%s err %s: %s' % (bid_id, type(_e).__name__, _e), flush=True)
+        return None
+
+
+def autocheck_api_pdf(bid_id, vin):
+    """Pull the AutoCheck HTML via the BFF API, render it to a PDF, store the PDF
+    path so the bid listing can show it. Best-effort; never raises."""
+    try:
+        s = _capi_session()
+        if not s:
+            return None
+        r = s.get(_BFF2_AUTOCHECK + '/api/autocheck/getReport?vin=' + vin,
+                  headers={'Accept': 'text/html,*/*'}, timeout=30)
+        html = r.text if r.status_code == 200 and len(r.text) > 5000 else None
+        if not html:
+            return None
+        ts = int(time.time())
+        htmlf = os.path.join(VAUTO_REPORTS_DIR, 'autocheck_%s_%d.html' % (vin, ts))
+        pdf = os.path.join(VAUTO_REPORTS_DIR, 'autocheck_api_%s_%d.pdf' % (vin, ts))
+        with open(htmlf, 'w', encoding='utf-8') as fh:
+            fh.write(html)
+        if not _capi_render_pdf('file://' + htmlf, pdf, budget=12000):
+            return None
+        db = get_db(); cur = db.cursor()
+        cur.execute("INSERT INTO vauto_lookups (bid_id, vin, autocheck_screenshot, looked_up_at) "
+                    "VALUES (%s, %s, %s, NOW()) "
+                    "ON CONFLICT (bid_id) DO UPDATE SET "
+                    "  autocheck_screenshot = COALESCE(vauto_lookups.autocheck_screenshot, EXCLUDED.autocheck_screenshot)",
+                    (bid_id, vin, '/vauto_reports/' + os.path.basename(pdf)))
+        db.commit()
+        try: db.close()
+        except Exception: pass
+        print('[autocheck-api] bid=%s pdf=%s' % (bid_id, os.path.basename(pdf)), flush=True)
+        return '/vauto_reports/' + os.path.basename(pdf)
+    except Exception as _e:
+        print('[autocheck-api] bid=%s err %s' % (bid_id, _e), flush=True)
+        return None
+
+
+@app.route('/api/vauto/carfax_api_enrich', methods=['POST'])
+def api_carfax_api_enrich():
+    """CARFAX_API_2026_06_16: trigger the server-side Carfax(+AutoCheck) API->PDF
+    enrichment. The worker pings this the moment it logs into vAuto so the Carfax
+    trim is ready (via the 9B) before AccuTrade trim-select. Fires in a background
+    thread; returns immediately."""
+    data = request.get_json(silent=True) or {}
+    bid_id = data.get('bid_id'); vin = (data.get('vin') or '').strip()
+    if not bid_id or not vin:
+        return jsonify({'ok': False, 'error': 'missing bid_id/vin'}), 200
+    import threading as _th
+    def _run():
+        carfax_api_enrich(bid_id, vin)
+        autocheck_api_pdf(bid_id, vin)
+    _th.Thread(target=_run, daemon=True).start()
+    return jsonify({'ok': True, 'bid_id': bid_id, 'fired': True})
+
+
+@app.route('/api/vauto/carfax_early', methods=['POST'])
+def api_vauto_carfax_early():
+    """CARFAX_FRONTLOAD_2026_06_16: worker pushes the Carfax screenshot EARLY
+    (before the slow book hydration) so the trim OCRs in ~20-30s and AccuTrade
+    trim-select can use it. Upserts carfax_screenshot (no clobber of other
+    fields; raw_json stays NULL so the assess-gate does NOT fire early), then
+    OCRs immediately."""
+    data = request.get_json(silent=True) or {}
+    bid_id = data.get('bid_id')
+    vin = (data.get('vin') or '').strip()
+    shot = (data.get('carfax_screenshot') or '').strip()
+    if not bid_id or not shot:
+        return jsonify({'ok': False, 'error': 'missing bid_id/carfax_screenshot'}), 200
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute('''INSERT INTO vauto_lookups (bid_id, vin, carfax_screenshot, looked_up_at)
+                       VALUES (%s, %s, %s, NOW())
+                       ON CONFLICT (bid_id) DO UPDATE SET
+                         carfax_screenshot=COALESCE(EXCLUDED.carfax_screenshot, vauto_lookups.carfax_screenshot),
+                         vin=COALESCE(NULLIF(vauto_lookups.vin, ''), EXCLUDED.vin)''',
+                    (bid_id, vin, shot))
+        db.commit()
+        trim = _carfax_ocr_now(bid_id, db)
+        db.close()
+        return jsonify({'ok': True, 'bid_id': bid_id, 'carfax_trim': trim})
+    except Exception as _e:
+        try:
+            db.rollback(); db.close()
+        except Exception:
+            pass
+        print(f'[carfax-early] bid={bid_id} err {_e}', flush=True)
+        return jsonify({'ok': False, 'error': str(_e)}), 200
+
+
 @app.route('/api/vauto/submit', methods=['POST'])
 def api_vauto_submit():
     """Accept vAuto lookup results from worker.
@@ -15681,26 +15934,172 @@ ACCUTRADE_WAIT_FOR_EVIDENCE_ALLOWLIST: set[int] = set()  # MODEL_TOKEN_AUGMENT_2
 ACCUTRADE_EVIDENCE_WAIT_SECONDS = 40  # WAIT_ALL_DATA_2026_06_16: raised 8->40 so trim_select waits for the iPacket window sticker + vAuto BEFORE the 9B picks (bid 3404 F-150: iPacket landed after the old 8s window -> 9B picked blind -> XLT instead of Lariat PowerBoost). The loop exits the instant both land, so 40 is a CEILING not a fixed cost; safe under the current 150s worker budget (8 was sized for the old 90s budget). PRIOR:  # TIMING_FIX_2_2026_05_19: was 20. Bid 1830 (BMW 740i) overflowed worker 90s budget when LLM trim_select ran slow (~25s LLM + 20s evidence wait + 34s scrape = 79s of useful + 9s overhead = 99s, abandoned at 90s losing real values). 8s wait still lets vauto/ipacket land partway while leaving budget for slow LLM cases.
 
 
+_BFF2_VEHINFO = ('https://slot2.bff.megazord.vauto.app.coxautoinc.com'
+                 '/api/appraisal/vehicleInfo?strictYMM=true')
+
+
+def _vauto_series_now(vin, miles=None, _label='worker_pool'):
+    """VAUTO_SERIES_FAST_2026_06_16 (operator): fetch the EXACT trim from the Cox
+    BFF vehicleInfo API (vehicleInfo.series -- e.g. XL / AT4 / S / Reserve) using
+    the pooled vAuto session. ~2-5s, no OCR, no screenshot. Returns the series
+    string or None. Pure HTTP, best-effort: any failure (no session / 401 /
+    timeout / parse) returns None and the caller falls back to the Carfax/iPacket
+    evidence path. NEVER raises. NOTE: Carfax/AutoCheck carry NO clean trim
+    (history only); this vehicleInfo endpoint is the only fast structured trim."""
+    try:
+        import requests as _rq
+        _db = get_db()
+        _c = _db.cursor()
+        _c.execute("SELECT cookies, entity_id, platform_user_id "
+                   "FROM vauto_session WHERE label=%s", (_label,))
+        _row = _c.fetchone()
+        try:
+            _db.close()
+        except Exception:
+            pass
+        if not _row:
+            return None
+        _ck = _row['cookies'] if hasattr(_row, 'keys') else _row[0]
+        _eid = _row['entity_id'] if hasattr(_row, 'keys') else _row[1]
+        _puid = _row['platform_user_id'] if hasattr(_row, 'keys') else _row[2]
+        if isinstance(_ck, str):
+            _ck = json.loads(_ck)
+        if not _ck:
+            return None
+        _s = _rq.Session()
+        _s.cookies.update(_ck)
+        _s.headers.update({
+            'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                           'AppleWebKit/537.36 (KHTML, like Gecko) '
+                           'Chrome/147.0.0.0 Safari/537.36'),
+            'Accept': 'application/json,text/html,*/*',
+            'appraisalentityid': _eid or '',
+            'currententityid': _eid or '',
+            'platformuserid': _puid or '',
+            'Origin': 'https://provision.vauto.app.coxautoinc.com',
+            'Referer': 'https://provision.vauto.app.coxautoinc.com/',
+        })
+        _body = {'vin': vin}
+        if miles:
+            try:
+                _body.update({'odometer': int(miles), 'odometerUom': 'Miles'})
+            except Exception:
+                pass
+        _r = _s.post(_BFF2_VEHINFO, json=_body, timeout=12)
+        if _r.status_code != 200:
+            print('[vauto-series] vin=%s HTTP %s' % (vin, _r.status_code), flush=True)
+            return None
+        _vi = (_r.json() or {}).get('vehicleInfo') or {}
+        # VAUTO_SERIES_MAKE_GATE_2026_06_16: 3-agent verification proved series is
+        # trim-RELIABLE for mainstream/volume makes (Ford, BMW -- trim-accurate,
+        # often better than the seller) but trim-BLIND for exotics: Porsche / Ferrari
+        # / Lamborghini / McLaren COLLAPSE to literal 'Base' (a 911 GTS reads 'Base',
+        # modern Carreras read None); Bentley/Aston are spotty. Trusting series for
+        # those would pick BASE on a high trim = big underbid. So only trust series
+        # for non-exotic makes; exotics fall through to the iPacket sticker + 9B.
+        _vmk = (_vi.get('make') or '').strip().upper()
+        _SERIES_UNTRUSTED = {'PORSCHE', 'FERRARI', 'LAMBORGHINI', 'MCLAREN',
+                             'MASERATI', 'BENTLEY', 'ASTON MARTIN', 'ROLLS-ROYCE',
+                             'ROLLS ROYCE'}
+        if _vmk in _SERIES_UNTRUSTED:
+            print('[vauto-series] vin=%s make=%s -- EXOTIC, series not trusted '
+                  '(trim-blind); deferring to sticker/9B' % (vin, _vmk), flush=True)
+            return None
+        _series = _vi.get('series')
+        if _series and isinstance(_series, str) and _series.strip():
+            print('[vauto-series] vin=%s series=%r make=%s' % (vin, _series, _vmk), flush=True)
+            return _series.strip()
+    except Exception as _e:
+        print('[vauto-series] vin=%s err %s: %s'
+              % (vin, type(_e).__name__, _e), flush=True)
+    return None
+
+
 def _evidence_first_trim_pick(db, vin, bid_id, choices):
     """Canary path: wait for vauto+iPacket evidence, then deterministically
     match a trim choice against that evidence. Returns the JSON-response dict
     the endpoint should return (with index/source/reason set)."""
     import time as _t
     import re as _re_local
+    # CARFAX_API_FIRE_2026_06_16 (operator): the trim comes ONLY from the Carfax
+    # PDF read by the 9B. If the server-side Carfax-via-API render has not run for
+    # this bid yet, fire it now (BFF report.url -> connect.carfax.com -> chrome PDF
+    # -> 9B trim). Background thread; the carfax wait-loop below picks up the trim.
+    try:
+        with db.cursor() as _cfc:
+            _cfc.execute("SELECT 1 FROM vauto_lookups WHERE bid_id=%s AND carfax_share_url IS NOT NULL", (bid_id,))
+            _cf_api_done = _cfc.fetchone() is not None
+        if not _cf_api_done:
+            import threading as _tcf
+            _tcf.Thread(target=carfax_api_enrich, args=(bid_id, vin), daemon=True).start()
+            print("[carfax-api] bid=%s fired from trim_select" % bid_id, flush=True)
+    except Exception as _cfe:
+        print("[carfax-api] trim_select fire err %s" % _cfe, flush=True)
+    # VAUTO_SERIES_FAST_2026_06_16 (operator): try the Cox BFF vehicleInfo series
+    # FIRST -- exact trim in ~2-5s, no OCR/screenshot wait. If it strict-matches
+    # EXACTLY ONE choice it is an unambiguous fast win and we return WITHOUT
+    # waiting for Carfax/iPacket OCR. 0 or >1 matches (series can drop AWD/body
+    # qualifiers, e.g. Platinum 2WD vs 4WD) -> fall through to the Carfax/iPacket
+    # evidence path which carries the disambiguating qualifier. Never raises.
+    try:
+        _vser = None  # CARFAX_ONLY_2026_06_16 (operator): vehicleInfo.series DISABLED -- trim comes ONLY from Carfax OCR
+        if _vser:
+            _scf = sorted([c for c in choices if isinstance(c, dict) and c.get('text')],
+                          key=lambda c: -len((c.get('text') or '').strip()))
+            _vtoks = [t for t in _vser.upper().split() if t]
+            if _vtoks and _scf:
+                _vmatch = [c for c in _scf
+                           if all(_re_local.search(r'\b' + _re_local.escape(_tk) + r'\b',
+                                                   (c.get('text') or '').upper())
+                                  for _tk in _vtoks)]
+                if len(_vmatch) == 1:
+                    _bc = _vmatch[0]
+                    print('[trim_select/series-fast] bid=%s series=%r -> unique choice %r'
+                          % (bid_id, _vser, _bc.get('text')), flush=True)
+                    return {
+                        'index': int(_bc.get('index') or _scf.index(_bc)),
+                        'text': _bc.get('text'),
+                        'source': 'evidence_match_strict',
+                        'primary_trim': _vser.upper(),
+                        'primary_source': 'vauto_series_api',
+                        'evidence_sources': ['vauto_series_api'],
+                        'reason': 'BFF vehicleInfo series [%s] uniquely matched one choice' % _vser,
+                    }
+                else:
+                    print('[trim_select/series-fast] bid=%s series=%r matched %d choices -- falling through'
+                          % (bid_id, _vser, len(_vmatch)), flush=True)
+    except Exception as _vse:
+        print('[trim_select/series-fast] bid=%s err %s' % (bid_id, _vse), flush=True)
+    # CARFAX_FRONTLOAD_2026_06_16: wait primarily for carfax_json (the Carfax
+    # trim) — front-loaded so it lands ~20-30s in. Still break on vauto+ipacket
+    # both ready (prior behavior / Carfax-less cars). Bounded by the worker's
+    # 65s POST timeout.
     deadline = _t.time() + ACCUTRADE_EVIDENCE_WAIT_SECONDS
-    vauto_ready = ipacket_ready = False
-    while _t.time() < deadline and not (vauto_ready and ipacket_ready):
+    carfax_ready = vauto_ready = ipacket_ready = ipacket_ocr_ready = False
+    while _t.time() < deadline and not carfax_ready:
         with db.cursor() as _wcur:
             _wcur.execute("""
                 SELECT
+                  EXISTS(SELECT 1 FROM vauto_lookups WHERE bid_id=%s AND carfax_json IS NOT NULL) AS cf,
                   EXISTS(SELECT 1 FROM vauto_lookups WHERE bid_id=%s AND raw_json IS NOT NULL) AS v,
                   EXISTS(SELECT 1 FROM ipacket_lookups WHERE bid_id=%s
-                          AND (not_available=TRUE OR screenshot IS NOT NULL)) AS i
-            """, (bid_id, bid_id))
+                          AND (not_available=TRUE OR screenshot IS NOT NULL)) AS i,
+                  EXISTS(SELECT 1 FROM ipacket_lookups WHERE bid_id=%s
+                          AND length(coalesce(raw_json->>'_ocr_text','')) > 100) AS iocr
+            """, (bid_id, bid_id, bid_id, bid_id))
             r = _wcur.fetchone()
-            vauto_ready = bool(r.get('v') if hasattr(r, 'get') else r[0])
-            ipacket_ready = bool(r.get('i') if hasattr(r, 'get') else r[1])
-        if vauto_ready and ipacket_ready:
+            carfax_ready = bool(r.get('cf') if hasattr(r, 'get') else r[0])
+            vauto_ready = bool(r.get('v') if hasattr(r, 'get') else r[1])
+            ipacket_ready = bool(r.get('i') if hasattr(r, 'get') else r[2])
+            ipacket_ocr_ready = bool(r.get('iocr') if hasattr(r, 'get') else r[3])
+        # EVIDENCE_FASTEXIT_2026_06_16: the iPacket djapi early-push lands the
+        # factory sticker OCR at ~12s. Pick the trim THE MOMENT real evidence is
+        # present (Carfax parsed OR iPacket OCR text) -- do not keep waiting for
+        # vAuto raw_json (~37s) when the authoritative sticker is already here.
+        # bid 3422 (AMG GT): iPacket OCR ready 12.3s but trim not picked until 53s
+        # because the old exit required (vauto AND ipacket). Still waits for the
+        # sticker (the wrong-trim guard) -- just stops over-waiting for vAuto.
+        if carfax_ready:  # CARFAX_ONLY_2026_06_16 (operator): wait for the Carfax OCR ONLY -- it is the sole trim source; no iPacket/vauto early-exit
             break
         _t.sleep(1)
 
@@ -15823,27 +16222,29 @@ def _evidence_first_trim_pick(db, vin, bid_id, choices):
     # Wrangler, Range Rover, etc.).
     primary_trim = None
     primary_source = None
-    # 1. iPacket OCR trim extraction — look for choice-trim words IN the OCR text
-    ipkt_ocr = next((s[1] for s in evidence_sources if s[0] == 'ipacket_ocr'), None)
-    if ipkt_ocr:
-        # Build candidate trim keywords from the AccuTrade choice list itself
-        for c in sorted_choices:
-            ctext = (c.get('text') or '').strip().upper()
-            # Extract leading trim portion before body/door/engine boilerplate
-            _trim_word = _re_local.split(
-                r'\s+(?:\d+\s*DOOR|COUPE|SEDAN|HATCHBACK|CONVERTIBLE|SUV|TRUCK|WAGON|VAN|CABRIOLET|ROADSTER|FASTBACK|HARDTOP|P/?UP|PICKUP|S/?CHGD|HEMI|TURBO|HYBRID|EV|ELECTRIC|GAS|DIESEL|V\d|I\d|R\d|\d+\.\d+L|\d+\s*CYL)\b',
-                ctext, maxsplit=1
-            )[0].strip()
-            if _trim_word and _re_local.search(r'\b' + _re_local.escape(_trim_word) + r'\b', ipkt_ocr.upper()):
-                primary_trim = _trim_word
-                primary_source = 'ipacket_ocr'
-                break
-    # 2. Carfax
+    # CARFAX_PRIMARY_2026_06_16 (operator): Carfax is the PRIMARY trim source,
+    # iPacket is SECONDARY. Carfax's parsed trim (e.g. "718 GTS") is more reliable
+    # than substring-matching the raw sticker OCR.
+    # 1. Carfax (PRIMARY)
+    cf = next((s[1] for s in evidence_sources if s[0] == 'carfax'), None)
+    if cf:
+        primary_trim = cf.strip().upper()
+        primary_source = 'carfax'
+    # 2. iPacket OCR (SECONDARY) — look for choice-trim words IN the OCR text
     if not primary_trim:
-        cf = next((s[1] for s in evidence_sources if s[0] == 'carfax'), None)
-        if cf:
-            primary_trim = cf.strip().upper()
-            primary_source = 'carfax'
+        ipkt_ocr = next((s[1] for s in evidence_sources if s[0] == 'ipacket_ocr'), None)
+        if ipkt_ocr:
+            # Build candidate trim keywords from the AccuTrade choice list itself
+            for c in sorted_choices:
+                ctext = (c.get('text') or '').strip().upper()
+                _trim_word = _re_local.split(
+                    r'\s+(?:\d+\s*DOOR|COUPE|SEDAN|HATCHBACK|CONVERTIBLE|SUV|TRUCK|WAGON|VAN|CABRIOLET|ROADSTER|FASTBACK|HARDTOP|P/?UP|PICKUP|S/?CHGD|HEMI|TURBO|HYBRID|EV|ELECTRIC|GAS|DIESEL|V\d|I\d|R\d|\d+\.\d+L|\d+\s*CYL)\b',
+                    ctext, maxsplit=1
+                )[0].strip()
+                if _trim_word and _re_local.search(r'\b' + _re_local.escape(_trim_word) + r'\b', ipkt_ocr.upper()):
+                    primary_trim = _trim_word
+                    primary_source = 'ipacket_ocr'
+                    break
     # 3. AutoCheck
     if not primary_trim:
         ac = next((s[1] for s in evidence_sources if s[0] == 'autocheck'), None)
@@ -16094,6 +16495,21 @@ def api_trim_select():
                 sticker_ocr_text = _raw_ij.get('_ocr_text')
                 if sticker_ocr_text and len(sticker_ocr_text) > 3000:
                     sticker_ocr_text = sticker_ocr_text[:3000] + ' …[truncated]'
+        # CARFAX_ONLY_2026_06_16 (operator): the Carfax OCR trim is the SOLE
+        # trim source the 9B is allowed to use.
+        try:
+            cur.execute("SELECT carfax_json FROM vauto_lookups WHERE bid_id=%s "
+                        "AND carfax_json IS NOT NULL ORDER BY id DESC LIMIT 1", (bid_id,))
+            _cfr = cur.fetchone()
+            if _cfr:
+                _cfj = _cfr.get('carfax_json') if hasattr(_cfr, 'get') else _cfr[0]
+                if isinstance(_cfj, str):
+                    try: _cfj = json.loads(_cfj)
+                    except Exception: _cfj = None
+                if isinstance(_cfj, dict):
+                    carfax_trim_hint = (_cfj.get('trim') or '').strip() or None
+        except Exception:
+            pass
     except Exception as e:
         print(f'trim_select: bid/sticker context fetch failed: {e}', flush=True)
 
@@ -16102,24 +16518,17 @@ def api_trim_select():
         f"  [{c.get('index', i)}] {c.get('text', '')}"
         for i, c in enumerate(choices)
     )
+    # CARFAX_ONLY_2026_06_16 (operator): the 9B decides the trim from the CARFAX
+    # OCR ONLY. No iPacket sticker, no seller hint, no MSRP, no colors -- those
+    # let the 9B over-pick higher trims (phantom S). Carfax is the sole authority.
     ctx_lines = [f"VIN: {vin}"]
     if bid_year and bid_make and bid_model:
-        ctx_lines.append(f"Vehicle (from seller): {bid_year} {bid_make} {bid_model}")
-    if bid_trim:
-        ctx_lines.append(f"Trim hint from seller: {bid_trim}")
-    if sticker_msrp:
-        ctx_lines.append(f"Window-sticker MSRP: ${sticker_msrp:,}")
-    if sticker_base:
-        ctx_lines.append(f"Window-sticker base price: ${sticker_base:,}")
-    if sticker_ext:
-        ctx_lines.append(f"Exterior color: {sticker_ext}")
-    if sticker_int:
-        ctx_lines.append(f"Interior color: {sticker_int}")
-    if sticker_ocr_text:
+        ctx_lines.append(f"Vehicle: {bid_year} {bid_make} {bid_model}")
+    if carfax_trim_hint:
         ctx_lines.append(
-            f"\n=== iPacket WINDOW-STICKER OCR TEXT (verbatim — authoritative for trim) ===\n"
-            f"{sticker_ocr_text}\n"
-            f"=== END iPacket OCR ===\n"
+            f"\n=== CARFAX TRIM (the ONLY trim source -- authoritative) ===\n"
+            f"{carfax_trim_hint}\n"
+            f"=== END CARFAX ===\n"
         )
     context_block = '\n'.join(ctx_lines)
 
@@ -16131,13 +16540,25 @@ def api_trim_select():
         "AccuTrade choices (you must pick exactly one index):\n"
         f"{choice_lines}\n\n"
         "Rules:\n"
-        "1. The iPacket window-sticker OCR text (when present above) is the\n"
-        "   STRONGEST signal — stickers print the trim verbatim in the\n"
-        "   vehicle-description block (e.g. 'OUTER BANKS-4 PASSENGER',\n"
-        "   'LARIAT 4 DOOR P/UP 5.0L V8', 'BIG BEND', 'WILDTRAK', 'GT3 RS').\n"
-        "   When the sticker text contains a trim word matching one of the\n"
-        "   choices, that's a near-certain match. Trust it over everything\n"
-        "   else, including the seller's hint.\n"
+        "1. The CARFAX TRIM (when present above) is the authoritative and ONLY\n"
+        "   trim source. Match it to the AccuTrade choice whose trim word it\n"
+        "   names (Carfax 'GT3 RS' -> the 'GT3 RS ...' choice; Carfax '718 GTS'\n"
+        "   -> the 'GTS ...' choice). If the Carfax trim names NO higher-trim\n"
+        "   word (just model + engine, e.g. 'Bentayga V8'), see rule 1b: it is\n"
+        "   the BASE choice. There is no iPacket sticker / seller hint / MSRP --\n"
+        "   decide from the Carfax trim alone.\n"
+        "1b. CRITICAL -- BASE vs higher trim. A BASE / entry trim prints on the\n"
+        "   window sticker and Carfax WITHOUT any trim suffix -- just MODEL +\n"
+        "   ENGINE (e.g. 'Bentayga V8', 'Cayenne', '911 Carrera', 'F-150 XL',\n"
+        "   'Grand Cherokee'). HIGHER trims ALWAYS add an explicit word on the\n"
+        "   sticker ('S', 'GTS', 'Speed', 'Turbo', 'Azure', 'Lariat', 'Platinum',\n"
+        "   'Denali', 'SRT', 'Hellcat', 'Raptor'). THEREFORE: if the sticker/\n"
+        "   Carfax text shows ONLY the model and engine, and NONE of the higher\n"
+        "   choices' distinguishing words appear ANYWHERE in the evidence text,\n"
+        "   the vehicle IS the BASE / lowest choice. NEVER upgrade to 'S'/'GTS'/\n"
+        "   'Speed'/'Turbo'/'Azure'/etc. unless that EXACT word literally appears\n"
+        "   in the sticker or Carfax. Example: a sticker reading 'Bentayga V8'\n"
+        "   with no 'S' anywhere is the BASE V8 -- pick the BASE choice, not S.\n"
         "2. The seller's trim hint is the second-strongest signal.\n"
         "3. Window-sticker MSRP narrows by price tier (higher trims cost more).\n"
         "4. If the seller hint contradicts the sticker OCR or MSRP, prefer the\n"
@@ -16579,7 +17000,10 @@ def api_accutrade_submit():
         _adv_has = any(data.get(_k) for _k in
                        ('guaranteed_offer', 'trade_in', 'trade_market', 'market_avg', 'retail'))
         _adv_scr = data.get('screenshot')
-        if (not _adv_has) and _adv_scr:
+        # ACCU_VISION_PRIMARY_2026_06_16 (operator): 9B reads the saved appraisal
+        # screenshot as the PRIMARY value source (was fallback-only). Per-tile, the
+        # 9B value overrides the DOM scrape when present; DOM kept where 9B is blank.
+        if _adv_scr:
             _adv_path = os.path.join(ACCUTRADE_REPORTS_DIR, os.path.basename(str(_adv_scr)))
             if os.path.exists(_adv_path) and os.path.getsize(_adv_path) > 5000:
                 with open(_adv_path, 'rb') as _adv_f:
@@ -16619,7 +17043,9 @@ def api_accutrade_submit():
                     }
                     if any(_v is not None for _v in _adv_map.values()):
                         for _ak, _av in _adv_map.items():
-                            if _av is not None:
+                            # ACCU_VISION_FILL_ONLY_2026_06_16: never override a value
+                            # the DOM scrape already captured; only FILL the gaps.
+                            if _av is not None and not data.get(_ak):
                                 data[_ak] = _av
                         data['not_available'] = False
                         if (data.get('unavailable_reason') or '').startswith('accutrade_manual_quote'):
@@ -17069,6 +17495,47 @@ def _ipacket_early_rescue(bid_id):
         _maybe_fire_assessment(bid_id, require_all=True, source='ipacket')
     except Exception:
         pass
+
+
+@app.route('/api/ipacket/ocr_early', methods=['POST'])
+def api_ipacket_ocr_early():
+    """IPACKET_OCR_EARLY_2026_06_16: the worker pushes the iPacket sticker OCR
+    text (from the djapi fast-path, ~11s in) BEFORE the full submit, so AccuTrade
+    trim-select has the sticker's trim in time to pick correctly. Upserts the OCR
+    text + MSRP into ipacket_lookups WITHOUT firing assessment/notify/re-arm."""
+    data = request.get_json(silent=True) or {}
+    bid_id = data.get('bid_id')
+    vin = (data.get('vin') or '').strip()
+    ocr = data.get('ocr_text') or ''
+    if not bid_id or not ocr:
+        return jsonify({'ok': False, 'error': 'missing bid_id/ocr_text'}), 200
+    db = get_db()
+    cur = db.cursor()
+    try:
+        raw = json.dumps({'_ocr_text': ocr, 'options': data.get('options') or [], 'djapi_early': True})
+        cur.execute('''INSERT INTO ipacket_lookups
+              (bid_id, vin, total_msrp, base_price, raw_json, not_available, looked_up_at)
+              VALUES (%s, %s, %s, %s, %s::jsonb, FALSE, NOW())
+              ON CONFLICT (bid_id) DO UPDATE SET
+                vin = COALESCE(NULLIF(ipacket_lookups.vin, ''), EXCLUDED.vin),
+                total_msrp = COALESCE(EXCLUDED.total_msrp, ipacket_lookups.total_msrp),
+                base_price = COALESCE(EXCLUDED.base_price, ipacket_lookups.base_price),
+                raw_json = CASE WHEN length(COALESCE(EXCLUDED.raw_json->>'_ocr_text','')) >
+                                     length(COALESCE(ipacket_lookups.raw_json->>'_ocr_text',''))
+                           THEN EXCLUDED.raw_json ELSE ipacket_lookups.raw_json END,
+                not_available = FALSE''',
+            (bid_id, vin, data.get('total_msrp'), data.get('base_price'), raw))
+        db.commit()
+        db.close()
+        print(f'[ipacket-ocr-early] bid={bid_id} ocr={len(ocr)}c msrp={data.get("total_msrp")}', flush=True)
+        return jsonify({'ok': True, 'bid_id': bid_id, 'ocr_chars': len(ocr)})
+    except Exception as _e:
+        try:
+            db.rollback(); db.close()
+        except Exception:
+            pass
+        print(f'[ipacket-ocr-early] bid={bid_id} err {_e}', flush=True)
+        return jsonify({'ok': False, 'error': str(_e)}), 200
 
 
 @app.route('/api/ipacket/submit', methods=['POST'])

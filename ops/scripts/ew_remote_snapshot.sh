@@ -101,18 +101,26 @@ tar -cf "$BUNDLE" -C "$WORK" .
 BUNDLE_SIZE=$(stat -c %s "$BUNDLE")
 log "bundle size $(numfmt --to=iec $BUNDLE_SIZE)"
 
-# 6. SCP to DO
-log "scp → ${DO_HOST}:${REMOTE_DIR}/"
-if ! scp "${SSH_OPTS[@]}" "$BUNDLE" "root@${DO_HOST}:${REMOTE_DIR}/" 2>>"$LOG"; then
+# 6. Prune DO FIRST (independent of upload success) + upload ATOMICALLY.
+#    A failed scp must never snowball the disk to 100% (root cause of the
+#    2026-06-16 offsite-backup outage: retention ran only AFTER scp, and
+#    scp exited 1 on failure so it never pruned). Upload to .part then
+#    rename on success so a partial can never sit under the real name.
+REMOTE_KEEP=4
+log "prune DO to newest $((REMOTE_KEEP-1)) before upload"
+ssh "${SSH_OPTS[@]}" "root@${DO_HOST}" \
+    "cd ${REMOTE_DIR} && rm -f ew_remote_snapshot_*.part 2>/dev/null; ls -t ew_remote_snapshot_*.tar 2>/dev/null | tail -n +${REMOTE_KEEP} | xargs -r rm -v" 2>>"$LOG"
+
+REMOTE_NAME="ew_remote_snapshot_${TS}.tar"
+log "scp → ${DO_HOST}:${REMOTE_DIR}/${REMOTE_NAME} (atomic via .part)"
+if ! scp "${SSH_OPTS[@]}" "$BUNDLE" "root@${DO_HOST}:${REMOTE_DIR}/${REMOTE_NAME}.part" 2>>"$LOG"; then
     log 'ERROR: scp to DO failed'
+    ssh "${SSH_OPTS[@]}" "root@${DO_HOST}" "rm -f ${REMOTE_DIR}/${REMOTE_NAME}.part" 2>>"$LOG" || true
     tg "🔥 EW snapshot FAILED ($TS): scp to DO failed. See $LOG"
     exit 1
 fi
+ssh "${SSH_OPTS[@]}" "root@${DO_HOST}" "mv -f ${REMOTE_DIR}/${REMOTE_NAME}.part ${REMOTE_DIR}/${REMOTE_NAME}" 2>>"$LOG"
 log 'scp complete'
-
-# 7. Retention: keep 14 most recent on DO
-ssh "${SSH_OPTS[@]}" "root@${DO_HOST}" \
-    "cd ${REMOTE_DIR} && ls -t ew_remote_snapshot_*.tar 2>/dev/null | tail -n +15 | xargs -r rm -v" 2>>"$LOG"
 
 REMOTE_COUNT=$(ssh "${SSH_OPTS[@]}" "root@${DO_HOST}" "ls ${REMOTE_DIR}/ew_remote_snapshot_*.tar 2>/dev/null | wc -l" 2>/dev/null)
 REMOTE_FREE=$(ssh "${SSH_OPTS[@]}" "root@${DO_HOST}" "df -h / | awk 'NR==2 {print \$4}'" 2>/dev/null)
