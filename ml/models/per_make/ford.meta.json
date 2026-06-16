@@ -1,6 +1,6 @@
 {
   "make_name": "FORD",
-  "trained_at": "2026-06-15T08:30:29.138839Z",
+  "trained_at": "2026-06-16T08:30:28.730524Z",
   "n_total": 2166,
   "n_train": 1972,
   "n_test": 194,
@@ -227,11 +227,11 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 6277.0,
-    "mape_pct": 11.92,
+    "mae_dollars": 6281.0,
+    "mape_pct": 11.93,
     "r2": 0.8732,
     "within_5pct": 33.5,
-    "within_10pct": 60.3
+    "within_10pct": 59.8
   },
   "baseline_metrics": {
     "mae_dollars": 6129.0,

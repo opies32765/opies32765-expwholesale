@@ -1483,6 +1483,14 @@ _MILES_RE_LABELED = re.compile(
     r'(\d{1,3}\.\d{1,2}|\d{1,3}(?:[,. ]\d{3})+|\d{1,6})\s*(?:k\b|mi\b|miles?\b|mileage\b)',
     re.IGNORECASE)
 _MILES_RE_KSHORT = re.compile(r'\b(\d{2,3})\s*[kK]\b')
+# LABELED_MILES_FIRST_2026_06_16: explicit odometer LABEL *before* the number
+# ("Miles - 35,306", "mileage: 35306", "odo 35,306"). The number-then-unit
+# _MILES_RE_LABELED missed this form, so a trailing price "145k" won as miles
+# (bid 3394). (?![kK.\d]) keeps "miles 47k" off this path -> expands to 47000.
+_MILES_RE_LABEL_FIRST = re.compile(
+    r'\b(?:odo(?:meter)?|mileage|miles?)\s*(?:[-:=])?\s*'
+    r'(\d{1,3}(?:[,. ]\d{3})+|\d{1,6})\b(?![kK.\d])',
+    re.IGNORECASE)
 # Bare comma-grouped numbers like "47,000" or "120,500" — used only when a VIN
 # is present (otherwise too risky: matches prices, years, addresses)
 _MILES_RE_COMMA = re.compile(r'(?<![\d$])(\d{1,3}(?:,\d{3})+)(?!\d)')
@@ -1619,6 +1627,20 @@ def extract_miles_from_text(text, has_vin=False):
     # bare-digit branch at the bottom of this function already does).
     if has_vin:
         text = re.sub(r'[A-HJ-NPR-Z0-9]{17}', ' ', text)
+    # LABELED_MILES_FIRST_2026_06_16: an explicit odometer label that
+    # PRECEDES the number is the most trustworthy signal (bid 3394:
+    # 'Miles - 35,306 ... 145k' -- the passes below would grab the 145k
+    # PRICE as miles). Return the labeled value first.
+    _lm = _MILES_RE_LABEL_FIRST.search(text)
+    if _lm:
+        _lc = _lm.group(1).replace(',', '').replace('.', '').replace(' ', '')
+        try:
+            _ln = int(_lc)
+        except ValueError:
+            _ln = 0
+        if 1 <= _ln <= 999999:
+            return _ln
+    _k_fallback = None
     for m in _MILES_RE_LABELED.finditer(text):
         raw = m.group(1)
         # Suffix is the LAST char of the full match — k / i / s / e
@@ -1645,7 +1667,15 @@ def extract_miles_from_text(text, has_vin=False):
         # suffix: miles->s, mi->i, mileage->e, k->k.
         _floor = 1 if suffix in ('s', 'i', 'e') else 100
         if _floor <= n <= 999999:
-            return n
+            # PREFER_EXPLICIT_UNIT_2026_06_16: 'N miles/mi/mileage' wins
+            # outright; a bare 'Nk' (often a PRICE) is only a fallback used
+            # when no explicit-unit match exists anywhere in the body.
+            if suffix in ('s', 'i', 'e'):
+                return n
+            if _k_fallback is None:
+                _k_fallback = n
+    if _k_fallback is not None:
+        return _k_fallback
     m = _MILES_RE_KSHORT.search(text)
     if m:
         n = int(m.group(1)) * 1000
@@ -5984,6 +6014,20 @@ def twilio_webhook():
         _ai_vin = str(text_ai['vin']).strip().upper()
         if VIN_RE.match(_ai_vin):
             vin = _ai_vin
+    # PRICE_AS_MILES_GUARD_2026_06_16: when the regex miles equals the
+    # LLM-parsed asking_price, the SAME token ('145k') was read as both
+    # price and miles (bid 3394). The 9B separates them reliably -- trust
+    # its labeled mileage when they collide on the price.
+    try:
+        _ai_ask = float(text_ai.get('asking_price') or 0)
+        _ai_mi = int(text_ai.get('mileage') or 0)
+        if (miles and _ai_ask and float(miles) == _ai_ask
+                and 1 <= _ai_mi <= 999999 and _ai_mi != miles):
+            print(f'[miles-guard] regex miles {miles} == asking ${_ai_ask:.0f};'
+                  f' using 9B miles {_ai_mi}', flush=True)
+            miles = _ai_mi
+    except (ValueError, TypeError):
+        pass
     if not miles and text_ai.get('mileage'):
         try:
             _m = int(text_ai['mileage'])
@@ -10932,6 +10976,31 @@ _ensure_vds_unknown_table()
 
 # ── Precise VIN decoder wrapper — wraps decode_vin with VDS tables + auto.dev
 def decode_vin_precise_wrapper(vin):
+    """WMI_GUARD_2026_06_16 — WMI-guarded public entry. A decoder make that
+    contradicts the VIN's WMI is a hallucination (bid 3403: W1N Mercedes
+    decoded 'Porsche 911' by the cached Claude decoder). Override make/model
+    with the deterministic NHTSA decode for that WMI."""
+    r = _decode_vin_precise_inner(vin)
+    try:
+        from wmi_guard import make_conflict
+        if r and make_conflict(vin, r.get('make')):
+            _nh = decode_vin(vin) or {}
+            _nm = (_nh.get('make') or '').upper() or None
+            if _nm:
+                print(f'[wmi-guard] intake vin={vin} make={r.get("make")!r} '
+                      f'contradicts WMI {vin[:3]} -> NHTSA {_nm!r}/{_nh.get("model")!r}',
+                      flush=True)
+                r = dict(r)
+                r['make'] = _nm
+                r['model'] = _nh.get('model') or r.get('model')
+                r['trim'] = None
+                r['source'] = (r.get('source') or 'decode') + '+wmi_guard'
+    except Exception as _e:
+        print(f'[wmi-guard] intake err vin={vin}: {_e}', flush=True)
+    return r
+
+
+def _decode_vin_precise_inner(vin):
     """vds_first_cascade_20260518 — Deterministic VDS tables FIRST (no LLM),
     then Claude Sonnet 4.6 via decode_vin_smart (gated to >=0.9 confidence
     instead of 0.5 — Claude hallucinated 2022 Ferrari Roma as "296 GTB" at
@@ -14830,6 +14899,18 @@ def api_admin_force_reprocess(bid_id):
     cur.execute('DELETE FROM vauto_lookups WHERE bid_id=%s', (bid_id,))
     n_vauto = cur.rowcount
 
+    # TRIM_CACHE_INVALIDATE_2026_06_16: drop the per-VIN trim_select cache
+    # and the AccuTrade-derived display trim so the reprocess re-derives them
+    # with the now-available evidence (bid 3404: a stale 'XLT' cache survived
+    # a reprocess and kept the header wrong after AccuTrade re-picked Lariat).
+    try:
+        _rvin = row.get('vin') if hasattr(row, 'get') else (row[1] if len(row) > 1 else None)
+        if _rvin:
+            cur.execute('DELETE FROM accutrade_trim_select_cache WHERE vin=%s', (_rvin,))
+        cur.execute('UPDATE bids SET trim=NULL, canon_trim=NULL WHERE id=%s', (bid_id,))
+    except Exception as _tci:
+        print(f'[trim-cache-invalidate] bid={bid_id}: {_tci}', flush=True)
+
     # Reset claim + assessment so worker re-claims and assess re-fires
     cur.execute("""
         UPDATE bids
@@ -15597,7 +15678,7 @@ def _normalize_accutrade_url(url):
 # Empty by default → no canary bids → existing LLM behavior preserved fleet-wide.
 # Add a bid_id here to test the new flow for that specific bid.
 ACCUTRADE_WAIT_FOR_EVIDENCE_ALLOWLIST: set[int] = set()  # MODEL_TOKEN_AUGMENT_2026_05_27: evidence-first now runs for ALL bids; this set is legacy and unused
-ACCUTRADE_EVIDENCE_WAIT_SECONDS = 8  # TIMING_FIX_2_2026_05_19: was 20. Bid 1830 (BMW 740i) overflowed worker 90s budget when LLM trim_select ran slow (~25s LLM + 20s evidence wait + 34s scrape = 79s of useful + 9s overhead = 99s, abandoned at 90s losing real values). 8s wait still lets vauto/ipacket land partway while leaving budget for slow LLM cases.
+ACCUTRADE_EVIDENCE_WAIT_SECONDS = 40  # WAIT_ALL_DATA_2026_06_16: raised 8->40 so trim_select waits for the iPacket window sticker + vAuto BEFORE the 9B picks (bid 3404 F-150: iPacket landed after the old 8s window -> 9B picked blind -> XLT instead of Lariat PowerBoost). The loop exits the instant both land, so 40 is a CEILING not a fixed cost; safe under the current 150s worker budget (8 was sized for the old 90s budget). PRIOR:  # TIMING_FIX_2_2026_05_19: was 20. Bid 1830 (BMW 740i) overflowed worker 90s budget when LLM trim_select ran slow (~25s LLM + 20s evidence wait + 34s scrape = 79s of useful + 9s overhead = 99s, abandoned at 90s losing real values). 8s wait still lets vauto/ipacket land partway while leaving budget for slow LLM cases.
 
 
 def _evidence_first_trim_pick(db, vin, bid_id, choices):
@@ -15837,6 +15918,58 @@ def _evidence_first_trim_pick(db, vin, bid_id, choices):
     # PLATINUM' or 'V-SERIES'). LLM with evidence in prompt is the better
     # backstop when deterministic substring match has nothing to lock onto.
     return None
+
+
+_STICKER_TRIM_WORDS = (
+    'KING RANCH', 'HIGH COUNTRY', 'POWER WAGON', 'TRAIL BOSS', 'TRD PRO',
+    'OUTER BANKS', 'BIG BEND', 'BIG HORN', 'LARIAT', 'PLATINUM', 'LIMITED',
+    'RAPTOR', 'TREMOR', 'LIGHTNING', 'LARAMIE', 'REBEL', 'DENALI', 'AT4',
+    'WILDTRAK', 'BADLANDS', 'TIMBERLINE', 'SR5', 'TRD', 'LTZ', 'RST',
+    'XLT', 'SLT', 'SLE', 'Z71', 'XL', 'LT', 'WT',
+)
+
+
+def _sticker_trim_word(text):
+    """Trim series named on a window sticker (e.g. 'LARIAT' from '*LARIAT
+    SERIES'), or None. Used to detect a blind AccuTrade trim pick that
+    contradicts the sticker on trim-ambiguous trucks/SUVs (bids 3404/3408)."""
+    import re as _r
+    if not text:
+        return None
+    up = text.upper()
+    m = _r.search(r'([A-Z][A-Z0-9 ]{1,20}?)\s+SERIES\b', up)
+    if m:
+        cand = m.group(1).strip()
+        for w in _STICKER_TRIM_WORDS:
+            if cand == w or cand.endswith(' ' + w):
+                return w
+    for w in sorted(_STICKER_TRIM_WORDS, key=len, reverse=True):
+        if _r.search(r'\b' + _r.escape(w) + r'\b', up):
+            return w
+    return None
+
+
+def _accutrade_clean_label(text):
+    """Short, display-friendly trim label from an AccuTrade choice string.
+    'LARIAT 4 DOOR P/UP 5.0L V8' -> 'Lariat'; 'G63 4 DOOR SUV 4.0L V8 TURBO'
+    -> 'G63'; 'GT3 RS' -> 'GT3 RS'. Stops at the first body/door/engine token
+    so descriptors don't leak into the trim. Used when no LLM clean_trim
+    exists (evidence-match picks / reprocess with a cleared cache)."""
+    import re as _r
+    t = (normalize_trim_text(text or '') or '').strip()
+    if not t:
+        return None
+    _stop = _r.compile(r'^(DOOR|DR|P/UP|PICKUP|PU|SUV|SEDAN|COUPE|CONV|CONVERTIBLE|WAGON|HATCH|VAN|CREW|CAB|SUPERCREW|SUPERCAB|QUADCAB|4MATIC|AWD|RWD|FWD|4WD|2WD|4X4|4X2)$', _r.I)
+    out = []
+    for tok in t.split():
+        if tok[0].isdigit() or _stop.match(tok) or _r.search(r'\d\.\dL', tok, _r.I) or _r.fullmatch(r'V\d', tok, _r.I):
+            break
+        out.append(tok)
+    if not out:
+        out = [t.split()[0]]
+    def _case(w):
+        return w if (len(w) <= 3 or any(ch.isdigit() for ch in w)) else w.title()
+    return ' '.join(_case(w) for w in out)
 
 
 @app.route('/api/accutrade/trim_select', methods=['POST'])
@@ -16588,6 +16721,14 @@ def api_accutrade_submit():
                 "SELECT clean_trim, selected_text, confidence, choices_json "
                 "FROM accutrade_trim_select_cache WHERE vin=%s", (vin,))
             crow = cur.fetchone()
+            if not crow and data.get('selected_trim_text'):
+                # TRIM_FRESH_FALLBACK_2026_06_16: evidence-match picks don't
+                # write the VIN trim cache; fall back to THIS bid's own fresh
+                # AccuTrade selection so canon_trim still repopulates (esp.
+                # after a reprocess cleared the stale cache).
+                crow = {'clean_trim': _accutrade_clean_label(data.get('selected_trim_text')),
+                        'selected_text': data.get('selected_trim_text'),
+                        'confidence': 0.85, 'choices_json': None}
             if crow:
                 cconf = float(crow['confidence'] or 0)
                 ctrim = (crow.get('clean_trim')
@@ -17167,6 +17308,60 @@ def api_ipacket_submit():
     except Exception as _ipt_err:
         print(f'[ipacket-submit] canon_trim extract err bid={bid_id}: '
               f'{_ipt_err}', flush=True)
+
+    # IPACKET_TRIM_REARM_2026_06_16: the sticker is authoritative for trim,
+    # but on a fresh bid it lands ~90s AFTER AccuTrade's trim modal, so
+    # trim_select had to pick BLIND ('llm') and defaults to the lower trim on
+    # trim-ambiguous trucks (F-150 -> XLT for a Lariat). Now that the sticker
+    # is here, if it names a different trim than that blind pick: (a) correct
+    # the display trim immediately, and (b) when that trim is one of
+    # AccuTrade's choices, re-arm AccuTrade (delete its lookup+cache, set
+    # accutrade_retry_at) so it re-runs WITH the sticker present and re-values
+    # the right trim. Deleting the accu row also defers the assessment until
+    # the corrected values land.
+    try:
+        if not data.get('not_available'):
+            import re as _rr
+            _rc = db.cursor()
+            _rc.execute("SELECT raw_json->>'_ocr_text' AS t FROM ipacket_lookups WHERE bid_id=%s", (bid_id,))
+            _orow = _rc.fetchone()
+            _ocr = (_orow.get('t') if _orow else None) or ''
+            _sw = _sticker_trim_word(_ocr)
+            if _sw:
+                _rc.execute('SELECT selected_trim_text, trim_select_source FROM accutrade_lookups WHERE bid_id=%s', (bid_id,))
+                _arow = _rc.fetchone()
+                _picked = (_arow.get('selected_trim_text') or '').upper() if _arow else ''
+                _asrc = (_arow.get('trim_select_source') or '').lower() if _arow else ''
+                _in_pick = bool(_rr.search(r'\b' + _rr.escape(_sw) + r'\b', _picked))
+                if _arow and _picked and _asrc == 'llm' and not _in_pick:
+                    _vinx = (data.get('vin') or '').upper().strip()
+                    _label = _accutrade_clean_label(_sw) or _sw.title()
+                    _rc.execute("UPDATE bids SET trim=%s, canon_trim=%s, canon_source='ipacket_sticker' WHERE id=%s", (_label, _label, bid_id))
+                    _choices_txt = ''
+                    try:
+                        _rc.execute('SELECT choices_json FROM accutrade_trim_select_cache WHERE vin=%s', (_vinx,))
+                        _cr = _rc.fetchone()
+                        _cj = _cr.get('choices_json') if _cr else None
+                        if isinstance(_cj, str):
+                            _cj = json.loads(_cj)
+                        if isinstance(_cj, list):
+                            _choices_txt = ' '.join((c.get('text') or '') for c in _cj if isinstance(c, dict)).upper()
+                    except Exception:
+                        _choices_txt = ''
+                    _in_choices = bool(_rr.search(r'\b' + _rr.escape(_sw) + r'\b', _choices_txt))
+                    if _in_choices:
+                        _rc.execute('DELETE FROM accutrade_lookups WHERE bid_id=%s', (bid_id,))
+                        if _vinx:
+                            _rc.execute('DELETE FROM accutrade_trim_select_cache WHERE vin=%s', (_vinx,))
+                        _rc.execute('UPDATE bids SET accutrade_retry_at=NOW(), accutrade_retry_claimed_at=NULL WHERE id=%s', (bid_id,))
+                        print(f'[ipacket-trim-rearm] bid={bid_id} sticker trim {_sw!r} != blind pick {_picked!r} -> display fixed + AccuTrade re-armed', flush=True)
+                    else:
+                        print(f'[ipacket-trim-rearm] bid={bid_id} sticker trim {_sw!r} != blind pick {_picked!r} -> display fixed (trim not in AccuTrade choices; no re-value)', flush=True)
+                    db.commit()
+    except Exception as _rearm_e:
+        print(f'[ipacket-trim-rearm] err bid={bid_id}: {_rearm_e}', flush=True)
+        try: db.rollback()
+        except Exception: pass
 
     db.close()
     # AI assessment still fires in background (saved to ai_assessment column

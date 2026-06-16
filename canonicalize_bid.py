@@ -112,7 +112,18 @@ def canonicalize_bid_vin(bid_id: int, conn,
     # Idempotency: don't overwrite a high-confidence canon (e.g. overseer
     # already wrote canon_trim='GT3' from accutrade_overseer source). Only
     # NHTSA-blank bids should be re-attempted.
-    if existing_canon_make and not force:
+    # WMI_GUARD_2026_06_16: even an already-canonicalized bid must be
+    # repaired when the stored/canon make contradicts the VIN's WMI (bid
+    # 3403: a cached 'Porsche' hallucination on a W1N Mercedes). Bypass
+    # idempotency in that case so the override below can fix make/model.
+    _wmi_needs_fix = False
+    try:
+        from wmi_guard import make_conflict as _mc
+        _row_make = row['make'] if hasattr(row, 'keys') else row[2]
+        _wmi_needs_fix = bool(_mc(vin, existing_canon_make) or _mc(vin, _row_make))
+    except Exception as _e:
+        log.warning('bid %d wmi precheck failed: %s', bid_id, _e)
+    if existing_canon_make and not force and not _wmi_needs_fix:
         # If the existing source is the AccuTrade overseer (high-confidence
         # trim), keep it but DON'T overwrite — just return what's there.
         out['reason'] = f'already_canonicalized:{existing_canon_source}'
@@ -159,6 +170,41 @@ def canonicalize_bid_vin(bid_id: int, conn,
     nh_trim = (nhtsa.get('trim') or '').strip() or None
     nh_body = (nhtsa.get('body_class') or '').strip() or None
     nh_err = nh_err or nhtsa.get('error')
+
+    # WMI_GUARD_2026_06_16: a decoded make that contradicts the VIN's WMI is
+    # a hallucination (bid 3403: W1N Mercedes -> 'Porsche'). Replace make/
+    # model with the deterministic NHTSA decode AND fix the DISPLAY columns
+    # (bids.make/model) — canonicalize historically wrote only canon_*, so
+    # the dashboard kept showing the wrong marque.
+    try:
+        from wmi_guard import make_conflict as _mc2, wmi_make as _wmfn
+        _wm_target = _wmfn(vin)
+        if _wm_target and (_mc2(vin, nh_make) or _wmi_needs_fix):
+            from nhtsa_decode import decode_vin as _nhd
+            _an = _nhd(vin, conn=conn) or {}
+            _amk = (_an.get('make') or '').strip().upper() or _wm_target
+            _amd = (_an.get('model') or '').strip() or None
+            if _amk:
+                log.warning('bid %d WMI-guard: make %r contradicts WMI %s -> %r/%r',
+                            bid_id, nh_make, vin[:3], _amk, _amd)
+                nh_make = _amk
+                if _amd:
+                    nh_model = _amd
+                nh_trim = None
+                cur.execute(
+                    'UPDATE bids SET make=%s, model=COALESCE(%s, model) WHERE id=%s',
+                    (_amk, _amd, bid_id))
+                # A trim derived under the WRONG make is suspect (bid 3382:
+                # 'Turbo S' on a Mercedes from claude_sonnet_4_6). Clear it
+                # unless a phase-1 source (AccuTrade/iPacket/vAuto overseer)
+                # wrote it from the actual vehicle (bid 3403 G550 stays).
+                _src = existing_canon_source or ''
+                _trusted = ('overseer' in _src) or (_src in ('vauto', 'ipacket', 'nhtsa+vin_prefix'))
+                if not _trusted and _mc2(vin, existing_canon_make):
+                    cur.execute('UPDATE bids SET trim=NULL, canon_trim=NULL WHERE id=%s', (bid_id,))
+                out['wmi_corrected'] = True
+    except Exception as _e:
+        log.warning('bid %d WMI-guard apply failed: %s', bid_id, _e)
 
     # 2) VIN-prefix fallback for trim-blind makes (Porsche etc.)
     try:
