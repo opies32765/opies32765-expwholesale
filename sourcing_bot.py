@@ -1042,9 +1042,17 @@ def try_handle_sourcing(from_phone, body, db, cur, intake_log_id=None,
     Returns True if this inbound was handled by the sourcing flow.
     Returns False to fall through to the existing bid-reply logic.
     """
-    # SOURCING_KILL_SWITCH_2026_05_15: file-flag emergency disable.
-    # Touch /tmp/sourcing_disabled to disable instantly; rm to re-enable.
+    # SOURCING_PERMANENTLY_OFF_2026_06_16 (operator: permanently kill it).
+    # The sourcing/car-finder bot was texting wholesalers who only meant to
+    # submit bids (Joe, bid 3410: "what car can i help you find?"). It is now
+    # OFF BY DEFAULT via a PERSISTENT enable-flag. The previous kill switch
+    # lived in /tmp (/tmp/sourcing_disabled), which the OS periodically wipes
+    # -> the switch aged out and the bot silently RE-ENABLED itself. To turn
+    # the bot back on (deliberately): touch /opt/expwholesale/SOURCING_ENABLED
+    # (persistent; survives reboots + tmp cleaning). rm it to disable again.
     import os as _os_ks
+    if not _os_ks.path.exists("/opt/expwholesale/SOURCING_ENABLED"):
+        return False
     if _os_ks.path.exists("/tmp/sourcing_disabled"):
         return False
     if not _phone_allowed(from_phone):
