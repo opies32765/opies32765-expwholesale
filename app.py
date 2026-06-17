@@ -15421,6 +15421,114 @@ def autocheck_api_pdf(bid_id, vin):
         return None
 
 
+_PG_OPTS_API = {'BlackBook': None, 'KelleyBlueBook': None, 'KbbOnline': None, 'Manheim': None,
+                'Nada': None, 'Galves': None, 'Tim': None, 'Naaa': None, 'Radar': None,
+                'BlackBookCanada': None, 'None': None}
+_PG_GUIDES_API = ['Radar', 'BlackBook', 'Manheim', 'KelleyBlueBook', 'KbbOnline', 'Nada']
+_BOOK_PREF_API = {
+    'blackBook': [('Wholesale', 'Clean'), ('Wholesale', 'Average'), ('Wholesale', 'ExtraClean'), ('Wholesale', 'Rough')],
+    'kbb': [('Wholesale', 'Good'), ('Wholesale', 'Excellent'), ('Wholesale', 'Outstanding'), ('Wholesale', 'Fair')],
+    'kbbOnline': [('TradeIn', 'Good'), ('TradeIn', 'Excellent'), ('TradeIn', 'VeryGood'), ('TradeIn', 'Fair')],
+    'nada': [('TradeIn', 'Average'), ('TradeIn', 'Clean'), ('TradeIn', 'Rough')],
+    'manheim': [('Wholesale', 'Average'), ('Wholesale', 'Above'), ('Wholesale', 'Below')],
+}
+
+
+def _book_val_api(book, name):
+    if not isinstance(book, dict):
+        return None
+    ps = book.get('pricings') or []
+    if not ps:
+        return None
+    def _tot(p):
+        try:
+            return int(round(float(p.get('basePrice') or 0)
+                             + float(p.get('odometerAdjustment') or 0)
+                             + float(p.get('historicalAdjustment') or 0)))
+        except Exception:
+            return None
+    for disp, cond in (_BOOK_PREF_API.get(name) or []):
+        for p in ps:
+            if p.get('disposition') == disp and p.get('condition') == cond:
+                v = _tot(p)
+                if v and v > 0:
+                    return v
+    for p in ps:
+        v = _tot(p)
+        if v and v > 0:
+            return v
+    return None
+
+
+def vauto_books_api_enrich(bid_id, vin, miles=None):
+    """Pull the 6 vAuto books via the Cox BFF priceGuides API (~5s) and store
+    them in vauto_lookups.raw_json in the worker's exact string format
+    ('$32,660' / '—'). create_appraisal -> vehicleInfo -> priceGuides. rBook
+    (Radar) is not in priceGuides -> left as the worker's value (COALESCE only
+    fills when raw_json is still NULL, so this never clobbers a worker write).
+    Best-effort; never raises."""
+    try:
+        s = _capi_session()
+        if not s:
+            return None
+        if not miles:
+            try:
+                _db0 = get_db(); _c0 = _db0.cursor()
+                _c0.execute("SELECT mileage FROM bids WHERE id=%s", (bid_id,))
+                _mr = _c0.fetchone()
+                miles = (_mr['mileage'] if hasattr(_mr, 'keys') else _mr[0]) if _mr else None
+                _db0.close()
+            except Exception:
+                miles = None
+        B2 = _BFF2_AUTOCHECK
+        apid = (s.get(B2 + '/api/appraisal/default', headers={'Accept': 'application/json'},
+                      timeout=15).json().get('appraisal') or {}).get('appraisalId')
+        if not apid:
+            print('[books-api] bid=%s no appraisalId' % bid_id, flush=True)
+            return None
+        _body = {'vin': vin}
+        if miles:
+            try:
+                _body.update({'odometer': int(miles), 'odometerUom': 'Miles'})
+            except Exception:
+                pass
+        vi = (s.post(B2 + '/api/appraisal/vehicleInfo?strictYMM=true', json=_body, timeout=20).json() or {}).get('vehicleInfo')
+        if not vi:
+            print('[books-api] bid=%s no vehicleInfo' % bid_id, flush=True)
+            return None
+        pg = s.post(B2 + '/api/priceGuides',
+                    json={'appraisalId': apid, 'vehicle': vi,
+                          'priceGuideOptions': _PG_OPTS_API, 'availablePriceGuides': _PG_GUIDES_API},
+                    timeout=25).json() or {}
+        def _fmt(v):
+            return ('$%s' % format(int(v), ',')) if v else '—'
+        books = {
+            'black_book': _fmt(_book_val_api(pg.get('blackBook'), 'blackBook')),
+            'kbb': _fmt(_book_val_api(pg.get('kbb'), 'kbb')),
+            'kbb_com': _fmt(_book_val_api(pg.get('kbbOnline'), 'kbbOnline')),
+            'jd_power': _fmt(_book_val_api(pg.get('nada'), 'nada')),
+            'mmr': _fmt(_book_val_api(pg.get('manheim'), 'manheim')),
+            'rbook': '—',
+            '_year': str(vi.get('year') or ''),
+            '_api_books': True,
+            '_api_appraisal_id': apid,
+        }
+        db = get_db(); cur = db.cursor()
+        cur.execute("INSERT INTO vauto_lookups (bid_id, vin, raw_json, looked_up_at) "
+                    "VALUES (%s, %s, %s::jsonb, NOW()) "
+                    "ON CONFLICT (bid_id) DO UPDATE SET "
+                    "  raw_json = COALESCE(vauto_lookups.raw_json, EXCLUDED.raw_json)",
+                    (bid_id, vin, json.dumps(books)))
+        db.commit()
+        try: db.close()
+        except Exception: pass
+        print('[books-api] bid=%s books=%s' % (bid_id, {k: v for k, v in books.items() if not k.startswith('_')}), flush=True)
+        return books
+    except Exception as _e:
+        print('[books-api] bid=%s err %s: %s' % (bid_id, type(_e).__name__, _e), flush=True)
+        return None
+
+
 @app.route('/api/vauto/carfax_api_enrich', methods=['POST'])
 def api_carfax_api_enrich():
     """CARFAX_API_2026_06_16: trigger the server-side Carfax(+AutoCheck) API->PDF
@@ -15433,6 +15541,7 @@ def api_carfax_api_enrich():
         return jsonify({'ok': False, 'error': 'missing bid_id/vin'}), 200
     import threading as _th
     def _run():
+        vauto_books_api_enrich(bid_id, vin)
         carfax_api_enrich(bid_id, vin)
         autocheck_api_pdf(bid_id, vin)
     _th.Thread(target=_run, daemon=True).start()
