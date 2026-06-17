@@ -9064,12 +9064,17 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
             return False
 
         cur.execute("SELECT 1, rbook_completed_at IS NOT NULL AS rb_done, "
-                    "manheim_completed_at IS NOT NULL AS mh_done "
+                    "manheim_completed_at IS NOT NULL AS mh_done, "
+                    "COALESCE((raw_json->>'_api_books')::boolean, false) AS api_books "
                     "FROM vauto_lookups WHERE bid_id=%s LIMIT 1", (bid_id,))
         _vrow = cur.fetchone()
         has_vauto = _vrow is not None
-        rb_done   = bool(_vrow and _vrow.get('rb_done'))
-        mh_done   = bool(_vrow and _vrow.get('mh_done'))
+        # API_BOOKS_GATE_2026_06_16: api_mode books (raw_json._api_books) satisfy the
+        # rBook/Manheim 'done' gate WITHOUT setting the completion timestamps, so the
+        # EWEnrichRbook saved-appraisal scrape still claims the bid (rBook/MMR cards).
+        _api_books = bool(_vrow and _vrow.get('api_books'))
+        rb_done   = bool(_vrow and _vrow.get('rb_done')) or _api_books
+        mh_done   = bool(_vrow and _vrow.get('mh_done')) or _api_books
         # F1 DATA_QUALITY_GATE_2026_05_30: count a row only if it carries a
         # real value OR a not_available that is NOT a known-RETRYABLE transient.
         # Retryable blanks (mileage_did_not_commit; iPacket dashboard/viewer/
@@ -15405,17 +15410,27 @@ def autocheck_api_pdf(bid_id, vin):
             fh.write(html)
         if not _capi_render_pdf('file://' + htmlf, pdf, budget=12000):
             return None
+        # AUTOCHECK_PNG_2026_06_16: the multi-modal assessment feeds
+        # autocheck_screenshot to the vision model; a PDF is rejected ('Provided
+        # image is not valid', 400) and crashes the WHOLE assessment -> no price.
+        # Render page 1 to a PNG (like Carfax) and store THAT valid image. If the
+        # PNG render fails, store nothing (assessment runs without it, never crashes).
+        png = os.path.join(VAUTO_REPORTS_DIR, 'autocheck_api_%s_%d.png' % (vin, ts))
+        if not _capi_pdf_page1_png(pdf, png):
+            print('[autocheck-api] bid=%s png render failed; skipping image' % bid_id, flush=True)
+            return None
+        shot = '/vauto_reports/' + os.path.basename(png)
         db = get_db(); cur = db.cursor()
         cur.execute("INSERT INTO vauto_lookups (bid_id, vin, autocheck_screenshot, looked_up_at) "
                     "VALUES (%s, %s, %s, NOW()) "
                     "ON CONFLICT (bid_id) DO UPDATE SET "
                     "  autocheck_screenshot = COALESCE(vauto_lookups.autocheck_screenshot, EXCLUDED.autocheck_screenshot)",
-                    (bid_id, vin, '/vauto_reports/' + os.path.basename(pdf)))
+                    (bid_id, vin, shot))
         db.commit()
         try: db.close()
         except Exception: pass
-        print('[autocheck-api] bid=%s pdf=%s' % (bid_id, os.path.basename(pdf)), flush=True)
-        return '/vauto_reports/' + os.path.basename(pdf)
+        print('[autocheck-api] bid=%s png=%s' % (bid_id, os.path.basename(png)), flush=True)
+        return shot
     except Exception as _e:
         print('[autocheck-api] bid=%s err %s' % (bid_id, _e), flush=True)
         return None
@@ -15500,25 +15515,40 @@ def vauto_books_api_enrich(bid_id, vin, miles=None):
                     json={'appraisalId': apid, 'vehicle': vi,
                           'priceGuideOptions': _PG_OPTS_API, 'availablePriceGuides': _PG_GUIDES_API},
                     timeout=25).json() or {}
+        _vbb = _book_val_api(pg.get('blackBook'), 'blackBook')
+        _vkb = _book_val_api(pg.get('kbb'), 'kbb')
+        _vkc = _book_val_api(pg.get('kbbOnline'), 'kbbOnline')
+        _vjd = _book_val_api(pg.get('nada'), 'nada')
+        _vmm = _book_val_api(pg.get('manheim'), 'manheim')
         def _fmt(v):
             return ('$%s' % format(int(v), ',')) if v else '—'
         books = {
-            'black_book': _fmt(_book_val_api(pg.get('blackBook'), 'blackBook')),
-            'kbb': _fmt(_book_val_api(pg.get('kbb'), 'kbb')),
-            'kbb_com': _fmt(_book_val_api(pg.get('kbbOnline'), 'kbbOnline')),
-            'jd_power': _fmt(_book_val_api(pg.get('nada'), 'nada')),
-            'mmr': _fmt(_book_val_api(pg.get('manheim'), 'manheim')),
+            'black_book': _fmt(_vbb),
+            'kbb': _fmt(_vkb),
+            'kbb_com': _fmt(_vkc),
+            'jd_power': _fmt(_vjd),
+            'mmr': _fmt(_vmm),
             'rbook': '—',
             '_year': str(vi.get('year') or ''),
             '_api_books': True,
             '_api_appraisal_id': apid,
         }
         db = get_db(); cur = db.cursor()
-        cur.execute("INSERT INTO vauto_lookups (bid_id, vin, raw_json, looked_up_at) "
-                    "VALUES (%s, %s, %s::jsonb, NOW()) "
+        # API_BOOKS_COLS_2026_06_16: write the INTEGER book columns so the vAuto
+        # 6-value card renders (it formats ${:,} on the columns, not raw_json).
+        # rBook column stays NULL (filled by the EWEnrichRbook saved-appraisal
+        # scrape). Do NOT set rbook/manheim_completed_at -- those gate the
+        # EWEnrichRbook claim; the assess-gate keys off the _api_books marker.
+        cur.execute("INSERT INTO vauto_lookups (bid_id, vin, raw_json, black_book, kbb, kbb_com, jd_power, mmr, looked_up_at) "
+                    "VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, NOW()) "
                     "ON CONFLICT (bid_id) DO UPDATE SET "
-                    "  raw_json = COALESCE(vauto_lookups.raw_json, EXCLUDED.raw_json)",
-                    (bid_id, vin, json.dumps(books)))
+                    "  raw_json = COALESCE(vauto_lookups.raw_json, EXCLUDED.raw_json), "
+                    "  black_book = COALESCE(vauto_lookups.black_book, EXCLUDED.black_book), "
+                    "  kbb = COALESCE(vauto_lookups.kbb, EXCLUDED.kbb), "
+                    "  kbb_com = COALESCE(vauto_lookups.kbb_com, EXCLUDED.kbb_com), "
+                    "  jd_power = COALESCE(vauto_lookups.jd_power, EXCLUDED.jd_power), "
+                    "  mmr = COALESCE(vauto_lookups.mmr, EXCLUDED.mmr)",
+                    (bid_id, vin, json.dumps(books), _vbb, _vkb, _vkc, _vjd, _vmm))
         db.commit()
         try: db.close()
         except Exception: pass
@@ -15541,9 +15571,47 @@ def api_carfax_api_enrich():
         return jsonify({'ok': False, 'error': 'missing bid_id/vin'}), 200
     import threading as _th
     def _run():
-        vauto_books_api_enrich(bid_id, vin)
+        # API_MODE_ENRICH_2026_06_16: pinged ONLY by the api_mode vAuto worker AFTER
+        # its session push (pooled session FRESH). Carfax first (trim-select waits on
+        # it), then books (sets raw_json + rbook/manheim completion ts so the
+        # assess-gate require_all passes for a browser-skipped bid), then AutoCheck,
+        # then nudge the gate (the accutrade submit also nudges it).
         carfax_api_enrich(bid_id, vin)
+        vauto_books_api_enrich(bid_id, vin)
         autocheck_api_pdf(bid_id, vin)
+        # API_MODE_DIRECT_ENRICH_2026_06_16: the vauto submit (skipped in api_mode)
+        # normally kicks the direct vAuto BFF rBook + Manheim fetch that fills
+        # rbook_competitive_set + manheim_transactions -> the rBook Retail Comps +
+        # MMR Auction Floor cards. Fire them here. Best-effort; legacy EWEnrichRbook
+        # (VM 120) still backstops via /api/enrichment/claim.
+        try:
+            import threading as _dth
+            from vauto_enrichment import kick_direct_enrichment, kick_direct_manheim
+            _stamp_rbook_direct_started(bid_id)
+            _stamp_manheim_direct_started(bid_id)
+            _dth.Thread(target=kick_direct_enrichment, args=(int(bid_id), get_db), daemon=True, name='direct-enrich-%s' % bid_id).start()
+            _dth.Thread(target=kick_direct_manheim, args=(int(bid_id), get_db), daemon=True, name='direct-manheim-%s' % bid_id).start()
+        except Exception as _de:
+            print('[api-mode-enrich] direct rbook/manheim kick err bid=%s %s' % (bid_id, _de), flush=True)
+        # API_MODE_JOBCLOSE_2026_06_16: the worker skipped /api/vauto/submit (which
+        # normally closes the worker_job + releases the claim), so the vauto job would
+        # sit in_progress forever ('stuck worker'). Close it here now that enrichment
+        # (books+Carfax+AutoCheck) has landed.
+        try:
+            _dbj = get_db(); _cj = _dbj.cursor()
+            _cj.execute("UPDATE bids SET vauto_priority=FALSE, vauto_claimed_by=NULL, vauto_claimed_at=NULL WHERE id=%s", (bid_id,))
+            _cj.execute("UPDATE worker_jobs SET completed_at=NOW(), status='ok_api_mode', "
+                        "duration_ms=EXTRACT(EPOCH FROM (NOW()-claimed_at))::int*1000 "
+                        "WHERE id=(SELECT id FROM worker_jobs WHERE bid_id=%s AND completed_at IS NULL "
+                        "ORDER BY claimed_at DESC LIMIT 1)", (bid_id,))
+            _dbj.commit(); _dbj.close()
+            print('[api-mode-enrich] worker_job closed + claim released bid=%s' % bid_id, flush=True)
+        except Exception as _je:
+            print('[api-mode-enrich] job-close err bid=%s %s' % (bid_id, _je), flush=True)
+        try:
+            _maybe_fire_assessment(bid_id, require_all=True, source='api_mode_enrich')
+        except Exception as _amfe:
+            print('[api-mode-enrich] gate err bid=%s %s' % (bid_id, _amfe), flush=True)
     _th.Thread(target=_run, daemon=True).start()
     return jsonify({'ok': True, 'bid_id': bid_id, 'fired': True})
 
