@@ -1332,6 +1332,11 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-f
     if not client:
         return None
     from google.genai import types
+    if image_bytes is not None and len(image_bytes or b'') < 200:
+        # NO_GEMINI_GUARD_2026_06_17: empty/truncated image -> brain 400 -> Gemini
+        # fallback (358x today). Skip the call entirely; caller handles None.
+        print('[gemini_call] skip: empty/truncated image (%d bytes)' % len(image_bytes or b''), flush=True)
+        return None
     if image_bytes:
         # Downsize oversized images before encoding — Gemini's per-request
         # token budget is finite; high-res dealer photos can blow it.
@@ -1936,7 +1941,7 @@ def _parse_sticker_text(text):
                 # IPACKET_MSRP_LABEL_FIX_2026_05_29: Lexus/Toyota-style sticker —
                 # 'MANUFACTURER'S SUGGESTED RETAIL PRICE' MSRP line with no TOTAL
                 # prefix; _pick_largest_near then grabs the grand total in-window.
-                r"(?<!BASE\s)MANUFACTURER'?S?\s+SUGGESTED\s+RETAIL\s+PRICE"):
+                r"(?<!BASE\s)MANUFACTURER'?S?\s+SUGGESTED\s+RETAIL\s+(?:BASE\s+)?PRICE"):
         v = _pick_largest_near(text, pat)
         if v is not None:
             result['total_msrp'] = v
@@ -2651,7 +2656,7 @@ def _phone_in_portal_gate(phone):
     (multi-car batch intake + per-sender /s/<token> portal + suppressed
     per-car SMS). DB-driven via gated_phones gate_type='rolling_portal';
     gated to the operator number during testing. Never raises."""
-    return True  # ALL_PHASES_OPEN_2026_06_12 (operator): everyone gets the rolling portal
+    return False  # CLEAN_SLATE_2026_06_17 (operator): rolling portal OFF -- everyone gets the real per-car bid card, not a portal nudge
     try:
         return _phone_digits(phone) in gate_helpers.gate_digits('rolling_portal')
     except Exception:
@@ -4761,26 +4766,26 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     _vin_before = (bg_cur.fetchone() or {}).get('vin')
                     bg_cur.execute("""
                         WITH cands AS (
-                            SELECT vin_extracted AS v, created_at AS t
+                            SELECT vin_extracted AS v, created_at AS t, 1 AS src
                               FROM bid_photos
                              WHERE bid_id=%(b)s
                                AND vin_extracted ~ '^[A-HJ-NPR-Z0-9]{17}$'
                             UNION ALL
-                            SELECT substring(upper(raw_message) from '[A-HJ-NPR-Z0-9]{17}'), created_at
+                            SELECT substring(upper(raw_message) from '[A-HJ-NPR-Z0-9]{17}'), created_at, 0 AS src
                               FROM bids
                              WHERE id=%(b)s
                                AND upper(COALESCE(raw_message,'')) ~ '[A-HJ-NPR-Z0-9]{17}'
                             UNION ALL
-                            SELECT substring(upper(message) from '[A-HJ-NPR-Z0-9]{17}'), created_at
+                            SELECT substring(upper(message) from '[A-HJ-NPR-Z0-9]{17}'), created_at, 0 AS src
                               FROM bid_messages
                              WHERE bid_id=%(b)s AND direction='inbound'
                                AND upper(COALESCE(message,'')) ~ '[A-HJ-NPR-Z0-9]{17}'
                         )
                         UPDATE bids
-                           SET vin = (SELECT v FROM cands WHERE v IS NOT NULL ORDER BY t ASC, v ASC LIMIT 1),
+                           SET vin = (SELECT v FROM cands WHERE v IS NOT NULL ORDER BY src ASC, t ASC, v ASC LIMIT 1),
                                updated_at = NOW()
                          WHERE id=%(b)s
-                           AND (SELECT v FROM cands WHERE v IS NOT NULL ORDER BY t ASC, v ASC LIMIT 1) IS NOT NULL
+                           AND (SELECT v FROM cands WHERE v IS NOT NULL ORDER BY src ASC, t ASC, v ASC LIMIT 1) IS NOT NULL
                            AND (vin IS NULL OR vin='' OR vin IN (SELECT v FROM cands WHERE v IS NOT NULL))
                     """, {'b': bid_id})
                     bg_cur.execute("SELECT vin FROM bids WHERE id=%s", (bid_id,))
@@ -6423,22 +6428,18 @@ def twilio_webhook():
     #   * Phase 3     → "we'll contact you back shortly" (final SMS) AND
     #                   stamp phase3_notified_at so the cron sweep doesn't
     #                   re-send.
-    _full_broker = _is_full_broker_phone(from_phone)
-    _name = bidder['name']
+    # CLEAN_SLATE_2026_06_17 (operator): identical instant ack for EVERY
+    # sender — no full-broker / phase-3 / partner-name tiers. The same
+    # per-car bid card follows for everyone via _notify_driver_combined().
     print(f'[bid-ack] entering for bid={bid_id} phone={from_phone!r} '
-          f'kind={bidder["kind"]} full_broker={_full_broker}', flush=True)
+          f'kind={bidder["kind"]}', flush=True)
     if from_phone and not from_phone.startswith('field:'):
         try:
-            if _full_broker:
-                _ack_body = (f"thanks {_name}, bid #{bid_id} received — "
-                             f"give us a minute." if _name
-                             else f"Bid #{bid_id} received — give us a minute.")
-                _ack_result = send_sms(from_phone, _ack_body)
-                print(f'[bid-ack] full-broker sent bid={bid_id} result={_ack_result}', flush=True)
-            else:
-                # Phase 3 path — _send_phase3_ack handles wording + idempotency.
-                _send_phase3_ack(cur, bid_id, from_phone, _name)
-                db.commit()
+            _ack_result = send_sms(
+                from_phone,
+                f"Bid #{bid_id} received — give us a minute, "
+                f"we'll text you the number shortly.")
+            print(f'[bid-ack] sent bid={bid_id} result={_ack_result}', flush=True)
         except Exception as _ack_e:
             print(f'[bid-ack] error bid={bid_id}: {_ack_e}', flush=True)
 
@@ -6820,6 +6821,8 @@ def update_bid(bid_id):
         except Exception as _e:
             print(f'[update_bid] decode_vin error bid={bid_id}: {_e}', flush=True)
         cur.execute("UPDATE bids SET vauto_priority=TRUE WHERE id=%s", (bid_id,))
+        # POST_ENRICH_YMM_RECONCILE_2026_06_17: re-check YMM after a VIN correction
+        cur.execute("UPDATE bids SET ymm_reconciled_at=NULL WHERE id=%s", (bid_id,))
         db.commit()
         # VIN_EDIT_CANONICALIZE_2026_05_28: re-run validate + canonicalize
         # so a fixed VIN clears vin_invalid_reason (Phase 1 gate at app.py:9929).
@@ -7449,6 +7452,154 @@ def _get_thalist_asks_for_bid(bid: dict, db=None) -> dict | None:
 
 
 
+def reconcile_ymm_post_enrichment(bid_id, force=False):
+    """POST_ENRICH_YMM_RECONCILE_2026_06_17 (operator): after all enrichment lands,
+    the 9B reviews the displayed year/make/model/trim against ALL evidence
+    (VIN/NHTSA decode, iPacket window sticker, AccuTrade appraisal, vAuto) and
+    CORRECTS the listing when they disagree -- e.g. bid 3482: VIN 4JGFF.. + sticker
+    'GLS450W4' but listing showed GLE 450 -> GLS 450. The 9B is authoritative;
+    gemini_call() routes to the local 9B with Gemini as automatic fallback
+    (local_brain_shim). Idempotent via ymm_reconciled_at. SAFETY: only applies a
+    model/make change that is backed by hard evidence (NHTSA decode or the window
+    sticker text), never an unsupported 9B invention. Returns the corrected dict
+    {year,make,model,trim,corrected:True,reason} or None (no change)."""
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT id, vin, year, make, model, trim, ymm_reconciled_at FROM bids WHERE id=%s", (bid_id,))
+        b = cur.fetchone()
+        if not b or not (b.get('vin') or '') or len(b.get('vin') or '') != 17:
+            return None
+        if b.get('ymm_reconciled_at') and not force:
+            return None
+        vin = b['vin'].upper()
+        cur_disp = {'year': b.get('year'), 'make': (b.get('make') or ''),
+                    'model': (b.get('model') or ''), 'trim': (b.get('trim') or '')}
+
+        nh = {}
+        try:
+            from claude_vin_decoder import decode_vin_smart
+            from nhtsa_decode import decode_vin as _nh
+            nh = decode_vin_smart(vin, db, nhtsa_fallback=_nh) or {}
+        except Exception:
+            try:
+                from nhtsa_decode import decode_vin as _nh2
+                nh = _nh2(vin, conn=db) or {}
+            except Exception:
+                nh = {}
+        nh_str = ("NHTSA/VIN decode: year=%s make=%s model=%s trim=%s"
+                  % (nh.get('year'), nh.get('make'), nh.get('model'), nh.get('trim')))
+
+        cur.execute("SELECT total_msrp, raw_json FROM ipacket_lookups WHERE bid_id=%s", (bid_id,))
+        ip = cur.fetchone() or {}
+        ip_ocr = ((ip.get('raw_json') or {}).get('_ocr_text') or '')[:1200]
+        if ip_ocr or ip.get('total_msrp'):
+            ip_str = "iPacket window sticker MSRP=$%s; sticker text: %s" % (ip.get('total_msrp') or '?', ip_ocr)
+        else:
+            ip_str = "iPacket: none"
+
+        cur.execute("SELECT selected_trim_text FROM accutrade_lookups WHERE bid_id=%s", (bid_id,))
+        ac = cur.fetchone() or {}
+        ac_str = "AccuTrade selected: %s" % (ac.get('selected_trim_text') or '?')
+
+        cur.execute("SELECT raw_json FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+        va = cur.fetchone() or {}
+        va_year = (va.get('raw_json') or {}).get('_year')
+
+        prompt = (
+            "You are reconciling a wholesale vehicle listing against hard evidence. "
+            "Determine the correct YEAR, MAKE, MODEL and TRIM for this VIN.\n\n"
+            "VIN: " + vin + "\n"
+            + ("CURRENT LISTING: %s %s %s %s\n\n" % (cur_disp['year'], cur_disp['make'], cur_disp['model'], cur_disp['trim']))
+            + "EVIDENCE:\n"
+            + "- " + nh_str + "\n"
+            + "- " + ip_str + "\n"
+            + "- " + ac_str + "\n"
+            + "- vAuto year: " + str(va_year) + "\n\n"
+            + "The factory window sticker (iPacket) and the VIN decode are the most "
+            "authoritative for MODEL. Weigh all evidence. If the current listing is "
+            "correct, set matches=true. If wrong, give corrected values.\n"
+            "Respond with ONLY compact JSON, no prose, no markdown:\n"
+            + '{"year":<int>,"make":"..","model":"..","trim":"..","matches":<true|false>,"reason":"<short>"}'
+        )
+        resp = gemini_call(prompt, model='gemini-2.5-flash', max_tokens=300, temperature=0)
+        if not resp:
+            print('[ymm-reconcile] bid=%s 9B returned nothing' % bid_id, flush=True)
+            return None
+        import re as _re, json as _json
+        m = _re.search(r'\{.*\}', resp, _re.S)
+        if not m:
+            print('[ymm-reconcile] bid=%s no JSON in resp: %r' % (bid_id, resp[:120]), flush=True)
+            return None
+        j = _json.loads(m.group(0))
+        new = {'year': j.get('year'),
+               'make': (j.get('make') or '').strip().upper(),
+               'model': (j.get('model') or '').strip(),
+               'trim': (j.get('trim') or '').strip()}
+        matches = bool(j.get('matches'))
+        reason = (j.get('reason') or '')[:200]
+
+        cur.execute("UPDATE bids SET ymm_reconciled_at=NOW() WHERE id=%s", (bid_id,))
+
+        def _norm(s):
+            return str(s or '').strip().upper()
+        changed = ((_norm(new['model']) and _norm(new['model']) != _norm(cur_disp['model']))
+                   or (new['year'] and str(new['year']) != str(cur_disp['year']))
+                   or (_norm(new['trim']) and _norm(new['trim']) != _norm(cur_disp['trim']))
+                   or (_norm(new['make']) and _norm(new['make']) != _norm(cur_disp['make'])))
+        if matches or not changed:
+            db.commit()
+            return None
+
+        ev_blob = _norm(nh.get('model')) + ' ' + _norm(ip_ocr) + ' ' + _norm(ac.get('selected_trim_text'))
+        _mtok = _norm(new['model']).split()[0] if _norm(new['model']) else ''
+        model_supported = (not _mtok) or (_mtok in ev_blob) or (_norm(nh.get('model')) and _mtok in _norm(nh.get('model')))
+        make_ok = (not _norm(new['make'])) or _norm(new['make']) == _norm(cur_disp['make']) or _norm(new['make']) == _norm(nh.get('make'))
+        if not model_supported or not make_ok:
+            print('[ymm-reconcile] bid=%s 9B suggested %s but NOT evidence-backed -> skip' % (bid_id, new), flush=True)
+            db.commit()
+            return None
+
+        sets, vals = [], []
+        for col, val in (('year', new['year'] if new['year'] else None),
+                         ('make', new['make'] or None),
+                         ('model', new['model'] or None),
+                         ('trim', new['trim'] or None),
+                         ('canon_year', new['year'] if new['year'] else None),
+                         ('canon_make', new['make'] or None),
+                         ('canon_model', new['model'] or None),
+                         ('canon_trim', new['trim'] or None)):
+            if val is not None:
+                sets.append(col + '=%s'); vals.append(val)
+        sets.append("canon_source=%s"); vals.append('9b_post_enrich_reconcile')
+        vals.append(bid_id)
+        cur.execute("UPDATE bids SET " + ', '.join(sets) + ", updated_at=NOW() WHERE id=%s", vals)
+        # Also rewrite the human-readable summary text (Quick Drop raw_message +
+        # any intake bid_messages) so the dashboard message column matches the fix.
+        try:
+            _old_seg = (str(cur_disp['make'] or '').strip() + ' ' + str(cur_disp['model'] or '').strip()).strip()
+            _new_seg = ((new['make'] or cur_disp['make'] or '').strip() + ' ' + (new['model'] or cur_disp['model'] or '').strip()).strip()
+            if _old_seg and _new_seg and _old_seg.upper() != _new_seg.upper():
+                cur.execute("UPDATE bids SET raw_message = replace(raw_message, %s, %s) WHERE id=%s AND raw_message LIKE %s",
+                            (_old_seg, _new_seg, bid_id, '%' + _old_seg + '%'))
+                cur.execute("UPDATE bid_messages SET message = replace(message, %s, %s) WHERE bid_id=%s AND message LIKE %s",
+                            (_old_seg, _new_seg, bid_id, '%' + _old_seg + '%'))
+        except Exception as _msg_e:
+            print('[ymm-reconcile] bid=%s msg-text fix err: %s' % (bid_id, _msg_e), flush=True)
+        db.commit()
+        print('[ymm-reconcile] bid=%s CORRECTED %s -> %s (%s)' % (bid_id, cur_disp, new, reason), flush=True)
+        return {'year': new['year'], 'make': new['make'], 'model': new['model'],
+                'trim': new['trim'], 'corrected': True, 'reason': reason}
+    except Exception as e:
+        try: db.rollback()
+        except Exception: pass
+        print('[ymm-reconcile] bid=%s error: %s' % (bid_id, e), flush=True)
+        return None
+    finally:
+        try: db.close()
+        except Exception: pass
+
+
 def _run_assessment(bid_id):
     """Core assessment logic — callable from endpoint or background thread.
     Returns dict: {'success': True, 'assessment': ..., 'buy_price': ...} or {'error': ...}
@@ -7487,6 +7638,18 @@ def _run_assessment(bid_id):
               f'(human must confirm odometer before pricing)', flush=True)
         return {'success': False, 'error': 'mileage_missing',
                 'message': 'Mileage required for assessment'}
+
+    # POST_ENRICH_YMM_RECONCILE_2026_06_17: 9B verifies YMM vs all enrichment
+    # evidence and corrects the listing before pricing (Gemini fallback via shim).
+    try:
+        _rec = reconcile_ymm_post_enrichment(bid_id)
+        if _rec and _rec.get('corrected'):
+            bid = dict(bid)
+            for _rk in ('year', 'make', 'model', 'trim'):
+                if _rec.get(_rk) is not None:
+                    bid[_rk] = _rec[_rk]
+    except Exception as _rec_e:
+        print('[ymm-reconcile] hook err bid=%s: %s' % (bid_id, _rec_e), flush=True)
 
     cur.execute("SELECT url FROM bid_photos WHERE bid_id = %s ORDER BY id LIMIT 8", (bid_id,))
     photos = cur.fetchall()
@@ -15160,30 +15323,57 @@ def api_vauto_url_capture_result():
         _rbx = int(_rbx) if _rbx not in (None, '', 0, '0') else None
     except Exception:
         _rbx = None
-    if _rbx and _rbx > 1000:
+    if data.get('summary_shot'):
+        # SUMMARY_9B_2026_06_17: save-worker captured the HYDRATED vAuto Summary panel
+        # (pre-Save, tight element crop). Local 9B reads all 6 books; rBook is the value
+        # in NO API. gemini_call routes to the local 9B via the shim (brain healthy ->
+        # no fallback). Set rbook before the enrichment kick so comp-median can't win.
+        try:
+            import base64 as _b64s, re as _res, json as _jss
+            _png = _b64s.b64decode(data.get('summary_shot'))
+            try:
+                open('/tmp/summary_%s.jpg' % bid_id, 'wb').write(_png)
+            except Exception:
+                pass
+            _sp = ('This image is a vAuto Provision "Summary" panel listing vehicle book '
+                   'values. Read the dollar amount next to each label. Return ONLY JSON like '
+                   '{"rbook":30649,"black_book":24350,"mmr":26100,"kbb":26150,"kbb_com":22050,"jd_power":0} '
+                   '-- plain integers, no $ or commas; use 0 for a dash or blank.')
+            _vr = gemini_call(_sp, image_bytes=_png, mime='image/jpeg', max_tokens=160, temperature=0, disable_thinking=True)
+            _mm = _res.search(r'\{.*\}', (_vr or ''), _res.S)
+            if _mm:
+                _bk = _jss.loads(_mm.group(0))
+                def _iv(x):
+                    try:
+                        return int(x)
+                    except Exception:
+                        return 0
+                _rb = _iv(_bk.get('rbook'))
+                if _rb > 1000:
+                    cur.execute('UPDATE vauto_lookups SET rbook=%s WHERE bid_id=%s', (_rb, bid_id))
+                print('[summary-9b] bid=%s rbook=%s books=%s' % (bid_id, _rb, _bk), flush=True)
+            else:
+                print('[summary-9b] bid=%s unparseable 9B read=%r' % (bid_id, (_vr or '')[:140]), flush=True)
+        except Exception as _se9:
+            print('[summary-9b] bid=%s err %s' % (bid_id, _se9), flush=True)
+    elif _rbx and _rbx > 1000:
         cur.execute("UPDATE vauto_lookups SET rbook=%s WHERE bid_id=%s", (_rbx, bid_id))
         print('[rbook-exact] bid=%s scraped rbook=%s' % (bid_id, _rbx), flush=True)
     elif data.get('rbook_shot'):
-        # DOM missed -> 9B VISION brain reads rBook off the screenshot. gemini_call is
-        # monkey-patched to the local 9B (same path as the AccuTrade exotic-page vision).
+        # NO_GEMINI_2026_06_17: the VLM rBook read (gemini_call -> 9B vision) returned 0
+        # and added brain image calls that 400 -> Gemini fallback. Disabled per operator
+        # no-Gemini rule. Save the shot for a future LOCAL-OCR approach; rBook=comp-median.
         try:
-            import base64 as _b64v, re as _rev
+            import base64 as _b64v
             _png = _b64v.b64decode(data.get('rbook_shot'))
-            _vp = ('This is a vAuto ProVision used-vehicle appraisal screenshot. Its book-values '
-                   'section lists rBook, Black Book, KBB, MMR, J.D. Power with dollar amounts. '
-                   'Read ONLY the rBook value. Reply with just that number as a plain integer '
-                   '(no $ or commas). If no rBook value is visible reply 0.')
-            _vr = gemini_call(_vp, image_bytes=_png, mime='image/jpeg', max_tokens=24,
-                              temperature=0, disable_thinking=True)
-            _vd = _rev.sub(r'[^0-9]', '', (_vr or '').strip().split(chr(10))[0])[:7]
-            _vv = int(_vd) if _vd else 0
-            if _vv > 1000:
-                cur.execute('UPDATE vauto_lookups SET rbook=%s WHERE bid_id=%s', (_vv, bid_id))
-                print('[rbook-vision] bid=%s 9B read rbook=%s raw=%r' % (bid_id, _vv, (_vr or '')[:40]), flush=True)
-            else:
-                print('[rbook-vision] bid=%s 9B no value raw=%r' % (bid_id, (_vr or '')[:80]), flush=True)
+            try:
+                open('/tmp/rbook_%s.jpg' % bid_id, 'wb').write(_png)
+            except Exception:
+                pass
+            print('[rbook] bid=%s DOM missed; VLM disabled (no-Gemini); shot %dB saved; rbook=comp-median'
+                  % (bid_id, len(_png)), flush=True)
         except Exception as _ve:
-            print('[rbook-vision] bid=%s err %s' % (bid_id, _ve), flush=True)
+            print('[rbook] bid=%s shot save err %s' % (bid_id, _ve), flush=True)
     elif _rbdbg:
         print('[rbook-exact] bid=%s DOM+vision MISS debug=%r' % (bid_id, (_rbdbg or '')[:120]), flush=True)
     db.commit()
@@ -16937,7 +17127,11 @@ def api_trim_select():
         "   Rover, Toyota Tundra/Tacoma, Chevy Silverado/Tahoe, GMC Sierra/\n"
         "   Yukon, etc.), prefer the LOWER trim — never assume a high-spec\n"
         "   trim without evidence.\n"
-        "6. The VIN itself is authoritative when its prefix encodes trim\n"
+        "6. CARFAX IS AUTHORITATIVE: when a Carfax trim is provided you MUST pick the\n"
+        "   option that matches it -- NEVER a different drivetrain ('S' vs '4S', non-AWD\n"
+        "   vs 4MATIC/quattro/xDrive/4MOTION) or a different trim level. Carfax beats the\n"
+        "   VIN, the seller hint, and your own inference. Match Carfax, no matter what.\n"
+        "6b. The VIN itself is authoritative when its prefix encodes trim\n"
         "   (Porsche WP0AA=Carrera, WP0AB=Carrera S, WP0AC=GT3/Touring,\n"
         "   WP0AH=GTS variants). When seller hint disagrees with VIN-encoded\n"
         "   trim, TRUST THE VIN.\n"
@@ -16993,6 +17187,39 @@ def api_trim_select():
     if idx < 0 or idx >= len(choices):
         db.close()
         return jsonify({'index': None, 'reason': 'index_out_of_range'}), 200
+
+    # CARFAX_AUTHORITY_2026_06_17 (operator: 'always go by Carfax, no matter what'):
+    # bid 3469 (2024 Porsche 911) -- the model chose 'CARRERA 4S AWD' over the correct
+    # 'CARRERA S COUPE', hallucinating an AWD hint though Carfax+VIN both said Carrera S.
+    # Pull the Carfax trim and, if it UNIQUELY matches a different option strictly better
+    # (token overlap), override the model. Ties keep the model (body-style disambiguation).
+    try:
+        _cfx = None
+        try:
+            cur.execute("SELECT carfax_json->>'trim' FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+            _cr = cur.fetchone()
+            _cfx = (_cr[0] if _cr else None) or None
+        except Exception:
+            _cfx = None
+        _ev = (_cfx or bid_trim or '').strip()
+        def _toks(x):
+            return set(re.findall(r'[a-z0-9]+', (x or '').lower()))
+        _evt = _toks(_ev)
+        if _evt:
+            _scores = [(len(_evt & _toks(_ch.get('text') or '')), _i) for _i, _ch in enumerate(choices)]
+            _maxsc = max(sc for sc, _ in _scores)
+            _top = [i for sc, i in _scores if sc == _maxsc]
+            _pick_sc = len(_evt & _toks(choices[idx].get('text') or ''))
+            if _maxsc > _pick_sc and len(_top) == 1 and _top[0] != idx:
+                _bi = _top[0]
+                print('trim_select CARFAX_AUTHORITY VIN=%s bid=%s override [%s] "%s" -> [%s] "%s" (carfax/evidence trim "%s")'
+                      % (vin, bid_id, idx, choices[idx].get('text'), _bi, choices[_bi].get('text'), _ev), flush=True)
+                idx = _bi
+                conf = max(conf, 0.9)
+                reason = ('carfax-authority: matched Carfax/evidence trim "%s". ' % _ev + (reason or ''))[:200]
+                clean_trim = _ev or clean_trim
+    except Exception as _cae:
+        print('trim_select carfax-authority err: %s' % _cae, flush=True)
 
     selected_text = normalize_trim_text(choices[idx].get('text', ''))
 
@@ -17380,14 +17607,17 @@ def api_accutrade_submit():
                 _adv_mime = 'image/png' if _adv_path.lower().endswith('.png') else 'image/jpeg'
                 _adv_prompt = (
                     "This is a screenshot of an AccuTrade vehicle appraisal page. Near the "
-                    "top are up to four labeled valuation tiles, left to right: 'Instant "
-                    "Offer', 'Target Auction', a retail tile labeled 'Target Retail' OR "
-                    "'Median Retail', and 'Average' (sometimes 'Wholesale'/'Avg'). Ignore "
-                    "any 'Manheim' tile. Each tile shows EITHER a dollar amount (e.g. "
-                    "$476,021) OR 'N/A'. Return ONLY a compact JSON object with integer "
-                    "dollars (no $, no commas) or null when a tile reads N/A or is absent. "
-                    'Keys exactly: {"instant_offer":null,"target_auction":null,'
-                    '"target_retail":null,"average":null}. Return only the JSON.'
+                    "top are labeled valuation tiles, left to right: 'Instant Offer', "
+                    "'Target Auction', a retail tile ('Target Retail' OR 'Median Retail'), "
+                    "'Manheim', and 'Wholesale / Average' (sometimes 'Average'/'Avg'). Each "
+                    "tile shows EITHER a dollar amount (e.g. $41,500) OR no price (only a "
+                    "trim label, blank, or 'N/A'). Read each tile's dollar amount. Return "
+                    "ONLY a compact JSON object with integer dollars (no $, no commas), or "
+                    "null when a tile has no dollar amount. The 'Wholesale / Average' tile "
+                    "is OFTEN blank (shows only a trim like 'Premier 4D SUV 4WD') -> return "
+                    'null for "average" then. Keys exactly: {"instant_offer":null,'
+                    '"target_auction":null,"target_retail":null,"manheim":null,'
+                    '"average":null}. Return only the JSON.'
                 )
                 _adv_txt = gemini_call(_adv_prompt, image_bytes=_adv_bytes, mime=_adv_mime,
                                        model='gemini-2.5-flash', max_tokens=200,
@@ -17408,6 +17638,7 @@ def api_accutrade_submit():
                         'guaranteed_offer': _adv_num(_adv_obj.get('instant_offer')),
                         'trade_in': _adv_num(_adv_obj.get('target_auction')),
                         'trade_market': _adv_num(_adv_obj.get('target_retail')),
+                        'retail': _adv_num(_adv_obj.get('manheim')),
                         'market_avg': _adv_num(_adv_obj.get('average')),
                     }
                     if any(_v is not None for _v in _adv_map.values()):
@@ -19037,8 +19268,10 @@ def api_vauto_extras_status(bid_id):
                     "(rbook_competitive_set IS NOT NULL) AS has_rb, "
                     "(manheim_transactions IS NOT NULL) AS has_mh, "
                     "(EXISTS (SELECT 1 FROM accutrade_lookups a WHERE a.bid_id=%s "
-                    "         AND (a.trade_in IS NOT NULL OR a.not_available IS TRUE))) AS has_accu "
-                    "FROM vauto_lookups WHERE bid_id=%s", (bid_id, bid_id))
+                    "         AND (a.market_avg IS NOT NULL OR a.not_available IS TRUE))) AS has_accu, "
+                    "(EXISTS (SELECT 1 FROM ipacket_lookups i WHERE i.bid_id=%s "
+                    "         AND (i.not_available IS TRUE OR i.total_msrp IS NOT NULL OR i.base_price IS NOT NULL))) AS has_ipkt "
+                    "FROM vauto_lookups WHERE bid_id=%s", (bid_id, bid_id, bid_id))
         row = cur.fetchone()
     except Exception:
         row = None
@@ -19048,10 +19281,10 @@ def api_vauto_extras_status(bid_id):
     # POPULATE_AT_DONE_2026_06_17: wait for the LAST piece (AccuTrade appraisal
     # values) too, not just vAuto -- so the single reload lands EVERYTHING at once
     # (autocheck + 5 books + link + rBook/MMR + all AccuTrade), no staged refreshes.
-    ready = bool(row.get('has_url') and row.get('has_rb') and row.get('has_mh') and row.get('has_accu'))
+    ready = bool(row.get('has_url') and row.get('has_rb') and row.get('has_mh') and row.get('has_accu') and row.get('has_ipkt'))
     return jsonify({'ready': ready, 'has_url': bool(row.get('has_url')),
                     'has_rbook': bool(row.get('has_rb')), 'has_mmr': bool(row.get('has_mh')),
-                    'has_accu': bool(row.get('has_accu'))})
+                    'has_accu': bool(row.get('has_accu')), 'has_ipkt': bool(row.get('has_ipkt'))})
 
 
 @app.route('/api/verify-comps', methods=['POST'])
@@ -21114,38 +21347,9 @@ def _notify_driver_combined(bid_id):
                   flush=True)
             db.close()
             return False
-        # ROLLING_PORTAL_2026_06_02: portal-gated senders do NOT get a per-car
-        # link. Suppress this per-car SMS, stamp notified so it won't retry,
-        # and fire a throttled "N cars ready" nudge pointing at their
-        # /s/<token> portal (the batch ack already gave them the link).
-        if _phone_in_portal_gate(bid.get('driver_phone')):
-            try:
-                _portal_nudge_for_phone(cur, bid['driver_phone'])
-            except Exception as _pne:
-                print(f'[combined-sms] portal nudge err bid={bid_id}: {_pne}', flush=True)
-            cur.execute("UPDATE bids SET driver_notified_at=NOW(), "
-                        "phase2_notified_at=NOW() WHERE id=%s", (bid_id,))
-            db.commit()
-            db.close()
-            print(f'[combined-sms] bid={bid_id} suppressed (portal) → nudge', flush=True)
-            return True
-
-        # Full-broker phone gate (matches legacy PHASE2_PHONE_GATE behavior).
-        gate = (os.environ.get('PHASE2_PHONE_GATE') or '').strip()
-        if gate:
-            def _digits(p):
-                d = ''.join(c for c in (p or '') if c.isdigit())
-                if len(d) == 11 and d[0] == '1':
-                    d = d[1:]
-                return d
-            allowed = {_digits(tok) for tok in gate.replace(',', ' ').split()
-                       if len(_digits(tok)) == 10}
-            if _digits(bid['driver_phone']) not in allowed:
-                print(f'[combined-sms] gated — bid={bid_id} '
-                      f'driver={bid["driver_phone"]} not in allowlist',
-                      flush=True)
-                db.close()
-                return False
+        # CLEAN_SLATE_2026_06_17 (operator): no portal suppression, no
+        # PHASE2_PHONE_GATE allowlist -- every sender gets the same per-car
+        # bid card.
 
         ymm_parts = [str(bid['year']) if bid['year'] else '',
                      bid['make'] or '', bid['model'] or '']
