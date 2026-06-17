@@ -130,7 +130,7 @@
   </summary>
   <div class="body">
     <a href="{{ vauto.autocheck_screenshot }}" target="_blank">
-      <img src="{{ vauto.autocheck_screenshot }}" style="width:100%;border-radius:6px;border:1px solid #1f2937;display:block" alt="AutoCheck Report">
+      {% if vauto.autocheck_screenshot.endswith('.pdf') %}<a href="{{ vauto.autocheck_screenshot }}" target="_blank" rel="noopener" style="display:block;padding:14px;text-align:center;color:#60a5fa;text-decoration:none">📄 View AutoCheck PDF →</a>{% else %}<img src="{{ vauto.autocheck_screenshot }}" style="width:100%;border-radius:6px;border:1px solid #1f2937;display:block" alt="AutoCheck Report">{% endif %}
     </a>
   </div>
 </details>

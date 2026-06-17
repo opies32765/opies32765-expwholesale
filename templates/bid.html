@@ -1948,19 +1948,22 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         <div style="margin-top:14px;display:flex;gap:8px;flex:1">
           {% if vauto_data.carfax_screenshot %}
           <div style="flex:1;cursor:pointer;min-height:0" onclick="openReportLightbox('{{ vauto_data.carfax_screenshot }}')">
-            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Carfax</div>
+            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Carfax{% if vauto_data.carfax_share_url %} <a href="{{ vauto_data.carfax_share_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:9px;color:#60a5fa;text-decoration:none;text-transform:none;letter-spacing:0">🔗 full report →</a>{% endif %}</div>
             <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
               <img src="{{ vauto_data.carfax_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="Carfax Report">
             </div>
           </div>
           {% endif %}
           {% if vauto_data.autocheck_screenshot %}
-          <div style="flex:1;cursor:pointer;min-height:0" onclick="openReportLightbox('{{ vauto_data.autocheck_screenshot }}')">
+          {% if vauto_data.autocheck_screenshot.endswith('.pdf') %}<div style="flex:1;min-height:0">
+            <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AutoCheck</div>
+            <a href="{{ vauto_data.autocheck_screenshot }}" target="_blank" rel="noopener" style="display:flex;align-items:center;justify-content:center;background:#0f172a;border:1px solid #1e293b;border-radius:8px;height:100%;min-height:80px;color:#60a5fa;text-decoration:none;font-size:13px">📄 View AutoCheck PDF →</a>
+          </div>{% else %}<div style="flex:1;cursor:pointer;min-height:0" onclick="openReportLightbox('{{ vauto_data.autocheck_screenshot }}')">
             <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AutoCheck</div>
             <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
               <img src="{{ vauto_data.autocheck_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AutoCheck Report">
             </div>
-          </div>
+          </div>{% endif %}
           {% endif %}
         </div>
         {% endif %}
