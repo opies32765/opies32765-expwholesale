@@ -18021,6 +18021,30 @@ def _ipacket_prewarm_cache(bid_id, vin):
                 source_bid_id  = EXCLUDED.source_bid_id
         """, (_v, _pdf.get('msrp'), _pdf.get('base_price'),
               _pdf.get('exterior_color'), _pdf.get('interior_color'), _ss, bid_id))
+        # IPACKET_CARD_EARLY_2026_06_17: ALSO write the ipacket_lookups CARD row now so
+        # the iPacket card lands at prewarm time (~15-25s in) instead of +6-9s after the
+        # worker's sequential AccuTrade leg (that lag = the server OCR that runs AFTER the
+        # worker submits the sticker -- we already have the MSRP + rendered screenshot
+        # right here). Only on a GOOD sticker (msrp set) -> never a false NA. The worker's
+        # later submit is an idempotent COALESCE upsert + IPACKET_WORKER_SKIP sees the good
+        # sticker and skips the re-pull. has_ipkt then goes true early -> populate gate no
+        # longer waits on iPacket.
+        try:
+            _c.execute("""INSERT INTO ipacket_lookups
+                  (bid_id, vin, total_msrp, base_price, exterior_color, interior_color, screenshot, not_available, looked_up_at)
+                  VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE, NOW())
+                  ON CONFLICT (bid_id) DO UPDATE SET
+                    total_msrp = COALESCE(EXCLUDED.total_msrp, ipacket_lookups.total_msrp),
+                    base_price = COALESCE(EXCLUDED.base_price, ipacket_lookups.base_price),
+                    exterior_color = COALESCE(ipacket_lookups.exterior_color, EXCLUDED.exterior_color),
+                    interior_color = COALESCE(ipacket_lookups.interior_color, EXCLUDED.interior_color),
+                    screenshot = COALESCE(ipacket_lookups.screenshot, EXCLUDED.screenshot),
+                    not_available = FALSE""",
+                (bid_id, _v, _pdf.get('msrp'), _pdf.get('base_price'),
+                 _pdf.get('exterior_color'), _pdf.get('interior_color'), _ss))
+            print('[ipacket-prewarm] bid=%s wrote CARD row early (msrp=$%s)' % (bid_id, _pdf.get('msrp')), flush=True)
+        except Exception as _cwe:
+            print('[ipacket-prewarm] bid=%s card-row early-write skipped: %s' % (bid_id, _cwe), flush=True)
         _db.commit(); _db.close()
         print('[ipacket-prewarm] bid=%s vin=%s cached MSRP=$%s (creation-time prewarm)' % (bid_id, _v, _pdf.get('msrp')), flush=True)
     except Exception as _pe:
@@ -18403,7 +18427,7 @@ def api_ipacket_submit():
                 if _arow and _picked and _asrc == 'llm' and not _in_pick:
                     _vinx = (data.get('vin') or '').upper().strip()
                     _label = _accutrade_clean_label(_sw) or _sw.title()
-                    _rc.execute("UPDATE bids SET trim=%s, canon_trim=%s, canon_source='ipacket_sticker' WHERE id=%s", (_label, _label, bid_id))
+                    _rc.execute("UPDATE bids SET trim=%s, canon_trim=%s, canon_source='ipacket_sticker', ymm_reconciled_at=NULL WHERE id=%s", (_label, _label, bid_id))
                     _choices_txt = ''
                     try:
                         _rc.execute('SELECT choices_json FROM accutrade_trim_select_cache WHERE vin=%s', (_vinx,))
@@ -18425,6 +18449,14 @@ def api_ipacket_submit():
                     else:
                         print(f'[ipacket-trim-rearm] bid={bid_id} sticker trim {_sw!r} != blind pick {_picked!r} -> display fixed (trim not in AccuTrade choices; no re-value)', flush=True)
                     db.commit()
+                    # POST_ENRICH_YMM_RECONCILE_2026_06_17: the sticker trim word can be
+                    # OCR noise (bid 3486: 'TRD' on a Ford Expedition). Let the 9B
+                    # adjudicate this overwrite vs AccuTrade / NHTSA / the full sticker
+                    # text NOW (force=True) so OCR garbage can never stick as the trim.
+                    try:
+                        reconcile_ymm_post_enrichment(bid_id, force=True)
+                    except Exception as _rrx:
+                        print('[ipacket-trim-rearm] 9B reconcile err bid=%s: %s' % (bid_id, _rrx), flush=True)
     except Exception as _rearm_e:
         print(f'[ipacket-trim-rearm] err bid={bid_id}: {_rearm_e}', flush=True)
         try: db.rollback()
