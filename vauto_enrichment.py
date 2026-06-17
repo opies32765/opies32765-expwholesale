@@ -446,6 +446,23 @@ def kick_direct_enrichment(bid_id: int, db_conn_factory) -> None:
                         json.dumps(state_patch),
                     ))
                     rows = cur.rowcount
+                    # PROVISION_RBOOK_2026_06_17: ProVision's rBook book value = the
+                    # median of the retail comps (priceGuides has no Radar key). Set the
+                    # rbook column = comp median so the vAuto 6-value card shows all 5.
+                    try:
+                        _pp = sorted(int(r.get('price') or 0) for r in (cs.get('rows') or []) if r.get('price'))
+                        _pe = sorted(int(r.get('effective_price') or 0) for r in (cs.get('rows') or []) if r.get('effective_price'))
+                        def _med(a):
+                            if not a:
+                                return None
+                            n=len(a)
+                            return a[n//2] if n%2 else int((a[n//2-1]+a[n//2])/2)
+                        _mp=_med(_pp); _me=_med(_pe)
+                        log.info('bid %d rbook median price=%s effprice=%s', bid_id, _mp, _me)
+                        if _me:
+                            cur.execute("UPDATE vauto_lookups SET rbook=%s WHERE bid_id=%s AND (rbook IS NULL OR rbook=0)", (_me, bid_id))
+                    except Exception as _rbe:
+                        log.debug('bid %d rbook median err: %s', bid_id, _rbe)
                 conn.commit()
             log.info('bid %d direct write: rows=%d (market_intel cached=%s)',
                      bid_id, rows, 'yes' if market_intel_json else 'no')

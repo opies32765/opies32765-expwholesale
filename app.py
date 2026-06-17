@@ -732,7 +732,7 @@ def inventory_gaps_page():
         format_ymm=format_ymm,
     )
 
-_PUBLIC_SUFFIXES = ('/rep-message', '/field-update', '/messages', '/messages-poll', '/inventory-gaps')
+_PUBLIC_SUFFIXES = ('/rep-message', '/field-update', '/messages', '/messages-poll', '/inventory-gaps', '/vauto-extras-status')
 
 
 @app.before_request
@@ -2401,10 +2401,62 @@ def send_sms(to, body):
     try:
         client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
         client.messages.create(to=to, from_=TWILIO_PHONE, body=body)
+        # ANYONE_GETS_A_REPLY_2026_06_17: record that we texted this number
+        # so the inbound-reply safety net (after_request) knows the sender
+        # already got a response and won't double-text.
+        try:
+            from flask import g as _g_rt, has_request_context as _hrc_rt
+            if _hrc_rt():
+                _dd = ''.join(c for c in (to or '') if c.isdigit())
+                if len(_dd) == 11 and _dd[0] == '1':
+                    _dd = _dd[1:]
+                if not hasattr(_g_rt, '_sms_reply_digits'):
+                    _g_rt._sms_reply_digits = set()
+                _g_rt._sms_reply_digits.add(_dd)
+        except Exception:
+            pass
         return True
     except Exception as e:
         print(f'SMS send error: {e}')
         return False
+
+
+@app.after_request
+def _ensure_inbound_sms_reply(response):
+    """ANYONE_GETS_A_REPLY_2026_06_17 (operator): every inbound SMS to the
+    Twilio webhook must get SOME text back. Several intake routers (share_reply,
+    window_merge, partner-reply, pending-attach, etc.) intentionally file the
+    message and return empty TwiML, leaving the sender with silence. This net
+    catches that: if the request neither texted the sender via send_sms() nor
+    returned a TwiML <Message>, send a generic fallback ack. send_sms() still
+    enforces bot_mute / field: / STOP / magic-number rules, so muted numbers
+    stay muted."""
+    try:
+        if request.path != '/webhook/twilio' or request.method != 'POST':
+            return response
+        from flask import g as _g_rt
+        from_phone = (request.form.get('From') or '').strip()
+        if not from_phone or from_phone.startswith('field:'):
+            return response
+        _d = ''.join(c for c in from_phone if c.isdigit())
+        if len(_d) == 11 and _d[0] == '1':
+            _d = _d[1:]
+        if _d in getattr(_g_rt, '_sms_reply_digits', set()):
+            return response  # already replied to the sender via send_sms
+        try:
+            _body_txt = response.get_data(as_text=True) or ''
+        except Exception:
+            _body_txt = ''
+        if '<Message' in _body_txt:
+            return response  # already replied via TwiML <Message>
+        send_sms(from_phone,
+                 "Got it — thanks for reaching out to Experience Wholesale. "
+                 "If you're after a bid, send the VIN, mileage, or a clear photo "
+                 "and we'll get you a number. Otherwise we'll be in touch shortly.")
+        print(f'[reply-net] fallback ack sent to {from_phone}', flush=True)
+    except Exception as _rne:
+        print(f'[reply-net] error: {_rne}', flush=True)
+    return response
 
 
 # ── Bidder-identity helpers (Phase 1/2/3 gating + name capture) ─────────────
@@ -4499,6 +4551,16 @@ def bid_detail(bid_id):
             bid, vauto_data, accutrade_data = _aso(get_db, bid_id, bid, vauto_data, accutrade_data)
     except Exception as _soe:
         print('[shadow-overlay] bid=%s err=%s' % (bid_id, _soe), flush=True)
+    # PROGRESSIVE_RELOAD_2026_06_17: readiness level the page is rendered at, so the
+    # client poller reloads only when a HIGHER level lands (link=1, +rBook/MMR cards=2)
+    # -- never loops, and shows each tier the instant it arrives (no 45s-refresh wait).
+    try:
+        _vx_url = bool(vauto_data and (((vauto_data.get('appraisal_url') if hasattr(vauto_data,'get') else None) or '')).startswith('http'))
+        _vx_rb = bool(market_intel and market_intel.get('rbook'))
+        _vx_mh = bool(market_intel and market_intel.get('manheim'))
+        vextras_level = 2 if (_vx_url and _vx_rb and _vx_mh) else (1 if _vx_url else 0)
+    except Exception:
+        vextras_level = 0
     _rendered = render_template('bid.html', bid=bid, photos=photos, show_sources=show_sources,
                                 messages=messages, valuations=valuations,
                                 vauto_data=vauto_data,
@@ -4510,6 +4572,7 @@ def bid_detail(bid_id):
                                 partner_info=partner_info,
                                 vin_candidate=vin_candidate,
                                 market_intel=market_intel,
+                                vextras_level=vextras_level,
                                 ml_prediction=ml_prediction,
                                 partner_offers=partner_offers,
                                 bid_network_claim=bid_network_claim,
@@ -12461,10 +12524,10 @@ def api_vauto_pending():
                                                   'released_admin',
                                                   'released_admin_reprocess',
                                                   'released_invalid_vin',
-                                                  'ok')
+                                                  'ok', 'ok_api_mode')
                GROUP BY bid_id
                HAVING COUNT(*) >= 5
-                  AND COUNT(*) FILTER (WHERE status='ok') = 0
+                  AND COUNT(*) FILTER (WHERE status IN ('ok', 'ok_api_mode')) = 0
           ) wj ON wj.bid_id = b.id
          WHERE b.vin IS NOT NULL
         ON CONFLICT (bid_id) DO UPDATE
@@ -15044,6 +15107,7 @@ def api_vauto_url_capture_result():
     data = request.json or {}
     bid_id = data.get('bid_id')
     url = (data.get('appraisal_url') or '').strip()
+    print('[url-capture] bid=%s url_present=%s books=%s' % (bid_id, bool(url), data.get('books')), flush=True)
     if not bid_id:
         return jsonify({'error': 'bid_id required'}), 400
     db = get_db()
@@ -15051,10 +15115,77 @@ def api_vauto_url_capture_result():
     if url:
         cur.execute("UPDATE vauto_lookups SET appraisal_url=%s WHERE bid_id=%s",
                     (url, bid_id))
+        # SAVED_APPRAISAL_BOOKS_2026_06_17: store the ProVision Summary book values
+        # (worker readSummary) so the EW vAuto card matches ProVision EXACTLY -- the BFF
+        # priceGuides applies no odometer adjustment so its values come out high (per the
+        # 2026-06-13 cutover finding). Overwrite the int columns + the raw_json books.
+        _bk = data.get('books') or {}
+        if isinstance(_bk, dict) and (_bk.get('mmr') or _bk.get('rbook') or _bk.get('kbb') or _bk.get('jd_power')):
+            import re as _re3
+            def _pv(x):
+                if x is None:
+                    return None
+                x = str(x)
+                if x in ('$0', '—', '--', '-', ''):
+                    return None
+                d = _re3.sub(r'[^0-9]', '', x)
+                return int(d) if d else None
+            _v = {k: _pv(_bk.get(k)) for k in ('rbook', 'black_book', 'mmr', 'kbb', 'kbb_com', 'jd_power')}
+            cur.execute("UPDATE vauto_lookups SET rbook=%s, black_book=%s, mmr=%s, kbb=%s, kbb_com=%s, jd_power=%s WHERE bid_id=%s",
+                        (_v['rbook'], _v['black_book'], _v['mmr'], _v['kbb'], _v['kbb_com'], _v['jd_power'], bid_id))
+            try:
+                cur.execute("SELECT raw_json FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+                _rr = cur.fetchone()
+                _rj = (_rr['raw_json'] if hasattr(_rr, 'keys') else _rr[0]) if _rr else None
+                if isinstance(_rj, str):
+                    _rj = json.loads(_rj)
+                if isinstance(_rj, dict):
+                    for _k in ('rbook', 'black_book', 'mmr', 'kbb', 'kbb_com', 'jd_power'):
+                        _rj[_k] = ('$%s' % format(_v[_k], ',')) if _v[_k] else '—'
+                    _rj['_provision_books'] = True
+                    cur.execute("UPDATE vauto_lookups SET raw_json=%s::jsonb WHERE bid_id=%s", (json.dumps(_rj), bid_id))
+            except Exception as _rje:
+                print('[saved-books] raw_json update err bid=%s %s' % (bid_id, _rje), flush=True)
+            print('[saved-books] bid=%s ProVision books mmr=%s rbook=%s kbb=%s' % (bid_id, _v['mmr'], _v['rbook'], _v['kbb']), flush=True)
     else:
         # Mark the attempt so the queue endpoint stops returning it.
         cur.execute("UPDATE vauto_lookups SET appraisal_url='__not_found__' "
                     "WHERE bid_id=%s AND appraisal_url IS NULL", (bid_id,))
+    # RBOOK_SCRAPE_2026_06_17: worker scraped the EXACT ProVision rBook (Radar retail
+    # book -- in no API) off the appraisal page. Store it now, BEFORE the direct
+    # enrichment kicks -- its comp-median fallback only writes where rbook IS NULL/0,
+    # so this exact value wins. Scrape miss (None) -> comp-median fills it as before.
+    _rbx = data.get('rbook_exact'); _rbdbg = data.get('rbook_debug')
+    try:
+        _rbx = int(_rbx) if _rbx not in (None, '', 0, '0') else None
+    except Exception:
+        _rbx = None
+    if _rbx and _rbx > 1000:
+        cur.execute("UPDATE vauto_lookups SET rbook=%s WHERE bid_id=%s", (_rbx, bid_id))
+        print('[rbook-exact] bid=%s scraped rbook=%s' % (bid_id, _rbx), flush=True)
+    elif data.get('rbook_shot'):
+        # DOM missed -> 9B VISION brain reads rBook off the screenshot. gemini_call is
+        # monkey-patched to the local 9B (same path as the AccuTrade exotic-page vision).
+        try:
+            import base64 as _b64v, re as _rev
+            _png = _b64v.b64decode(data.get('rbook_shot'))
+            _vp = ('This is a vAuto ProVision used-vehicle appraisal screenshot. Its book-values '
+                   'section lists rBook, Black Book, KBB, MMR, J.D. Power with dollar amounts. '
+                   'Read ONLY the rBook value. Reply with just that number as a plain integer '
+                   '(no $ or commas). If no rBook value is visible reply 0.')
+            _vr = gemini_call(_vp, image_bytes=_png, mime='image/jpeg', max_tokens=24,
+                              temperature=0, disable_thinking=True)
+            _vd = _rev.sub(r'[^0-9]', '', (_vr or '').strip().split(chr(10))[0])[:7]
+            _vv = int(_vd) if _vd else 0
+            if _vv > 1000:
+                cur.execute('UPDATE vauto_lookups SET rbook=%s WHERE bid_id=%s', (_vv, bid_id))
+                print('[rbook-vision] bid=%s 9B read rbook=%s raw=%r' % (bid_id, _vv, (_vr or '')[:40]), flush=True)
+            else:
+                print('[rbook-vision] bid=%s 9B no value raw=%r' % (bid_id, (_vr or '')[:80]), flush=True)
+        except Exception as _ve:
+            print('[rbook-vision] bid=%s err %s' % (bid_id, _ve), flush=True)
+    elif _rbdbg:
+        print('[rbook-exact] bid=%s DOM+vision MISS debug=%r' % (bid_id, (_rbdbg or '')[:120]), flush=True)
     db.commit()
     db.close()
 
@@ -15085,6 +15216,13 @@ def api_vauto_url_capture_result():
         except Exception as _direct_err:
             print(f'[direct-enrich] kick failed bid={bid_id}: '
                   f'{_direct_err}', flush=True)
+        # SAVED_APPRAISAL_BOOKS_2026_06_17: re-price off the corrected ProVision books
+        # (the fast api_mode assessment used the high BFF priceGuides values).
+        if data.get('books'):
+            try:
+                _maybe_reassess_on_late_data(int(bid_id), 'vauto_summary_books')
+            except Exception as _rae:
+                print(f'[saved-books] reassess err bid={bid_id}: {_rae}', flush=True)
 
     return jsonify({'ok': True, 'url': url or None})
 
@@ -15475,6 +15613,41 @@ def _book_val_api(book, name):
     return None
 
 
+def _book_val_pv(book):
+    """ProVision-EXACT book value (PROVISION_BOOKS_2026_06_17): use the book's own
+    defaultDisposition + selectedCondition (exactly what the ProVision Summary panel
+    shows), falling back to same-disposition then any. Verified on 3443: kbbOnline
+    TradeIn/Fair=23450, nada TradeIn/Clean=34375, kbb Wholesale->Outstanding=28250.
+    Returns int or None."""
+    if not isinstance(book, dict):
+        return None
+    ps = book.get('pricings') or []
+    if not ps:
+        return None
+    dd = book.get('defaultDisposition')
+    sc = book.get('selectedCondition')
+    def _tot(p):
+        try:
+            return int(round(float(p.get('basePrice') or 0) + float(p.get('odometerAdjustment') or 0) + float(p.get('historicalAdjustment') or 0)))
+        except Exception:
+            return None
+    for p in ps:
+        if p.get('disposition') == dd and p.get('condition') == sc:
+            v = _tot(p)
+            if v and v > 0:
+                return v
+    for p in ps:
+        if p.get('disposition') == dd:
+            v = _tot(p)
+            if v and v > 0:
+                return v
+    for p in ps:
+        v = _tot(p)
+        if v and v > 0:
+            return v
+    return None
+
+
 def vauto_books_api_enrich(bid_id, vin, miles=None):
     """Pull the 6 vAuto books via the Cox BFF priceGuides API (~5s) and store
     them in vauto_lookups.raw_json in the worker's exact string format
@@ -15511,15 +15684,34 @@ def vauto_books_api_enrich(bid_id, vin, miles=None):
         if not vi:
             print('[books-api] bid=%s no vehicleInfo' % bid_id, flush=True)
             return None
+        # ODOMETER_ADJ_2026_06_17: the BFF priceGuides applies the odometer (miles)
+        # adjustment ONLY if odometer is ON THE VEHICLE object (vehicleInfo doesn't echo
+        # it back) -- without it the books value at 0 mi = inflated vs ProVision.
+        if miles:
+            try:
+                vi['odometer'] = int(miles)
+                vi['odometerUom'] = 'Miles'
+                vi['mileage'] = int(miles)
+            except Exception:
+                pass
         pg = s.post(B2 + '/api/priceGuides',
                     json={'appraisalId': apid, 'vehicle': vi,
-                          'priceGuideOptions': _PG_OPTS_API, 'availablePriceGuides': _PG_GUIDES_API},
+                          'priceGuideOptions': _PG_OPTS_API, 'availablePriceGuides': _PG_GUIDES_API,
+                          'useSavedFields': True},
                     timeout=25).json() or {}
-        _vbb = _book_val_api(pg.get('blackBook'), 'blackBook')
-        _vkb = _book_val_api(pg.get('kbb'), 'kbb')
-        _vkc = _book_val_api(pg.get('kbbOnline'), 'kbbOnline')
-        _vjd = _book_val_api(pg.get('nada'), 'nada')
-        _vmm = _book_val_api(pg.get('manheim'), 'manheim')
+        try:
+            _mh = pg.get('manheim') or {}
+            _bb = pg.get('blackBook') or {}
+            print('[books-api] bid=%s ODO=%s avgAuc=%s pg_keys=%s' % (bid_id, miles, _mh.get('averageAuctionPrice'), list(pg.keys())), flush=True)
+            import json as _j2
+            open('/tmp/pg_dump_%s.json' % bid_id, 'w').write(_j2.dumps(pg, default=str))
+        except Exception:
+            pass
+        _vbb = _book_val_pv(pg.get('blackBook'))
+        _vkb = _book_val_pv(pg.get('kbb'))
+        _vkc = _book_val_pv(pg.get('kbbOnline'))
+        _vjd = _book_val_pv(pg.get('nada'))
+        _vmm = (pg.get('manheim') or {}).get('averageAuctionPrice') or _book_val_api(pg.get('manheim'), 'manheim')
         def _fmt(v):
             return ('$%s' % format(int(v), ',')) if v else '—'
         books = {
@@ -18829,6 +19021,37 @@ def api_ipacket_status(bid_id):
                  and (row.get('total_msrp') or row.get('base_price')))
     return jsonify({'status': 'not_available' if row.get('not_available') else 'complete',
                     'has_sticker': _good})
+
+
+@app.route('/api/bid/<int:bid_id>/vauto-extras-status')
+def api_vauto_extras_status(bid_id):
+    """SAVED_APPRAISAL_PUSH_2026_06_17: tiny status so the bid page reloads the
+    moment the Saved-vAuto link + rBook + MMR cards land. In api_mode the price
+    fires fast off the API books; these extras arrive ~30-40s later (browser
+    appraisal-save -> appraisal_url -> direct BFF rBook/Manheim). The assess-status
+    reload fires on price (too early), so this poller catches the extras."""
+    db = get_db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT (appraisal_url LIKE 'http%%') AS has_url, "
+                    "(rbook_competitive_set IS NOT NULL) AS has_rb, "
+                    "(manheim_transactions IS NOT NULL) AS has_mh, "
+                    "(EXISTS (SELECT 1 FROM accutrade_lookups a WHERE a.bid_id=%s "
+                    "         AND (a.trade_in IS NOT NULL OR a.not_available IS TRUE))) AS has_accu "
+                    "FROM vauto_lookups WHERE bid_id=%s", (bid_id, bid_id))
+        row = cur.fetchone()
+    except Exception:
+        row = None
+    db.close()
+    if not row:
+        return jsonify({'ready': False})
+    # POPULATE_AT_DONE_2026_06_17: wait for the LAST piece (AccuTrade appraisal
+    # values) too, not just vAuto -- so the single reload lands EVERYTHING at once
+    # (autocheck + 5 books + link + rBook/MMR + all AccuTrade), no staged refreshes.
+    ready = bool(row.get('has_url') and row.get('has_rb') and row.get('has_mh') and row.get('has_accu'))
+    return jsonify({'ready': ready, 'has_url': bool(row.get('has_url')),
+                    'has_rbook': bool(row.get('has_rb')), 'has_mmr': bool(row.get('has_mh')),
+                    'has_accu': bool(row.get('has_accu'))})
 
 
 @app.route('/api/verify-comps', methods=['POST'])

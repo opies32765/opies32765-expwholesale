@@ -2029,7 +2029,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
             ('Instant Offer', accutrade_data.guaranteed_offer),
             ('Target Auction', accutrade_data.trade_in),
             ('Target Retail', accutrade_data.trade_market),
-            ('Manheim', accutrade_data.retail),
+            ('Manheim', accutrade_data.retail or (vauto_data.mmr if vauto_data else None)),
             ('Wholesale / Avg', accutrade_data.market_avg)
           ] %}
           {% for label, val in at_books %}
@@ -3839,6 +3839,19 @@ async function clearEstimate() {
 //   - <5 s since last reload (avoid double-fires with the 4 enrichment pollers)
 window.__ewHoldReload = window.__ewHoldReload || false;
 window._ewReloadGuarded = function(){ if (window.__ewHoldReload) return false; location.reload(); return true; };
+/* SAVED_APPRAISAL_PUSH_2026_06_17 (v2): in api_mode the Saved-vAuto link + rBook +
+   MMR cards land ~30-50s after the fast price. Poll the extras status and reload the
+   moment they go ready. No Jinja guard / no sessionStorage (those raced the early
+   price-reload + the link-before-cards timing): instead reload only on a false->true
+   TRANSITION, so if the page already shows everything at load we never loop. ~3min. */
+(function(){ try { var bid='{{ bid.id }}', sawNotReady=false;
+  function chk(){ fetch('/api/bid/'+bid+'/vauto-extras-status',{cache:'no-store'}).then(function(r){return r.json();})
+    .then(function(d){ if(!d) return;
+      if(!d.ready){ sawNotReady=true; return; }
+      clearInterval(t); if(sawNotReady){ _ewReloadGuarded(); } }).catch(function(){}); }
+  var t=setInterval(chk, 2000); chk();
+  setTimeout(function(){ clearInterval(t); }, 180000);
+} catch(e){} })();
 (function _autoRefresh() {
   // AUTO_REFRESH_MODAL_GUARDS_2026_05_20: don't reload while the user
   // is reading a modal/lightbox. Was only checking .share-overlay.show
