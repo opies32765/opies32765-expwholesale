@@ -1309,7 +1309,8 @@ import local_brain_shim  # EW_SHIM_2026_06_11: route ALL genai generate_content 
 
 
 def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-flash',
-                max_tokens=1024, temperature=0.4, disable_thinking=False):
+                max_tokens=1024, temperature=0.4, disable_thinking=False,
+                img_max_dim=1536, img_quality=85):  # NINEB_VIN_HIRES_2026_06_18
     # GEMINI_FLASH_MILES_OCR_2026_05_17 (param): pass disable_thinking=True for
     # terse-output OCR tasks (single number, 17-char VIN). With thinking enabled
     # the model can burn most of max_tokens on internal reasoning, leaving
@@ -1340,7 +1341,7 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-f
     if image_bytes:
         # Downsize oversized images before encoding — Gemini's per-request
         # token budget is finite; high-res dealer photos can blow it.
-        image_bytes, mime = _resize_image_for_gemini(image_bytes)
+        image_bytes, mime = _resize_image_for_gemini(image_bytes, max_dim=img_max_dim, quality=img_quality)  # NINEB_VIN_HIRES_2026_06_18
         contents = [
             types.Part.from_bytes(data=image_bytes, mime_type=mime),
             prompt,
@@ -2018,6 +2019,7 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
     for attempt in range(2):
         result = gemini_call(hw_prompt, image_bytes=file_bytes, mime=media_type,
                              model='gemini-2.5-pro', max_tokens=2000,
+                             img_max_dim=3000, img_quality=92,  # NINEB_VIN_HIRES_2026_06_18: 1536 downscale shrank fine sticker VINs to ~6-8px = unreadable; the 9B accepts up to 16MP
                              temperature=(0.0 if attempt == 0 else 0.4))  # HARDEN_OCR_TEMP_2026_06_11
         if not result:
             continue
@@ -2050,7 +2052,8 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
 
     # Cross-check 2: Gemini Flash. Accept ONLY if check digit valid.
     flash_result = gemini_call(VIN_PROMPT, image_bytes=file_bytes, mime=media_type,
-                               model='gemini-2.5-flash', max_tokens=100, temperature=0.0)  # HARDEN_OCR_TEMP_2026_06_11
+                               model='gemini-2.5-flash', max_tokens=100, temperature=0.0,
+                               img_max_dim=3000, img_quality=92)  # NINEB_VIN_HIRES_2026_06_18
     if flash_result:
         flash_vin = flash_result.strip().upper()
         m = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', flash_vin)
@@ -4670,9 +4673,24 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
     Results land on bid_photos.vin_extracted, bids.vin (if NULL), bids.mileage (if NULL).
     """
     try:
-        _resp = requests.get(media_url, auth=(TWILIO_SID, TWILIO_TOKEN), timeout=30)
-        if _resp.status_code != 200:
-            print(f'[sms-photo-bg] HTTP {_resp.status_code} bid={bid_id} photo={photo_id}', flush=True)
+        # TWILIO_404_RETRY_2026_06_18: Twilio media is frequently NOT provisioned
+        # for ~1-6s after the webhook fires -> a transient 404 (or 5xx). The old
+        # single GET silently dropped the photo on that 404 -> the VIN/odometer/
+        # window-sticker was never OCR'd (bid 3545: the sticker 404'd once and the
+        # VIN was lost). Retry with backoff so a momentary 404 can't lose a photo.
+        import time as _dl_t
+        _resp = None
+        for _dl_try in range(5):
+            _resp = requests.get(media_url, auth=(TWILIO_SID, TWILIO_TOKEN), timeout=30)
+            if _resp.status_code == 200:
+                break
+            if _resp.status_code in (404, 425, 429, 500, 502, 503, 504) and _dl_try < 4:
+                print(f'[sms-photo-bg] HTTP {_resp.status_code} retry {_dl_try+1}/5 bid={bid_id} photo={photo_id}', flush=True)
+                _dl_t.sleep(2 * (_dl_try + 1))  # 2,4,6,8s
+                continue
+            break
+        if not _resp or _resp.status_code != 200:
+            print(f'[sms-photo-bg] HTTP {_resp.status_code if _resp else "no-resp"} GAVE UP after retries bid={bid_id} photo={photo_id}', flush=True)
             return
         mime = (_resp.headers.get('Content-Type') or media_type or 'image/jpeg').split(';')[0]
         img_bytes = _resp.content
@@ -7476,6 +7494,14 @@ def reconcile_ymm_post_enrichment(bid_id, force=False):
         cur_disp = {'year': b.get('year'), 'make': (b.get('make') or ''),
                     'model': (b.get('model') or ''), 'trim': (b.get('trim') or '')}
 
+        # CARFAX_YMM_AUTHORITY_2026_06_18: carfax decode is THE authority for YMM.
+        try:
+            _cfa = _apply_carfax_ymm_authority(bid_id)
+            if _cfa and _cfa.get('corrected'):
+                return _cfa
+        except Exception:
+            pass
+
         # DETERMINISTIC MAKE GUARD (before the LLM): if the current make contradicts
         # the VIN's WMI, the LLM is unreliable here (Gemini fallback hallucinates
         # Mercedes -> Porsche, bid 3488). Fix it deterministically -- purge the
@@ -7506,6 +7532,13 @@ def reconcile_ymm_post_enrichment(bid_id, force=False):
             except Exception as _cz:
                 print('[ymm-reconcile] bid=%s carline recanon err: %s' % (bid_id, _cz), flush=True)
             return {'model': _cl_model, 'corrected': True, 'reason': 'car-line %s -> %s' % (vin[:4], _cl_model)}
+        # NO_9B_2026_06_18 (operator): the 9B must NEVER reconcile intake YMM -- it
+        # mangled make/model (BMW X5 -> X3, Lexus -> 'Porsche 911'). carfax (authority,
+        # applied above) + the deterministic WMI/car-line guards are the ONLY correctors.
+        # If none caught it, trust the decode, lock it, and return. No LLM, ever.
+        cur.execute("UPDATE bids SET ymm_reconciled_at=NOW() WHERE id=%s", (bid_id,))
+        db.commit()
+        return None
         nh = {}
         try:
             from claude_vin_decoder import decode_vin_smart
@@ -9397,12 +9430,21 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
             db.close()
             return False
 
-        # Atomic claim — only one caller wins
+        # Atomic claim — only one caller wins.
+        # TIMING_ACCURATE_2026_06_18: stamp all_enriched_at = the moment ALL
+        # enrichment legs (vAuto+AccuTrade+iPacket+rBook+MMR) are terminal in the
+        # DB, i.e. "all info except the AI assessment is populated". This is the
+        # authoritative end-of-enrichment timestamp, decoupled from the AI price
+        # (honors LISTING_NEVER_WAITS_ON_ASSESSMENT). Only stamp when the FULL
+        # gate is satisfied (not the vauto-only fallback-timer path).
+        _full_ready = bool(has_vauto and has_accu and rb_done and mh_done and has_ipkt)
         cur.execute("""
-            UPDATE bids SET ai_assessed_at=NOW()
+            UPDATE bids SET ai_assessed_at=NOW(),
+                all_enriched_at = CASE WHEN %s THEN COALESCE(all_enriched_at, NOW())
+                                       ELSE all_enriched_at END
             WHERE id=%s AND ai_assessed_at IS NULL
             RETURNING id
-        """, (bid_id,))
+        """, (_full_ready, bid_id,))
         claimed = cur.fetchone() is not None
         db.commit()
         db.close()
@@ -14830,7 +14872,7 @@ def api_admin_workers_snapshot():
             w.auto_demoted_at,
             (SELECT COUNT(*) FROM worker_jobs wj
               WHERE wj.worker_id = w.worker_id
-                AND wj.status = 'ok'
+                AND wj.status IN ('ok','ok_api_mode')  -- TIMING_ACCURATE_2026_06_18: api_mode closes as ok_api_mode, was undercounted
                 AND wj.completed_at::date = (NOW() AT TIME ZONE 'America/New_York')::date
             ) AS lookups_today,
             (SELECT b.id FROM bids b
@@ -14948,20 +14990,61 @@ def api_admin_workers_snapshot():
         if looks_stuck:
             stuck.append(item)
 
-    # Recent activity timeline — last 50 completed bids
+    # Recent activity timeline — last 50 completed bids.
+    # TIMING_ACCURATE_2026_06_18: report the REAL end-to-end enrich time, not the
+    # vAuto-only duration_ms. T0 = first worker claim (MIN over all worker_jobs
+    # rows for the bid, incl. a stalled first-claim); T1 = all_enriched_at (stamped
+    # at the assess-gate when every leg is terminal). queue = created→first claim;
+    # accu_tail = AccuTrade landed − vAuto landed (the usual long pole). Naive cols
+    # are ET wall-clock → cast AT TIME ZONE so the math is TZ-safe in any session.
     cur.execute("""
         SELECT wj.bid_id, wj.worker_id, wj.claimed_at, wj.completed_at,
                wj.duration_ms, wj.status,
-               b.vin, b.year, b.make, b.model
+               b.vin, b.year, b.make, b.model,
+               b.all_enriched_at,
+               fc.first_claim,
+               ad.all_done,
+               -- TOTAL = bid received (created) → fully populated. all_done is the
+               -- authoritative gate stamp when present, else the real last-leg-landed
+               -- time so EVERY bid (incl. pre-stamp history) shows a number.
+               EXTRACT(EPOCH FROM (ad.all_done
+                     - (b.created_at AT TIME ZONE 'America/New_York')))::int AS total_sec,
+               EXTRACT(EPOCH FROM (ad.all_done - fc.first_claim))::int AS enrich_sec,
+               EXTRACT(EPOCH FROM (fc.first_claim
+                     - (b.created_at AT TIME ZONE 'America/New_York')))::int AS queue_sec,
+               EXTRACT(EPOCH FROM (
+                     (a.looked_up_at AT TIME ZONE 'America/New_York')
+                   - (v.looked_up_at AT TIME ZONE 'America/New_York')))::int AS accu_tail_sec
         FROM worker_jobs wj
         LEFT JOIN bids b ON b.id = wj.bid_id
+        LEFT JOIN LATERAL (
+            SELECT MIN(claimed_at) AS first_claim FROM worker_jobs wj2
+            WHERE wj2.bid_id = wj.bid_id
+        ) fc ON true
+        LEFT JOIN vauto_lookups v ON v.bid_id = wj.bid_id
+        LEFT JOIN accutrade_lookups a ON a.bid_id = wj.bid_id
+        LEFT JOIN ipacket_lookups i ON i.bid_id = wj.bid_id
+        LEFT JOIN LATERAL (
+            SELECT COALESCE(b.all_enriched_at, GREATEST(
+                (v.looked_up_at  AT TIME ZONE 'America/New_York'),
+                v.rbook_completed_at, v.manheim_completed_at,
+                (a.looked_up_at  AT TIME ZONE 'America/New_York'),
+                (i.looked_up_at  AT TIME ZONE 'America/New_York'))) AS all_done
+        ) ad ON true
         WHERE wj.completed_at IS NOT NULL
         ORDER BY wj.completed_at DESC
-        LIMIT 50
+        LIMIT 120
     """)
     activity = []
+    _seen_bids = set()   # DEDUP_2026_06_18: one row per bid (a re-claimed/stuck
     for r in cur.fetchall():
         bid_id = r['bid_id']
+        # bid can have several completed worker_jobs rows -> show only the latest).
+        if bid_id in _seen_bids:
+            continue
+        _seen_bids.add(bid_id)
+        if len(activity) >= 50:
+            break
         # Pull phase markers
         cur.execute("""
             SELECT phase, state, ts FROM bid_phase_progress
@@ -14982,8 +15065,13 @@ def api_admin_workers_snapshot():
                                           r.get('make') or '',
                                           r.get('model') or ''])).strip(),
             'claimed_at': r['claimed_at'].isoformat() if r['claimed_at'] else None,
+            'first_claim': r['first_claim'].isoformat() if r.get('first_claim') else None,
             'completed_at': r['completed_at'].isoformat() if r['completed_at'] else None,
             'duration_ms': r['duration_ms'],
+            'total_sec': r.get('total_sec'),
+            'enrich_sec': r.get('enrich_sec'),
+            'queue_sec': r.get('queue_sec'),
+            'accu_tail_sec': r.get('accu_tail_sec'),
             'status': r['status'],
             'phases': markers,
         })
@@ -15727,8 +15815,13 @@ def _capi_session():
     return _s
 
 
-def _capi_render_pdf(url, out_pdf, budget=20000):
-    """Headless-Chrome render a URL -> PDF. Returns True if a real PDF landed."""
+def _capi_render_pdf(url, out_pdf, budget=3000):
+    """Headless-Chrome render a URL -> PDF. Returns True if a real PDF landed.
+    CARFAX_RENDER_BUDGET_3S_2026_06_18: budget was 20000 -> the carfax report's
+    trackers/JS kept Chrome's virtual clock busy the FULL 20s (render measured
+    at 19.4s = 78%% of the whole carfax chain, which GATES AccuTrade start). The
+    trim lives in the vehicle header at the TOP of the report (renders in ~1-2s),
+    so 3s is ample (PDF stays 4 pages/1.9MB complete) and saves ~11.5s/bid."""
     try:
         if os.path.exists(out_pdf):
             os.remove(out_pdf)
@@ -15798,10 +15891,170 @@ def _render_full_png(pdf, out_png, max_pages=16, dpi=120):
             pass
 
 
+_CFX_TITLE_PROMPT = (
+    'Extract the vehicle fields from this description and return ONLY a compact JSON '
+    'object with keys "year","make","model","trim". The trim is the variant/series that '
+    'follows the model. Examples: "2026 MERCEDES-BENZ S-CLASS S 580 4MATIC" -> '
+    '{"year":2026,"make":"Mercedes-Benz","model":"S-Class","trim":"S 580 4MATIC"}; '
+    '"2020 PORSCHE 911 CARRERA S" -> {"year":2020,"make":"Porsche","model":"911","trim":"Carrera S"}; '
+    '"2026 LAMBORGHINI TEMERARIO" -> {"year":2026,"make":"Lamborghini","model":"Temerario","trim":""}. '
+    'Return JSON only, no prose, no code fences.')
+
+
+def _vauto_vehicleinfo(vin):
+    """NO_9B_2026_06_18: structured year/make/model/series from the vAuto BFF
+    vehicleInfo endpoint -- a deterministic VIN decode (~0.4s, NO 9B/LLM).
+    Reliable for make/model/year on every VIN tested. Best-effort; None on failure."""
+    try:
+        s = _capi_session()
+        if not s:
+            return None
+        r = s.post(_BFF2_VEHINFO, json={'vin': vin}, timeout=10)
+        if r.status_code != 200:
+            return None
+        vi = (r.json() or {}).get('vehicleInfo') or {}
+        return {'year': vi.get('year'), 'make': vi.get('make'),
+                'model': vi.get('model'), 'series': vi.get('series')}
+    except Exception:
+        return None
+
+
+def _carfax_trim_from_title(vin, ymmt):
+    """NO_9B_2026_06_18 (operator: the 9B must NEVER touch the intake decode):
+    decode YEAR/MAKE/MODEL/TRIM with ZERO 9B. MAKE/MODEL/YEAR come STRUCTURED from the
+    vAuto BFF vehicleInfo (deterministic). TRIM comes from the carfax page <title>
+    string with the year/make/model tokens subtracted (carfax is the trim authority --
+    it carries the exotic trims the BFF series collapses to Base/None). vehicleInfo
+    series is the trim fallback when there is no title. Universal, no per-make logic.
+    Returns (trim, payload) or (None, None)."""
+    vi = _vauto_vehicleinfo(vin) or {}
+    yr = vi.get('year'); mk = (vi.get('make') or '').strip(); md = (vi.get('model') or '').strip()
+    if not (mk and md):
+        return None, None
+    trim = ''
+    if ymmt:
+        drop = set()
+        if yr:
+            drop.add(str(yr))
+        for t in (mk + ' ' + md).upper().split():
+            if t:
+                drop.add(t)
+        rem = [t for t in ymmt.split() if t.upper().strip() not in drop]
+        while rem and re.match(r'^(19|20)\d{2}$', rem[0]):
+            rem.pop(0)
+        trim = ' '.join(rem).strip()
+    if not trim:
+        _ser = (vi.get('series') or '').strip()
+        trim = '' if _ser.lower() in ('base', 'none', '') else _ser
+    payload = {'year': yr, 'make': mk, 'model': md, 'trim': trim, 'source': 'carfax_title+vehicleinfo'}
+    return (trim or None), payload
+
+
+def _carfax_render_display(bid_id, vin, connect):
+    """CARFAX_TITLE_TRIM_2026_06_18: render the connect report -> PDF/PNG for the
+    USER-FACING display only, ASYNC (off the AccuTrade-gating trim path). Updates
+    carfax_screenshot when ready; the live bid page fills it in."""
+    try:
+        pdf = os.path.join(VAUTO_REPORTS_DIR, 'carfax_%s.pdf' % vin)
+        png = os.path.join(VAUTO_REPORTS_DIR, 'carfax_%s.png' % vin)
+        if not _capi_render_pdf(connect, pdf):
+            print('[carfax-render] bid=%s render failed' % bid_id, flush=True); return
+        if not _capi_pdf_page1_png(pdf, png):
+            print('[carfax-render] bid=%s png failed' % bid_id, flush=True); return
+        db = get_db(); cur = db.cursor()
+        cur.execute("UPDATE vauto_lookups SET carfax_screenshot=%s WHERE bid_id=%s",
+                    ('/vauto_reports/' + os.path.basename(png), bid_id))
+        db.commit(); db.close()
+        print('[carfax-render] bid=%s display PNG ready' % bid_id, flush=True)
+    except Exception as _e:
+        print('[carfax-render] bid=%s err %s' % (bid_id, _e), flush=True)
+
+
+def _apply_carfax_ymm_authority(bid_id):
+    """CARFAX_YMM_AUTHORITY_2026_06_18 (operator): the carfax report decode is THE
+    AUTHORITY for YEAR/MAKE/MODEL. carfax_json (parsed from the report <title>) carries
+    a clean year/make/model for EVERY VIN. If it disagrees with the displayed listing,
+    apply carfax -- deterministic, universal, ZERO per-make logic. Fixes intake
+    mis-decodes (e.g. Lexus UX shown as 'Porsche 911', Lexus RX 350 as 'Toyota RAV4').
+    Rewrites display make/model + canon_* + the message text. No LLM. Returns the
+    corrected dict or None. Sets ymm_reconciled_at so the later 9B reconcile defers."""
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("SELECT b.year, b.make, b.model, b.trim, "
+                    "(SELECT carfax_json FROM vauto_lookups WHERE bid_id=b.id AND carfax_json IS NOT NULL ORDER BY id DESC LIMIT 1) AS cfj "
+                    "FROM bids b WHERE b.id=%s", (bid_id,))
+        r = cur.fetchone()
+        if not r:
+            return None
+        cfj = r.get('cfj') if hasattr(r, 'get') else r[4]
+        if isinstance(cfj, str):
+            try: cfj = json.loads(cfj)
+            except Exception: cfj = {}
+        cfj = cfj or {}
+        cf_make = (cfj.get('make') or '').strip()
+        cf_model = (cfj.get('model') or '').strip()
+        cf_year = cfj.get('year')
+        cf_trim = (cfj.get('trim') or '').strip()
+        if not (cf_make and cf_model):
+            return None
+        def _n(s): return str(s or '').strip().upper()
+        cur_make = r.get('make') or ''; cur_model = r.get('model') or ''; cur_year = r.get('year')
+        disagree = ((_n(cf_make) != _n(cur_make)) or (_n(cf_model) != _n(cur_model))
+                    or (cf_year and str(cf_year) != str(cur_year or '')))
+        if not disagree:
+            # CARFAX_LOCK_2026_06_18: carfax decoded this VIN and CONFIRMS the
+            # listing -> LOCK it (set ymm_reconciled_at) so the unreliable 9B
+            # reconcile cannot second-guess carfax. bid 3541: 9B turned a
+            # carfax-correct BMW X5 into an X3. Carfax is the YMM authority.
+            try:
+                cur.execute("UPDATE bids SET ymm_reconciled_at=NOW() WHERE id=%s AND ymm_reconciled_at IS NULL", (bid_id,))
+                db.commit()
+            except Exception:
+                pass
+            return None
+        sets = ['make=%s', 'model=%s', 'canon_make=%s', 'canon_model=%s']
+        vals = [cf_make.upper(), cf_model, cf_make.upper(), cf_model]
+        if cf_year:
+            sets += ['year=%s', 'canon_year=%s']; vals += [cf_year, cf_year]
+        if cf_trim:
+            sets += ['trim=%s', 'canon_trim=%s']; vals += [cf_trim, cf_trim]
+        sets += ["canon_source=%s", "ymm_reconciled_at=NOW()", "updated_at=NOW()"]
+        vals += ['carfax_authority']
+        vals.append(bid_id)
+        cur.execute("UPDATE bids SET " + ', '.join(sets) + " WHERE id=%s", vals)
+        try:
+            old_seg = (str(cur_make).strip() + ' ' + str(cur_model).strip()).strip()
+            new_seg = (cf_make + ' ' + cf_model).strip()
+            if old_seg and new_seg and old_seg.upper() != new_seg.upper():
+                cur.execute("UPDATE bids SET raw_message=replace(raw_message,%s,%s) WHERE id=%s AND raw_message LIKE %s",
+                            (old_seg, new_seg, bid_id, '%' + old_seg + '%'))
+                cur.execute("UPDATE bid_messages SET message=replace(message,%s,%s) WHERE bid_id=%s AND message LIKE %s",
+                            (old_seg, new_seg, bid_id, '%' + old_seg + '%'))
+        except Exception:
+            pass
+        db.commit()
+        print('[carfax-ymm] bid=%s AUTHORITY %s %s %s (was %s %s %s)'
+              % (bid_id, cf_year, cf_make, cf_model, cur_year, cur_make, cur_model), flush=True)
+        return {'year': cf_year, 'make': cf_make.upper(), 'model': cf_model,
+                'trim': cf_trim, 'corrected': True, 'reason': 'carfax YMM authority'}
+    except Exception as _e:
+        try: db.rollback()
+        except Exception: pass
+        print('[carfax-ymm] bid=%s err %s' % (bid_id, _e), flush=True)
+        return None
+    finally:
+        try: db.close()
+        except Exception: pass
+
+
 def carfax_api_enrich(bid_id, vin):
-    """Pull Carfax via the BFF API, render the public report to PDF + PNG, store
-    the share URL + PDF + PNG, then run _carfax_ocr_now so the 9B reads the trim.
-    Returns the trim string or None. Best-effort; never raises."""
+    """Pull Carfax via the BFF API. CARFAX_TITLE_TRIM_2026_06_18: the trim is read
+    DIRECTLY from the connect report page's <title> (it holds YEAR MAKE MODEL TRIM for
+    EVERY vehicle -- incl. exotics that VIN-decode APIs miss like 911 Carrera S /
+    Bentley) via a ~0.5s HTTP GET -- NO Chrome render, NO PDF, NO OCR/9B-vision on the
+    AccuTrade-gating path (was ~13s render+OCR). ONE universal source, zero per-make
+    logic. The display PDF/PNG still renders, but ASYNC. Returns the trim or None."""
+    _cft_enter = time.time()
     try:
         s = _capi_session()
         if not s:
@@ -15812,13 +16065,44 @@ def carfax_api_enrich(bid_id, vin):
         if not gw:
             print('[carfax-api] bid=%s no report.url' % bid_id, flush=True)
             return None
-        r1 = s.get(gw, headers={'Accept': 'text/html,*/*'}, allow_redirects=False, timeout=20)
-        connect = r1.headers.get('Location') or r1.headers.get('location')
-        if not connect:
-            print('[carfax-api] bid=%s gateway no redirect (status %s)' % (bid_id, r1.status_code), flush=True)
-            return None
-        ts = int(time.time())
-        pdf = os.path.join(VAUTO_REPORTS_DIR, 'carfax_%s.pdf' % vin)  # derivable from the PNG for in-page full-report view
+        r1 = s.get(gw, headers={'Accept': 'text/html,*/*'}, allow_redirects=True, timeout=25)
+        connect = r1.url
+        html = r1.text or ''
+        # FAST PATH: parse the trim from the page <title> (universal).
+        trim = None; payload = None; ymmt = None
+        try:
+            _tm = re.search(r'<title[^>]*>\s*CARFAX Vehicle History Report for this\s+(.*?)\s*:\s*'
+                            + re.escape(vin), html, re.I | re.S)
+            if _tm:
+                ymmt = re.sub(r'\s+', ' ', _tm.group(1)).strip()
+            trim, payload = _carfax_trim_from_title(vin, ymmt)
+        except Exception as _te:
+            print('[carfax-api] bid=%s title parse err %s' % (bid_id, _te), flush=True)
+        if payload is not None:
+            db = get_db(); cur = db.cursor()
+            cur.execute("INSERT INTO vauto_lookups (bid_id, vin, carfax_share_url, carfax_json, looked_up_at) "
+                        "VALUES (%s, %s, %s, %s::jsonb, NOW()) "
+                        "ON CONFLICT (bid_id) DO UPDATE SET "
+                        "  carfax_share_url = COALESCE(EXCLUDED.carfax_share_url, vauto_lookups.carfax_share_url), "
+                        "  carfax_json = EXCLUDED.carfax_json, "
+                        "  vin = COALESCE(NULLIF(vauto_lookups.vin, ''), EXCLUDED.vin)",
+                        (bid_id, vin, connect, json.dumps(payload)))
+            db.commit(); db.close()
+            try:
+                threading.Thread(target=_carfax_render_display, args=(bid_id, vin, connect),
+                                 daemon=True, name='cfx-render-%s' % bid_id).start()
+            except Exception:
+                pass
+            try:
+                _apply_carfax_ymm_authority(bid_id)  # CARFAX_YMM_AUTHORITY_2026_06_18
+            except Exception:
+                pass
+            print('[carfax-api] bid=%s TITLE trim=%r ymmt=%r %.1fs (render async)' %
+                  (bid_id, trim, ymmt, time.time() - _cft_enter), flush=True)
+            return trim
+        # FALLBACK: title missing/unparseable -> old synchronous render + OCR (never regress).
+        print('[carfax-api] bid=%s no title trim -> sync render+OCR fallback' % bid_id, flush=True)
+        pdf = os.path.join(VAUTO_REPORTS_DIR, 'carfax_%s.pdf' % vin)
         png = os.path.join(VAUTO_REPORTS_DIR, 'carfax_%s.png' % vin)
         if not _capi_render_pdf(connect, pdf):
             print('[carfax-api] bid=%s render failed' % bid_id, flush=True)
@@ -15838,7 +16122,7 @@ def carfax_api_enrich(bid_id, vin):
         trim = _carfax_ocr_now(bid_id, db)
         try: db.close()
         except Exception: pass
-        print('[carfax-api] bid=%s trim=%r connect=%s pdf=%s' % (bid_id, trim, connect[:40], os.path.basename(pdf)), flush=True)
+        print('[carfax-api] bid=%s FALLBACK trim=%r %.1fs' % (bid_id, trim, time.time() - _cft_enter), flush=True)
         return trim
     except Exception as _e:
         print('[carfax-api] bid=%s err %s: %s' % (bid_id, type(_e).__name__, _e), flush=True)
@@ -16598,8 +16882,15 @@ def api_accutrade_pending():
                       AND (EXISTS (SELECT 1 FROM vauto_lookups vl
                                     WHERE vl.bid_id = b.id AND vl.carfax_json IS NOT NULL)
                        OR b.created_at < NOW() - INTERVAL '3 minutes')
+                      -- ACCU_PICKUP_FAST_2026_06_18: was 40s. iPacket via the djapi
+                      -- fast-path lands ~11-12s and Carfax (the trim authority) ~13-17s,
+                      -- so a 15s window still catches fast iPacket. The old 40s ceiling
+                      -- just added ~25s of pickup latency on slow-iPacket bids (iPacket
+                      -- landed 51-71s = after the ceiling fired, so the wait got nothing).
+                      -- The IPACKET_TRIM_REARM safety net re-runs AccuTrade if the sticker
+                      -- trim later differs from the carfax pick.
                       AND (EXISTS (SELECT 1 FROM ipacket_lookups ip WHERE ip.bid_id = b.id)
-                           OR b.created_at < NOW() - INTERVAL '40 seconds')
+                           OR b.created_at < NOW() - INTERVAL '15 seconds')
                   )"""
     cur.execute("""
         WITH eligible AS (

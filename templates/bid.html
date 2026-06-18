@@ -3863,7 +3863,7 @@ window.__ewAllReady = window.__ewAllReady || false;
 // POPULATE_AT_DONE_2026_06_17: suppress EVERY enrichment-poller reload until the whole
 // bid is ready (link+rBook+MMR+AccuTrade+iPacket) so the page paints once, complete --
 // no iPacket-then-save-then-numbers dribble. Manual reloads use location.reload() direct.
-window._ewReloadGuarded = function(){ if (window.__ewHoldReload) return false; if (!window.__ewAllReady) return false; location.reload(); return true; };
+window._ewReloadGuarded = function(){ if (window.__ewHoldReload) return false; /* IPKT_DISPLAY_NOWAIT_2026_06_18: dropped the !__ewAllReady block -- it gated EVERY event-driven reload on the vAuto-extras (saved-link+rBook+MMR, ~30-50s/40s failsafe), so iPacket/AccuTrade reloads were held ~10s+ AFTER their data already landed. Each leg's poller now reloads the instant its own data lands; a 2.5s debounce prevents reload thrash. The blind 45s auto-refresh stays __ewAllReady-gated below. */ var _now=Date.now(); if (window.__ewLastReload && (_now-window.__ewLastReload)<2500) return false; window.__ewLastReload=_now; location.reload(); return true; };
 /* SAVED_APPRAISAL_PUSH_2026_06_17 (v2): in api_mode the Saved-vAuto link + rBook +
    MMR cards land ~30-50s after the fast price. Poll the extras status and reload the
    moment they go ready. No Jinja guard / no sessionStorage (those raced the early
