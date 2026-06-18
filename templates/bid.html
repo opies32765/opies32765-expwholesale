@@ -1947,7 +1947,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         {% if vauto_data.carfax_screenshot or vauto_data.autocheck_screenshot %}
         <div style="margin-top:14px;display:flex;gap:8px;flex:1">
           {% if vauto_data.carfax_screenshot %}
-          <div style="flex:1;cursor:pointer;min-height:0" onclick="openReportLightbox('{{ vauto_data.carfax_screenshot }}')">
+          <div style="flex:1;cursor:pointer;min-height:0" title="Click for the full Carfax report" onclick="openReportLightbox('{{ vauto_data.carfax_screenshot[:-4] }}_full.png')">
             <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Carfax{% if vauto_data.carfax_share_url %} <a href="{{ vauto_data.carfax_share_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:9px;color:#60a5fa;text-decoration:none;text-transform:none;letter-spacing:0">🔗 full report →</a>{% endif %}</div>
             <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
               <img src="{{ vauto_data.carfax_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="Carfax Report">
@@ -1958,7 +1958,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           {% if vauto_data.autocheck_screenshot.endswith('.pdf') %}<div style="flex:1;min-height:0">
             <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AutoCheck</div>
             <a href="{{ vauto_data.autocheck_screenshot }}" target="_blank" rel="noopener" style="display:flex;align-items:center;justify-content:center;background:#0f172a;border:1px solid #1e293b;border-radius:8px;height:100%;min-height:80px;color:#60a5fa;text-decoration:none;font-size:13px">📄 View AutoCheck PDF →</a>
-          </div>{% else %}<div style="flex:1;cursor:pointer;min-height:0" onclick="openReportLightbox('{{ vauto_data.autocheck_screenshot }}')">
+          </div>{% else %}<div style="flex:1;cursor:pointer;min-height:0" title="Click for the full AutoCheck report" onclick="openReportLightbox('{{ vauto_data.autocheck_screenshot[:-4] }}_full.png')">
             <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AutoCheck</div>
             <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
               <img src="{{ vauto_data.autocheck_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AutoCheck Report">
@@ -3838,7 +3838,11 @@ async function clearEstimate() {
 //   - hidden tab (no point reloading in the background)
 //   - <5 s since last reload (avoid double-fires with the 4 enrichment pollers)
 window.__ewHoldReload = window.__ewHoldReload || false;
-window._ewReloadGuarded = function(){ if (window.__ewHoldReload) return false; location.reload(); return true; };
+window.__ewAllReady = window.__ewAllReady || false;
+// POPULATE_AT_DONE_2026_06_17: suppress EVERY enrichment-poller reload until the whole
+// bid is ready (link+rBook+MMR+AccuTrade+iPacket) so the page paints once, complete --
+// no iPacket-then-save-then-numbers dribble. Manual reloads use location.reload() direct.
+window._ewReloadGuarded = function(){ if (window.__ewHoldReload) return false; if (!window.__ewAllReady) return false; location.reload(); return true; };
 /* SAVED_APPRAISAL_PUSH_2026_06_17 (v2): in api_mode the Saved-vAuto link + rBook +
    MMR cards land ~30-50s after the fast price. Poll the extras status and reload the
    moment they go ready. No Jinja guard / no sessionStorage (those raced the early
@@ -3848,9 +3852,10 @@ window._ewReloadGuarded = function(){ if (window.__ewHoldReload) return false; l
   function chk(){ fetch('/api/bid/'+bid+'/vauto-extras-status',{cache:'no-store'}).then(function(r){return r.json();})
     .then(function(d){ if(!d) return;
       if(!d.ready){ sawNotReady=true; return; }
+      window.__ewAllReady = true;
       clearInterval(t); if(sawNotReady){ _ewReloadGuarded(); } }).catch(function(){}); }
   var t=setInterval(chk, 2000); chk();
-  setTimeout(function(){ clearInterval(t); }, 180000);
+  setTimeout(function(){ clearInterval(t); window.__ewAllReady = true; }, 40000);
 } catch(e){} })();
 (function _autoRefresh() {
   // AUTO_REFRESH_MODAL_GUARDS_2026_05_20: don't reload while the user
@@ -3860,6 +3865,7 @@ window._ewReloadGuarded = function(){ if (window.__ewHoldReload) return false; l
   let lastReload = Date.now();
   setInterval(() => {
     if (window.__ewHoldReload) return;
+    if (!window.__ewAllReady) return;   // hold the 45s refresh until fully ready (90s failsafe unlocks)
     if (document.hidden) return;
     if (Date.now() - lastReload < 5000) return;
     const a = document.activeElement;

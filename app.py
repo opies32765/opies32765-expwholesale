@@ -7473,9 +7473,44 @@ def reconcile_ymm_post_enrichment(bid_id, force=False):
         if b.get('ymm_reconciled_at') and not force:
             return None
         vin = b['vin'].upper()
+        try:
+            from wmi_guard import make_conflict as _wmi_conf, wmi_make as _wmi_fn
+            _wmi_make = _wmi_fn(vin)
+        except Exception:
+            _wmi_conf = None; _wmi_make = None
         cur_disp = {'year': b.get('year'), 'make': (b.get('make') or ''),
                     'model': (b.get('model') or ''), 'trim': (b.get('trim') or '')}
 
+        # DETERMINISTIC MAKE GUARD (before the LLM): if the current make contradicts
+        # the VIN's WMI, the LLM is unreliable here (Gemini fallback hallucinates
+        # Mercedes -> Porsche, bid 3488). Fix it deterministically -- purge the
+        # poisoned decode cache, force the WMI make, drop the poisoned model/trim,
+        # and re-canonicalize so NHTSA's VDS re-derives the correct model. No LLM.
+        if _wmi_make and _wmi_conf and cur_disp['make'] and _wmi_conf(vin, cur_disp['make']):
+            print('[ymm-reconcile] bid=%s current make %r conflicts VIN WMI %s -> deterministic WMI fix + re-canon' % (bid_id, cur_disp['make'], _wmi_make), flush=True)
+            try: cur.execute("DELETE FROM vin_decode_cache WHERE vin=%s", (vin,))
+            except Exception: pass
+            cur.execute("UPDATE bids SET make=%s, canon_make=%s, model=NULL, canon_model=NULL, trim=NULL, canon_trim=NULL, canon_source='wmi_guard_reconcile', ymm_reconciled_at=NOW() WHERE id=%s", (_wmi_make, _wmi_make, bid_id))
+            db.commit()
+            try: _retrigger_canonicalize_after_vin(bid_id)
+            except Exception as _cz: print('[ymm-reconcile] bid=%s recanon err: %s' % (bid_id, _cz), flush=True)
+            return {'make': _wmi_make, 'corrected': True, 'reason': 'current make conflicted VIN WMI; forced ' + str(_wmi_make)}
+
+        # DETERMINISTIC CAR-LINE MODEL GUARD 2026-06-17 (bid 3500: VIN 1G1Y Corvette shown
+        # as Camaro; Carfax said 'Stingray Convertible'). Some VINs encode the model in
+        # WMI+car-line -- Chevy: 1G1Y=Corvette, 1G1F=Camaro. If the listing model contradicts
+        # the car-line, force it + re-canonicalize. Authoritative like the WMI make guard.
+        _CARLINE_MODEL = {'1G1Y': 'CORVETTE', '1G1F': 'CAMARO'}
+        _cl_model = _CARLINE_MODEL.get(vin[:4].upper())
+        if _cl_model and (cur_disp['model'] or '').strip().upper() != _cl_model:
+            print('[ymm-reconcile] bid=%s car-line %s -> model %s (was %r) [deterministic]' % (bid_id, vin[:4], _cl_model, cur_disp['model']), flush=True)
+            cur.execute("UPDATE bids SET model=%s, canon_model=%s, trim=NULL, canon_trim=NULL, canon_source='carline_guard_reconcile', ymm_reconciled_at=NOW() WHERE id=%s", (_cl_model, _cl_model, bid_id))
+            db.commit()
+            try:
+                _retrigger_canonicalize_after_vin(bid_id)
+            except Exception as _cz:
+                print('[ymm-reconcile] bid=%s carline recanon err: %s' % (bid_id, _cz), flush=True)
+            return {'model': _cl_model, 'corrected': True, 'reason': 'car-line %s -> %s' % (vin[:4], _cl_model)}
         nh = {}
         try:
             from claude_vin_decoder import decode_vin_smart
@@ -7502,21 +7537,25 @@ def reconcile_ymm_post_enrichment(bid_id, force=False):
         ac = cur.fetchone() or {}
         ac_str = "AccuTrade selected: %s" % (ac.get('selected_trim_text') or '?')
 
-        cur.execute("SELECT raw_json FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+        cur.execute("SELECT raw_json, carfax_json->>'trim' AS cfx_trim FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
         va = cur.fetchone() or {}
         va_year = (va.get('raw_json') or {}).get('_year')
+        cfx_trim = (va.get('cfx_trim') or '').strip()
+        cfx_str = ("Carfax decoded vehicle: %s" % cfx_trim) if cfx_trim else "Carfax: none"
 
         prompt = (
             "You are reconciling a wholesale vehicle listing against hard evidence. "
             "Determine the correct YEAR, MAKE, MODEL and TRIM for this VIN.\n\n"
             "VIN: " + vin + "\n"
+            + (("VIN manufacturer (WMI, AUTHORITATIVE - the MAKE must be this): " + _wmi_make + "\n") if _wmi_make else "")
             + ("CURRENT LISTING: %s %s %s %s\n\n" % (cur_disp['year'], cur_disp['make'], cur_disp['model'], cur_disp['trim']))
             + "EVIDENCE:\n"
             + "- " + nh_str + "\n"
             + "- " + ip_str + "\n"
             + "- " + ac_str + "\n"
+            + "- " + cfx_str + "\n"
             + "- vAuto year: " + str(va_year) + "\n\n"
-            + "The factory window sticker (iPacket) and the VIN decode are the most "
+            + "The Carfax decoded vehicle, the factory window sticker (iPacket), and the VIN decode are the most "
             "authoritative for MODEL. Weigh all evidence. If the current listing is "
             "correct, set matches=true. If wrong, give corrected values.\n"
             "Respond with ONLY compact JSON, no prose, no markdown:\n"
@@ -7536,8 +7575,28 @@ def reconcile_ymm_post_enrichment(bid_id, force=False):
                'make': (j.get('make') or '').strip().upper(),
                'model': (j.get('model') or '').strip(),
                'trim': (j.get('trim') or '').strip()}
+        # The 9B never overrides the deterministic WMI make.
+        if _wmi_make and new['make'] and _wmi_conf and _wmi_conf(vin, new['make']):
+            new['make'] = _wmi_make
         matches = bool(j.get('matches'))
         reason = (j.get('reason') or '')[:200]
+
+        # HARD WMI GATE 2026-06-17 (bid 3488: W1K Mercedes -> 'Porsche 911' from a
+        # poisoned cached decode). The VIN's WMI make is DETERMINISTIC; the reconcile
+        # must NEVER produce a make that contradicts it. On conflict: reject the 9B
+        # output, purge the poisoned decode cache, force the WMI make, drop the
+        # poisoned model/trim, and re-canonicalize (its WMI guard re-derives model).
+        if _wmi_make and _wmi_conf and new['make'] and _wmi_conf(vin, new['make']):
+            print('[ymm-reconcile] bid=%s HARD-REJECT: 9B make %r conflicts VIN WMI %s -> forcing WMI + re-canonicalize' % (bid_id, new['make'], _wmi_make), flush=True)
+            try: cur.execute("DELETE FROM vin_decode_cache WHERE vin=%s", (vin,))
+            except Exception: pass
+            cur.execute("UPDATE bids SET make=%s, canon_make=%s, model=NULL, canon_model=NULL, trim=NULL, canon_trim=NULL, canon_source='wmi_guard_reconcile', ymm_reconciled_at=NOW() WHERE id=%s", (_wmi_make, _wmi_make, bid_id))
+            db.commit()
+            try:
+                _retrigger_canonicalize_after_vin(bid_id)
+            except Exception as _cz:
+                print('[ymm-reconcile] bid=%s recanon err: %s' % (bid_id, _cz), flush=True)
+            return {'make': _wmi_make, 'corrected': True, 'reason': 'WMI conflict: rejected 9B make, forced ' + str(_wmi_make)}
 
         cur.execute("UPDATE bids SET ymm_reconciled_at=NOW() WHERE id=%s", (bid_id,))
 
@@ -7551,7 +7610,7 @@ def reconcile_ymm_post_enrichment(bid_id, force=False):
             db.commit()
             return None
 
-        ev_blob = _norm(nh.get('model')) + ' ' + _norm(ip_ocr) + ' ' + _norm(ac.get('selected_trim_text'))
+        ev_blob = _norm(nh.get('model')) + ' ' + _norm(ip_ocr) + ' ' + _norm(ac.get('selected_trim_text')) + ' ' + _norm(cfx_trim)
         _mtok = _norm(new['model']).split()[0] if _norm(new['model']) else ''
         model_supported = (not _mtok) or (_mtok in ev_blob) or (_norm(nh.get('model')) and _mtok in _norm(nh.get('model')))
         make_ok = (not _norm(new['make'])) or _norm(new['make']) == _norm(cur_disp['make']) or _norm(new['make']) == _norm(nh.get('make'))
@@ -15275,6 +15334,19 @@ def api_vauto_url_capture_result():
         return jsonify({'error': 'bid_id required'}), 400
     db = get_db()
     cur = db.cursor()
+    # URLCAP_RACE_FIX_2026_06_17 (bid 3489): url-capture can arrive BEFORE the
+    # books-api creates the vauto_lookups row -> the plain UPDATEs below hit 0 rows
+    # and the appraisal_url (+ rBook/MMR) are silently dropped. Ensure the row
+    # exists first so every write persists regardless of leg ordering. vin is
+    # NOT NULL, so source it from the bid when the post omits it.
+    try:
+        cur.execute(
+            "INSERT INTO vauto_lookups (bid_id, vin, looked_up_at) "
+            "SELECT %s, COALESCE(NULLIF(%s, ''), b.vin, 'UNKNOWN'), NOW() "
+            "FROM bids b WHERE b.id = %s ON CONFLICT (bid_id) DO NOTHING",
+            (bid_id, (data.get('vin') or ''), bid_id))
+    except Exception as _ensure_e:
+        print('[url-capture] row-ensure err bid=%s %s' % (bid_id, _ensure_e), flush=True)
     if url:
         cur.execute("UPDATE vauto_lookups SET appraisal_url=%s WHERE bid_id=%s",
                     (url, bid_id))
@@ -15669,7 +15741,49 @@ def _capi_pdf_page1_png(pdf, png):
                         '-singlefile', pdf, pref], capture_output=True, timeout=40)
     except Exception:
         return False
+    try:
+        import threading
+        threading.Thread(target=_render_full_png,
+                         args=(pdf, png[:-4] + '_full.png'), daemon=True).start()
+    except Exception:
+        pass
     return os.path.exists(png) and os.path.getsize(png) > 5000
+
+
+def _render_full_png(pdf, out_png, max_pages=16, dpi=120):
+    """Render ALL pages of a PDF into one tall PNG (the full-report lightbox view).
+    pdftoppm each page -> PIL stitch vertically. Cached to out_png. Best-effort; never raises."""
+    import tempfile, glob
+    if not os.path.exists(pdf):
+        return False
+    tmpd = tempfile.mkdtemp(prefix='fullpng_')
+    pref = os.path.join(tmpd, 'pg')
+    try:
+        _capi_subp.run(['pdftoppm', '-png', '-r', str(dpi), '-l', str(max_pages), pdf, pref],
+                       capture_output=True, timeout=120)
+        pages = sorted(glob.glob(pref + '*.png'))
+        if not pages:
+            return False
+        from PIL import Image
+        imgs = [Image.open(p).convert('RGB') for p in pages]
+        w = max(i.width for i in imgs)
+        h = sum(i.height for i in imgs)
+        canvas = Image.new('RGB', (w, h), (255, 255, 255))
+        y = 0
+        for i in imgs:
+            canvas.paste(i, (0, y)); y += i.height; i.close()
+        canvas.save(out_png, format='PNG')
+        return os.path.exists(out_png) and os.path.getsize(out_png) > 5000
+    except Exception as _e:
+        print('[full-png] %s err: %s' % (os.path.basename(pdf), _e), flush=True)
+        return False
+    finally:
+        try:
+            for _p in glob.glob(pref + '*.png'):
+                os.remove(_p)
+            os.rmdir(tmpd)
+        except Exception:
+            pass
 
 
 def carfax_api_enrich(bid_id, vin):
@@ -15692,7 +15806,7 @@ def carfax_api_enrich(bid_id, vin):
             print('[carfax-api] bid=%s gateway no redirect (status %s)' % (bid_id, r1.status_code), flush=True)
             return None
         ts = int(time.time())
-        pdf = os.path.join(VAUTO_REPORTS_DIR, 'carfax_api_%s_%d.pdf' % (vin, ts))
+        pdf = os.path.join(VAUTO_REPORTS_DIR, 'carfax_%s.pdf' % vin)  # derivable from the PNG for in-page full-report view
         png = os.path.join(VAUTO_REPORTS_DIR, 'carfax_%s.png' % vin)
         if not _capi_render_pdf(connect, pdf):
             print('[carfax-api] bid=%s render failed' % bid_id, flush=True)
@@ -16193,7 +16307,18 @@ def api_vauto_upload_report():
 
 @app.route('/vauto_reports/<path:filename>')
 def serve_vauto_report(filename):
-    """Serve Carfax/AutoCheck screenshot images."""
+    """Serve Carfax/AutoCheck images. <base>_full.png = the COMPLETE report (all PDF
+    pages stitched into one tall image), rendered on-demand from <base>.pdf + cached;
+    falls back to the page-1 PNG when there is no PDF (older bids)."""
+    if filename.endswith('_full.png'):
+        _full = os.path.join(VAUTO_REPORTS_DIR, filename)
+        _base = filename[:-len('_full.png')]
+        if not os.path.exists(_full):
+            _pdf = os.path.join(VAUTO_REPORTS_DIR, _base + '.pdf')
+            if os.path.exists(_pdf):
+                _render_full_png(_pdf, _full)
+        if not os.path.exists(_full) and os.path.exists(os.path.join(VAUTO_REPORTS_DIR, _base + '.png')):
+            return send_from_directory(VAUTO_REPORTS_DIR, _base + '.png')
     return send_from_directory(VAUTO_REPORTS_DIR, filename)
 
 
@@ -19300,7 +19425,7 @@ def api_vauto_extras_status(bid_id):
                     "(rbook_competitive_set IS NOT NULL) AS has_rb, "
                     "(manheim_transactions IS NOT NULL) AS has_mh, "
                     "(EXISTS (SELECT 1 FROM accutrade_lookups a WHERE a.bid_id=%s "
-                    "         AND (a.market_avg IS NOT NULL OR a.not_available IS TRUE))) AS has_accu, "
+                    "         AND (a.looked_up_at IS NOT NULL OR a.not_available IS TRUE))) AS has_accu, "
                     "(EXISTS (SELECT 1 FROM ipacket_lookups i WHERE i.bid_id=%s "
                     "         AND (i.not_available IS TRUE OR i.total_msrp IS NOT NULL OR i.base_price IS NOT NULL))) AS has_ipkt "
                     "FROM vauto_lookups WHERE bid_id=%s", (bid_id, bid_id, bid_id))
