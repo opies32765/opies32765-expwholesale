@@ -4516,34 +4516,29 @@ def bid_detail(bid_id):
     _mark('match_dealers')
 
     _handler_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
-    # DISPLAY_HOLD_2026_05_31: reveal the raw source cards (vAuto/AccuTrade/
-    # iPacket/rBook/MMR) together only once the bid is terminal — assessed,
-    # priced, has an assessment narrative, OR older than 8 min (so a bid whose
-    # assessment never fired can never hide its data forever). On any error,
-    # default to SHOWING (never hide).
-    try:
-        show_sources = bool(bid.get('ai_price') or bid.get('ai_assessed_at')
-                            or bid.get('ai_assessment'))
-        if not show_sources:
-            # DECOUPLE_2026_05_31: reveal all cards together once the 3
-            # sources are terminal -- don't wait for the AI assessment.
-            try:
-                _sdb = get_db(); _sc = _sdb.cursor()
-                _sc.execute("SELECT EXISTS(SELECT 1 FROM vauto_lookups WHERE bid_id=%s) AS v, EXISTS(SELECT 1 FROM accutrade_lookups WHERE bid_id=%s) AS a, EXISTS(SELECT 1 FROM ipacket_lookups WHERE bid_id=%s) AS i", (bid['id'], bid['id'], bid['id']))
-                _sr = _sc.fetchone(); _sdb.close()
-                if _sr and _sr.get('v') and _sr.get('a') and _sr.get('i'):
-                    show_sources = True
-            except Exception:
-                pass
-        if not show_sources:
-            _c_at = bid.get('created_at')
-            if _c_at is not None:
-                import datetime as _dt_sh
-                show_sources = (_dt_sh.datetime.now(_c_at.tzinfo) - _c_at).total_seconds() > 480
-            else:
-                show_sources = True
-    except Exception:
-        show_sources = True
+    # ====================================================================
+    # INVARIANT - LISTING POPULATES INDEPENDENT OF THE AI ASSESSMENT
+    # (operator directive, restated emphatically 2026-06-18; said 1000x)
+    # --------------------------------------------------------------------
+    # The bid-listing page MUST populate its enrichment source cards
+    # (vAuto / AccuTrade / iPacket / rBook / MMR) the INSTANT each leg's
+    # data lands, and MUST NEVER wait -- in any form or fashion -- on the
+    # AI buy-price assessment (ai_price / ai_assessed_at / ai_assessment).
+    # The AI assessment is a DOWNSTREAM CONSUMER: it may only START once
+    # the data is already populated here. That ordering is enforced by the
+    # _maybe_fire_assessment gate, which requires all enrichment legs to be
+    # present before it fires -- never the reverse.
+    #
+    # Therefore show_sources is ALWAYS True. Each card has its own
+    # data-presence check in bid.html, so a card whose leg has not landed
+    # yet simply stays empty and fills in the moment that leg lands.
+    # DO NOT re-introduce ANY "display hold" that gates these cards on the
+    # assessment or on an all-legs-done barrier. The old DISPLAY_HOLD_2026_05_31
+    # (which hid every source card until the bid was assessed/priced or 8 min
+    # old) was the exact bug the operator kept reporting -- it is KILLED here.
+    # See CLAUDE.md HARD RULE + memory feedback_ew_listing_never_waits_on_assessment_20260618.
+    # ====================================================================
+    show_sources = True  # LISTING_NEVER_WAITS_ON_ASSESSMENT_2026_06_18
     # RENDER_TIMER_2026_05_20: also time the Jinja template render. Server
     # work and template work are different problems with different fixes;
     # need to see both. Phase deltas printed AFTER render so the log line
@@ -9297,6 +9292,14 @@ def _notify_driver_if_pending(bid_id):
 # ~30-40% of the intended weight and skews toward whichever sources arrived
 # first. A 5-minute fallback timer fires the assessment with whatever's present
 # in case a worker is dead or the VIN is ultra-rare.
+#
+# INVARIANT (operator directive, 2026-06-18): the AI assessment is STRICTLY
+# DOWNSTREAM of enrichment. It may only START once the enrichment data is
+# already populated (that is what the require_all gate below enforces -- it
+# needs vAuto + AccuTrade + iPacket present before it fires). The bid-listing
+# page NEVER waits on this assessment to display its enrichment cards (see the
+# show_sources=True invariant in bid_detail). Populate the page first; assess
+# second. Do not couple the two. ASSESSMENT_STARTS_AFTER_DATA_POPULATED_2026_06_18
 
 def _release_assessment_claim(bid_id):
     """Reset ai_assessed_at to NULL so re-run is possible after failure."""
@@ -9412,6 +9415,15 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
     print(f'assess-fire bid={bid_id} source={source} require_all={require_all} '
           f'vauto={has_vauto} accu={has_accu} ipkt={has_ipkt}', flush=True)
     threading.Thread(target=_auto_assess, args=(bid_id,), daemon=True).start()
+    # INVARIANT (operator-confirmed 2026-06-18) SMS_FIRES_ON_ENRICHMENT_NOT_ASSESSMENT_2026_06_18:
+    # the customer mini-site SMS fires HERE, at the assess-GATE (all enrichment
+    # legs -- vAuto + AccuTrade + iPacket -- are terminal at this point), in a
+    # thread IN PARALLEL with the AI assessment. It must NEVER be moved to fire
+    # after _run_assessment completes. The mini-site (/m, /m/full) shows enrichment
+    # DATA only -- the EW buy-price/assessment is intentionally internal-only and
+    # NOT on the customer page -- so the SMS has no reason to wait on the assessment.
+    # (Operator chose: send when AccuTrade lands; keep the assessment off the
+    # mini-site.) The _auto_assess _notify_driver_combined call is a no-op backstop.
     # DECOUPLE_2026_05_31: fire the customer SMS NOW, in parallel with the AI
     # (sources are all terminal here; iPacket is complete via the submit-time
     # early-rescue). Threaded so the ~1s Twilio send never blocks. Idempotent
@@ -16505,6 +16517,33 @@ def api_ipacket_pending():
     return jsonify({'pending': [dict(r) for r in rows]})
 
 
+_ACCU_DECOUPLE_CACHE = {"v": False, "t": 0.0}
+def _accutrade_decoupled():
+    """ACCUTRADE_DECOUPLE_2026_06_18: True only when /opt/expwholesale/ACCUTRADE_DECOUPLED
+    exists. OFF by default (file absent) so the AccuTrade-pending PRIMARY path stays dormant
+    until the worker half removes AccuTrade from process_bid (else AccuTrade is pulled twice
+    per bid). 10s cache; survives restarts (file-based, like LOCAL_BRAIN_ON)."""
+    import time as _adt
+    _now = _adt.time()
+    if _now - _ACCU_DECOUPLE_CACHE["t"] < 10:
+        return _ACCU_DECOUPLE_CACHE["v"]
+    try:
+        _v = os.path.exists("/opt/expwholesale/ACCUTRADE_DECOUPLED")
+    except Exception:
+        _v = False
+    _ACCU_DECOUPLE_CACHE["v"] = _v
+    _ACCU_DECOUPLE_CACHE["t"] = _now
+    return _v
+
+
+@app.route('/api/accutrade/decoupled')
+def api_accutrade_decoupled_flag():
+    """ACCUTRADE_DECOUPLE_2026_06_18: workers poll this to know whether to SKIP the
+    bundled AccuTrade leg in process_bid (decoupled => AccuTrade runs ONLY via the
+    dedicated /api/accutrade/pending runner). Public (under /api/accutrade/ prefix)."""
+    return jsonify({'decoupled': _accutrade_decoupled()})
+
+
 @app.route('/api/accutrade/pending')
 def api_accutrade_pending():
     """Return bids EXPLICITLY marked for an AccuTrade-only retry, atomically
@@ -16543,13 +16582,30 @@ def api_accutrade_pending():
     # transient. So a bid whose only accutrade row is the mileage placeholder is
     # still eligible (correct — that is exactly what we are retrying), while a
     # bid that has since produced real values or a terminal failure drops out.
+    # ACCUTRADE_DECOUPLE_2026_06_18: when the decouple flag is ON, AccuTrade is a
+    # first-class worker -> ALSO serve fresh PRIMARY bids (not just accutrade_retry_at
+    # retries), gated on Carfax-trim evidence (vauto_lookups.carfax_json present) plus
+    # iPacket-if-available (else a 40s ceiling) so the 9B trim-select has its inputs.
+    # Flag OFF (default) = EXACT prior retry-only behavior (byte-identical eligibility),
+    # so nothing changes until the worker half removes AccuTrade from process_bid.
+    _accu_primary = ""
+    if _accutrade_decoupled():
+        _accu_primary = """
+                  OR (
+                      b.created_at > NOW() - INTERVAL '2 hours'
+                      AND COALESCE(b.status, '') NOT IN
+                          ('dead','duplicate','archived','rejected','sold','passed','cancelled')
+                      AND (EXISTS (SELECT 1 FROM vauto_lookups vl
+                                    WHERE vl.bid_id = b.id AND vl.carfax_json IS NOT NULL)
+                       OR b.created_at < NOW() - INTERVAL '3 minutes')
+                      AND (EXISTS (SELECT 1 FROM ipacket_lookups ip WHERE ip.bid_id = b.id)
+                           OR b.created_at < NOW() - INTERVAL '40 seconds')
+                  )"""
     cur.execute("""
         WITH eligible AS (
             SELECT b.id
             FROM bids b
             WHERE b.vin IS NOT NULL AND length(b.vin) = 17
-              AND b.accutrade_retry_at IS NOT NULL
-              AND b.accutrade_retry_at > NOW() - INTERVAL '15 minutes'
               AND NOT EXISTS (
                   SELECT 1 FROM accutrade_lookups al
                    WHERE al.bid_id = b.id
@@ -16562,7 +16618,12 @@ def api_accutrade_pending():
               )
               AND (b.accutrade_retry_claimed_at IS NULL
                    OR b.accutrade_retry_claimed_at < NOW() - INTERVAL '3 minutes')
-            ORDER BY b.accutrade_retry_at ASC
+              AND (
+                  (b.accutrade_retry_at IS NOT NULL
+                   AND b.accutrade_retry_at > NOW() - INTERVAL '15 minutes')
+                  """ + _accu_primary + """
+              )
+            ORDER BY b.accutrade_retry_at ASC NULLS LAST, b.created_at ASC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
         )
@@ -16719,6 +16780,29 @@ def _evidence_first_trim_pick(db, vin, bid_id, choices):
             print("[carfax-api] bid=%s fired from trim_select" % bid_id, flush=True)
     except Exception as _cfe:
         print("[carfax-api] trim_select fire err %s" % _cfe, flush=True)
+    # SINGLE_CHOICE_FAST_2026_06_18 (operator: "pull the carfax trim first and
+    # give it to AccuTrade ASAP"): if AccuTrade offers exactly ONE trim choice
+    # there is nothing to disambiguate -- select it INSTANTLY and skip the
+    # Carfax/iPacket evidence wait AND the 9B fallthrough. 100% safe (one option
+    # is the only option AccuTrade can value) and it is the common case for
+    # VIN-specific trims. Bid 3516 (S580): one choice, yet it still ran the
+    # evidence wait and fell to the LLM, costing ~10-30s on the long-pole leg.
+    # The Carfax backstop fire above still ran, so carfax_json lands for the
+    # display + YMM reconcile regardless.
+    _one_ch = [c for c in choices if isinstance(c, dict) and c.get('text')]
+    if len(_one_ch) == 1:
+        _bc = _one_ch[0]
+        print('[trim_select/single-choice] bid=%s -> only choice %r (instant, no wait/LLM)'
+              % (bid_id, _bc.get('text')), flush=True)
+        return {
+            'index': int(_bc.get('index') or 0),
+            'text': _bc.get('text'),
+            'source': 'single_choice',
+            'primary_trim': (_bc.get('text') or '').upper(),
+            'primary_source': 'single_choice',
+            'evidence_sources': ['single_choice'],
+            'reason': 'AccuTrade returned exactly one trim choice; selected instantly without evidence wait or LLM',
+        }
     # VAUTO_SERIES_FAST_2026_06_16 (operator): try the Cox BFF vehicleInfo series
     # FIRST -- exact trim in ~2-5s, no OCR/screenshot wait. If it strict-matches
     # EXACTLY ONE choice it is an unambiguous fast win and we return WITHOUT

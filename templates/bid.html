@@ -2077,6 +2077,27 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         {% endif %}
       </div>
       {% endif %}{# DISPLAY_HOLD_2026_05_31 /accutrade #}
+      {# ACCU_LANDING_RELOAD_2026_06_18: AccuTrade is the long-pole leg (decoupled
+         dedicated runner; lands ~50s after the other legs). When it lands the
+         listing must populate it IMMEDIATELY and NOT wait for the assessment-done
+         reload (line ~886, which is assessment-gated). Poll the assessment-
+         INDEPENDENT status endpoint and reload once the AccuTrade row lands.
+         Mirrors the iPacket landing poller. See CLAUDE.md listing-never-waits rule. #}
+      {% if accutrade_data is none %}
+      <script>
+      (function(){ try {
+        var bid='{{ bid.id }}', k='accu_refresh_'+bid;
+        if(sessionStorage.getItem(k)) return;
+        var n=0; var t=setInterval(function(){
+          if(++n>45){ clearInterval(t); return; }   /* ~135s ceiling */
+          fetch('/api/accutrade/status/'+bid,{cache:'no-store'})
+            .then(function(r){return r.json();})
+            .then(function(d){ if(d && (d.status==='complete' || d.status==='not_available')){ clearInterval(t); sessionStorage.setItem(k,'1'); _ewReloadGuarded(); } })
+            .catch(function(){});
+        }, 3000);
+      } catch(e){} })();
+      </script>
+      {% endif %}
 
     </div><!-- /col 3 -->
 
