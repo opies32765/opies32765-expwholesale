@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Report Studio · EW</title>
+<style>
+  :root{ --bg:#0b1120; --card:#0f172a; --line:#1e293b; --txt:#e2e8f0; --mut:#64748b; --accent:#38bdf8; --green:#4ade80; --amber:#fbbf24; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--txt); font-family:'Inter',system-ui,Segoe UI,Roboto,sans-serif; }
+  .wrap{ max-width:980px; margin:0 auto; padding:24px 20px 80px; }
+  .top{ display:flex; align-items:center; gap:14px; margin-bottom:4px; }
+  .top h1{ font-size:22px; margin:0; font-weight:800; letter-spacing:-.01em; }
+  .top a.back{ color:var(--mut); text-decoration:none; font-size:13px; border:1px solid var(--line); padding:6px 12px; border-radius:8px; }
+  .sub{ color:var(--mut); font-size:13px; margin:0 0 20px; }
+  .panel{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; }
+  .panel h2{ font-size:13px; margin:0 0 14px; font-weight:700; color:#cbd5e1; text-transform:uppercase; letter-spacing:.5px; }
+  .row{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+  .row .lbl{ width:80px; font-size:12px; color:var(--mut); font-weight:600; }
+  .row input[type=date]{ background:#0b1120; border:1px solid #334155; color:var(--txt); border-radius:8px; padding:9px 12px; font-size:14px; color-scheme:dark; }
+  .row input[type=text]{ flex:1; min-width:240px; background:#0b1120; border:1px solid #334155; color:var(--txt); border-radius:8px; padding:9px 12px; font-size:14px; }
+  .row input:focus{ outline:none; border-color:var(--accent); }
+  .row .sep{ color:#475569; font-size:12px; }
+  .runbtn{ background:#2563eb; border:none; color:#fff; border-radius:9px; padding:11px 28px; font-size:15px; font-weight:700; cursor:pointer; }
+  .runbtn:disabled{ opacity:.5; cursor:default; }
+  #status{ color:var(--mut); font-size:13px; margin:18px 2px; display:none; }
+  #err{ color:#f87171; font-size:13px; margin:14px 2px; display:none; white-space:pre-wrap; }
+  .report{ display:none; margin-top:22px; }
+  .rhead{ display:flex; align-items:flex-start; justify-content:space-between; gap:14px; flex-wrap:wrap; }
+  .rtitle{ font-size:19px; font-weight:800; margin:0; }
+  .meta{ font-size:11px; color:var(--mut); margin-top:4px; }
+  .actions{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .actions button{ background:#1e293b; border:1px solid #334155; color:var(--txt); border-radius:8px; padding:8px 14px; font-size:13px; cursor:pointer; font-weight:600; }
+  .actions button:hover{ background:#27364a; }
+  .actions .txtlbl{ font-size:12px; color:var(--mut); margin-left:6px; }
+  .actions .tbtn{ padding:8px 12px; }
+  .narr{ background:var(--card); border:1px solid var(--line); border-left:3px solid var(--accent); border-radius:10px; padding:14px 16px; font-size:14px; line-height:1.55; margin:16px 0; }
+  .tablewrap{ background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:auto; }
+  table{ width:100%; border-collapse:collapse; font-size:14px; }
+  th,td{ text-align:left; padding:10px 16px; border-bottom:1px solid rgba(30,41,59,.7); white-space:nowrap; }
+  th{ font-size:10px; color:var(--mut); text-transform:uppercase; letter-spacing:.5px; }
+  tr:last-child td{ border-bottom:none; }
+  tbody tr:hover{ background:rgba(148,163,184,.05); }
+  .sqlbox{ margin-top:14px; }
+  .sqlbox summary{ cursor:pointer; color:var(--mut); font-size:12px; }
+  .sqlbox pre{ background:#0a0f1a; border:1px solid var(--line); border-radius:8px; padding:12px; font-size:12px; color:#9fb3c8; overflow:auto; font-family:'JetBrains Mono','Consolas',monospace; }
+  .toast{ position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#1e293b; border:1px solid #334155; color:#e2e8f0; padding:11px 18px; border-radius:10px; font-size:13px; display:none; z-index:50; }
+  @media print{ body{ background:#fff; color:#000; } .panel,.actions,.sqlbox,.top a.back,#status,.toast{ display:none!important; } .narr,.tablewrap{ break-inside:avoid; } th{ color:#333; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <a class="back" href="/">&larr; Dashboard</a>
+    <h1>Report Studio</h1>
+  </div>
+  <p class="sub">Compare any two date ranges across the live deal ledger.</p>
+
+  <div class="panel">
+    <h2>Month-to-Date snapshot</h2>
+    <button class="runbtn" onclick="mtdRun()">📊 This month vs last month vs last year</button>
+    <div style="font-size:12px;color:var(--mut);margin-top:8px">Month-to-date, same day-of-month aligned — live from the ledger.</div>
+  </div>
+
+  <div class="panel" style="margin-top:14px">
+    <h2>Compare two date ranges</h2>
+    <div class="row"><span class="lbl">Period A</span><input type="date" id="a_from"><span class="sep">to</span><input type="date" id="a_to"></div>
+    <div class="row"><span class="lbl">Period B</span><input type="date" id="b_from"><span class="sep">to</span><input type="date" id="b_to"></div>
+    <div class="row"><span class="lbl">Compare</span><input type="text" id="cmp_what" value="total profit, units sold and PVR"></div>
+    <button class="runbtn" id="go" onclick="compareRanges()">Compare</button>
+  </div>
+
+  <div id="status">Pulling the data…</div>
+  <div id="err"></div>
+
+  <div class="report" id="report">
+    <div class="rhead">
+      <div>
+        <h2 class="rtitle" id="rtitle"></h2>
+        <div class="meta" id="rmeta"></div>
+      </div>
+      <div class="actions">
+        <button onclick="window.print()">🖨 Print</button>
+        <button onclick="getPdf()">📄 PDF</button>
+        <span class="txtlbl">Text:</span>
+        <button class="tbtn" onclick="textTo('me')">Me</button>
+        <button class="tbtn" onclick="textTo('joe')">Joe</button>
+        <button class="tbtn" onclick="textTo('todd')">Todd</button>
+        <button class="tbtn" onclick="textTo('gregg')">Gregg</button>
+        <button class="tbtn" onclick="textTo('all')">All</button>
+      </div>
+    </div>
+    <details class="sqlbox"><summary>Show query (read-only SQL)</summary><pre id="sql"></pre></details>
+    <div class="narr" id="narr"></div>
+    <div class="tablewrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+var LAST=null;
+function val(id){ var el=document.getElementById(id); return el?(el.value||'').trim():''; }
+function esc(s){ return (s==null?'':String(s)).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];}); }
+function fmt(v){ if(v==null) return '<span style="color:#475569">—</span>'; if(typeof v==='number'){ return v.toLocaleString('en-US'); } return esc(v); }
+function toast(m){ var t=document.getElementById('toast'); t.textContent=m; t.style.display='block'; clearTimeout(window._tt); window._tt=setTimeout(function(){t.style.display='none';},3500); }
+
+function compareRanges(){
+  var af=val('a_from'),at=val('a_to'),bf=val('b_from'),bt=val('b_to');
+  var e=document.getElementById('err');
+  if(!af||!at||!bf||!bt){ e.style.display='block'; e.textContent='Pick a start and end date for both Period A and Period B.'; return; }
+  var what=val('cmp_what')||'total profit, units sold and PVR';
+  var q=what+' — compare '+af+'…'+at+' vs '+bf+'…'+bt;
+  var periods=[{label:af+' → '+at, from:af, to:at},{label:bf+' → '+bt, from:bf, to:bt}];
+  document.getElementById('report').style.display='none';
+  e.style.display='none';
+  document.getElementById('status').style.display='block';
+  document.getElementById('go').disabled=true;
+  fetch('/api/intel/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request:q,periods:periods})})
+    .then(function(r){ if(r.status===401){location.href='/login';return null;} return r.json(); })
+    .then(function(d){
+      document.getElementById('status').style.display='none';
+      document.getElementById('go').disabled=false;
+      if(!d) return;
+      if(d.error){ e.style.display='block'; e.textContent='⚠ '+d.error+(d.sql?('\n\nSQL: '+d.sql):''); return; }
+      LAST=d; render(d);
+    })
+    .catch(function(err){ document.getElementById('status').style.display='none'; document.getElementById('go').disabled=false;
+      e.style.display='block'; e.textContent='Failed: '+err; });
+}
+function mtdRun(){
+  document.getElementById('report').style.display='none';
+  document.getElementById('err').style.display='none';
+  document.getElementById('status').style.display='block';
+  fetch('/api/intel/mtd').then(function(r){ if(r.status===401){location.href='/login';return null;} return r.json(); })
+    .then(function(d){
+      document.getElementById('status').style.display='none';
+      if(!d) return;
+      if(d.error){ var e=document.getElementById('err'); e.style.display='block'; e.textContent='⚠ '+d.error; return; }
+      LAST=d; render(d);
+    })
+    .catch(function(err){ document.getElementById('status').style.display='none';
+      var el=document.getElementById('err'); el.style.display='block'; el.textContent='Failed: '+err; });
+}
+function render(d){
+  document.getElementById('rtitle').textContent=d.title||'Comparison';
+  document.getElementById('rmeta').textContent=(d.source_label||'')+' · '+d.row_count+' rows · '+d.elapsed_s+'s';
+  document.getElementById('narr').textContent=d.narrative||'';
+  document.getElementById('thead').innerHTML='<tr>'+(d.columns||[]).map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr>';
+  document.getElementById('tbody').innerHTML=(d.rows||[]).map(function(r){
+    return '<tr>'+r.map(function(v){return '<td>'+fmt(v)+'</td>';}).join('')+'</tr>'; }).join('');
+  document.getElementById('sql').textContent=d.sql||'';
+  document.getElementById('report').style.display='block';
+}
+function getPdf(){
+  if(!LAST){ toast('Run a comparison first'); return; }
+  toast('Building PDF…');
+  fetch('/api/intel/report/pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({report:LAST})})
+    .then(function(r){
+      var ct=r.headers.get('content-type')||'';
+      if(ct.indexOf('application/pdf')<0){ return r.json().then(function(j){ throw (j.error||'render failed'); }); }
+      return r.blob();
+    })
+    .then(function(b){ var u=URL.createObjectURL(b); var a=document.createElement('a'); a.href=u; a.download='ew_report.pdf'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u); toast('PDF downloaded'); })
+    .catch(function(e){ toast('PDF failed: '+e); });
+}
+function textTo(who){
+  if(!LAST){ toast('Run a comparison first'); return; }
+  toast('Texting '+who+'…');
+  fetch('/api/intel/report/sms',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({who:who,report:LAST})})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(d.error){ toast('Text failed: '+d.error); return; }
+      var ok=(d.sent||[]).filter(function(x){return x.ok;}).map(function(x){return x.who;});
+      var bad=(d.sent||[]).filter(function(x){return !x.ok;}).map(function(x){return x.who;});
+      toast('Texted: '+(ok.join(', ')||'none')+(bad.length?(' · failed: '+bad.join(', ')):''));
+    })
+    .catch(function(e){ toast('Text failed: '+e); });
+}
+</script>
+</body>
+</html>

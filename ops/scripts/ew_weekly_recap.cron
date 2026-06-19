@@ -1,0 +1,5 @@
+# EW WEEKLY RECAP — every Saturday 7:00pm (server EDT). Texts the prior-week
+# sales digest (clean ## format) to all 4: me / joe / todd / gregg.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+0 19 * * 6 root /usr/bin/python3 /usr/local/bin/ew_weekly_recap.py >> /var/log/ew_weekly_recap.log 2>&1

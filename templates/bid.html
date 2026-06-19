@@ -3931,6 +3931,34 @@ window._ewReloadGuarded = function(){ return false; };  /* ONE_REFRESH_LOOP_2026
   }
   t = setInterval(tick, 1500); tick();  /* ACCU_NOWAIT_2026_06_18: 4s->1.5s so a late AccuTrade (the slowest leg) is caught within ~1.5s, not up to 4s */
 })();
+
+(function _ewAccuPoll(){
+  /* ACCU_POLL_2026_06_19 (operator): AccuTrade sometimes lands in the DB but the
+     card only shows on manual refresh. This dedicated poller hits /source-status
+     every 2s and, the instant AccuTrade goes terminal (done/captured/unavailable)
+     AFTER the page was rendered pending, reloads to paint it -- independent of the
+     main full-status loop. One-shot: never reloads if AccuTrade was already in at
+     page load; stops once it's shown; waits (keeps polling) if a modal/tab-hidden
+     would make a reload disruptive. */
+  var bid = '{{ bid.id }}';
+  var firstSeen = null;
+  function term(st){ return st === 'done' || st === 'captured' || st === 'unavailable'; }
+  function blocked(){
+    return document.hidden || window.__ewHoldReload
+      || document.querySelector('.modal[style*="display: block"],.modal[style*="display:block"]')
+      || document.querySelector('.share-overlay.show, .lightbox.open, dialog[open]');
+  }
+  var t = setInterval(function(){
+    fetch('/api/bid/' + bid + '/source-status', {cache:'no-store'})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (!d || !d.accutrade) return;
+        var st = d.accutrade.state;
+        if (firstSeen === null){ firstSeen = term(st); if (firstSeen) clearInterval(t); return; }
+        if (term(st)){ if (blocked()) return; clearInterval(t); location.reload(); }
+      }).catch(function(){});
+  }, 2000);
+})();
 </script>
 
 <script src="/static/lsl_wizard.js?v=1"></script>

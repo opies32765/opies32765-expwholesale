@@ -14728,6 +14728,99 @@ def api_correction_refresh():
         return jsonify({'error': str(e)}), 500
 
 
+# ===== INTEL_REPORT_STUDIO_2026_06_19 (operator): NL report engine over EW+DIA+LSL =====
+import intel_studio as _intel_studio
+
+@app.route('/report-studio')
+def intel_reports_page():
+    """Report Studio portal (internal, behind require_login)."""
+    return render_template('intel_reports.html')
+
+
+@app.route('/api/intel/report', methods=['POST'])
+def api_intel_report():
+    """Run a natural-language report via the 9B over EW/DIA/LSL. Read-only."""
+    _data = request.get_json(silent=True) or {}
+    _req = (_data.get('request') or '').strip()
+    if not _req:
+        return jsonify({'error': 'Type what report you want.'}), 400
+    _periods = _data.get('periods')
+    if not isinstance(_periods, list):
+        _periods = None
+    try:
+        _res = _intel_studio.run_report(_req, periods=_periods)
+        print('[intel-report] req=%r source=%s rows=%s err=%r'
+              % (_req[:80], _res.get('source'), _res.get('row_count'), _res.get('error')), flush=True)
+        return jsonify(_res)
+    except Exception as _e:
+        print('[intel-report] ENGINE ERROR: %s' % _e, flush=True)
+        return jsonify({'error': 'engine error: %s' % str(_e)[:200]}), 200
+
+
+_INTEL_RECIPS = {'me': '+14074309675', 'joe': '+13522099696', 'todd': '+15613018622', 'gregg': '+15166803500'}
+
+
+def _intel_twilio_send(to, body):
+    """Direct Twilio send for operator-requested report texts (bypasses bot-mute)."""
+    try:
+        from twilio.rest import Client as _ITC
+        _ITC(TWILIO_SID, TWILIO_TOKEN).messages.create(to=to, from_=TWILIO_PHONE, body=body)
+        return True
+    except Exception as _te:
+        print('[intel-sms] send err to %s: %s' % (to, _te), flush=True)
+        return False
+
+
+@app.route('/api/intel/report/sms', methods=['POST'])
+def api_intel_report_sms():
+    _data = request.get_json(silent=True) or {}
+    _who = (_data.get('who') or '').lower().strip()
+    _rep = _data.get('report') or {}
+    if _who == 'all':
+        _tg = list(_INTEL_RECIPS.items())
+    elif _who in _INTEL_RECIPS:
+        _tg = [(_who, _INTEL_RECIPS[_who])]
+    else:
+        return jsonify({'error': 'unknown recipient'}), 400
+    _body = _intel_studio.report_sms_text(_rep)
+    if not _body.strip():
+        return jsonify({'error': 'nothing to send'}), 400
+    _sent = [{'who': _nm, 'ok': _intel_twilio_send(_num, _body)} for _nm, _num in _tg]
+    print('[intel-sms] who=%s -> %s' % (_who, _sent), flush=True)
+    return jsonify({'sent': _sent})
+
+
+@app.route('/api/intel/report/pdf', methods=['POST'])
+def api_intel_report_pdf():
+    import tempfile as _tf
+    from flask import send_file as _send_file
+    _data = request.get_json(silent=True) or {}
+    _rep = _data.get('report') or _data
+    _html = _intel_studio.report_html(_rep)
+    _fd, _hf = _tf.mkstemp(suffix='.html')
+    os.write(_fd, _html.encode('utf-8')); os.close(_fd)
+    _pdf = _hf[:-5] + '.pdf'
+    try:
+        _capi_render_pdf('file://' + _hf, _pdf, budget=2500)
+    except Exception as _pe:
+        print('[intel-pdf] render err %s' % _pe, flush=True)
+    try: os.remove(_hf)
+    except Exception: pass
+    if os.path.exists(_pdf) and os.path.getsize(_pdf) > 800:
+        return _send_file(_pdf, mimetype='application/pdf', as_attachment=True, download_name='ew_report.pdf')
+    return jsonify({'error': 'PDF render failed'}), 200
+
+
+@app.route('/api/intel/mtd', methods=['GET', 'POST'])
+def api_intel_mtd():
+    """Deterministic month-to-date 3-way: this MTD vs prior-month MTD vs last-year MTD."""
+    try:
+        return jsonify(_intel_studio.mtd_report())
+    except Exception as _e:
+        print('[intel-mtd] err %s' % _e, flush=True)
+        return jsonify({'error': 'mtd error: %s' % str(_e)[:200]}), 200
+
+
 # ===== CONVERSION_TAB_2026_06_18 (operator): bids-since-day-one vs EW-bought =====
 # Real bids live in Postgres `bids`; the BOUGHT reality (profit, dealers, salesperson)
 # lives in the read-only LSL ledger /opt/livesaleslog/crm.db `deals`. Matched by VIN.
