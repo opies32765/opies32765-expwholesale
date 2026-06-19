@@ -1,9 +1,9 @@
 {
   "make_name": "LAND ROVER",
-  "trained_at": "2026-06-18T08:30:28.109012Z",
-  "n_total": 1190,
+  "trained_at": "2026-06-19T08:30:26.002048Z",
+  "n_total": 1191,
   "n_train": 1091,
-  "n_test": 99,
+  "n_test": 100,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -213,49 +213,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3516.0,
-    "mape_pct": 6.27,
-    "r2": 0.9733,
-    "within_5pct": 61.6,
-    "within_10pct": 84.8
+    "mae_dollars": 3429.0,
+    "mape_pct": 6.25,
+    "r2": 0.9744,
+    "within_5pct": 60.0,
+    "within_10pct": 85.0
   },
   "baseline_metrics": {
-    "mae_dollars": 5472.0,
-    "mape_pct": 9.81,
+    "mae_dollars": 5450.0,
+    "mape_pct": 9.88,
     "ratio": 1.0254
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.47570809721946716
+      "importance": 0.47814810276031494
     },
     {
       "name": "market_asking_price",
-      "importance": 0.24213232100009918
+      "importance": 0.24429814517498016
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.11424346268177032
-    },
-    {
-      "name": "model_name_New Range Rover SE Sport Utility Vehicle",
-      "importance": 0.012553669512271881
+      "importance": 0.11272561550140381
     },
     {
       "name": "supplier_name_Marino Performance Motors",
-      "importance": 0.012392318807542324
+      "importance": 0.012039764784276485
     },
     {
       "name": "model_name_Range Rover Sport Utility Vehicle",
-      "importance": 0.010159023106098175
+      "importance": 0.010350728407502174
+    },
+    {
+      "name": "model_name_New Range Rover SE Sport Utility Vehicle",
+      "importance": 0.009970815852284431
     },
     {
       "name": "supplier_name_Mall Of Georgia Mazda",
-      "importance": 0.0074128140695393085
+      "importance": 0.0074353693053126335
     },
     {
       "name": "model_name_Range Rover Supercharged Sport Utility Vehicle",
-      "importance": 0.006333926692605019
+      "importance": 0.006888508331030607
     }
   ]
 }

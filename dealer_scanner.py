@@ -3264,11 +3264,21 @@ class DealerScanner:
                 if cc_cfg:
                     cc = fetch_carscommerce_inventory(cc_cfg)
                     if cc:
-                        prior = self._zero_vehicle_abort_check()
-                        if prior and len(cc) > max(50, prior * 3):
+                        # Group-feed guard. Baseline = the LARGER of the current
+                        # active count and the recent historical max scan size;
+                        # the live active count alone is unsafe because a prior
+                        # partial/degraded scan can shrink it (Ferrari #4: a
+                        # half-dead algolia run cut 169->49, which made an
+                        # active-only gate reject the CORRECT 179-car carscommerce
+                        # result). Only refuse when the result dwarfs that
+                        # baseline — a real unscoped group pool is thousands.
+                        # GATE_FIX_2026_06_19.
+                        prior = self._zero_vehicle_abort_check() or 0
+                        baseline = max(prior, self._recent_max_scan_count())
+                        if len(cc) > max(1000, baseline * 4):
                             print(f'  [cc-autofallback] carscommerce returned {len(cc)} '
-                                  f'vs {prior} active — looks like an unscoped group '
-                                  f'feed, NOT migrating; falling through', flush=True)
+                                  f'vs baseline {baseline} — looks like an unscoped '
+                                  f'group feed, NOT migrating; falling through', flush=True)
                         else:
                             print(f'  [cc-autofallback] algolia dead -> carscommerce '
                                   f'returned {len(cc)} vehicles; migrating dealer '
@@ -4253,17 +4263,29 @@ class DealerScanner:
         store self-heals. Returns a cfg dict or None.
         CARSCOMMERCE_AUTOFALLBACK_2026_06_18."""
         srp = self.base_url.rstrip('/') + '/used-vehicles/'
-        body = None
-        try:
-            resp = requests.post(
-                dealer_fetchers.FLARESOLVERR_URL,
-                json={'cmd': 'request.get', 'url': srp, 'maxTimeout': 85000},
-                timeout=130,
-            )
-            if resp.status_code == 200 and resp.json().get('status') == 'ok':
-                body = ((resp.json().get('solution') or {}).get('response') or '')
-        except Exception:
-            return None
+        # DealerInspire hydrates inventory (and the SEARCH_SERVICE config block)
+        # client-side, so a single FlareSolverr fetch frequently returns a
+        # partial pre-hydration render with no config (it cost Ferrari #4 a
+        # ~30-min universal grind on 06-19). Retry until the carscommerce
+        # SEARCH_SERVICE marker appears; keep the largest body seen.
+        # AUTODISCOVER_RETRY_2026_06_19.
+        body = ''
+        for _attempt in range(3):
+            h = ''
+            try:
+                resp = requests.post(
+                    dealer_fetchers.FLARESOLVERR_URL,
+                    json={'cmd': 'request.get', 'url': srp, 'maxTimeout': 85000},
+                    timeout=130,
+                )
+                if resp.status_code == 200 and resp.json().get('status') == 'ok':
+                    h = ((resp.json().get('solution') or {}).get('response') or '')
+            except Exception:
+                h = ''
+            if len(h) > len(body):
+                body = h
+            if 'websites-search' in body:
+                break
         if not body:
             return None
         # SEARCH_SERVICE = {"apiUrl":"https://websites-search.api.carscommerce.inc",
@@ -4280,6 +4302,25 @@ class DealerScanner:
         if src:
             cfg['source_id'] = src
         return cfg
+
+    def _recent_max_scan_count(self):
+        """Largest vehicles_found across this dealer's recent OK scans — a
+        corruption-resistant baseline for the auto-fallback group-feed gate
+        (the live active count can be wrong if a prior partial scan shrank
+        it). GATE_FIX_2026_06_19."""
+        try:
+            with get_conn() as conn, conn.cursor() as cur:
+                cur.execute('''SELECT COALESCE(MAX(vehicles_found), 0) AS mx
+                                 FROM dealer_scans
+                                WHERE dealer_id = %s AND status = 'ok'
+                                  AND started_at > NOW() - INTERVAL '30 days' ''',
+                            (self.dealer_id,))
+                row = cur.fetchone()
+                if row is None:
+                    return 0
+                return (row.get('mx') if isinstance(row, dict) else row[0]) or 0
+        except Exception:
+            return 0
 
     def _persist_carscommerce_cfg(self, cfg):
         """Persist the auto-discovered Cars Commerce config under

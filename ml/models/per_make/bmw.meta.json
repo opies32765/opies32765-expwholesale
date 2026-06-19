@@ -1,9 +1,9 @@
 {
   "make_name": "BMW",
-  "trained_at": "2026-06-18T08:30:25.334784Z",
-  "n_total": 1683,
+  "trained_at": "2026-06-19T08:30:23.696404Z",
+  "n_total": 1684,
   "n_train": 1558,
-  "n_test": 125,
+  "n_test": 126,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -221,49 +221,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3365.0,
-    "mape_pct": 8.59,
-    "r2": 0.9688,
-    "within_5pct": 49.6,
-    "within_10pct": 80.8
+    "mae_dollars": 3195.0,
+    "mape_pct": 8.3,
+    "r2": 0.9704,
+    "within_5pct": 51.6,
+    "within_10pct": 81.0
   },
   "baseline_metrics": {
-    "mae_dollars": 3461.0,
-    "mape_pct": 9.42,
+    "mae_dollars": 3454.0,
+    "mape_pct": 9.47,
     "ratio": 1.0233
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.3710700273513794
+      "importance": 0.41260552406311035
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.33074262738227844
+      "importance": 0.30132293701171875
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.15216241776943207
-    },
-    {
-      "name": "supplier_name_Marshall Goldman Motor Sls & Leasing Llc",
-      "importance": 0.01249129418283701
-    },
-    {
-      "name": "supplier_name_Ultimo Warrenville",
-      "importance": 0.006397150456905365
+      "importance": 0.15861186385154724
     },
     {
       "name": "model_name_M4 Competition Coupe",
-      "importance": 0.005907861981540918
+      "importance": 0.005046518053859472
     },
     {
-      "name": "year",
-      "importance": 0.005751397460699081
+      "name": "body_type_Coupe",
+      "importance": 0.004867183044552803
     },
     {
       "name": "odometer",
-      "importance": 0.005629244260489941
+      "importance": 0.004519200883805752
+    },
+    {
+      "name": "mileage_adjustment_value",
+      "importance": 0.004370962269604206
+    },
+    {
+      "name": "original_msrp",
+      "importance": 0.004172982648015022
     }
   ]
 }

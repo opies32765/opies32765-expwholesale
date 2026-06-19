@@ -521,6 +521,10 @@ def _pa_spawn_bid_from_staged(cur, pa, from_phone, intake_log_id):
     bidder = _lookup_bidder(cur, from_phone)
     is_unknown = (bidder['kind'] == 'unknown'
                   and not _is_full_broker_phone(from_phone))
+    # ONE_ACK_FOR_EVERYONE_2026_06_19 (operator): every bid lands with ONE
+    # identical ack and enriches immediately -- first-timers are no longer held
+    # for a name (the hold also violated the never-block-enrichment rule).
+    is_unknown = False
     initial_status = 'awaiting_name' if is_unknown else 'new'
     driver_token = _secrets.token_urlsafe(8)[:12]
     contact_id = bidder.get('contact_id')
@@ -5599,12 +5603,14 @@ def twilio_webhook():
 
             # Combined Phase 3 ack covering every released bid.
             if len(_held_ids) == 1:
-                _ack_body = (f"thanks {_name}, bid #{_held_ids[0]} received — "
-                             f"we'll contact you back shortly.")
+                _ack_body = (f"Bid #{_held_ids[0]} Received. Give us a bit. If "
+                             f"you need to contact us please text Joe, Todd or "
+                             f"Gregg with your Bid #{_held_ids[0]}.")
             else:
                 _bid_list = ', '.join('#' + str(i) for i in _held_ids)
-                _ack_body = (f"thanks {_name}, bids {_bid_list} received — "
-                             f"we'll contact you back shortly.")
+                _ack_body = (f"Bids {_bid_list} Received. Give us a bit. If "
+                             f"you need to contact us please text Joe, Todd or "
+                             f"Gregg with your Bid #.")
             _sent = send_sms(from_phone, _ack_body)
             if _sent:
                 cur.execute("""UPDATE bids
@@ -6241,6 +6247,10 @@ def twilio_webhook():
     # the pre-Phase-3 system.
     is_unknown = (bidder['kind'] == 'unknown'
                   and not _is_full_broker_phone(from_phone))
+    # ONE_ACK_FOR_EVERYONE_2026_06_19 (operator): every bid lands with ONE
+    # identical ack and enriches immediately -- first-timers are no longer held
+    # for a name (the hold also violated the never-block-enrichment rule).
+    is_unknown = False
 
     # Mini-page token: short, URL-safe, unguessable. Used for /m/<token>
     # auto-reply flow so the sender can review + counter from his phone.
@@ -6450,8 +6460,8 @@ def twilio_webhook():
         try:
             _ack_result = send_sms(
                 from_phone,
-                f"Bid #{bid_id} received — give us a minute, "
-                f"we'll text you the number shortly.")
+                f"Bid #{bid_id} Received. Give us a bit. If you need to "
+                f"contact us please text Joe, Todd or Gregg with your Bid #{bid_id}.")
             print(f'[bid-ack] sent bid={bid_id} result={_ack_result}', flush=True)
         except Exception as _ack_e:
             print(f'[bid-ack] error bid={bid_id}: {_ack_e}', flush=True)
@@ -9181,12 +9191,21 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
         # dismiss, or customer SMS reply with corrected data.
         if (row.get('needs_verification_at')
                 and not row.get('needs_verification_cleared_at')):
-            print(f"assess-gate bid={bid_id} source={source} "
-                  f"BLOCKED by needs_verification="
+            # FLAG_DONT_BLOCK_2026_06_19 (operator): a needs_verification flag
+            # (miles_discrepancy) NO LONGER stops the assessment + card. Text the
+            # bidder the heads-up ONCE (idempotent), then PROCESS LIKE NORMAL --
+            # fall through to fire the assessment + customer card. A later
+            # corrected reply still clears the flag + triggers F2 re-assess.
+            print(f"assess-gate bid={bid_id} source={source} FLAGGED (not "
+                  f"blocking) needs_verification="
                   f"{row.get('needs_verification_reason') or 'unknown'}",
                   flush=True)
-            db.close()
-            return False
+            try:
+                _vr = row.get('needs_verification_reason') or ''
+                if 'miles' in _vr:
+                    _maybe_send_miles_verify_sms(bid_id, reason=_vr)
+            except Exception as _vfx:
+                print(f"assess-gate bid={bid_id} verify-sms err: {_vfx}", flush=True)
 
         cur.execute("SELECT 1, rbook_completed_at IS NOT NULL AS rb_done, "
                     "manheim_completed_at IS NOT NULL AS mh_done, "
@@ -12822,27 +12841,33 @@ def api_ipacket_refresh_token():
 import hashlib as _ew_hashlib
 import time as _ew_time
 import requests as _ew_requests
-_VAUTO_PROBE_URL = (
-    'https://bff.vaweb.vauto.app.coxautoinc.com/api/PricingData/Manheim'
-)
-# A real appraisalId from the captured prod session. priceGuides/Manheim
-# 500 on bogus values, but accept any valid user-owned id. This one is
-# stable per cookie_jar docstring.
-_VAUTO_PROBE_APPRAISAL_ID = 'qWNKSOaUPCW6x4lPKnM8iojBTMhHy415I2iIv9GiCZ4='
-_VAUTO_PROBE_VEHICLE = {
-    'Vin': 'WBA4Z3C51KEN89661',  # known-decodable BMW 4 Series
-    'Odometer': 70000, 'ModelYear': 2019,
-    'Make': 'BMW', 'Model': '4 Series', 'Series': '',
-}
+# VAUTO_PROBE_SAME_SURFACE_2026_06_19: the liveness gate now probes the SAME
+# surface enrichment uses (slot1.bff.megazord /api/carfax/report) instead of the
+# old bff.vaweb/PricingData/Manheim host, which is a different auth surface that
+# could disagree -> a DEAD session got stored. Verified live on C1: a healthy
+# session returns 200 application/json with report.url (~0.5s); a dead session
+# returns 401 text/plain body "Entity and/or User is Null." (~0.15s).
+_VAUTO_PROBE_SLOT1 = 'https://slot1.bff.megazord.vauto.app.coxautoinc.com'
+_VAUTO_PROBE_CANARY_VIN = 'WBA4Z3C51KEN89661'  # known-decodable BMW 4 Series
+_VAUTO_DEAD_BODY_SIGNAL = 'Entity and/or User is Null.'
 _vauto_probe_cache: dict = {}  # cookie_hash -> (verdict_str, expires_ts)
-_VAUTO_PROBE_TTL = 60  # seconds
+_VAUTO_PROBE_TTL = 60  # seconds (one network probe/min max per identical push)
+_VAUTO_PROBE_TIMEOUT = 4  # short: live=~0.5s, dead=~0.15s; never slow the push
 
 
 def _vauto_probe_cookies(cookies_dict, headers_dict, label_for_log='?'):
-    """Return one of: 'alive' | 'dead' | 'unknown'. Dead = definite 401
-    against Cox BFF (cookies don't authenticate). Unknown = probe couldn't
-    decide (network blip, 500, timeout) — callers should accept optimistically
-    rather than reject legit pushes during transient errors."""
+    """Return one of: 'alive' | 'dead' | 'unknown'.
+    Probes slot1.bff.megazord/api/carfax/report (the REAL enrichment surface)
+    with the SAME cookies+headers being pushed.
+      alive   = 200 JSON with report.url -> session authenticates, STORE it
+      dead    = CONFIRMED-dead: HTTP 401/403, OR body contains
+                'Entity and/or User is Null.', OR a 3xx auth-redirect -> REJECT,
+                keep last-known-good.
+      unknown = INCONCLUSIVE (timeout / conn-error / 5xx / 200-without-url):
+                callers ACCEPT so a flaky probe never causes a self-inflicted
+                outage. Set env VAUTO_PROBE_DISABLE=1 to force accept-all."""
+    if (os.environ.get('VAUTO_PROBE_DISABLE') or '').strip() in ('1', 'true', 'yes'):
+        return 'unknown'
     try:
         h_items = sorted((k, v) for k, v in cookies_dict.items())
         h_input = repr(h_items) + '|' + repr(sorted(headers_dict.items()))
@@ -12856,27 +12881,46 @@ def _vauto_probe_cookies(cookies_dict, headers_dict, label_for_log='?'):
         if exp > now:
             return verdict
 
+    verdict = 'unknown'
     try:
-        body = {
-            'AppraisalId': _VAUTO_PROBE_APPRAISAL_ID,
-            'Vehicle': _VAUTO_PROBE_VEHICLE,
-            'PriceGuide': 12, 'PostalCode': None,
-            'AddDeducts': None, 'OwningEntityId': None,
-        }
-        r = _ew_requests.post(_VAUTO_PROBE_URL, json=body,
-                              cookies=cookies_dict, headers=headers_dict,
-                              timeout=8)
-        if r.status_code == 401:
+        _h = dict(headers_dict or {})
+        _h['Accept'] = 'application/json'
+        r = _ew_requests.get(
+            _VAUTO_PROBE_SLOT1 + '/api/carfax/report?vin=' + _VAUTO_PROBE_CANARY_VIN,
+            cookies=cookies_dict, headers=_h,
+            timeout=_VAUTO_PROBE_TIMEOUT, allow_redirects=False)
+        try:
+            _body = (r.text or '')[:400]
+        except Exception:
+            _body = ''
+        _is_auth_redirect = (
+            r.status_code in (301, 302, 303, 307, 308)
+            and any(s in (r.headers.get('Location') or '').lower()
+                    for s in ('login', 'signin', 'okta', 'auth')))
+        if (r.status_code in (401, 403)
+                or (_VAUTO_DEAD_BODY_SIGNAL.lower() in _body.lower())
+                or _is_auth_redirect):
+            # CONFIRMED dead -> fail closed.
             verdict = 'dead'
         elif 200 <= r.status_code < 300:
-            verdict = 'alive'
+            _ok = False
+            try:
+                _ok = bool(((r.json() or {}).get('report') or {}).get('url'))
+            except Exception:
+                _ok = False
+            verdict = 'alive' if _ok else 'unknown'
         else:
-            # 403/500/etc — treat as unknown rather than blocking
+            # 5xx / other 4xx / non-auth 3xx -> inconclusive, never block.
             verdict = 'unknown'
     except _ew_requests.RequestException:
         verdict = 'unknown'
     except Exception:
         verdict = 'unknown'
+
+    try:
+        print('[vauto-probe] label=%s verdict=%s' % (label_for_log, verdict), flush=True)
+    except Exception:
+        pass
 
     if ch:
         _vauto_probe_cache[ch] = (verdict, now + _VAUTO_PROBE_TTL)
@@ -17738,7 +17782,7 @@ def _maybe_send_miles_verify_sms(bid_id, reason='miles_discrepancy'):
     # MILES_VERIFY_SMS_DISABLED_2026_05_31: operator removed the customer-facing
     # "odometer check" SMS. miles_audit_worker still records the discrepancy
     # internally; we just no longer text the bidder. Re-enable: env MILES_VERIFY_SMS_ENABLED=1.
-    if os.environ.get('MILES_VERIFY_SMS_ENABLED', '0') != '1':
+    if os.environ.get('MILES_VERIFY_SMS_ENABLED', '1') != '1':  # FLAG_DONT_BLOCK_2026_06_19: re-enabled (operator) -- notify the bidder on a miles flag, never block
         return False
     try:
         _db = get_db()

@@ -1,9 +1,9 @@
 {
   "make_name": "CHEVROLET",
-  "trained_at": "2026-06-18T08:30:22.134510Z",
-  "n_total": 2311,
+  "trained_at": "2026-06-19T08:30:18.617397Z",
+  "n_total": 2315,
   "n_train": 2123,
-  "n_test": 188,
+  "n_test": 192,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -227,49 +227,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2905.0,
-    "mape_pct": 6.11,
-    "r2": 0.9496,
-    "within_5pct": 56.4,
-    "within_10pct": 83.0
+    "mae_dollars": 2896.0,
+    "mape_pct": 6.18,
+    "r2": 0.9495,
+    "within_5pct": 53.6,
+    "within_10pct": 79.2
   },
   "baseline_metrics": {
-    "mae_dollars": 3104.0,
-    "mape_pct": 7.1,
+    "mae_dollars": 3122.0,
+    "mape_pct": 7.26,
     "ratio": 1.048
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.3616895079612732
+      "importance": 0.37324216961860657
     },
     {
       "name": "market_asking_price",
-      "importance": 0.29589948058128357
+      "importance": 0.2716080844402313
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.2509154677391052
+      "importance": 0.2655869722366333
+    },
+    {
+      "name": "model_name_Camaro 2SS Coupe",
+      "importance": 0.0031471350230276585
     },
     {
       "name": "supplier_name_Classic Cars Of Palm Beach Llc",
-      "importance": 0.003973469138145447
-    },
-    {
-      "name": "supplier_name_Nissan Of Orange Park",
-      "importance": 0.0039196982979774475
-    },
-    {
-      "name": "supplier_name_Ultimo Northbrook",
-      "importance": 0.0031302724964916706
+      "importance": 0.003143152454867959
     },
     {
       "name": "sold_year",
-      "importance": 0.0029361566994339228
+      "importance": 0.0030880942940711975
     },
     {
-      "name": "model_name_OTHER",
-      "importance": 0.0026987360324710608
+      "name": "model_name_Tahoe Premier Sport Utility Vehicle",
+      "importance": 0.0030688466504216194
+    },
+    {
+      "name": "supplier_name_Nissan Of Orange Park",
+      "importance": 0.002774610184133053
     }
   ]
 }

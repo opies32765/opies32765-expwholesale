@@ -1,9 +1,9 @@
 {
   "make_name": "BENTLEY",
-  "trained_at": "2026-06-18T08:30:49.044671Z",
-  "n_total": 333,
+  "trained_at": "2026-06-19T08:30:39.475300Z",
+  "n_total": 334,
   "n_train": 293,
-  "n_test": 40,
+  "n_test": 41,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,49 +215,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 15135.0,
-    "mape_pct": 13.75,
-    "r2": 0.9243,
-    "within_5pct": 35.0,
-    "within_10pct": 55.0
+    "mae_dollars": 15117.0,
+    "mape_pct": 13.85,
+    "r2": 0.9225,
+    "within_5pct": 29.3,
+    "within_10pct": 53.7
   },
   "baseline_metrics": {
-    "mae_dollars": 26323.0,
-    "mape_pct": 25.94,
+    "mae_dollars": 26388.0,
+    "mape_pct": 26.19,
     "ratio": 1.1871
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.3214537799358368
+      "importance": 0.33193087577819824
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.30810409784317017
+      "importance": 0.31589481234550476
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.22087478637695312
+      "importance": 0.19191764295101166
     },
     {
       "name": "model_name_Mulsanne Sedan 4 Dr.",
-      "importance": 0.020293407142162323
-    },
-    {
-      "name": "supplier_name_Mall Of Georgia Mini",
-      "importance": 0.010963741689920425
+      "importance": 0.016760393977165222
     },
     {
       "name": "year",
-      "importance": 0.01047854870557785
+      "importance": 0.011444373056292534
     },
     {
-      "name": "model_name_Mulsanne",
-      "importance": 0.007587018422782421
+      "name": "supplier_name_Mall Of Georgia Mini",
+      "importance": 0.008911585435271263
+    },
+    {
+      "name": "odometer",
+      "importance": 0.007297757547348738
     },
     {
       "name": "supplier_name_Give Me The Vin Llc",
-      "importance": 0.006432306952774525
+      "importance": 0.006739383097738028
     }
   ]
 }
