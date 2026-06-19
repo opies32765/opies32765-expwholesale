@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conversion · EW</title>
+<style>
+  :root{ --bg:#0b1120; --card:#0f172a; --line:#1e293b; --txt:#e2e8f0; --mut:#64748b; --accent:#38bdf8; --green:#4ade80; --amber:#fbbf24; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--txt); font-family:'Inter',system-ui,Segoe UI,Roboto,sans-serif; }
+  .wrap{ max-width:1180px; margin:0 auto; padding:24px 20px 60px; }
+  .top{ display:flex; align-items:center; gap:14px; margin-bottom:6px; }
+  .top h1{ font-size:22px; margin:0; font-weight:700; letter-spacing:-.01em; }
+  .top a.back{ color:var(--mut); text-decoration:none; font-size:13px; border:1px solid var(--line); padding:6px 12px; border-radius:8px; }
+  .top a.back:hover{ color:var(--txt); border-color:#334155; }
+  .sub{ color:var(--mut); font-size:13px; margin:0 0 20px; }
+  .controls{ display:flex; gap:10px; align-items:center; margin-bottom:22px; flex-wrap:wrap; }
+  .controls label{ font-size:12px; color:var(--mut); }
+  .controls input{ background:var(--card); border:1px solid var(--line); color:var(--txt); border-radius:8px; padding:7px 10px; font-size:13px; }
+  .controls button{ background:#1e293b; border:1px solid #334155; color:var(--txt); border-radius:8px; padding:8px 16px; font-size:13px; cursor:pointer; font-weight:600; }
+  .controls button:hover{ background:#27364a; }
+  .controls .pill{ font-size:11px; color:var(--mut); }
+  .cards{ display:grid; grid-template-columns:repeat(5,1fr); gap:14px; margin-bottom:30px; }
+  @media(max-width:880px){ .cards{ grid-template-columns:repeat(2,1fr);} }
+  .kpi{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; }
+  .kpi .v{ font-size:28px; font-weight:800; letter-spacing:-.02em; font-family:'JetBrains Mono','Consolas',monospace; }
+  .kpi .l{ font-size:11px; color:var(--mut); text-transform:uppercase; letter-spacing:.5px; margin-top:6px; }
+  .kpi.accent .v{ color:var(--accent); }
+  .kpi.green .v{ color:var(--green); }
+  .kpi.amber .v{ color:var(--amber); }
+  .grid{ display:grid; grid-template-columns:repeat(2,1fr); gap:20px; }
+  @media(max-width:880px){ .grid{ grid-template-columns:1fr; } }
+  .panel{ background:var(--card); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+  .panel h2{ font-size:13px; margin:0; padding:14px 18px; border-bottom:1px solid var(--line); font-weight:700; letter-spacing:.02em; color:#cbd5e1; text-transform:uppercase; }
+  table{ width:100%; border-collapse:collapse; font-size:13px; }
+  th,td{ text-align:left; padding:9px 18px; border-bottom:1px solid rgba(30,41,59,.6); }
+  th{ font-size:10px; color:var(--mut); text-transform:uppercase; letter-spacing:.5px; cursor:pointer; user-select:none; }
+  th.num,td.num{ text-align:right; font-family:'JetBrains Mono','Consolas',monospace; }
+  tr:last-child td{ border-bottom:none; }
+  td.name{ color:var(--txt); }
+  td.profit{ color:var(--green); }
+  tbody tr:hover{ background:rgba(148,163,184,.05); }
+  .muted{ color:var(--mut); }
+  #err{ color:#f87171; font-size:13px; margin:10px 0; display:none; }
+  .bar{ height:6px; background:#1e293b; border-radius:4px; overflow:hidden; margin-top:10px; }
+  .bar > div{ height:100%; background:linear-gradient(90deg,#0ea5e9,#38bdf8); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <a class="back" href="/">&larr; Dashboard</a>
+    <h1>Conversion &middot; Bids &rarr; Bought</h1>
+  </div>
+  <p class="sub" id="sub">Real inbound bids since day one, and how many EW actually bought (matched to the LSL ledger by VIN). Excludes duplicates, incompletes, test/AI submits, and bulk uploads.</p>
+
+  <div class="controls">
+    <label>From <input type="date" id="from"></label>
+    <label>To <input type="date" id="to"></label>
+    <button onclick="load()">Apply</button>
+    <button onclick="document.getElementById('from').value='';document.getElementById('to').value='';load()">Since day one</button>
+    <span class="pill" id="rangepill"></span>
+  </div>
+
+  <div id="err"></div>
+
+  <div class="cards">
+    <div class="kpi"><div class="v" id="k_bids">&mdash;</div><div class="l">Real Bids</div></div>
+    <div class="kpi green"><div class="v" id="k_bought">&mdash;</div><div class="l">Bought</div></div>
+    <div class="kpi accent"><div class="v" id="k_conv">&mdash;</div><div class="l">Conversion</div></div>
+    <div class="kpi green"><div class="v" id="k_profit">&mdash;</div><div class="l">Total Profit</div></div>
+    <div class="kpi amber"><div class="v" id="k_avg">&mdash;</div><div class="l">Avg / Car</div></div>
+  </div>
+
+  <div class="grid">
+    <div class="panel"><h2>By Make</h2><div id="t_make"></div></div>
+    <div class="panel"><h2>By Salesperson</h2><div id="t_sales"></div></div>
+    <div class="panel"><h2>By Buying Source / Dealer</h2><div id="t_buy"></div></div>
+    <div class="panel"><h2>By Selling Dealer</h2><div id="t_sell"></div></div>
+  </div>
+</div>
+
+<script>
+function money(n){ return '$' + (n||0).toLocaleString('en-US'); }
+function num(n){ return (n||0).toLocaleString('en-US'); }
+var _data = {};   // holds latest breakdown arrays for re-sort
+var _sort = {};   // panel -> {key, dir}
+
+function renderTable(elId, rows, panelKey){
+  var s = _sort[panelKey] || {key:'count', dir:-1};
+  var sorted = rows.slice().sort(function(a,b){
+    var av = s.key==='name' ? (a.name||'').toLowerCase() : a[s.key];
+    var bv = s.key==='name' ? (b.name||'').toLowerCase() : b[s.key];
+    if(av<bv) return -1*s.dir; if(av>bv) return 1*s.dir; return 0;
+  });
+  var max = Math.max.apply(null, rows.map(function(r){return r.count;}).concat([1]));
+  var h = '<table><thead><tr>'
+    + '<th data-k="name">Name</th>'
+    + '<th class="num" data-k="count">Bought</th>'
+    + '<th class="num" data-k="profit">Profit</th>'
+    + '</tr></thead><tbody>';
+  sorted.forEach(function(r){
+    h += '<tr><td class="name">'+(r.name||'(none)')
+      +'<div class="bar"><div style="width:'+Math.round(100*r.count/max)+'%"></div></div></td>'
+      +'<td class="num">'+num(r.count)+'</td>'
+      +'<td class="num profit">'+money(r.profit)+'</td></tr>';
+  });
+  h += '</tbody></table>';
+  var el = document.getElementById(elId);
+  el.innerHTML = h;
+  el.querySelectorAll('th').forEach(function(th){
+    th.onclick = function(){
+      var k = th.getAttribute('data-k');
+      var cur = _sort[panelKey] || {key:'count', dir:-1};
+      _sort[panelKey] = {key:k, dir: (cur.key===k ? -cur.dir : (k==='name'?1:-1))};
+      renderTable(elId, rows, panelKey);
+    };
+  });
+}
+
+function load(){
+  var f = document.getElementById('from').value, t = document.getElementById('to').value;
+  var qs = []; if(f) qs.push('from='+f); if(t) qs.push('to='+t);
+  document.getElementById('rangepill').textContent = (f||t) ? ((f||'…')+' → '+(t||'today')) : 'all-time';
+  document.getElementById('err').style.display='none';
+  fetch('/api/admin/conversion/data'+(qs.length?'?'+qs.join('&'):''), {cache:'no-store'})
+    .then(function(r){ if(r.status===401){ location.href='/login'; return null; } return r.json(); })
+    .then(function(d){
+      if(!d) return;
+      if(d.error){ var e=document.getElementById('err'); e.style.display='block'; e.textContent='Error: '+d.error+' — '+(d.detail||''); return; }
+      document.getElementById('k_bids').textContent   = num(d.total_real_bids);
+      document.getElementById('k_bought').textContent = num(d.bought);
+      document.getElementById('k_conv').textContent   = d.conversion_pct+'%';
+      document.getElementById('k_profit').textContent = money(d.total_profit);
+      document.getElementById('k_avg').textContent    = money(d.avg_profit);
+      renderTable('t_make',  d.by_make||[],          'make');
+      renderTable('t_sales', d.by_salesperson||[],   'sales');
+      renderTable('t_buy',   d.by_buying_dealer||[],  'buy');
+      renderTable('t_sell',  d.by_selling_dealer||[], 'sell');
+    })
+    .catch(function(e){ var el=document.getElementById('err'); el.style.display='block'; el.textContent='Load failed: '+e; });
+}
+load();
+</script>
+</body>
+</html>

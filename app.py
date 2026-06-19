@@ -7127,203 +7127,7 @@ def api_market_check_submit():
 
 
 
-# --- PROMO_VIDEO_ROUTES_2026_06_12: "Create Video" social promo (Veo) ---
-@app.route('/api/bid/<int:bid_id>/promo-video', methods=['POST'])
-def create_promo_video(bid_id):
-    """Queue a promo video job for a bid photo. Body: {photo_id, price?}.
-    ew_promo_video_worker.py (systemd ew-promo-video) picks it up."""
-    data = request.get_json(silent=True) or {}
-    photo_id = data.get('photo_id')
-    price = (str(data.get('price') or '')).strip() or None
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("SELECT id FROM bids WHERE id=%s", (bid_id,))
-    if not cur.fetchone():
-        db.close()
-        return jsonify({'error': 'bid not found'}), 404
-    if photo_id:
-        cur.execute("SELECT id FROM bid_photos WHERE id=%s AND bid_id=%s", (photo_id, bid_id))
-        if not cur.fetchone():
-            db.close()
-            return jsonify({'error': 'photo not on this bid'}), 400
-    script = (str(data.get('script') or '')).strip() or None
-    try:
-        scenes = max(2, min(int(data.get('scenes') or 4), 6))
-    except (TypeError, ValueError):
-        scenes = 4
-    quality = 'max' if data.get('quality') == 'max' else 'fast'
-    notify = 'telegram' if data.get('notify') == 'telegram' else None
-    cur.execute("INSERT INTO promo_video_jobs (bid_id, photo_id, price, script, scenes, quality, notify) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
-                (bid_id, photo_id, price, script, scenes, quality, notify))
-    job_id = cur.fetchone()['id']
-    db.commit()
-    db.close()
-    return jsonify({'success': True, 'job_id': job_id})
-
-
-@app.route('/api/promo-video/<int:job_id>', methods=['GET'])
-def promo_video_status(job_id):
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("SELECT id, bid_id, status, url, error FROM promo_video_jobs WHERE id=%s",
-                (job_id,))
-    row = cur.fetchone()
-    db.close()
-    if not row:
-        return jsonify({'error': 'not found'}), 404
-    return jsonify(dict(row))
-# --- end PROMO_VIDEO_ROUTES_2026_06_12 ---
-
-
-
-
-
-# --- PROMO_PHOTOS_2026_06_12: photo picker + original-pic upload for /promo-videos ---
-@app.route('/api/bid/<int:bid_id>/promo-photos', methods=['GET'])
-def promo_photos(bid_id):
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("SELECT id, COALESCE(local_path, url) AS src FROM bid_photos "
-                "WHERE bid_id=%s ORDER BY id", (bid_id,))
-    photos = [{'id': r['id'], 'thumb': thumb_url_filter(r['src'], 'strip')}
-              for r in cur.fetchall()]
-    db.close()
-    return jsonify({'photos': photos})
-
-
-@app.route('/api/bid/<int:bid_id>/promo-photo-upload', methods=['POST'])
-def promo_photo_upload(bid_id):
-    f = request.files.get('photo')
-    if not f or not f.filename:
-        return jsonify({'error': 'no file'}), 400
-    ext = os.path.splitext(f.filename)[1].lower()
-    if ext not in ('.jpg', '.jpeg', '.png', '.webp', '.heic'):
-        return jsonify({'error': 'unsupported file type'}), 400
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("SELECT id FROM bids WHERE id=%s", (bid_id,))
-    if not cur.fetchone():
-        db.close()
-        return jsonify({'error': 'bid not found'}), 404
-    seed_dir = os.path.join(UPLOAD_DIR, 'promo_seeds')
-    os.makedirs(seed_dir, exist_ok=True)
-    fname = 'bid%d_%d%s' % (bid_id, int(time.time()), ext)
-    f.save(os.path.join(seed_dir, fname))
-    web_path = '/static/uploads/promo_seeds/' + fname
-    cur.execute("INSERT INTO bid_photos (bid_id, url, local_path, is_sms_intake) "
-                "VALUES (%s, %s, %s, false) RETURNING id",
-                (bid_id, web_path, web_path))
-    photo_id = cur.fetchone()['id']
-    db.commit()
-    db.close()
-    return jsonify({'photo_id': photo_id, 'thumb': thumb_url_filter(web_path, 'strip')})
-# --- end PROMO_PHOTOS_2026_06_12 ---
-
-
-# --- PROMO_NARRATION_2026_06_12: Jen's pre-filled narration macro ---
-@app.route('/api/bid/<int:bid_id>/promo-narration', methods=['GET'])
-def promo_narration(bid_id):
-    import re as _re
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("SELECT year, make, model, trim, mileage, color, int_color, vin "
-                "FROM bids WHERE id=%s", (bid_id,))
-    b = cur.fetchone()
-    if not b:
-        db.close()
-        return jsonify({'error': 'bid not found'}), 404
-    cur.execute("SELECT total_msrp, exterior_color, interior_color, raw_json::text AS raw "
-                "FROM ipacket_lookups WHERE (bid_id=%s OR vin=%s) AND total_msrp IS NOT NULL "
-                "ORDER BY id DESC LIMIT 1", (bid_id, b.get('vin')))
-    s = cur.fetchone() or {}
-    db.close()
-
-    # raw_json::text escapes newlines as the 2-char sequence backslash-n; flatten
-    # them to spaces so the color phrases become single-line and easy to slice
-    raw = (s.get('raw') or '').replace(chr(92) + 'n', ' ')
-    bullet = chr(0x2022)
-
-    def _slice(text, start_token, stop_tokens):
-        i = text.find(start_token)
-        if i < 0:
-            return ''
-        seg = text[i + len(start_token):i + len(start_token) + 60]
-        cut = len(seg)
-        for t in stop_tokens:
-            k = seg.find(t)
-            if 0 <= k < cut:
-                cut = k
-        return ' '.join(seg[:cut].split()).title()
-
-    ext = (s.get('exterior_color') or '').strip()
-    if not ext and raw:
-        ext = _slice(raw, 'EXTERIOR:', ['INTERIOR:', bullet])
-    inte = (s.get('interior_color') or '').strip()
-    if not inte and raw:
-        inte = _slice(raw, 'INTERIOR:', [bullet, 'EXTERIOR:'])
-    ext = ext or (b.get('color') or '').strip().title()
-    inte = inte or (b.get('int_color') or '').strip().title()
-
-    car = ' '.join(str(x) for x in [b.get('year'), (b.get('make') or '').title(),
-                                    b.get('model'), (b.get('trim') or '').strip()] if x).strip()
-    parts = ["Hi, this is Jen with Experience Wholesale. Today we have a %s." % car]
-    msrp = s.get('total_msrp')
-    if msrp:
-        parts.append("The original MSRP was over $%s." % format(int(msrp) // 1000 * 1000, ','))
-    if ext and inte:
-        parts.append("It's %s on %s." % (ext, inte))
-    elif ext:
-        parts.append("It's finished in %s." % ext)
-    if b.get('mileage'):
-        parts.append("Only %s miles." % format(int(b['mileage']), ','))
-    return jsonify({'script': ' '.join(parts), 'msrp': msrp,
-                    'exterior': ext or None, 'interior': inte or None})
-# --- end PROMO_NARRATION_2026_06_12 ---
-
-
-# --- PROMO_VIDEO_PAGE_2026_06_12: promo video management page ---
-@app.route('/promo-videos')
-def promo_videos_page():
-    from flask import render_template
-    return render_template('promo_videos.html')
-
-
-@app.route('/api/promo-videos/data', methods=['GET'])
-def promo_videos_data():
-    db = get_db()
-    cur = db.cursor()
-    cur.execute("""
-        SELECT b.id, b.year, b.make, b.model, b.trim,
-               (SELECT i.total_msrp FROM ipacket_lookups i
-                 WHERE (i.bid_id = b.id OR i.vin = b.vin) AND i.total_msrp IS NOT NULL
-                 ORDER BY i.id DESC LIMIT 1) AS msrp,
-               (SELECT count(*) FROM bid_photos p WHERE p.bid_id = b.id) AS photos,
-               (SELECT count(*) FROM promo_video_jobs v
-                 WHERE v.bid_id = b.id AND v.status = 'done') AS videos
-        FROM bids b
-        WHERE b.created_at > now() - interval '14 days'
-        ORDER BY b.id DESC LIMIT 200""")
-    bids = [{'id': r['id'],
-             'vehicle': ' '.join(str(x) for x in [r['year'], (r['make'] or '').title(),
-                                                  r['model'], r['trim'] or ''] if x).strip(),
-             'msrp': r['msrp'], 'photos': r['photos'], 'videos': r['videos']}
-            for r in cur.fetchall()]
-    cur.execute("""
-        SELECT j.id, j.bid_id, j.price, j.status, j.url, j.error, j.scenes, j.quality,
-               j.progress, j.created_at, b.year, b.make, b.model
-        FROM promo_video_jobs j JOIN bids b ON b.id = j.bid_id
-        ORDER BY j.id DESC LIMIT 40""")
-    jobs = [{'id': r['id'], 'bid_id': r['bid_id'], 'price': r['price'], 'status': r['status'],
-             'url': r['url'], 'error': r['error'], 'scenes': r['scenes'], 'quality': r['quality'],
-             'progress': r['progress'],
-             'created_at': r['created_at'].isoformat() if r['created_at'] else None,
-             'vehicle': ' '.join(str(x) for x in [r['year'], (r['make'] or '').title(),
-                                                  r['model']] if x).strip()}
-            for r in cur.fetchall()]
-    db.close()
-    return jsonify({'bids': bids, 'jobs': jobs})
-# --- end PROMO_VIDEO_PAGE_2026_06_12 ---
+# PROMO_VIDEO (Veo car-video) feature removed 2026-06-18 — routes/page/worker/service/table all deleted
 
 
 @app.route('/api/bid/<int:bid_id>/detect-color', methods=['POST'])
@@ -13778,6 +13582,47 @@ def api_bid_progress(bid_id):
     return jsonify(out)
 
 
+@app.route('/api/bid/<int:bid_id>/full-status')
+def api_bid_full_status(bid_id):
+    """ONE_REFRESH_LOOP_2026_06_18: drives the bid page's single refresh-until-done
+    loop. `fp` is a fingerprint that flips a bit as each value lands (page reloads to
+    repaint); `terminal` goes True once ALL values are in (3 legs + price + the vAuto
+    extras), or a 5-min failsafe, so the loop STOPS refreshing for good. Read-only/cheap."""
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("SELECT EXTRACT(EPOCH FROM (NOW()-created_at))::int AS age, "
+                    "(ai_price IS NOT NULL) AS priced, (ai_assessment IS NOT NULL) AS assessed "
+                    "FROM bids WHERE id=%s", (bid_id,))
+        b = cur.fetchone()
+        if not b:
+            return jsonify({'terminal': True, 'fp': 'x'})
+        age = b.get('age') or 0
+        cur.execute("SELECT (raw_json IS NOT NULL) AS bk, (carfax_screenshot IS NOT NULL) AS cf, "
+                    "(autocheck_screenshot IS NOT NULL) AS ac, (appraisal_url IS NOT NULL) AS lnk, "
+                    "(rbook_completed_at IS NOT NULL) AS rb, (manheim_completed_at IS NOT NULL) AS mh "
+                    "FROM vauto_lookups WHERE bid_id=%s", (bid_id,))
+        v = cur.fetchone() or {}
+        cur.execute("SELECT (looked_up_at IS NOT NULL) AS a FROM accutrade_lookups WHERE bid_id=%s", (bid_id,))
+        a = cur.fetchone() or {}
+        cur.execute("SELECT (looked_up_at IS NOT NULL) AS i FROM ipacket_lookups WHERE bid_id=%s", (bid_id,))
+        i = cur.fetchone() or {}
+    finally:
+        try: db.close()
+        except Exception: pass
+    def _b(x): return '1' if x else '0'
+    fp = ''.join(_b(x) for x in [v.get('bk'), v.get('cf'), v.get('ac'), v.get('lnk'),
+                                 v.get('rb'), v.get('mh'), a.get('a'), i.get('i'), b.get('priced')])
+    legs_in   = bool(v.get('bk') and a.get('a') and i.get('i'))
+    priced    = bool(b.get('priced') or b.get('assessed'))
+    extras_in = bool(v.get('lnk') and v.get('rb') and v.get('mh'))
+    # ACCU_NOWAIT_2026_06_18: stop ONLY once the 3 enrichment legs (AccuTrade is
+    # the slowest/last) AND the price are in. Dropped the extras_in gate (saved
+    # vAuto link / rBook / MMR are flaky and not what's watched); raised the hard
+    # failsafe 300->600s so a slow AccuTrade is never cut off before it lands.
+    terminal  = (legs_in and priced) or age > 600
+    return jsonify({'terminal': terminal, 'fp': fp})
+
+
 @app.route('/api/bid/<int:bid_id>/source-status')
 def api_bid_source_status(bid_id):
     """SOURCE_STATUS_2026_05_29: per-source enrichment state (vauto / accutrade /
@@ -14837,6 +14682,124 @@ def api_correction_refresh():
         return jsonify({'30d': r30, '90d': r90})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ===== CONVERSION_TAB_2026_06_18 (operator): bids-since-day-one vs EW-bought =====
+# Real bids live in Postgres `bids`; the BOUGHT reality (profit, dealers, salesperson)
+# lives in the read-only LSL ledger /opt/livesaleslog/crm.db `deals`. Matched by VIN.
+# Operator-chosen rules: count each car (VIN) once; bought = bid VIN appears in deals
+# with purchase_cost>0. Excludes: his phone, bulk uploads, his dashboard quick-drops,
+# duplicates/dead/rejected, incompletes (no VIN & no YMM), and obvious test/AI bids.
+_CONV_EXCLUDE = """ NOT (
+  regexp_replace(coalesce(phone,''),'[^0-9]','','g') LIKE '%%4074309675%%'
+  OR coalesce(creation_source,'')='bulk_upload'
+  OR (coalesce(creation_source,'')='quick_drop' AND phone='drop:dashboard')
+  OR coalesce(status,'') IN ('duplicate','dead','rejected')
+  OR ((vin IS NULL OR length(vin)<>17) AND (year IS NULL OR make IS NULL OR model IS NULL))
+  OR coalesce(source,'')='voice'
+  OR phone IN ('ext:test','18005551234','field:rep','field:speedtest','field:wipetest','field:dispatchtest','field:worker2test')
+  OR coalesce(phone,'') LIKE '%%5551234%%'
+) """
+
+@app.route('/admin/conversion')
+def admin_conversion():
+    """Auth via global require_login."""
+    return render_template('admin_conversion.html')
+
+
+@app.route('/api/admin/conversion/data')
+def api_admin_conversion_data():
+    """CONVERSION_TAB_2026_06_18. Read-only. Optional ?from=YYYY-MM-DD&to=YYYY-MM-DD
+    on the bid created_at; default = since day one (all-time)."""
+    import sqlite3 as _sq
+    from collections import Counter as _Ct, defaultdict as _dd
+    _fr = (request.args.get('from') or '').strip()
+    _to = (request.args.get('to') or '').strip()
+    _date_re = __import__('re').compile(r'^\d{4}-\d{2}-\d{2}$')
+    _conds = [_CONV_EXCLUDE]
+    _params = []
+    if _date_re.match(_fr):
+        _conds.append("created_at::date >= %s"); _params.append(_fr)
+    if _date_re.match(_to):
+        _conds.append("created_at::date <= %s"); _params.append(_to)
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT vin, make FROM bids WHERE " + " AND ".join(_conds), _params)
+    rows = cur.fetchall()
+    try: db.close()
+    except Exception: pass
+    vins = set(); novin = 0
+    for r in rows:
+        v = (r['vin'] if hasattr(r, 'keys') else r[0]) or ''
+        if len(v) == 17:
+            vins.add(v.upper())
+        else:
+            novin += 1
+    total_real = len(vins) + novin
+
+    lsl_path = os.environ.get('LSL_DB_PATH', '/opt/livesaleslog/crm.db')
+    deal = {}
+    try:
+        s = _sq.connect('file:%s?mode=ro' % lsl_path, uri=True)
+        q = "SELECT vin_no, make_name, front_value, supplier_name, customer_name, sales_person, sale_price FROM deals WHERE purchase_cost>0 AND length(vin_no)=17"
+        if _date_re.match(_fr) or _date_re.match(_to):
+            # bought-basis = deal created_at (acquisition date)
+            if _date_re.match(_fr): q += " AND date(created_at) >= '%s'" % _fr
+            if _date_re.match(_to): q += " AND date(created_at) <= '%s'" % _to
+        for row in s.execute(q):
+            k = (row[0] or '').upper()
+            if k and k not in deal:
+                deal[k] = row
+        s.close()
+    except Exception as _e:
+        return jsonify({'error': 'lsl_unavailable', 'detail': str(_e)[:200]}), 200
+
+    # CONV_BUYSRC_FROM_INVENTORY_2026_06_18: the real BUY source is inventory.source
+    # (deals.supplier_name == customer_name on wholesale deals -> that's the sold-to).
+    buysrc = {}
+    try:
+        s2 = _sq.connect('file:%s?mode=ro' % lsl_path, uri=True)
+        for vrow in s2.execute("SELECT vin_no, source FROM inventory WHERE length(vin_no)=17"):
+            kk = (vrow[0] or '').upper()
+            if kk and kk not in buysrc and vrow[1]:
+                buysrc[kk] = vrow[1]
+        s2.close()
+    except Exception:
+        pass
+    bought = [deal[v] for v in vins if v in deal]
+
+    def grp(idx):
+        c = _Ct(); p = _dd(float)
+        for row in bought:
+            k = (row[idx] or '(none)')
+            k = (k.strip() if isinstance(k, str) else str(k)) or '(none)'
+            c[k] += 1; p[k] += (row[2] or 0)
+        return [{'name': k, 'count': c[k], 'profit': round(p[k])}
+                for k in sorted(c, key=lambda k: -c[k])]
+
+    def grp_src():
+        c = _Ct(); p = _dd(float)
+        for row in bought:
+            k = buysrc.get((row[0] or '').upper()) or '(none)'
+            k = (k.strip() if isinstance(k, str) else str(k)) or '(none)'
+            c[k] += 1; p[k] += (row[2] or 0)
+        return [{'name': k, 'count': c[k], 'profit': round(p[k])}
+                for k in sorted(c, key=lambda k: -c[k])]
+
+    total_profit = round(sum((r[2] or 0) for r in bought))
+    sold = sum(1 for r in bought if (r[6] or 0) > 0)
+    return jsonify({
+        'total_real_bids': total_real,
+        'unique_vins': len(vins),
+        'bought': len(bought),
+        'conversion_pct': round(100.0 * len(bought) / max(1, total_real), 1),
+        'total_profit': total_profit,
+        'avg_profit': round(total_profit / max(1, len(bought))) if bought else 0,
+        'sold': sold,
+        'by_make': grp(1),
+        'by_buying_dealer': grp_src(),
+        'by_selling_dealer': grp(4),
+        'by_salesperson': grp(5),
+    })
 
 
 @app.route('/admin/workers')

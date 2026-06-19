@@ -986,6 +986,33 @@ def _normalize_carscommerce(it):
     }
 
 
+def _carscommerce_used_types(url, headers, src):
+    """Probe the live Cars Commerce `type` facet and return every non-New
+    label (Used / Pre-Owned / Certified / Certified Pre-Owned / CPO / ...),
+    so the main query never silently drops cars on a store that uses a
+    different used-label convention. Returns None on failure -> caller then
+    fetches unfiltered and relies on _normalize_carscommerce to drop
+    new/demo/loaner/courtesy. CARSCOMMERCE_TYPE_AUTO_2026_06_18."""
+    probe = {'perPage': 1, 'page': 1, 'facets': ['type']}
+    if src:
+        probe['facetFilters'] = {'source_id': [str(src)]}
+    try:
+        r = requests.post(url, json=probe, headers=headers, timeout=20)
+        if r.status_code != 200:
+            return None
+        facets = ((r.json().get('data') or {}).get('facets')) or []
+    except Exception:
+        return None
+    vals = []
+    for f in facets:
+        if isinstance(f, dict) and f.get('name') == 'type':
+            for v in (f.get('values') or []):
+                k = (v.get('key') or '').strip()
+                if k and 'new' not in k.lower():
+                    vals.append(k)
+    return vals or None
+
+
 def fetch_carscommerce_inventory(cfg):
     """cfg = {ccid, api_key, source_id(optional rooftop filter), origin}. Returns
     list of normalized used/cpo dicts, or None on hard failure."""
@@ -1001,17 +1028,27 @@ def fetch_carscommerce_inventory(cfg):
     if origin:
         headers['Origin'] = origin
         headers['Referer'] = origin.rstrip('/') + '/'
+    # CARSCOMMERCE_TYPE_AUTO_2026_06_18: the old hard-coded type allowlist
+    # ('Used','Certified Used','CTP') silently dropped EVERY car on stores
+    # that label used inventory 'Pre-Owned'/'Certified Pre-Owned' (the Hendrick
+    # group rooftops, e.g. BMW McKinney #89, Mall of GA MINI #91) -> 0 vehicles
+    # -> scan aborted. Probe the live `type` facet and include every non-New
+    # label instead. The `type_slug` AND-constraint is dropped (its slug also
+    # varies by convention and was excluding Pre-Owned). _normalize_carscommerce
+    # remains the final guard (drops new/demo/loaner/courtesy regardless).
+    used_types = _carscommerce_used_types(url, headers, src)
     base_body = {
         'perPage': 100,
         'facets': ['type_slug', 'year', 'make', 'model_slug', 'trim_slug',
                    'miles', 'body_type', 'low_price'],
         'filters': {'status': ['publish', 'modified', 'pend-sale']},
-        'facetFilters': {'type': ['Used', 'Certified Used', 'CTP'],
-                         'type_slug': ['Used', 'Certified Used']},
+        'facetFilters': {},
         'requestedFields': ['vin', 'stock', 'type', 'year', 'make', 'model',
                             'trim', 'date_in_stock', 'mileage', 'vdp_url',
                             'source_id', 'pricing', 'media'],
     }
+    if used_types:
+        base_body['facetFilters']['type'] = used_types
     if src:
         base_body['facetFilters']['source_id'] = [str(src)]
     out, page, total = [], 1, None
@@ -3213,7 +3250,37 @@ class DealerScanner:
                     stats['status'] = 'ok'
                     self._finalize(scan_id, stats, started)
                     return stats
-                # Algolia failed (config not in homepage HTML, or API down) —
+                # Algolia failed (config not in homepage HTML, API down, or —
+                # increasingly — a 403 because DealerInspire migrated the store
+                # onto Cars Commerce and DISABLED the old Algolia account).
+                # CARSCOMMERCE_AUTOFALLBACK_2026_06_18: before giving up to the
+                # universal path, try to auto-migrate this dealer to Cars
+                # Commerce — pull its SEARCH_SERVICE ccid/apiKey off the SRP,
+                # derive the rooftop source_id from the algolia rooftop_filter
+                # api_id, validate the count, persist, and use it. Makes the
+                # whole DealerInspire fleet self-heal on migration instead of
+                # silently aborting until someone notices.
+                cc_cfg = self._autodiscover_carscommerce()
+                if cc_cfg:
+                    cc = fetch_carscommerce_inventory(cc_cfg)
+                    if cc:
+                        prior = self._zero_vehicle_abort_check()
+                        if prior and len(cc) > max(50, prior * 3):
+                            print(f'  [cc-autofallback] carscommerce returned {len(cc)} '
+                                  f'vs {prior} active — looks like an unscoped group '
+                                  f'feed, NOT migrating; falling through', flush=True)
+                        else:
+                            print(f'  [cc-autofallback] algolia dead -> carscommerce '
+                                  f'returned {len(cc)} vehicles; migrating dealer '
+                                  f'{self.dealer_id} to carscommerce', flush=True)
+                            self._persist_carscommerce_cfg(cc_cfg)
+                            self._process_aan(scan_id, cc, stats)
+                            stats['colors_detected'] = self._detect_colors()
+                            self._update_dealer('dealerinspire', 'carscommerce',
+                                                scan_id, 'ok', stats['tier'])
+                            stats['status'] = 'ok'
+                            self._finalize(scan_id, stats, started)
+                            return stats
                 # fall through to the legacy universal path so the dealer
                 # still gets a scan attempt.
                 print('  dealerinspire algolia path failed — falling back to universal', flush=True)
@@ -4160,6 +4227,78 @@ class DealerScanner:
         existing = self.dealer.get('scrape_config') or {}
         if isinstance(existing, dict):
             existing['algolia'] = cfg
+            self.dealer['scrape_config'] = existing
+
+    def _carscommerce_source_id_from_rooftop(self):
+        """The Algolia rooftop_filter's api_id IS the Cars Commerce source_id
+        for the same physical rooftop (verified: BMW McKinney algolia
+        api_id 9093124 == cc source_id 9093124). Pull it from
+        scrape_config.algolia.rooftop_filter so a shared group ccid can be
+        scoped to this one store. Returns str or None.
+        CARSCOMMERCE_AUTOFALLBACK_2026_06_18."""
+        sc = self.dealer.get('scrape_config') or {}
+        if not isinstance(sc, dict):
+            return None
+        rf = (sc.get('algolia') or {}).get('rooftop_filter')
+        if not rf:
+            return None
+        m = re.search(r'api_id:(\d{3,9})', _json.dumps(rf))
+        return m.group(1) if m else None
+
+    def _autodiscover_carscommerce(self):
+        """Pull the Cars Commerce SEARCH_SERVICE config (ccid + apiKey) off a
+        JS-hydrated listing page and build a fetch_carscommerce_inventory cfg,
+        scoped by the rooftop source_id when the dealer is on a shared group
+        ccid. Used as the Algolia-failure fallback so a migrated DealerInspire
+        store self-heals. Returns a cfg dict or None.
+        CARSCOMMERCE_AUTOFALLBACK_2026_06_18."""
+        srp = self.base_url.rstrip('/') + '/used-vehicles/'
+        body = None
+        try:
+            resp = requests.post(
+                dealer_fetchers.FLARESOLVERR_URL,
+                json={'cmd': 'request.get', 'url': srp, 'maxTimeout': 85000},
+                timeout=130,
+            )
+            if resp.status_code == 200 and resp.json().get('status') == 'ok':
+                body = ((resp.json().get('solution') or {}).get('response') or '')
+        except Exception:
+            return None
+        if not body:
+            return None
+        # SEARCH_SERVICE = {"apiUrl":"https://websites-search.api.carscommerce.inc",
+        #                   "ccid":"NNN","enabled":"1","apiKey":"KEY", ...}
+        m = re.search(
+            r'websites-search\.api\.carscommerce\.inc"\s*,\s*"ccid"\s*:\s*"(\d{3,9})"'
+            r'.{0,80}?"apiKey"\s*:\s*"([0-9A-Za-z]{20,48})"',
+            body, re.S)
+        if not m:
+            return None
+        cfg = {'ccid': m.group(1), 'api_key': m.group(2),
+               'origin': self.base_url.rstrip('/')}
+        src = self._carscommerce_source_id_from_rooftop()
+        if src:
+            cfg['source_id'] = src
+        return cfg
+
+    def _persist_carscommerce_cfg(self, cfg):
+        """Persist the auto-discovered Cars Commerce config under
+        scrape_config.carscommerce and flip scrape_method, so every future
+        scan uses the fast carscommerce path directly (it runs before the now
+        dead Algolia path). CARSCOMMERCE_AUTOFALLBACK_2026_06_18."""
+        payload = _json.dumps({'carscommerce': cfg})
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute('''UPDATE dealers
+                            SET scrape_config = COALESCE(scrape_config, '{}'::jsonb) || %s::jsonb,
+                                scrape_method = 'carscommerce',
+                                scrape_config_at = NOW(),
+                                updated_at = NOW()
+                           WHERE id = %s''',
+                        (payload, self.dealer_id))
+            conn.commit()
+        existing = self.dealer.get('scrape_config') or {}
+        if isinstance(existing, dict):
+            existing['carscommerce'] = cfg
             self.dealer['scrape_config'] = existing
 
     def _update_dealer(self, platform, method, scan_id, status, tier=None):

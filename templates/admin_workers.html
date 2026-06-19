@@ -176,6 +176,12 @@ const fmtTime = (iso) => {
     return d.toLocaleTimeString('en-US', {hour12:false});
   } catch(e){ return iso; }
 };
+// TIMING_ACCURATE_2026_06_18: seconds → human (used for real enrich timing)
+const fmtSec = (s) => {
+  if (s === null || s === undefined || s < 0) return '—';
+  if (s < 60) return s + 's';
+  return Math.floor(s/60) + 'm ' + (s%60) + 's';
+};
 
 function workerCard(w){
   const eff = w.effective_priority || w.priority || 'unknown';
@@ -454,7 +460,7 @@ function activityTable(rows){
     return '<div class="empty-state">No completed activity yet.</div>';
   }
   let html = '<table><thead><tr>' +
-    '<th>Bid</th><th>Worker</th><th>Vehicle</th><th>Phases</th><th>Total</th><th>Status</th><th>Done</th>' +
+    '<th>Bid</th><th>Worker</th><th>Vehicle</th><th>Phases</th><th>Total</th><th>Queue</th><th>Enrich</th><th>Accu tail</th><th>Status</th><th>Done</th>' +
     '</tr></thead><tbody>';
   for (const r of rows){
     // Compress phase markers into a horizontal track
@@ -463,13 +469,17 @@ function activityTable(rows){
       const sym = p.state === 'done' ? '✓' : '▸';
       return '<span class="' + cls + '">' + p.phase + ' ' + sym + ' ' + fmtTime(p.ts) + '</span>';
     }).join(' <span class="muted">→</span> ');
-    const statusCls = r.status === 'ok' ? 'pdone' : (r.status && r.status.startsWith('released') ? 'pstart' : '');
+    const statusCls = (r.status === 'ok' || r.status === 'ok_api_mode') ? 'pdone' : (r.status && r.status.startsWith('released') ? 'pstart' : '');
     html += '<tr>' +
       '<td><a href="/bid/' + r.bid_id + '" style="color:#93c5fd;text-decoration:none">#' + r.bid_id + '</a></td>' +
       '<td><span class="chip">' + (r.worker_id || '—') + '</span></td>' +
       '<td>' + (r.ymm || '—') + '</td>' +
       '<td><div class="phase-track">' + (phStr || '<span class="muted">no markers</span>') + '</div></td>' +
-      '<td class="mono">' + fmtDur(r.duration_ms) + '</td>' +
+      '<td class="mono" style="font-weight:700;color:#fbbf24">' + fmtSec(r.total_sec) + '</td>' +
+      '<td class="mono muted">' + fmtSec(r.queue_sec) + '</td>' +
+      '<td class="mono" style="font-weight:600">' + fmtSec(r.enrich_sec) +
+        (r.duration_ms ? ' <span class="muted" style="font-weight:400;font-size:11px">(vAuto ' + fmtDur(r.duration_ms) + ')</span>' : '') + '</td>' +
+      '<td class="mono ' + ((r.accu_tail_sec != null && r.accu_tail_sec > 45) ? '' : 'muted') + '">' + fmtSec(r.accu_tail_sec) + '</td>' +
       '<td><span class="' + statusCls + '">' + (r.status || '—') + '</span></td>' +
       '<td class="mono muted">' + fmtTime(r.completed_at) + '</td>' +
     '</tr>';
