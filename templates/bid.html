@@ -3860,7 +3860,7 @@ window.__ewAllReady = window.__ewAllReady || false;
 // POPULATE_AT_DONE_2026_06_17: suppress EVERY enrichment-poller reload until the whole
 // bid is ready (link+rBook+MMR+AccuTrade+iPacket) so the page paints once, complete --
 // no iPacket-then-save-then-numbers dribble. Manual reloads use location.reload() direct.
-window._ewReloadGuarded = function(){ return false; };  /* ONE_REFRESH_LOOP_2026_06_18: superseded by the single full-status loop; the old per-leg/extras pollers call this -> now a no-op so ONE loop owns reloads. */
+window._ewReloadGuarded = function(){ if(window.__ewReloaded) return false; var ae=document.activeElement; if(ae&&(ae.tagName=='INPUT'||ae.tagName=='TEXTAREA'||ae.isContentEditable)) return false; if(window.getSelection&&String(window.getSelection())) return false; window.__ewReloaded=true; location.reload(); return true; };  /* GUARDED_RELOAD_RESTORE_2026_06_22: 06-18 no-op froze pages on Analyzing; restore guarded one-shot reload (one-shot flag prevents the reload-loop the no-op was fighting). */
 /* SAVED_APPRAISAL_PUSH_2026_06_17 (v2): in api_mode the Saved-vAuto link + rBook +
    MMR cards land ~30-50s after the fast price. Poll the extras status and reload the
    moment they go ready. No Jinja guard / no sessionStorage (those raced the early
