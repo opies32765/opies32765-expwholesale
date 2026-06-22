@@ -17821,6 +17821,19 @@ def api_trim_select():
     except Exception as _cae:
         print('trim_select carfax-authority err: %s' % _cae, flush=True)
 
+    # CARFAX_TRIM_OF_RECORD_2026_06_22: when Carfax provides a trim it IS the
+    # trim of record verbatim -- even when it names NO AccuTrade tile word
+    # (Carfax 'PREMIUM' but AccuTrade only offers Black/Track Edition, zero token
+    # overlap, so the CARFAX_AUTHORITY override above can't fire). The LLM still
+    # picks the tile index for valuation, but must NEVER rewrite the displayed
+    # trim into its own guess. bid 3615: Carfax 'PREMIUM' -> LLM 'GT3 RS' ->
+    # canon_trim 'GT3 RS' -> fuzzy 'Pathfinder/SL'. Carfax is the authority, period.
+    try:
+        if _cfx:
+            clean_trim = _cfx
+    except Exception:
+        pass
+
     selected_text = normalize_trim_text(choices[idx].get('text', ''))
 
     # Persist to cache
