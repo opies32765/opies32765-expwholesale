@@ -18499,8 +18499,7 @@ def api_accutrade_submit():
     # BEFORE the retry fires, so it can never loop (see _accutrade_autoretry).
     try:
         _ar_reason = (data.get('unavailable_reason') or '')
-        _ar_low = _ar_reason.lower()
-        if data.get('not_available') and (_ar_reason.startswith('mileage_did_not_commit') or _ar_reason.startswith('accutrade_stuck_on_guidebook') or ('input_not_found' in _ar_low) or _ar_low.startswith('worker error:')) and os.environ.get('ACCU_RETRY_DISABLED', '0') != '1':  # CLASS_RETRY_2026_06_22: retry the whole class of transient browser/worker flakes (vin/odometer input_not_found + any 'worker error:'), not a string allowlist; one-shot guard keeps it storm-safe (bid 3637 vin_input_not_found fell through -> manual reprocess). DECOUPLE_2026_05_31 test-toggle
+        if data.get('not_available') and (_ar_reason.startswith('mileage_did_not_commit') or _ar_reason.startswith('accutrade_stuck_on_guidebook') or _ar_reason.startswith('accutrade_odometer_input_not_found')) and os.environ.get('ACCU_RETRY_DISABLED', '0') != '1':  # DECOUPLE_2026_05_31 test-toggle
             _ardb = get_db()
             _arc = _ardb.cursor()
             _arc.execute("UPDATE bids SET accutrade_autoretried=TRUE "
