@@ -16603,12 +16603,18 @@ def api_vauto_submit():
              looked_up_at)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         ON CONFLICT (bid_id) DO UPDATE SET
-            vin=EXCLUDED.vin, rbook=EXCLUDED.rbook, black_book=EXCLUDED.black_book,
-            mmr=EXCLUDED.mmr, kbb=EXCLUDED.kbb, kbb_com=EXCLUDED.kbb_com,
-            jd_power=EXCLUDED.jd_power, title_status=EXCLUDED.title_status,
-            price_rank=EXCLUDED.price_rank, adj_pct_market=EXCLUDED.adj_pct_market,
-            carfax_screenshot=EXCLUDED.carfax_screenshot,
-            autocheck_screenshot=EXCLUDED.autocheck_screenshot,
+            vin=COALESCE(EXCLUDED.vin, vauto_lookups.vin),
+            rbook=COALESCE(EXCLUDED.rbook, vauto_lookups.rbook),
+            black_book=COALESCE(EXCLUDED.black_book, vauto_lookups.black_book),
+            mmr=COALESCE(EXCLUDED.mmr, vauto_lookups.mmr),
+            kbb=COALESCE(EXCLUDED.kbb, vauto_lookups.kbb),
+            kbb_com=COALESCE(EXCLUDED.kbb_com, vauto_lookups.kbb_com),
+            jd_power=COALESCE(EXCLUDED.jd_power, vauto_lookups.jd_power),
+            title_status=COALESCE(EXCLUDED.title_status, vauto_lookups.title_status),
+            price_rank=COALESCE(EXCLUDED.price_rank, vauto_lookups.price_rank),
+            adj_pct_market=COALESCE(EXCLUDED.adj_pct_market, vauto_lookups.adj_pct_market),
+            carfax_screenshot=COALESCE(EXCLUDED.carfax_screenshot, vauto_lookups.carfax_screenshot),
+            autocheck_screenshot=COALESCE(EXCLUDED.autocheck_screenshot, vauto_lookups.autocheck_screenshot),
             raw_json=EXCLUDED.raw_json,
             appraisal_url=COALESCE(EXCLUDED.appraisal_url, vauto_lookups.appraisal_url),
             looked_up_at=NOW()
