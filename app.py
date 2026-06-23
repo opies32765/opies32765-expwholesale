@@ -20058,6 +20058,57 @@ def _enqueue_comp_msrps_for_bid(bid_id, market_intel_obj):
         print(f'[comp_msrp enqueue] bid={bid_id} err: {e}', flush=True)
 
 
+def _warm_bid_match(bid_id):
+    """PERF_WARM_MATCH_2026_06_23: pre-compute the per-bid match bundle and write
+    it to the /dev/shm cache so the FIRST click into a new bid is instant.
+    Mirrors bid_detail's match computation; fail-safe (runs in the warm daemon)."""
+    import os, pickle, time
+    try:
+        _md_db = get_db()
+        _md_cur = _md_db.cursor()
+        _md_cur.execute("SELECT * FROM bids WHERE id = %s", (bid_id,))
+        _brow = _md_cur.fetchone()
+        if not _brow:
+            _md_db.close(); return
+        bid = dict(_brow)
+        if _DEALER_DATA_CACHE['ds'] is not None and (time.time() - _DEALER_DATA_CACHE['ts']) < 120:
+            _ds = _DEALER_DATA_CACHE['ds']; _vins = _DEALER_DATA_CACHE['vins']
+        else:
+            if BUY_PROFILE_MATCH_ENABLED_SLUGS:
+                _md_cur.execute("""SELECT id, name, portal_slug, buy_profile FROM dealers WHERE portal_slug = ANY(%s) AND buy_profile IS NOT NULL""", (list(BUY_PROFILE_MATCH_ENABLED_SLUGS),))
+            else:
+                _md_cur.execute("""SELECT id, name, portal_slug, buy_profile FROM dealers WHERE portal_slug IS NOT NULL AND buy_profile IS NOT NULL""")
+            _ds = [dict(r) for r in _md_cur.fetchall()]
+            _vins = _load_dealer_vins_owned(_md_cur)
+            _DEALER_DATA_CACHE.update(ts=time.time(), ds=_ds, vins=_vins)
+        match_dealers = _compute_bid_matches(dict(bid), _ds, vins_by_dealer=_vins)
+        match_detail = {}
+        if match_dealers:
+            try:
+                match_detail = _load_match_detail(_md_cur, dict(bid), [m['dealer_id'] for m in match_dealers])
+            except Exception:
+                match_detail = {}
+        no_model_in_network = False
+        if not match_dealers:
+            _bm = (bid.get('make') or '').upper().strip()
+            _bmod = (bid.get('canon_model') or bid.get('model') or '').strip()
+            _bmod_alt = (bid.get('model') or '').strip()
+            if _bm and _bmod:
+                _md_cur.execute("""SELECT COUNT(*) AS n FROM dealers WHERE portal_slug IS NOT NULL AND buy_profile IS NOT NULL AND (buy_profile->'makes'->%s->'models' ? %s OR buy_profile->'makes'->%s->'models' ? %s)""", (_bm, _bmod, _bm, _bmod_alt))
+                _r = _md_cur.fetchone()
+                no_model_in_network = (int(_r['n'] or 0) == 0)
+        _md_db.close()
+        try:
+            found_at = _found_at_for_bid(bid.get('id'), bid.get('vin'), bid.get('market_check'))
+        except Exception:
+            found_at = {'dealers': [], 'marketplaces': []}
+        with open(os.path.join(_BID_MATCH_DIR, str(bid_id) + '.pkl'), 'wb') as _f:
+            pickle.dump((match_dealers, match_detail, no_model_in_network, found_at), _f)
+        print(f'[warm-match] bid={bid_id} match pre-cached (dealers={len(match_dealers)})', flush=True)
+    except Exception as _wm_err:
+        print(f'[warm-match] bid={bid_id} err: {_wm_err}', flush=True)
+
+
 def _warm_bid_cache(bid_id):
     """LAYER_2_WARM_2026_05_20: one-shot PG-page-cache warm for a single
     bid. Fired in a daemon thread right after ai_assessment_log gets a
@@ -20105,6 +20156,7 @@ def _warm_bid_cache(bid_id):
         cur.fetchall()
         db.close()
         print(f'[warm-one] bid={bid_id} pages warmed', flush=True)
+        _warm_bid_match(bid_id)
     except Exception as _wb_err:
         print(f'[warm-one] bid={bid_id} err: {_wb_err}', flush=True)
 
