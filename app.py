@@ -5528,15 +5528,17 @@ def twilio_webhook():
                     "OR vin_verify_sms_sent_at > NOW() - INTERVAL '24 hours'))) LIMIT 1",
                     (from_phone,))
                 if not cur.fetchone():
-                    # NO_STAGING_2026_06_13 (operator: "nothing staged ever"): a bare
-                    # number with no open bid is DROPPED (logged), never staged -- so
-                    # it can never be reclaimed onto a later unrelated bid.
+                    # ORDER_INDEP_RESTAGE_2026_06_23 (operator re-enabled, reverses
+                    # NO_STAGING_2026_06_13): STAGE the bare number so a VIN/photo bid
+                    # created within 60s reclaims it. Reclaim is guarded (60s window,
+                    # exactly-1 staged, blank-miles-only, VIN bid) so a stray number
+                    # won't attach to an unrelated bid.
                     _finalize_sms_intake(
-                        cur, intake_log_id, 'bare_miles_dropped',
+                        cur, intake_log_id, 'order_indep_staged',
                         parsed_miles=_oim_miles,
-                        reason='bare miles %s dropped (no open bid in window; staging disabled)' % _oim_miles)
+                        reason='bare miles %s staged (no open bid; awaiting VIN/photo bid within 60s)' % _oim_miles)
                     db.commit()
-                    print('[order-indep-merge] dropped bare miles=%s from=%s (no open bid; no staging)' % (_oim_miles, from_phone), flush=True)
+                    print('[order-indep-merge] staged bare miles=%s from=%s (awaiting bid within 60s)' % (_oim_miles, from_phone), flush=True)
                     db.close()
                     return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                             200, {'Content-Type': 'text/xml'})
