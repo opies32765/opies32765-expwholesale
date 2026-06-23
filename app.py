@@ -16565,12 +16565,16 @@ def api_vauto_submit():
     # ── Partial-success guard ─────────────────────────────────────────
     appraisal_url_present = bool((data.get('appraisal_url') or '').strip())
     carfax_present = bool((data.get('carfax_screenshot') or '').strip())
+    # SAVEONLY_PARTIAL_FIX_2026_06_23: SAVE_ONLY workers intentionally have no
+    # Carfax (api_mode renders it server-side) — do NOT treat their saved
+    # submit as a carfax-timeout 'partial' / release it for a redundant retry.
+    _save_only = bool((data.get('raw') or {}).get('save_only'))
     cur.execute(
         "SELECT COUNT(*) AS n FROM worker_jobs WHERE bid_id=%s AND job_type='vauto'",
         (bid_id,))
     _row = cur.fetchone()
     _attempts = _row['n'] if isinstance(_row, dict) else _row[0]
-    if appraisal_url_present and not carfax_present and _attempts < 3:
+    if appraisal_url_present and not carfax_present and not _save_only and _attempts < 3:
         cur.execute(
             "UPDATE bids SET vauto_claimed_by=NULL, vauto_claimed_at=NULL WHERE id=%s",
             (bid_id,))
