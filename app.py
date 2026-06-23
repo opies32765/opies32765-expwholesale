@@ -35,6 +35,11 @@ app.permanent_session_lifetime = 86400 * 30  # 30 days
 app.config['TEMPLATES_AUTO_RELOAD'] = False  # AUTO_RELOAD_OFF_2026_05_20
 app.jinja_env.auto_reload = False  # AUTO_RELOAD_OFF_2026_05_20
 _DEALER_DATA_CACHE = {'ts': 0.0, 'ds': None, 'vins': None}  # PERF_DEALER_CACHE_2026_06_23
+_BID_MATCH_DIR = '/dev/shm/ew_bidmatch'  # PERF_BID_MATCH_CACHE_2026_06_23 (shared per-bid result, RAM, 180s TTL)
+try:
+    import os as _osbmd; _osbmd.makedirs(_BID_MATCH_DIR, exist_ok=True)
+except Exception:
+    pass
 
 # JINJA_BYTECODE_CACHE_2026_05_20: gunicorn runs 10 workers; without a
 # shared bytecode cache each worker re-parses every template (bid.html
@@ -4460,65 +4465,82 @@ def bid_detail(bid_id):
     # BUY_PROFILE_MATCH_2026_05_22: compute matches for this bid (in-memory),
     # YMMT_MATCH_2026_05_26: scores ALL portal dealers by default. Uses a fresh
     # DB connection because the request's `cur` may have been closed earlier.
-    match_dealers = []
+    import time as _bmt, os as _osbm, pickle as _pkbm
+    _bmpath = _osbm.path.join(_BID_MATCH_DIR, str(bid.get('id')) + '.pkl')
+    _bmc = None
     try:
-        _md_db = get_db()
-        _md_cur = _md_db.cursor()
-        import time as _tdc
-        if _DEALER_DATA_CACHE['ds'] is not None and (_tdc.time() - _DEALER_DATA_CACHE['ts']) < 120:
-            _ds = _DEALER_DATA_CACHE['ds']; _vins = _DEALER_DATA_CACHE['vins']
-        else:
-            if BUY_PROFILE_MATCH_ENABLED_SLUGS:
-                _md_cur.execute("""SELECT id, name, portal_slug, buy_profile FROM dealers WHERE portal_slug = ANY(%s) AND buy_profile IS NOT NULL""", (list(BUY_PROFILE_MATCH_ENABLED_SLUGS),))
+        if _osbm.path.exists(_bmpath) and (_bmt.time() - _osbm.path.getmtime(_bmpath)) < 180:
+            with open(_bmpath, 'rb') as _bmf:
+                _bmc = _pkbm.load(_bmf)
+    except Exception:
+        _bmc = None
+    if _bmc is not None:
+        match_dealers, match_detail, no_model_in_network, found_at = _bmc
+    else:
+        match_dealers = []
+        try:
+            _md_db = get_db()
+            _md_cur = _md_db.cursor()
+            import time as _tdc
+            if _DEALER_DATA_CACHE['ds'] is not None and (_tdc.time() - _DEALER_DATA_CACHE['ts']) < 120:
+                _ds = _DEALER_DATA_CACHE['ds']; _vins = _DEALER_DATA_CACHE['vins']
             else:
-                _md_cur.execute("""SELECT id, name, portal_slug, buy_profile FROM dealers WHERE portal_slug IS NOT NULL AND buy_profile IS NOT NULL""")
-            _ds = [dict(r) for r in _md_cur.fetchall()]
-            _vins = _load_dealer_vins_owned(_md_cur)
-            _DEALER_DATA_CACHE.update(ts=_tdc.time(), ds=_ds, vins=_vins)
-        match_dealers = _compute_bid_matches(dict(bid), _ds, vins_by_dealer=_vins)
-        # YMMT_MATCH_2026_05_26: load per-dealer in-stock + sold detail for the
-        # unified buyer-match card. Reuses _md_cur connection (still open).
-        match_detail = {}
-        if match_dealers:
-            try:
-                match_detail = _load_match_detail(
-                    _md_cur, dict(bid),
-                    [m['dealer_id'] for m in match_dealers])
-            except Exception as _det_err:
-                print(f'[bid_detail] match_detail err: {_det_err}', flush=True)
-        # YMMT_MATCH_NO_BUYER_STATE_2026_05_26: when no matches and no ymmt_id,
-        # distinguish between "no partner stocks this model at all" (genuine
-        # no-buyer) vs "waiting for trim verification" (model exists somewhere
-        # in network, just waiting for trim disambiguation).
-        no_model_in_network = False
-        if not match_dealers:
-            _bm = (bid.get('make') or '').upper().strip()
-            _bmod_canon = bid.get('canon_model') or bid.get('model') or ''
-            _bmod = _bmod_canon.strip()
-            _bmod_alt = (bid.get('model') or '').strip()
-            if _bm and _bmod:
-                # Check if ANY portal dealer's buy_profile has this make+model.
-                # Cheap JSONB existence check, no LLM, no rollup.
-                _md_cur.execute("""
-                    SELECT COUNT(*) AS n FROM dealers
-                     WHERE portal_slug IS NOT NULL
-                       AND buy_profile IS NOT NULL
-                       AND (buy_profile->'makes'->%s->'models' ? %s
-                            OR buy_profile->'makes'->%s->'models' ? %s)
-                """, (_bm, _bmod, _bm, _bmod_alt))
-                _row = _md_cur.fetchone()
-                no_model_in_network = (int(_row['n'] or 0) == 0)
-        _md_db.close()
-    except Exception as _mm_err:
-        print(f'[bid_detail] match_dealers err: {_mm_err}', flush=True)
-        match_detail = {}
-        no_model_in_network = False
-    # FOUND_AT_2026_06_08: where is this exact VIN currently listed?
-    try:
-        found_at = _found_at_for_bid(bid.get('id'), bid.get('vin'), bid.get('market_check'))
-    except Exception as _fa_e:
-        print(f'[bid_detail] found_at err: {_fa_e}', flush=True)
-        found_at = {'dealers': [], 'marketplaces': []}
+                if BUY_PROFILE_MATCH_ENABLED_SLUGS:
+                    _md_cur.execute("""SELECT id, name, portal_slug, buy_profile FROM dealers WHERE portal_slug = ANY(%s) AND buy_profile IS NOT NULL""", (list(BUY_PROFILE_MATCH_ENABLED_SLUGS),))
+                else:
+                    _md_cur.execute("""SELECT id, name, portal_slug, buy_profile FROM dealers WHERE portal_slug IS NOT NULL AND buy_profile IS NOT NULL""")
+                _ds = [dict(r) for r in _md_cur.fetchall()]
+                _vins = _load_dealer_vins_owned(_md_cur)
+                _DEALER_DATA_CACHE.update(ts=_tdc.time(), ds=_ds, vins=_vins)
+            match_dealers = _compute_bid_matches(dict(bid), _ds, vins_by_dealer=_vins)
+            # YMMT_MATCH_2026_05_26: load per-dealer in-stock + sold detail for the
+            # unified buyer-match card. Reuses _md_cur connection (still open).
+            match_detail = {}
+            if match_dealers:
+                try:
+                    match_detail = _load_match_detail(
+                        _md_cur, dict(bid),
+                        [m['dealer_id'] for m in match_dealers])
+                except Exception as _det_err:
+                    print(f'[bid_detail] match_detail err: {_det_err}', flush=True)
+            # YMMT_MATCH_NO_BUYER_STATE_2026_05_26: when no matches and no ymmt_id,
+            # distinguish between "no partner stocks this model at all" (genuine
+            # no-buyer) vs "waiting for trim verification" (model exists somewhere
+            # in network, just waiting for trim disambiguation).
+            no_model_in_network = False
+            if not match_dealers:
+                _bm = (bid.get('make') or '').upper().strip()
+                _bmod_canon = bid.get('canon_model') or bid.get('model') or ''
+                _bmod = _bmod_canon.strip()
+                _bmod_alt = (bid.get('model') or '').strip()
+                if _bm and _bmod:
+                    # Check if ANY portal dealer's buy_profile has this make+model.
+                    # Cheap JSONB existence check, no LLM, no rollup.
+                    _md_cur.execute("""
+                        SELECT COUNT(*) AS n FROM dealers
+                         WHERE portal_slug IS NOT NULL
+                           AND buy_profile IS NOT NULL
+                           AND (buy_profile->'makes'->%s->'models' ? %s
+                                OR buy_profile->'makes'->%s->'models' ? %s)
+                    """, (_bm, _bmod, _bm, _bmod_alt))
+                    _row = _md_cur.fetchone()
+                    no_model_in_network = (int(_row['n'] or 0) == 0)
+            _md_db.close()
+        except Exception as _mm_err:
+            print(f'[bid_detail] match_dealers err: {_mm_err}', flush=True)
+            match_detail = {}
+            no_model_in_network = False
+        # FOUND_AT_2026_06_08: where is this exact VIN currently listed?
+        try:
+            found_at = _found_at_for_bid(bid.get('id'), bid.get('vin'), bid.get('market_check'))
+        except Exception as _fa_e:
+            print(f'[bid_detail] found_at err: {_fa_e}', flush=True)
+            found_at = {'dealers': [], 'marketplaces': []}
+        try:
+            with open(_bmpath, 'wb') as _bmf:
+                _pkbm.dump((match_dealers, match_detail, no_model_in_network, found_at), _bmf)
+        except Exception:
+            pass
     _mark('match_dealers')
 
     _handler_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
