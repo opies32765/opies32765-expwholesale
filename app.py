@@ -13648,14 +13648,14 @@ def api_bid_full_status(bid_id):
         v = cur.fetchone() or {}
         cur.execute("SELECT (looked_up_at IS NOT NULL) AS a FROM accutrade_lookups WHERE bid_id=%s", (bid_id,))
         a = cur.fetchone() or {}
-        cur.execute("SELECT (looked_up_at IS NOT NULL) AS i FROM ipacket_lookups WHERE bid_id=%s", (bid_id,))
+        cur.execute("SELECT (looked_up_at IS NOT NULL) AS i, ((not_available IS NOT TRUE) AND (total_msrp IS NOT NULL OR base_price IS NOT NULL)) AS ig FROM ipacket_lookups WHERE bid_id=%s", (bid_id,))  # IPKT_CONTENT_FP_2026_06_23
         i = cur.fetchone() or {}
     finally:
         try: db.close()
         except Exception: pass
     def _b(x): return '1' if x else '0'
     fp = ''.join(_b(x) for x in [v.get('bk'), v.get('cf'), v.get('ac'), v.get('lnk'),
-                                 v.get('rb'), v.get('mh'), a.get('a'), i.get('i'), b.get('priced')])
+                                 v.get('rb'), v.get('mh'), a.get('a'), i.get('i'), i.get('ig'), b.get('priced')])
     legs_in   = bool(v.get('bk') and a.get('a') and i.get('i'))
     priced    = bool(b.get('priced') or b.get('assessed'))
     extras_in = bool(v.get('lnk') and v.get('rb') and v.get('mh'))
