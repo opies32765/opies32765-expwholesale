@@ -6768,6 +6768,19 @@ def send_reply(bid_id):
     except Exception as _e:
         print(f'[partner notify] skipped for bid {bid_id}: {_e}', flush=True)
 
+    # THALIST_APP_BRIDGE_2026_06_23: push EW's response into the ThaList app
+    # (offer card + push + icon badge) for member-submitted bids. Best-effort,
+    # never blocks the reply. notify_thalist_member self-gates (no-op unless the
+    # bid has thalist_member_email set), so we call it unconditionally.
+    try:
+        notify_thalist_member(
+            bid_id,
+            'offer' if (new_status == 'bid_sent' and bid_amount) else 'message',
+            message,
+            bid_amount if new_status == 'bid_sent' else None)
+    except Exception as _te:
+        print(f'[thalist-app] member notify skipped bid {bid_id}: {_te}', flush=True)
+
     # Attempt SMS after DB is committed — failure doesn't affect the response
     sms_sent = send_sms(bid['phone'], message)
 
@@ -12154,6 +12167,210 @@ def api_thalist_post():
         'bid_id': new_bid_id,
         'vin': vin,
     })
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# ThaList member app  ⇄  EW   (bidirectional member-bid bridge)
+# THALIST_APP_BRIDGE_2026_06_23. Distinct from api_thalist_post above (that is
+# the thalist.com *scraper* acquisition feed). Here a signed-in ThaList member
+# asks EW for a bid on their OWN car from the ThaList phone app:
+#   inbound  POST /api/thalist/member_bid    (X-Auth) -> create + enrich a bid
+#   inbound  POST /api/thalist/member_reply  (X-Auth) -> member chats back
+#   outbound notify_thalist_member()         -> push EW's offer/reply into the
+#                                               app (banner + icon badge + card)
+# Member identity = email, carried as contact phone 'thalistapp:<email>' (the
+# routing key for offers back). creation_source='thalist_app'.
+# ─────────────────────────────────────────────────────────────────────────
+EW_THALIST_APP_BASE = os.environ.get(
+    'EW_THALIST_APP_BASE', 'https://thalist.orlandoaisolutions.net')
+
+
+def notify_thalist_member(bid_id, kind, text, amount=None):
+    """Best-effort: push EW's response into the ThaList app for the submitting
+    member. No-op for any bid that did not come from the member app. Never
+    raises into the caller (mirrors the partner-notify contract)."""
+    try:
+        db = get_db(); cur = db.cursor()
+        cur.execute("SELECT thalist_member_email, vin, year, make, model FROM bids WHERE id=%s",
+                    (bid_id,))
+        b = cur.fetchone(); db.close()
+        member_email = (b['thalist_member_email'] if b else None)
+        if not member_email:
+            return  # not a ThaList member-app bid -> nothing to deliver
+        ymm = ' '.join(str(x) for x in (b['year'], b['make'], b['model']) if x)
+        payload = {'member_email': member_email, 'bid_id': bid_id,
+                   'vin': b['vin'], 'ymm': ymm, 'kind': kind, 'text': text or ''}
+        if amount is not None:
+            try: payload['amount'] = float(amount)
+            except (TypeError, ValueError): pass
+        requests.post(f'{EW_THALIST_APP_BASE}/api/thalist-app/ew-offer',
+                      json=payload, headers={'X-Auth': THALIST_SECRET}, timeout=10)
+    except Exception as e:
+        print(f'[thalist-app] notify member failed bid={bid_id}: {e}', flush=True)
+
+
+@app.route('/api/thalist/member_bid', methods=['POST'])
+def api_thalist_member_bid():
+    """A signed-in ThaList member submits their own car for an EW bid.
+    Auth: header X-Auth == EW_THALIST_SECRET. Required: vin (17), mileage,
+    asking_price, member_email. Optional: member_name, year/make/model/trim,
+    notes, photos[] (urls), additional_photos[] (base64)."""
+    auth = (request.headers.get('X-Auth') or '').strip()
+    if not THALIST_SECRET or auth != THALIST_SECRET:
+        return jsonify({'error': 'bad auth'}), 401
+    data = request.get_json(silent=True) or {}
+
+    vin = (data.get('vin') or '').strip().upper()
+    if len(vin) != 17:
+        return jsonify({'error': 'valid 17-char VIN required'}), 400
+    member_email = (data.get('member_email') or '').strip().lower()
+    if not member_email:
+        return jsonify({'error': 'member_email required'}), 400
+    try:
+        mileage = int(data.get('mileage'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'mileage required'}), 400
+    try:
+        asking_price = float(data.get('asking_price'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'asking_price required'}), 400
+
+    member_name = (data.get('member_name') or '').strip() or member_email
+    # bids.phone / contacts.phone are varchar(20), so we can't store the email
+    # in the phone sentinel. Use a short stable per-member hash key, and keep the
+    # real email in bids.thalist_member_email (the routing key for offers back).
+    import hashlib as _hl
+    contact_phone = 'tla:' + _hl.sha1(member_email.encode()).hexdigest()[:14]  # 18 chars
+    year = data.get('year') or None
+    make = (data.get('make') or '').strip() or None
+    model = (data.get('model') or '').strip() or None
+    trim = (data.get('trim') or '').strip() or None
+
+    db = get_db(); cur = db.cursor()
+    try:
+        # Dedupe only against this member's own prior submission of this VIN
+        # (guards double-taps) — a scraper bid on the same VIN is separate.
+        cur.execute("""SELECT id FROM bids WHERE vin=%s AND phone=%s
+                       AND COALESCE(status,'') NOT IN ('cancelled','rejected')
+                       ORDER BY id DESC LIMIT 1""", (vin, contact_phone))
+        dupe = cur.fetchone()
+        if dupe:
+            db.close()
+            return jsonify({'ok': True, 'status': 'dupe', 'bid_id': dupe['id']})
+
+        cur.execute("""
+            INSERT INTO contacts (phone, name, company)
+            VALUES (%s, %s, 'ThaList')
+            ON CONFLICT (phone) DO UPDATE
+              SET name = COALESCE(EXCLUDED.name, contacts.name)
+            RETURNING id
+        """, (contact_phone, member_name))
+        contact_id = cur.fetchone()['id']
+
+        rm = ['[THALIST APP]', f'Member: {member_name}', f'VIN: {vin}']
+        if year and make and model: rm.append(f'{year} {make} {model}')
+        rm.append(f'{mileage:,} mi'); rm.append(f'Asking: ${asking_price:,.0f}')
+        raw_message = ' | '.join(rm)
+        member_note = (data.get('notes') or '').strip()
+        notes_text = f'[ThaList: {member_name}] {member_note}' if member_note else None
+
+        cur.execute("""
+            INSERT INTO bids (contact_id, phone, vin, year, make, model, trim,
+                              mileage, raw_message, asking_price, notes,
+                              status, creation_source, thalist_member_email,
+                              vauto_priority)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'new','thalist_app',%s,TRUE)
+            RETURNING id
+        """, (contact_id, contact_phone, vin, year, make, model, trim,
+              mileage, raw_message, asking_price, notes_text, member_email))
+        bid_id = cur.fetchone()['id']
+
+        for purl in (data.get('photos') or []):
+            if purl and isinstance(purl, str):
+                cur.execute("INSERT INTO bid_photos (bid_id, url) VALUES (%s,%s)",
+                            (bid_id, purl))
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        for photo in (data.get('additional_photos') or []):
+            try:
+                img = base64.b64decode(photo['data'])
+                ext = os.path.splitext(photo.get('filename', '.jpg'))[1] or '.jpg'
+                fname = f'{uuid.uuid4().hex}{ext}'
+                with open(os.path.join(UPLOAD_DIR, fname), 'wb') as f:
+                    f.write(img)
+                cur.execute("INSERT INTO bid_photos (bid_id, url) VALUES (%s,%s)",
+                            (bid_id, f'/static/uploads/{fname}'))
+            except Exception:
+                pass
+        # Surface the member's "vehicle details" note as an inbound message on
+        # the bid thread -> shows in the bid-page conversation AND flags the bid
+        # unread on the dashboard (same path SMS/field-rep messages use).
+        if member_note:
+            cur.execute("""INSERT INTO bid_messages (bid_id, direction, message, from_phone)
+                           VALUES (%s, 'inbound', %s, %s)""",
+                        (bid_id, member_note, contact_phone))
+            cur.execute("UPDATE bids SET has_unread=TRUE WHERE id=%s", (bid_id,))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        try: db.close()
+        except Exception: pass
+        return jsonify({'error': f'{type(e).__name__}: {e}'}), 500
+
+    # Operator alert + the SAME enrichment every bid runs through. Enrichment
+    # is NEVER gated on the AI assessment (HARD RULE); trigger_market_check is
+    # the shared intake hook (NHTSA decode + iPacket cache prewarm; the market
+    # check runs on the worker fleet). No iPacket retry is introduced.
+    try:
+        ymm = ' '.join(str(x) for x in (year, make, model) if x) or vin
+        _tg_worker_alert(
+            f'📲 <b>New ThaList member bid</b> → bid #<b>{bid_id}</b>\n'
+            f'{ymm}\nVIN: <code>{vin}</code>\n'
+            f'${asking_price:,.0f} · {mileage:,} mi\n'
+            f'by {member_name} ({member_email})')
+    except Exception as e:
+        print(f'[thalist-app] alert error: {e}', flush=True)
+    try:
+        trigger_market_check(bid_id, vin)
+    except Exception as e:
+        print(f'[thalist-app] market_check kick failed: {e}', flush=True)
+
+    return jsonify({'ok': True, 'status': 'new', 'bid_id': bid_id, 'vin': vin})
+
+
+@app.route('/api/thalist/member_reply', methods=['POST'])
+def api_thalist_member_reply():
+    """ThaList member chats back on their bid. Auth: X-Auth shared secret.
+    Records inbound on the bid_messages thread + flags unread + alerts."""
+    auth = (request.headers.get('X-Auth') or '').strip()
+    if not THALIST_SECRET or auth != THALIST_SECRET:
+        return jsonify({'error': 'bad auth'}), 401
+    data = request.get_json(silent=True) or {}
+    try:
+        bid_id = int(data.get('bid_id'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'bid_id required'}), 400
+    message = (data.get('text') or '').strip()
+    if not message:
+        return jsonify({'error': 'text required'}), 400
+    member_email = (data.get('member_email') or '').strip().lower()
+
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT phone FROM bids WHERE id=%s", (bid_id,))
+    b = cur.fetchone()
+    if not b:
+        db.close(); return jsonify({'error': 'bid not found'}), 404
+    cur.execute("""INSERT INTO bid_messages (bid_id, direction, message, from_phone)
+                   VALUES (%s, 'inbound', %s, %s)""",
+                (bid_id, message, b['phone'] or f'thalistapp:{member_email}'))
+    cur.execute("UPDATE bids SET updated_at=NOW(), has_unread=TRUE WHERE id=%s",
+                (bid_id,))
+    db.commit(); db.close()
+    try:
+        _tg_worker_alert(f'💬 <b>ThaList member replied</b> on bid '
+                         f'#<b>{bid_id}</b>\n{message[:500]}')
+    except Exception:
+        pass
+    return jsonify({'ok': True})
 
 
 # ─────────────────────────────────────────────────────────────────────────

@@ -22,6 +22,9 @@
             <div class="contact-name" style="color:#34d399">{{ bid.contact_name or 'Thalist Post' }}</div>
             {% if bid.contact_company %}<div class="contact-company" style="color:#94a3b8;font-size:11px">{{ bid.contact_company }}</div>{% endif %}
             <div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.3);border-radius:3px;font-size:9px;font-weight:700;color:#34d399;letter-spacing:.4px;text-transform:uppercase" title="Auto-scraped from thalist.com Wholesale Inventory">Thalist</span></div>
+          {% elif bid.phone.startswith('tla:') %}
+            <div class="contact-name" style="color:#34d399">{{ bid.contact_name or 'ThaList Member' }}</div>
+            <div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.3);border-radius:3px;font-size:9px;font-weight:700;color:#34d399;letter-spacing:.4px;text-transform:uppercase" title="Submitted from the ThaList member app">ThaList Member</span></div>
           {% elif bid.phone.startswith('dealerclub:') %}
             <div class="contact-name" style="color:#f59e0b">DealerClub</div>
             <div class="contact-company" style="color:#94a3b8;font-size:11px">

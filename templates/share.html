@@ -320,11 +320,13 @@ details.share-card.accutrade { border-left: 4px solid #065f46; }
     <details class="share-card accutrade">
       <summary>
         <span>AccuTrade Appraisal</span>
-        <span class="sc-summary-meta">{% if accutrade.guaranteed_offer %}Instant Offer ${{ '{:,}'.format(accutrade.guaranteed_offer|int) }}{% elif accutrade.trade_in %}Target Auction ${{ '{:,}'.format(accutrade.trade_in|int) }}{% endif %}</span>
+        <span class="sc-summary-meta">{% if accutrade.guaranteed_offer and accutrade.guaranteed_offer > 100 %}Instant Offer ${{ '{:,}'.format(accutrade.guaranteed_offer|int) }}{% elif accutrade.trade_in %}Target Auction ${{ '{:,}'.format(accutrade.trade_in|int) }}{% endif %}</span>
       </summary>
       <div class="sc-body">
+        {# ACCUTRADE_MIRROR_2026_06_23: AccuTrade's <=$100 "can't-price" floor is N/A, not a real offer #}
+        {% set _at_guar = accutrade.guaranteed_offer if (accutrade.guaranteed_offer and accutrade.guaranteed_offer > 100) else None %}
         {% set at_books = [
-          ('Instant Offer', accutrade.guaranteed_offer),
+          ('Instant Offer', _at_guar),
           ('Target Auction', accutrade.trade_in),
           ('Target Retail', accutrade.trade_market),
           ('Manheim', accutrade.retail),

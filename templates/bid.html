@@ -404,6 +404,11 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           <span>👤</span><span>via {{ bid.salesperson }}</span>
         </div>
         {% endif %}
+        {% if bid.creation_source == 'thalist_app' or (bid.phone and bid.phone.startswith('tla:')) %}
+        <div style="margin-top:8px;display:inline-flex;align-items:center;gap:6px;padding:4px 10px;background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.4);border-radius:14px;font-size:12px;color:#34d399;font-weight:600" title="Submitted from the ThaList member app">
+          <span>📲</span><span>Submitted via ThaList by {{ bid.contact_name or 'member' }}</span>
+        </div>
+        {% endif %}
       </div>
       {% if bid.status != 'bought' %}<span class="badge badge-{{ bid.status }}">{{ bid.status.replace('_',' ') }}</span>{% endif %}
     </div>
@@ -2022,11 +2027,16 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
         {% endif %}
         <div style="display:flex;flex-direction:column;gap:6px">
+          {# ACCUTRADE_MIRROR_2026_06_23: the card shows EXACTLY what the AccuTrade
+             snapshot shows — nothing borrowed from other legs (no vAuto MMR fallback
+             for Manheim), and AccuTrade's <=$100 "can't-price" floor on the Instant
+             Offer renders as N/A (—) just like the snapshot. #}
+          {% set _at_guar = accutrade_data.guaranteed_offer if (accutrade_data.guaranteed_offer and accutrade_data.guaranteed_offer > 100) else None %}
           {% set at_books = [
-            ('Instant Offer', accutrade_data.guaranteed_offer),
+            ('Instant Offer', _at_guar),
             ('Target Auction', accutrade_data.trade_in),
             ('Target Retail', accutrade_data.trade_market),
-            ('Manheim', accutrade_data.retail or (vauto_data.mmr if vauto_data else None)),
+            ('Manheim', accutrade_data.retail),
             ('Wholesale / Avg', accutrade_data.market_avg)
           ] %}
           {% for label, val in at_books %}
