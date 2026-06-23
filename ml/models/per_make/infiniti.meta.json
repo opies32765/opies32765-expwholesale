@@ -1,9 +1,9 @@
 {
   "make_name": "INFINITI",
-  "trained_at": "2026-06-22T08:31:40.561046Z",
-  "n_total": 164,
+  "trained_at": "2026-06-23T08:31:12.030568Z",
+  "n_total": 165,
   "n_train": 156,
-  "n_test": 8,
+  "n_test": 9,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -217,15 +217,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 4283.0,
-    "mape_pct": 57.44,
-    "r2": 0.8044,
-    "within_5pct": 25.0,
-    "within_10pct": 50.0
+    "mae_dollars": 3896.0,
+    "mape_pct": 51.36,
+    "r2": 0.8052,
+    "within_5pct": 33.3,
+    "within_10pct": 55.6
   },
   "baseline_metrics": {
-    "mae_dollars": 6673.0,
-    "mape_pct": 65.9,
+    "mae_dollars": 6097.0,
+    "mape_pct": 59.12,
     "ratio": 1.0457
   },
   "top_features": [

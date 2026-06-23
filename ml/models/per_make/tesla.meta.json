@@ -1,9 +1,9 @@
 {
   "make_name": "TESLA",
-  "trained_at": "2026-06-22T08:31:21.314598Z",
-  "n_total": 742,
+  "trained_at": "2026-06-23T08:30:51.889471Z",
+  "n_total": 743,
   "n_train": 698,
-  "n_test": 44,
+  "n_test": 45,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -221,15 +221,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2427.0,
-    "mape_pct": 8.35,
-    "r2": 0.9803,
-    "within_5pct": 43.2,
-    "within_10pct": 79.5
+    "mae_dollars": 2654.0,
+    "mape_pct": 8.51,
+    "r2": 0.9754,
+    "within_5pct": 42.2,
+    "within_10pct": 77.8
   },
   "baseline_metrics": {
-    "mae_dollars": 2744.0,
-    "mape_pct": 11.25,
+    "mae_dollars": 2942.0,
+    "mape_pct": 11.32,
     "ratio": 1.0462
   },
   "top_features": [

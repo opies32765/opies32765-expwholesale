@@ -1,9 +1,9 @@
 {
   "make_name": "JAGUAR",
-  "trained_at": "2026-06-22T08:31:36.854603Z",
-  "n_total": 276,
+  "trained_at": "2026-06-23T08:31:08.667849Z",
+  "n_total": 278,
   "n_train": 270,
-  "n_test": 6,
+  "n_test": 8,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2167.0,
-    "mape_pct": 9.73,
-    "r2": 0.972,
-    "within_5pct": 50.0,
-    "within_10pct": 66.7
+    "mae_dollars": 2638.0,
+    "mape_pct": 14.03,
+    "r2": 0.952,
+    "within_5pct": 37.5,
+    "within_10pct": 50.0
   },
   "baseline_metrics": {
-    "mae_dollars": 4076.0,
-    "mape_pct": 19.92,
+    "mae_dollars": 3153.0,
+    "mape_pct": 15.59,
     "ratio": 1.0578
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.3558759093284607
+      "importance": 0.37376463413238525
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.13097813725471497
+      "importance": 0.128447487950325
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.10492758452892303
+      "importance": 0.07816309481859207
     },
     {
       "name": "model_name_F-TYPE",
-      "importance": 0.058068785816431046
+      "importance": 0.06679495424032211
     },
     {
       "name": "supplier_name_Daxs Deals",
-      "importance": 0.02715389057993889
+      "importance": 0.03405129164457321
     },
     {
       "name": "model_name_XK-Series XKR Convertible",
-      "importance": 0.0262684915214777
+      "importance": 0.03294099122285843
     },
     {
       "name": "supplier_name_Toyota Of Vero Beach",
-      "importance": 0.02488178387284279
+      "importance": 0.0312020443379879
     },
     {
-      "name": "original_msrp",
-      "importance": 0.01979372650384903
+      "name": "supplier_name_Marino Performance Motors",
+      "importance": 0.020740224048495293
     }
   ]
 }
