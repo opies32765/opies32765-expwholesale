@@ -1952,7 +1952,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           <div style="flex:1;cursor:pointer;min-height:0" title="Click for the full Carfax report" onclick="openReportLightbox('{{ vauto_data.carfax_screenshot[:-4] }}_full.png')">
             <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Carfax{% if vauto_data.carfax_share_url %} <a href="{{ vauto_data.carfax_share_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:9px;color:#60a5fa;text-decoration:none;text-transform:none;letter-spacing:0">🔗 full report →</a>{% endif %}</div>
             <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
-              <img src="{{ vauto_data.carfax_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="Carfax Report">
+              <img src="{{ vauto_data.carfax_screenshot|thumb_url('strip') }}" loading="lazy" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="Carfax Report">
             </div>
           </div>
           {% endif %}
@@ -1963,7 +1963,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
           </div>{% else %}<div style="flex:1;cursor:pointer;min-height:0" title="Click for the full AutoCheck report" onclick="openReportLightbox('{{ vauto_data.autocheck_screenshot[:-4] }}_full.png')">
             <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AutoCheck</div>
             <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
-              <img src="{{ vauto_data.autocheck_screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AutoCheck Report">
+              <img src="{{ vauto_data.autocheck_screenshot|thumb_url('strip') }}" loading="lazy" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AutoCheck Report">
             </div>
           </div>{% endif %}
           {% endif %}
@@ -2068,7 +2068,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         <div style="margin-top:14px;cursor:pointer;flex:1;min-height:0" onclick="openReportLightbox('{{ accutrade_data.screenshot }}')">
           <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">AccuTrade Report</div>
           <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;height:100%">
-            <img src="{{ accutrade_data.screenshot }}" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AccuTrade Report">
+            <img src="{{ accutrade_data.screenshot|thumb_url('strip') }}" loading="lazy" style="width:100%;height:100%;object-fit:cover;object-position:top" alt="AccuTrade Report">
           </div>
         </div>
         {% endif %}
@@ -2263,7 +2263,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         <div style="margin-top:14px;cursor:pointer" onclick="openReportLightbox('{{ ipacket_data.screenshot }}')">
           <div style="font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">OEM Window Sticker</div>
           <div style="background:#0f172a;border:1px solid #1e293b;border-radius:8px;overflow:hidden;max-height:300px">
-            <img src="{{ ipacket_data.screenshot }}" style="width:100%;object-fit:cover;object-position:top" alt="iPacket Sticker">
+            <img src="{{ ipacket_data.screenshot|thumb_url('strip') }}" loading="lazy" style="width:100%;object-fit:cover;object-position:top" alt="iPacket Sticker">
           </div>
         </div>
         {% endif %}

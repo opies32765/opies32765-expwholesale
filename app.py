@@ -34,6 +34,7 @@ app.permanent_session_lifetime = 86400 * 30  # 30 days
 # this flips it to check mtime every request. Negligible perf cost.
 app.config['TEMPLATES_AUTO_RELOAD'] = False  # AUTO_RELOAD_OFF_2026_05_20
 app.jinja_env.auto_reload = False  # AUTO_RELOAD_OFF_2026_05_20
+_DEALER_DATA_CACHE = {'ts': 0.0, 'ds': None, 'vins': None}  # PERF_DEALER_CACHE_2026_06_23
 
 # JINJA_BYTECODE_CACHE_2026_05_20: gunicorn runs 10 workers; without a
 # shared bytecode cache each worker re-parses every template (bid.html
@@ -4463,19 +4464,17 @@ def bid_detail(bid_id):
     try:
         _md_db = get_db()
         _md_cur = _md_db.cursor()
-        if BUY_PROFILE_MATCH_ENABLED_SLUGS:
-            _md_cur.execute("""SELECT id, name, portal_slug, buy_profile
-                                 FROM dealers
-                                WHERE portal_slug = ANY(%s)
-                                  AND buy_profile IS NOT NULL""",
-                            (list(BUY_PROFILE_MATCH_ENABLED_SLUGS),))
+        import time as _tdc
+        if _DEALER_DATA_CACHE['ds'] is not None and (_tdc.time() - _DEALER_DATA_CACHE['ts']) < 120:
+            _ds = _DEALER_DATA_CACHE['ds']; _vins = _DEALER_DATA_CACHE['vins']
         else:
-            _md_cur.execute("""SELECT id, name, portal_slug, buy_profile
-                                 FROM dealers
-                                WHERE portal_slug IS NOT NULL
-                                  AND buy_profile IS NOT NULL""")
-        _ds = [dict(r) for r in _md_cur.fetchall()]
-        _vins = _load_dealer_vins_owned(_md_cur)
+            if BUY_PROFILE_MATCH_ENABLED_SLUGS:
+                _md_cur.execute("""SELECT id, name, portal_slug, buy_profile FROM dealers WHERE portal_slug = ANY(%s) AND buy_profile IS NOT NULL""", (list(BUY_PROFILE_MATCH_ENABLED_SLUGS),))
+            else:
+                _md_cur.execute("""SELECT id, name, portal_slug, buy_profile FROM dealers WHERE portal_slug IS NOT NULL AND buy_profile IS NOT NULL""")
+            _ds = [dict(r) for r in _md_cur.fetchall()]
+            _vins = _load_dealer_vins_owned(_md_cur)
+            _DEALER_DATA_CACHE.update(ts=_tdc.time(), ds=_ds, vins=_vins)
         match_dealers = _compute_bid_matches(dict(bid), _ds, vins_by_dealer=_vins)
         # YMMT_MATCH_2026_05_26: load per-dealer in-stock + sold detail for the
         # unified buyer-match card. Reuses _md_cur connection (still open).
@@ -16972,7 +16971,7 @@ def thumb():
     if not os.path.exists(cache_path):
         raw = None
         try:
-            if src.startswith('/static/uploads/'):
+            if src.startswith(('/static/uploads/', '/accutrade_reports/', '/ipacket_reports/', '/vauto_reports/')):
                 # Local upload
                 local_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), src.lstrip('/'))
                 if os.path.exists(local_path):
