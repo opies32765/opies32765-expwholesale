@@ -33,6 +33,15 @@ except Exception as _e:
     print(f"[wsgi] network_push register failed: {_e}", flush=True)
 
 
+try:
+    from recon_routes import bp as _recon_bp
+    if 'recon' not in app.blueprints:
+        app.register_blueprint(_recon_bp)
+        print('[wsgi] recon blueprint registered (RECON_PHASE1_2026_06_24)', flush=True)
+except Exception as _e:
+    print(f'[wsgi] recon register failed: {_e}', flush=True)
+
+
 # Pre-warm ML models so the first bid card render doesn't pay the
 # 5s pandas/xgboost import + 700-1900ms per-make cold load. Each worker
 # imports this module once on boot via gunicorn.

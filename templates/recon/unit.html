@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }} · Recon</title>
+<style>
+  :root{--bg:#f4f6f8;--card:#fff;--line:#d8dde2;--mut:#6b7280;--txt:#1f2937;--red:#c0392b;--accent:#e23b3b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif}
+  a{color:inherit}
+  header.top{display:flex;align-items:center;gap:14px;padding:12px 20px;border-bottom:1px solid var(--line);background:#fff;position:sticky;top:0;z-index:5}
+  .back{font-size:13px;color:var(--mut);text-decoration:none;padding:5px 12px;border:1px solid var(--line);border-radius:6px}
+  .back:hover{color:var(--txt);border-color:#9ca3af}
+  header.top h1{font-size:17px;margin:0;font-weight:700;color:#111827}
+  header.top .vin{font-size:12px;color:var(--mut);font-family:ui-monospace,monospace}
+  .spacer{flex:1}
+  .pill{font-size:11px;padding:2px 10px;border-radius:20px;background:#eef0f2;color:#374151;font-weight:600}
+  .pill.disp{background:#e7f6ec;color:#157347}
+  .wrap{max-width:920px;margin:0 auto;padding:18px 20px 60px}
+  .info{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+  .info .c{background:#fff;border:1px solid var(--line);border-radius:10px;padding:11px 15px;flex:1 1 240px;min-width:0}
+  .info .c .l{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}
+  .info .c .v{font-size:15px;font-weight:600;color:#111827}
+  .info .c .sub{font-size:12px;color:var(--mut);font-weight:400}
+  .panel{background:#fff;border:1px solid var(--line);border-radius:10px;margin-bottom:14px}
+  .panel h2{font-size:12px;margin:0;padding:11px 15px;border-bottom:1px solid var(--line);text-transform:uppercase;letter-spacing:.5px;color:#6b7280}
+  .panel .body{padding:13px 15px}
+  .now{margin-bottom:11px}
+  .now b{color:var(--red)}
+  .row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+  .lbl{font-size:13px;color:var(--mut)}
+  select,input,textarea{font:14px inherit;color:var(--txt);background:#fff;border:1px solid var(--line);border-radius:7px;padding:9px 10px}
+  select:focus,input:focus,textarea:focus{outline:none;border-color:var(--accent)}
+  textarea.addr{width:100%;min-height:54px;resize:vertical}
+  .grow{flex:1;min-width:120px}
+  .btn{cursor:pointer;font:600 13px/1 inherit;color:#fff;background:var(--red);border:0;border-radius:7px;padding:10px 15px}
+  .btn:hover{background:#a93226}
+  .btn.gray{background:#e5e7eb;color:#374151}
+  .btn.sm{padding:7px 11px;font-size:12px}
+  .chk{display:flex;align-items:center;gap:8px;color:#374151;cursor:pointer;margin-top:12px}
+  .chk input{width:auto;padding:0}
+  .msg{font-size:12px;color:var(--mut)}
+  .msg.ok{color:#157347}.msg.err{color:#c0392b}
+  .err{color:#c0392b;font-size:12px;min-height:15px;margin:6px 0}
+  .hint{font-size:11px;color:#9ca3af;margin-top:9px}
+  .field{margin-bottom:12px}
+  .field .lbl{display:block;margin-bottom:5px;font-weight:600;color:#374151}
+  .field input{width:100%}
+  .two{display:flex;gap:14px;flex-wrap:wrap}
+  .party{flex:1 1 300px;min-width:0;border:1px solid #eef0f2;border-radius:9px;padding:11px;background:#fafbfc}
+  .party .phead{font-size:12px;font-weight:700;color:#374151;margin-bottom:8px}
+  .party input{width:100%;margin-top:7px}
+  .party .estlbl{display:block;margin-top:10px;font-size:11px;color:#6b7280}
+  .party .est{color:#c0392b;font-weight:800;text-transform:uppercase;letter-spacing:.4px}
+  .party input[type=date]{margin-top:4px}
+  .pill .hdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .note{padding:9px 0;border-bottom:1px solid #eef0f2}
+  .note:last-child{border-bottom:0}
+  .nmeta{font-size:11px;color:var(--mut);margin-bottom:3px}
+  .nmeta b{color:#374151;font-size:12px}
+  .nact{float:right}
+  .nact a{color:#3b82f6;cursor:pointer;text-decoration:none}
+  .nact a:hover{text-decoration:underline}
+  .nbody{white-space:pre-wrap}
+  .tl{list-style:none;margin:0;padding:0}
+  .tl li{display:flex;gap:11px;align-items:center;padding:8px 0;border-bottom:1px solid #eef0f2}
+  .tl li:last-child{border-bottom:0}
+  .dot{width:9px;height:9px;border-radius:50%;background:#cbd5e1;flex:0 0 auto}
+  .dot.open{background:var(--accent);box-shadow:0 0 0 3px rgba(226,59,59,.18)}
+  .tl .nm{font-weight:600;min-width:150px}
+  .tl .tm{color:var(--mut);font-size:12px;flex:1}
+  .tag{font-size:10px;padding:1px 7px;border-radius:20px;background:#eef0f2;color:#374151}
+  .tag.open{background:rgba(226,59,59,.14);color:#c0392b}
+  .empty{color:#9ca3af;font-size:12px}
+  @media (max-width:760px){
+    header.top{flex-wrap:wrap;gap:7px 10px;padding:10px 13px}
+    header.top .back{order:1}
+    header.top .pill{order:2;margin-left:auto}
+    header.top h1{order:3;flex:1 1 100%;font-size:16px;line-height:1.2}
+    header.top .vin{order:4;flex:1 1 100%}
+    header.top .spacer{display:none}
+    .wrap{padding:13px}
+    .info .c{flex:1 1 100%}
+    select,input,textarea{font-size:16px}
+    .two{gap:11px}
+  }
+</style>
+<script>try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.parentNode.removeChild(_s);}catch(e){}</script>
+</head>
+<body>
+<header class="top">
+  <a class="back" href="/recon">&larr; Board</a>
+  <h1>{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }} {{ u.trim or '' }}</h1>
+  <span class="vin">{{ u.vin }}{% if u.stock_no %} · {{ u.stock_no }}{% endif %}</span>
+  <span class="spacer"></span>
+  <span class="pill"><span class="hdot" style="background:{{ dot }}"></span>{{ cur_name }}</span>
+  {% if u.lsl_disposition %}<span class="pill disp">{{ u.lsl_disposition }}</span>{% endif %}
+</header>
+
+<div class="wrap">
+  <div class="info">
+    <div class="c"><div class="l">Bought from</div><div class="v">{{ u.bought_from or '—' }}{% if u.buying_from_type %} <span class="sub">({{ 'Individual' if u.buying_from_type|lower=='individual' else 'Dealer' }})</span>{% endif %}</div></div>
+    <div class="c"><div class="l">Sold to{% if u.deal_status %} · {{ u.deal_status }}{% endif %}</div><div class="v">{{ u.sold_to or 'Not sold' }}{% if u.sold_to_salesperson %} <span class="sub">· {{ u.sold_to_salesperson }}</span>{% endif %}</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Status</h2>
+    <div class="body">
+      <div class="now">Currently in <b>{{ cur_name }}</b></div>
+      <div class="row">
+        <span class="lbl">Move to:</span>
+        <select id="anyStep">
+          {% for s in steps %}<option value="{{ s.code }}"{% if s.code==cur_code %} selected{% endif %}>{{ s.name }}</option>{% endfor %}
+        </select>
+        <button class="btn" onclick="moveAny()">Move</button>
+        <span id="msg" class="msg"></span>
+      </div>
+      <label class="chk"><input type="checkbox" id="needsPhotos" {% if u.needs_photos %}checked{% endif %} onchange="togglePhotos()"> Need photos taken on arrival at home base</label>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Transport</h2>
+    <div class="body">
+      <div class="field">
+        <label class="lbl">Transport company</label>
+        <input id="tcompany" list="carrierList" value="{{ u.transport_company or '' }}" placeholder="Pick a carrier or type a new one…" oninput="carrierSearch(this.value)" autocomplete="off">
+        <datalist id="carrierList">{% for c in companies %}<option value="{{ c }}">{% endfor %}</datalist>
+      </div>
+      <div class="two">
+        <div class="party">
+          <div class="phead">Pick up from{% if pickup.name %} — {{ pickup.name }}{% endif %}{% if pickup.from_lsl %} <span class="hint">· from LSL</span>{% endif %}</div>
+          <textarea id="pickup_address" class="addr" placeholder="Pickup address">{{ pickup.address }}</textarea>
+          <input id="pickup_phone" placeholder="Phone" value="{{ pickup.phone }}">
+          <input id="pickup_contact" placeholder="Contact person" value="{{ pickup.contact }}">
+          <label class="estlbl"><span class="est">Estimated</span> pickup date</label>
+          <input id="est_pickup_date" type="date" value="{{ u.est_pickup_date or '' }}">
+        </div>
+        <div class="party">
+          <div class="phead">Deliver to{% if delivery.name %} — {{ delivery.name }}{% endif %}{% if delivery.from_lsl %} <span class="hint">· from LSL</span>{% endif %}</div>
+          <textarea id="delivery_address" class="addr" placeholder="Delivery address">{{ delivery.address }}</textarea>
+          <input id="delivery_phone" placeholder="Phone" value="{{ delivery.phone }}">
+          <input id="delivery_contact" placeholder="Contact person" value="{{ delivery.contact }}">
+          <label class="estlbl"><span class="est">Estimated</span> delivery date</label>
+          <input id="est_delivery_date" type="date" value="{{ u.est_delivery_date or '' }}">
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px"><button class="btn" onclick="saveTransport()">Save transport</button><span id="tmsg" class="msg"></span></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Email Austin (transport)</h2>
+    <div class="body">
+      <label class="chk" style="margin-top:0"><input type="checkbox" id="emailAustin"> Send Austin an email to arrange transport</label>
+      <textarea id="austinNote" class="addr" style="margin-top:10px" placeholder="Optional note for Austin (timing, gate code, etc.)…"></textarea>
+      <div class="row" style="margin-top:10px"><button class="btn" onclick="sendAustin()">Send</button><span id="austinMsg" class="msg"></span></div>
+      <div class="hint">The carrier + pickup/delivery address &amp; contact above are included automatically. (Staged to the test inbox.)</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Notes</h2>
+    <div class="body">
+      <div class="row"><input id="noteInput" class="grow" placeholder="Add a note about this car…" autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();addNote();}"><button class="btn" onclick="addNote()">Add</button></div>
+      <div id="noteErr" class="err"></div>
+      {% for n in notes %}
+      <div class="note" id="note-{{ n.id }}">
+        <div class="nmeta"><b>{{ n.author or 'note' }}</b> · <span>{{ n.created_at.strftime('%b %-d %H:%M') if n.created_at else '' }}</span>
+          <span class="nact"><a onclick="startEdit({{ n.id }})">edit</a> · <a onclick="deleteNote({{ n.id }})">delete</a></span></div>
+        <div class="nbody" id="nbody-{{ n.id }}">{{ n.body }}</div>
+      </div>
+      {% else %}<div class="empty" id="noNotes">No notes yet — add the first one above.</div>{% endfor %}
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Photos</h2>
+    <div class="body">
+      <div class="row" style="margin-bottom:12px">
+        <label class="btn" style="cursor:pointer">📷 Add car photo
+          <input type="file" accept="image/*" style="display:none" onchange="uploadPhoto(this,false)">
+        </label>
+        <label class="btn gray" style="cursor:pointer">🔒 Pickup proof (person)
+          <input type="file" accept="image/*" style="display:none" onchange="uploadPhoto(this,true)">
+        </label>
+        <span id="photoErr" class="msg err"></span>
+      </div>
+      {% if photos %}
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        {% for p in photos %}
+          {% set src = p.url if p.url else ('/api/recon/photo/' ~ p.id) %}
+          <a href="{{ src }}" target="_blank" style="display:block;width:112px">
+            <img src="{{ src }}" loading="lazy" style="width:112px;height:90px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">
+            <div style="font-size:10px;color:var(--mut);margin-top:3px">{% if p.is_approval_media %}🔒 {% endif %}{{ p.caption or '' }}</div>
+          </a>
+        {% endfor %}
+      </div>
+      {% else %}<div class="empty">No photos yet — add one (camera or library). Pickup-proof photos are encrypted.</div>{% endif %}
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Step timeline</h2>
+    <div class="body">
+      <ul class="tl">
+        {% for e in events %}
+        <li>
+          <span class="dot {% if e.open %}open{% endif %}"></span>
+          <span class="nm">{{ e.step_name }}</span>
+          <span class="tm">{{ e.entered_at.strftime('%b %-d %H:%M') if e.entered_at else '' }}{% if e.hours is not none %} · {{ e.hours }}h{% endif %}</span>
+          {% if e.open %}<span class="tag open">open</span>{% endif %}
+        </li>
+        {% else %}
+        <li><span class="empty">No step history yet.</span></li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+const UNIT_ID = {{ u.id }};
+function val(id){return (document.getElementById(id).value||'').trim();}
+async function api(path, body){
+  const r=await fetch('/api/recon/'+UNIT_ID+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
+  return r.json();
+}
+function setMsg(id,t,cls){const m=document.getElementById(id);m.className='msg'+(cls?' '+cls:'');m.textContent=t||'';}
+async function move(code){
+  setMsg('msg','');
+  try{const j=await api('/move',{to_step:code}); if(j.ok){location.reload();}else{setMsg('msg',j.error||'failed','err');}}catch(e){setMsg('msg','network error','err');}
+}
+function moveAny(){ move(document.getElementById('anyStep').value); }
+
+let carrierTimer=null;
+function carrierSearch(q){
+  clearTimeout(carrierTimer);
+  if((q||'').length<2) return;
+  carrierTimer=setTimeout(async function(){
+    try{
+      const r=await fetch('/api/recon/lsl-company-search?q='+encodeURIComponent(q));
+      const j=await r.json();
+      const dl=document.getElementById('carrierList');
+      dl.innerHTML=(j.results||[]).map(function(n){return '<option value="'+n.replace(/"/g,'&quot;')+'">';}).join('');
+    }catch(e){}
+  },230);
+}
+async function saveTransport(){
+  setMsg('tmsg','saving…');
+  const payload={transport_company:val('tcompany'),
+    pickup_address:val('pickup_address'),pickup_phone:val('pickup_phone'),pickup_contact:val('pickup_contact'),
+    delivery_address:val('delivery_address'),delivery_phone:val('delivery_phone'),delivery_contact:val('delivery_contact'),
+    est_pickup_date:val('est_pickup_date'),est_delivery_date:val('est_delivery_date')};
+  try{const j=await api('/transport-details',payload); if(j.ok){setMsg('tmsg','saved ✓','ok');}else{setMsg('tmsg',j.error||'failed','err');}}catch(e){setMsg('tmsg','network error','err');}
+}
+async function sendAustin(){
+  setMsg('austinMsg','');
+  if(!document.getElementById('emailAustin').checked){ setMsg('austinMsg','Check the box first.','err'); return; }
+  setMsg('austinMsg','sending…');
+  try{
+    const j=await api('/email-austin',{note:val('austinNote')});
+    if(j.ok){ setMsg('austinMsg','Sent to Austin (staged to test inbox).','ok');
+      document.getElementById('emailAustin').checked=false; document.getElementById('austinNote').value=''; }
+    else{ setMsg('austinMsg',j.error||'failed','err'); }
+  }catch(e){ setMsg('austinMsg','network error','err'); }
+}
+async function togglePhotos(){
+  try{await api('/photos-flag',{needs_photos:document.getElementById('needsPhotos').checked});}catch(e){}
+}
+async function addNote(){
+  const el=document.getElementById('noteInput'); const body=(el.value||'').trim();
+  const err=document.getElementById('noteErr'); err.textContent='';
+  if(!body){return;}
+  try{const j=await api('/note',{body}); if(j.ok){location.reload();}else{err.textContent=j.error||'could not save note';}}catch(e){err.textContent='network error';}
+}
+function startEdit(id){
+  const bd=document.getElementById('nbody-'+id); if(bd.querySelector('textarea')) return;
+  bd.dataset.orig=bd.textContent;
+  const ta=document.createElement('textarea'); ta.className='addr'; ta.value=bd.dataset.orig;
+  bd.innerHTML=''; bd.appendChild(ta);
+  const row=document.createElement('div'); row.className='row'; row.style.marginTop='6px';
+  row.innerHTML='<button class="btn sm" onclick="saveEdit('+id+')">Save</button><button class="btn sm gray" onclick="cancelEdit('+id+')">Cancel</button>';
+  bd.appendChild(row); ta.focus();
+}
+async function saveEdit(id){
+  const bd=document.getElementById('nbody-'+id); const ta=bd.querySelector('textarea'); const body=(ta.value||'').trim();
+  if(!body){return;}
+  try{const j=await api('/note/'+id+'/edit',{body}); if(j.ok){bd.textContent=body; delete bd.dataset.orig;}else{alert(j.error||'failed');}}catch(e){alert('network error');}
+}
+function cancelEdit(id){const bd=document.getElementById('nbody-'+id); bd.textContent=bd.dataset.orig||''; delete bd.dataset.orig;}
+async function deleteNote(id){
+  if(!confirm('Delete this note?')) return;
+  try{const j=await api('/note/'+id+'/delete',{}); if(j.ok){const el=document.getElementById('note-'+id); if(el) el.remove();}else{alert(j.error||'failed');}}catch(e){alert('network error');}
+}
+async function uploadPhoto(input, isPickup){
+  const err=document.getElementById('photoErr'); err.textContent='';
+  const file=input.files && input.files[0]; if(!file){return;}
+  const fd=new FormData(); fd.append('photo', file); if(isPickup) fd.append('is_pickup','1');
+  err.textContent='uploading…';
+  try{
+    const r=await fetch('/api/recon/'+UNIT_ID+'/photo',{method:'POST',body:fd});
+    const j=await r.json();
+    if(j.ok){location.reload();}else{err.textContent=j.error||'upload failed';}
+  }catch(e){err.textContent='network error';}
+  input.value='';
+}
+</script>
+</body>
+</html>

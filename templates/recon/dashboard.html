@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reconditioning · EW Recon</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#eef0f2;color:#1f2937;font:13px/1.4 -apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  a{color:inherit;text-decoration:none}
+  /* top bar */
+  .topbar{background:#2b2f33;color:#fff;display:flex;align-items:center;height:54px;padding:0 18px}
+  .brand{font-weight:800;font-size:20px;letter-spacing:.5px}
+  .brand .r{color:#e23b3b}
+  .nav{display:flex;gap:2px;margin-left:26px}
+  .nav a{padding:8px 16px;color:#cbd5e1;font-weight:600;border-radius:4px}
+  .nav a.on{background:#3b4046;color:#fff}
+  .nav a:hover{color:#fff}
+  .top-right{margin-left:auto;display:flex;align-items:center;gap:16px;color:#cbd5e1;font-size:12px}
+  .top-right .store{font-weight:700;color:#fff}
+  .top-right a{color:#9ca3af}
+  .top-right a:hover{color:#fff}
+  .top-right a.logout{border:1px solid #4b5056;padding:5px 12px;border-radius:6px;color:#cbd5e1;text-decoration:none}
+  .top-right a.logout:hover{color:#fff;border-color:#6b7280}
+  /* sub bar */
+  .subbar{background:#fff;border-bottom:1px solid #d8dde2;padding:10px 18px;font-size:15px;font-weight:700;color:#c0392b}
+  /* layout */
+  .layout{display:flex;align-items:flex-start}
+  aside.steps{flex:0 0 220px;background:#fff;border-right:1px solid #d8dde2;min-height:calc(100vh - 95px)}
+  aside.steps a.step{display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid #eef0f2;color:#374151;border-left:3px solid transparent}
+  aside.steps a.step:hover{background:#f7f8fa}
+  aside.steps a.step.on{background:#fdecec;border-left-color:#e23b3b;font-weight:700;color:#111}
+  aside.steps a.step .n{color:#9ca3af;font-size:11px;min-width:14px;text-align:right}
+  aside.steps a.step .nm{flex:1}
+  aside.steps a.step .c{font-weight:700;color:#e23b3b;min-width:22px;text-align:right}
+  aside.steps a.step .c.zero{color:#cbd5e1;font-weight:400}
+  aside.steps a.step.gate .nm::after{content:" ▣";color:#d97706;font-size:10px}
+  main{flex:1;min-width:0;padding:14px 18px 50px}
+  .toolbar{display:flex;align-items:center;margin-bottom:10px}
+  .toolbar h2{margin:0;font-size:14px;color:#6b7280;font-weight:600}
+  .addbtn{margin-left:auto;cursor:pointer;background:#fff;border:1px solid #c0392b;color:#c0392b;font-weight:700;padding:7px 16px;border-radius:4px;font-size:13px}
+  .addbtn:hover{background:#c0392b;color:#fff}
+  table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d8dde2;font-size:13px}
+  thead th{background:#f3f4f6;text-align:left;padding:9px 10px;border-bottom:2px solid #d8dde2;color:#4b5563;font-size:11px;text-transform:uppercase;letter-spacing:.3px;white-space:nowrap}
+  tbody td{padding:9px 10px;border-bottom:1px solid #eef0f2;vertical-align:top}
+  tbody tr{cursor:pointer}
+  tbody tr:hover{background:#f7fbff}
+  .step-cell{font-weight:600;white-space:nowrap}
+  .step-cell .hash{color:#9ca3af}
+  .stock{color:#2563eb;font-weight:700;white-space:nowrap}
+  .veh b{font-size:13px}
+  .veh .sub{color:#6b7280;font-size:12px}
+  .daybox{display:inline-block;min-width:26px;text-align:center;padding:2px 7px;border-radius:3px;font-weight:700;background:#f3f4f6;color:#374151}
+  .daybox.warn{background:#fff3cd;color:#92660a}
+  .daybox.breach{background:#fde2e2;color:#b91c1c}
+  td.num{text-align:center;color:#374151;font-weight:600}
+  td.notes{color:#4b5563;font-size:12px;max-width:360px;white-space:pre-wrap}
+  .empty{text-align:center;color:#9ca3af;padding:30px}
+  /* VIN under the stock #, status dots, search */
+  .stock .vin{display:block;color:#9ca3af;font-weight:400;font-size:11px;font-family:ui-monospace,monospace;margin-top:2px;letter-spacing:.2px}
+  .status-cell{text-align:center}
+  .dot{display:inline-block;width:13px;height:13px;border-radius:50%;box-shadow:0 0 0 3px rgba(0,0,0,.04)}
+  aside.steps a.step .sd{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+  .filterbar{display:flex;align-items:center;gap:11px 16px;flex-wrap:wrap;margin-bottom:11px}
+  .searchbar{flex:1;min-width:220px}
+  .searchbar input{width:100%;max-width:540px;padding:9px 12px;border:1px solid #cbd5e1;border-radius:7px;font:13px inherit;background:#fff}
+  .searchbar input:focus{outline:none;border-color:#c0392b}
+  .chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .chip{display:inline-flex;align-items:center;gap:6px;cursor:pointer;border:1px solid #d8dde2;background:#fff;border-radius:16px;padding:5px 11px;font-size:12px;color:#374151;user-select:none}
+  .chip .cd{width:10px;height:10px;border-radius:50%}
+  .chip.on{border-color:#111;font-weight:700;box-shadow:0 0 0 2px rgba(0,0,0,.07)}
+  .chip.all.on{background:#111;color:#fff;border-color:#111}
+  /* add-vehicle modal */
+  dialog{border:1px solid #d8dde2;border-radius:8px;padding:0;width:min(460px,94vw);box-shadow:0 20px 50px rgba(0,0,0,.25)}
+  dialog::backdrop{background:rgba(0,0,0,.4)}
+  .dlg-h{padding:14px 18px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#c0392b}
+  .dlg-b{padding:16px 18px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .dlg-b label{font-size:11px;color:#6b7280;display:flex;flex-direction:column;gap:4px}
+  .dlg-b label.full{grid-column:1/3}
+  .dlg-b input,.dlg-b select{border:1px solid #cbd5e1;border-radius:5px;padding:8px;font:13px inherit;color:#111}
+  .dlg-f{padding:12px 18px;border-top:1px solid #e5e7eb;display:flex;justify-content:flex-end;gap:8px}
+  .dlg-f button{cursor:pointer;font:700 13px inherit;border-radius:5px;padding:8px 16px;border:1px solid #c0392b}
+  .dlg-f .ok{background:#c0392b;color:#fff}
+  .dlg-f .cancel{background:#fff;color:#6b7280;border-color:#cbd5e1}
+  #msg{color:#b91c1c;font-size:12px;min-height:16px;margin:0 0 8px}
+  /* ── mobile: chip status bar on top + full-width, readable car cards ── */
+  @media (max-width:760px){
+    .topbar{padding:8px 12px}
+    .brand{font-size:17px}
+    .topbar .store{font-size:11px}
+    .layout{display:block}
+    aside.steps{flex:none;width:auto;min-height:0;border-right:none;border-bottom:1px solid #d8dde2;
+      display:flex;overflow-x:auto;-webkit-overflow-scrolling:touch}
+    aside.steps a.step{flex:0 0 auto;border-bottom:0;border-right:1px solid #eef0f2;border-left:0;
+      white-space:nowrap;padding:10px 14px;gap:6px}
+    aside.steps a.step .n{display:none}
+    aside.steps a.step .nm{font-size:13px}
+    aside.steps a.step .c{font-size:12px}
+    aside.steps a.step.on{border-left:0;border-bottom:3px solid #e23b3b}
+    main{padding:10px 12px 44px}
+    .toolbar h2{font-size:13px}
+    /* table rows -> full-width cards */
+    table thead{display:none}
+    table,table tbody,table tr,table td{display:block;width:100%;box-sizing:border-box}
+    table tr{background:#fff;border:1px solid #d8dde2;border-radius:11px;margin:0 0 10px;padding:12px 15px}
+    table tr:hover{background:#fff}
+    table td{border:0 !important;padding:1px 0}
+    td.step-cell{font-size:12px;font-weight:700;color:#c0392b;margin-bottom:3px}
+    td.veh b{font-size:17px}
+    td.veh .sub{font-size:13px;color:#6b7280}
+    td.veh .fromto{display:none}        /* hide bought-from / sold-to on mobile */
+    td.stock{display:inline-block;font-size:13px;margin-top:2px}
+    td.num{display:inline-block;width:auto;margin:7px 20px 0 0;font-size:15px;font-weight:600}
+    td.num::before{content:attr(data-label) " ";color:#9ca3af;font-size:11px;font-weight:400}
+    td.status-cell{display:inline-block;width:auto;margin:7px 16px 0 0;text-align:left}
+    td.status-cell::before{content:"Status ";color:#9ca3af;font-size:11px;vertical-align:middle}
+    td.status-cell .dot{vertical-align:middle}
+    .chip{font-size:11px;padding:4px 9px}
+    td.notes{font-size:12px;margin-top:6px;white-space:pre-wrap;max-width:none;color:#4b5563}
+    /* Add Vehicle modal fits the screen */
+    dialog{width:96vw;max-height:88vh;overflow:auto}
+    .dlg-b{gap:10px;padding:13px}
+    .dlg-b input,.dlg-b select{padding:9px;font-size:16px}
+  }
+</style>
+<script>/* strip the EW-app's injected mobile CSS so the recon page controls its own layout */
+try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.parentNode.removeChild(_s);}catch(e){}</script>
+</head>
+<body>
+<div class="topbar">
+  <span class="brand"><span class="r">EW</span>RECON</span>
+  <div class="top-right">
+    <span class="store">Experience Wholesale</span>
+    <a href="/logout?next=/recon" class="logout">Log out</a>
+  </div>
+</div>
+
+<div class="layout">
+  <aside class="steps">
+    <a class="step {% if not sel %}on{% endif %}" href="/recon">
+      <span class="n">0</span><span class="nm">ALL</span>
+      <span class="c {% if total==0 %}zero{% endif %}">{{ total }}</span>
+    </a>
+    {% for s in steps if not s.is_terminal %}
+      <a class="step {% if s.is_gate %}gate{% endif %} {% if sel==s.code %}on{% endif %}" href="/recon?step={{ s.code }}">
+        <span class="n">{{ stepnum[s.code] }}</span>
+        <span class="sd" style="background:{{ dot_colors.get(s.code, '#cbd5e1') }}"></span>
+        <span class="nm">{{ s.name }}</span>
+        <span class="c {% if counts.get(s.code,0)==0 %}zero{% endif %}">{{ counts.get(s.code, 0) }}</span>
+      </a>
+    {% endfor %}
+  </aside>
+
+  <main>
+    <div class="toolbar">
+      <h2>{% if sel %}{{ rows[0].step_name if rows else sel }}{% else %}All vehicles{% endif %} · {{ rows|length }}</h2>
+      <button class="addbtn" onclick="document.getElementById('addDlg').showModal()">+ Add Vehicle</button>
+    </div>
+    <div id="msg"></div>
+    <div class="filterbar">
+      <span class="searchbar"><input id="search" type="search" placeholder="Search VIN, make, model, stock #…" oninput="applyFilters()" autocomplete="off"></span>
+      <span class="chips">
+        <span class="chip all on" data-color="" onclick="setColor('')">All</span>
+        <span class="chip" data-color="#e23b3b" onclick="setColor('#e23b3b')"><span class="cd" style="background:#e23b3b"></span>New / Staged</span>
+        <span class="chip" data-color="#eab308" onclick="setColor('#eab308')"><span class="cd" style="background:#eab308"></span>In Transit</span>
+        <span class="chip" data-color="#22c55e" onclick="setColor('#22c55e')"><span class="cd" style="background:#22c55e"></span>At Dealer</span>
+        <span class="chip" data-color="#3b82f6" onclick="setColor('#3b82f6')"><span class="cd" style="background:#3b82f6"></span>Home Base</span>
+      </span>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Step</th><th>Stock #</th><th>Vehicle</th><th>Status</th>
+        <th>Days In&nbsp;Step</th><th>Days Since Recon&nbsp;Began</th><th>Days In&nbsp;DMS</th><th>Notes</th>
+      </tr></thead>
+      <tbody>
+        {% for u in rows %}
+        <tr data-search="{{ (u.vin ~ ' ' ~ (u.stock_no or '') ~ ' ' ~ (u.make or '') ~ ' ' ~ (u.model or '') ~ ' ' ~ (u.year|string if u.year else ''))|lower }}" data-dot="{{ u.dot }}" onclick="location.href='/recon/u/{{ u.vin }}'">
+          <td class="step-cell"><span class="hash">#{{ stepnum.get(u.step_code, '') }}</span> {{ u.step_name or '—' }}</td>
+          <td class="stock">{% if u.stock_no %}<a href="{{ u.lsl_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Open this car's record in LiveSalesLog">{{ u.stock_no }}</a>{% else %}—{% endif %}<span class="vin">{{ u.vin }}</span></td>
+          <td class="veh"><b>{{ u.make or '' }} {{ u.model or '' }}</b>{% if u.needs_photos %} <span title="Needs photos on arrival">📷</span>{% endif %}<div class="sub">{{ u.year or '' }} {{ u.exterior_color or '' }}<span class="fromto">{% if u.bought_from %} · from {{ u.bought_from }}{% endif %}{% if u.sold_to %} · → {{ u.sold_to }}{% endif %}</span></div></td>
+          <td class="status-cell" data-label="Status:"><span class="dot" style="background:{{ u.dot }}" title="{{ u.step_name }}"></span></td>
+          <td class="num" data-label="In step:"><span class="daybox {{ u.sla_state }}">{{ u.d_step if u.d_step is not none else 0 }}</span></td>
+          <td class="num" data-label="Recon began:">{{ u.d_recon if u.d_recon is not none else '—' }}</td>
+          <td class="num" data-label="In DMS:">{{ u.d_dms if u.d_dms is not none else '—' }}</td>
+          <td class="notes">{{ u.notes or '' }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="empty">No vehicles{% if sel %} in this step{% endif %} yet. Click <b>+ Add Vehicle</b> to put one in recon.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </main>
+</div>
+
+<dialog id="addDlg">
+  <form method="dialog">
+    <div class="dlg-h">Add a vehicle to recon</div>
+    <div class="dlg-b">
+      <label class="full">VIN
+        <span style="display:flex;gap:6px">
+          <input id="f_vin" maxlength="17" placeholder="17-char VIN" autocomplete="off" style="flex:1">
+          <label class="addbtn" style="cursor:pointer;white-space:nowrap;margin:0;padding:8px 11px">📷 Scan
+            <input type="file" accept="image/*" style="display:none" onchange="scanPhoto(this,'vin')">
+          </label>
+        </span>
+      </label>
+      <label>Year<input id="f_year" type="number" placeholder="2022"></label>
+      <label>Stock #<input id="f_stock" placeholder="LL36388"></label>
+      <label>Make<input id="f_make" placeholder="Bentley"></label>
+      <label>Model<input id="f_model" placeholder="Bentayga"></label>
+      <label>Trim<input id="f_trim"></label>
+      <label>Miles
+        <span style="display:flex;gap:6px">
+          <input id="f_miles" type="number" placeholder="36037" style="flex:1">
+          <label class="addbtn" style="cursor:pointer;white-space:nowrap;margin:0;padding:8px 10px">📷
+            <input type="file" accept="image/*" style="display:none" onchange="scanPhoto(this,'miles')">
+          </label>
+        </span>
+      </label>
+      <label>Purchase $<input id="f_cost" type="number" placeholder="116800"></label>
+      <label>Class
+        <select id="f_class">
+          <option value="highline">High-line</option>
+          <option value="exotic">Exotic</option>
+          <option value="mainstream">Mainstream</option>
+          <option value="default">Default</option>
+        </select>
+      </label>
+      <div id="scanMsg" style="grid-column:1/3;font-size:12px;min-height:14px;color:#fb923c"></div>
+    </div>
+    <div class="dlg-f">
+      <button class="cancel" value="cancel">Cancel</button>
+      <button class="ok" value="ok" onclick="event.preventDefault();addUnit()">Add to Intake</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+function showErr(m){document.getElementById('msg').textContent=m||'';}
+async function addUnit(){
+  const g=id=>document.getElementById(id).value.trim();
+  const body={vin:g('f_vin'),year:g('f_year'),stock_no:g('f_stock'),make:g('f_make'),
+    model:g('f_model'),trim:g('f_trim'),miles:g('f_miles'),purchase_cost:g('f_cost'),
+    vehicle_class:document.getElementById('f_class').value};
+  if(body.vin.length<11){showErr('VIN required (>= 11 chars)');return;}
+  try{
+    const r=await fetch('/api/recon/add-unit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json();
+    if(j.ok){location.reload();}else{showErr(j.error||'add failed');}
+  }catch(e){showErr('network error');}
+}
+async function scanPhoto(input, kind){
+  const file=input.files && input.files[0]; if(!file){return;}
+  const m=document.getElementById('scanMsg'); m.style.color='#fb923c';
+  m.textContent = (kind==='vin' ? 'Reading VIN…' : 'Reading odometer…');
+  const fd=new FormData(); fd.append('photo', file);
+  try{
+    const r=await fetch('/api/recon/scan-'+kind,{method:'POST',body:fd});
+    const j=await r.json();
+    if(j.ok){
+      if(kind==='vin'){ document.getElementById('f_vin').value=j.vin; m.style.color='#4ade80'; m.textContent='VIN read: '+j.vin; }
+      else{ document.getElementById('f_miles').value=j.miles; m.style.color='#4ade80'; m.textContent='Odometer: '+Number(j.miles).toLocaleString(); }
+    } else { m.style.color='#f87171'; m.textContent=j.error||'could not read'; }
+  }catch(e){ m.style.color='#f87171'; m.textContent='network error'; }
+  input.value='';
+}
+/* ── search + colored-dot status filters (client-side) ── */
+var _colorFilter='';
+function _lightChip(){
+  document.querySelectorAll('.chips .chip').forEach(function(c){c.classList.remove('on');});
+  var sel=document.querySelector('.chip[data-color="'+_colorFilter+'"]');
+  if(sel) sel.classList.add('on');
+}
+function setColor(color){
+  _colorFilter=(_colorFilter===color)?'':color;
+  _lightChip();
+  try{sessionStorage.setItem('reconColor',_colorFilter);}catch(e){}
+  applyFilters();
+}
+function applyFilters(){
+  var q=(document.getElementById('search').value||'').toLowerCase().trim();
+  try{sessionStorage.setItem('reconSearch',q);}catch(e){}
+  document.querySelectorAll('tbody tr[data-search]').forEach(function(tr){
+    var okQ=!q || tr.getAttribute('data-search').indexOf(q)>=0;
+    var okC=!_colorFilter || tr.getAttribute('data-dot')===_colorFilter;
+    tr.style.display=(okQ&&okC)?'':'none';
+  });
+}
+(function(){try{
+  var q=sessionStorage.getItem('reconSearch')||'', c=sessionStorage.getItem('reconColor')||'';
+  var s=document.getElementById('search'); if(s&&q) s.value=q;
+  _colorFilter=c; _lightChip(); applyFilters();
+}catch(e){}})();
+
+let _fp=null;
+async function poll(){
+  try{
+    const r=await fetch('/api/recon/board',{cache:'no-store'});
+    if(!r.ok)return;
+    const j=await r.json();
+    if(_fp===null){_fp=j.fp;}else if(j.fp!==_fp){location.reload();}
+  }catch(e){}
+}
+setInterval(poll, 5000); poll();
+</script>
+</body>
+</html>

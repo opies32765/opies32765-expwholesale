@@ -783,7 +783,37 @@ def require_login():
     if path.startswith('/api/'):
         return jsonify({'error': 'login_required',
                         'redirect': '/login'}), 401
-    return redirect('/login')
+    return redirect('/login?next=' + request.path)
+
+
+# VOICE_9B_2026_06_24 — Bill (local 9B) voice assistant for the EW app.
+# Page + Cloud-LiveKit token that dispatches the ewdesk agent (9B router over all EW tools).
+@app.route('/voice-9b')
+def voice_9b_page():
+    return render_template('mobile_ewbot_9b.html')
+
+
+@app.route('/api/voice9b/token', methods=['POST'])
+def voice9b_token():
+    import secrets as _s9, datetime as _dt9
+    from livekit.api import AccessToken as _AT9, VideoGrants as _VG9, RoomConfiguration as _RC9, RoomAgentDispatch as _RAD9
+    _url = os.environ.get('LIVEKIT_CLOUD_URL')
+    _key = os.environ.get('LIVEKIT_CLOUD_API_KEY')
+    _sec = os.environ.get('LIVEKIT_CLOUD_API_SECRET')
+    if not (_url and _key and _sec):
+        return jsonify({'error': 'livekit cloud creds missing'}), 500
+    # EW app uses the shared operator login -> caller is the owner (Oscar) so
+    # owner-gated tools resolve. ewdesk reads this identity as caller_name.
+    _identity = 'oscar'
+    _room = 'ew9b-' + _s9.token_urlsafe(6)
+    _grant = _VG9(room_join=True, room=_room, can_publish=True, can_publish_data=True, can_subscribe=True)
+    _tok = (_AT9(_key, _sec)
+            .with_identity(_identity)
+            .with_grants(_grant)
+            .with_ttl(_dt9.timedelta(hours=1))
+            .with_room_config(_RC9(agents=[_RAD9(agent_name='ewdesk', metadata='')]))
+            .to_jwt())
+    return jsonify({'token': _tok, 'room': _room, 'identity': _identity, 'url': _url})
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -796,10 +826,16 @@ def login():
         _p = request.form.get('password') or ''
         if ((_u == EW_USERNAME.lower() and _p == EW_PASSWORD) or
                 (EW_DEMO_PASSWORD and _u == EW_DEMO_USERNAME.lower() and _p == EW_DEMO_PASSWORD)):
-            session.permanent = True
+            session.permanent = bool(request.form.get('remember'))
             session['logged_in'] = True
-            return redirect('/')
+            _nxt = request.form.get('next') or request.args.get('next') or '/'
+            if (not _nxt.startswith('/')) or _nxt.startswith('//'):
+                _nxt = '/'
+            return redirect(_nxt)
         error = 'Invalid credentials'
+    _nq = request.args.get('next') or request.form.get('next') or ''
+    if (not _nq.startswith('/')) or _nq.startswith('//') or '"' in _nq or '<' in _nq:
+        _nq = ''
     return f'''<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Login — Experience Wholesale</title>
@@ -821,8 +857,10 @@ button:hover{{background:#2563eb}}
 <div class="login-card">
 <div class="logo"><div class="logo-mark">EW</div><span class="logo-text">Experience Wholesale</span><span class="logo-sub">Buy Center</span></div>
 <form method="post">
+<input type="hidden" name="next" value="{_nq}">
 <label>Username</label><input type="text" name="username" autofocus>
 <label>Password</label><input type="password" name="password">
+<label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;margin-top:16px;color:#94a3b8;font-weight:500;font-size:13px;cursor:pointer"><input type="checkbox" name="remember" checked style="width:auto;margin:0"> Remember me on this device</label>
 <button type="submit">Sign In</button>
 {'<p class="error">' + error + '</p>' if error else ''}
 </form></div></body></html>'''
@@ -831,6 +869,9 @@ button:hover{{background:#2563eb}}
 @app.route('/logout')
 def logout():
     session.clear()
+    _n = request.args.get('next') or ''
+    if _n.startswith('/') and not _n.startswith('//'):
+        return redirect('/login?next=' + _n)
     return redirect('/login')
 
 
@@ -7346,6 +7387,80 @@ def _get_thalist_asks_for_bid(bid: dict, db=None) -> dict | None:
 
 
 
+def _enforce_carfax_trim_authority(bid_id):
+    """CARFAX_TRIM_AUTHORITY_2026_06_24 (operator: the 9B/AccuTrade must 100% use
+    the Carfax trim/series and NEVER derail). Runs post-enrichment, when Carfax is
+    guaranteed present. If the AccuTrade-selected trim is missing any Carfax
+    distinctive token (e.g. Carfax 'CARRERA 4S' but AccuTrade picked 'CARRERA S' --
+    the 4S landed late at pick-time so the LLM chose blind), it (a) fixes the
+    display canon_trim to the Carfax trim NOW and (b) re-arms AccuTrade ONCE so it
+    re-runs with Carfax present -- the deterministic Carfax strict-match then picks
+    the right trim and re-values it. One-shot via bids.accutrade_carfax_realigned,
+    so it can never loop. Conservative: only fires when Carfax has a token the
+    selection lacks (carfax-subset), so a more-complete AccuTrade label never
+    false-trips it. Returns True if it re-armed."""
+    import re as _r
+    db = get_db()
+    try:
+        cur = db.cursor()
+        cur.execute("SELECT vin, year, make, model, accutrade_carfax_realigned FROM bids WHERE id=%s", (bid_id,))
+        b = cur.fetchone()
+        if not b:
+            return False
+        _re_done = b.get('accutrade_carfax_realigned') if hasattr(b, 'get') else b[4]
+        if _re_done:
+            return False
+        vin = ((b.get('vin') if hasattr(b, 'get') else b[0]) or '').strip()
+        _ctx = ' '.join(str(x or '') for x in (
+            (b.get('year') if hasattr(b, 'get') else b[1]),
+            (b.get('make') if hasattr(b, 'get') else b[2]),
+            (b.get('model') if hasattr(b, 'get') else b[3]))).upper()
+        cur.execute("SELECT carfax_json->>'trim' AS cfx FROM vauto_lookups WHERE bid_id=%s "
+                    "AND carfax_json IS NOT NULL ORDER BY id DESC LIMIT 1", (bid_id,))
+        _cr = cur.fetchone()
+        cfx = (((_cr.get('cfx') if hasattr(_cr, 'get') else _cr[0]) if _cr else '') or '').strip().upper()
+        if not cfx:
+            return False
+        cur.execute("SELECT selected_trim_text FROM accutrade_lookups WHERE bid_id=%s ORDER BY id DESC LIMIT 1", (bid_id,))
+        _ar = cur.fetchone()
+        acsel = (((_ar.get('selected_trim_text') if hasattr(_ar, 'get') else _ar[0]) if _ar else '') or '').strip().upper()
+        if not acsel:
+            return False
+        _strip = set(_r.findall(r'[A-Z0-9]+', _ctx))
+        _body = {'COUPE', 'SEDAN', 'SUV', 'TRUCK', 'WAGON', 'VAN', 'HATCHBACK', 'CONVERTIBLE',
+                 'CABRIOLET', 'ROADSTER', 'DOOR', 'DR', 'CREW', 'CAB', 'SUPERCREW', 'SUPERCAB',
+                 'HARDTOP', 'FASTBACK', 'PICKUP'}
+        cfx_toks = [t for t in _r.findall(r'[A-Z0-9]+', cfx)
+                    if t not in _strip and t not in _body and not _r.fullmatch(r'(19|20)\d\d', t)]
+        if not cfx_toks:
+            return False
+        missing = [t for t in cfx_toks if not _r.search(r'\b' + _r.escape(t) + r'\b', acsel)]
+        if not missing:
+            return False
+        def _case(w):
+            return w if (len(w) <= 3 or any(ch.isdigit() for ch in w)) else w.title()
+        clean = ' '.join(_case(w) for w in cfx.split())
+        cur.execute("UPDATE bids SET canon_trim=%s, trim=%s, canon_source='carfax_trim_authority', "
+                    "accutrade_carfax_realigned=TRUE, accutrade_retry_at=now() WHERE id=%s",
+                    (clean, clean, bid_id))
+        cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s", (bid_id,))
+        try:
+            cur.execute("DELETE FROM accutrade_trim_select_cache WHERE vin=%s", (vin,))
+        except Exception:
+            pass
+        db.commit()
+        print('[carfax-trim-authority] bid=%s ENFORCE carfax=%r vs accutrade=%r missing=%s -> canon_trim=%r + AccuTrade re-armed' % (bid_id, cfx, acsel, missing, clean), flush=True)
+        return True
+    except Exception as _e:
+        try: db.rollback()
+        except Exception: pass
+        print('[carfax-trim-authority] bid=%s err %s' % (bid_id, _e), flush=True)
+        return False
+    finally:
+        try: db.close()
+        except Exception: pass
+
+
 def reconcile_ymm_post_enrichment(bid_id, force=False):
     """POST_ENRICH_YMM_RECONCILE_2026_06_17 (operator): after all enrichment lands,
     the 9B reviews the displayed year/make/model/trim against ALL evidence
@@ -7618,6 +7733,14 @@ def _run_assessment(bid_id):
                     bid[_rk] = _rec[_rk]
     except Exception as _rec_e:
         print('[ymm-reconcile] hook err bid=%s: %s' % (bid_id, _rec_e), flush=True)
+
+    # CARFAX_TRIM_AUTHORITY_2026_06_24 (operator: Carfax trim is law for the 9B/
+    # AccuTrade). If the AccuTrade pick derailed from Carfax (e.g. Carfax landed
+    # late -> LLM picked Carrera S vs Carfax 4S), fix the display + re-run AccuTrade.
+    try:
+        _enforce_carfax_trim_authority(bid_id)
+    except Exception as _cta_e:
+        print('[carfax-trim-authority] hook err bid=%s: %s' % (bid_id, _cta_e), flush=True)
 
     cur.execute("SELECT url FROM bid_photos WHERE bid_id = %s ORDER BY id LIMIT 8", (bid_id,))
     photos = cur.fetchall()
@@ -16425,6 +16548,53 @@ def carfax_api_enrich(bid_id, vin):
     Bentley) via a ~0.5s HTTP GET -- NO Chrome render, NO PDF, NO OCR/9B-vision on the
     AccuTrade-gating path (was ~13s render+OCR). ONE universal source, zero per-make
     logic. The display PDF/PNG still renders, but ASYNC. Returns the trim or None."""
+    # CROSS_BID_VIN_REUSE_2026_06_24 (operator): two senders texting the SAME VIN
+    # near-simultaneously made the 2nd bid's Carfax render + AutoCheck collide
+    # (renders keyed by VIN) -> bid 3747 lost both. If a sibling bid with the same
+    # VIN already has a COMPLETE Carfax (json + screenshot) from the last 15 min,
+    # copy Carfax + AutoCheck onto this bid and skip the re-pull/render entirely.
+    try:
+        if vin and len(vin) == 17:
+            _rdb = get_db(); _rc = _rdb.cursor()
+            _rc.execute("SELECT carfax_json, carfax_screenshot, carfax_share_url, "
+                        "autocheck_json, autocheck_screenshot, carfax_json->>'trim' AS cfx_trim "
+                        "FROM vauto_lookups WHERE vin=%s AND bid_id<>%s "
+                        "AND carfax_json IS NOT NULL AND carfax_screenshot IS NOT NULL "
+                        "AND carfax_screenshot <> '' "
+                        "AND looked_up_at > now() - interval '15 minutes' "
+                        "ORDER BY id DESC LIMIT 1", (vin, bid_id))
+            _sib = _rc.fetchone()
+            if _sib:
+                def _sg(k, i):
+                    return _sib.get(k) if hasattr(_sib, 'get') else _sib[i]
+                _cj = _sg('carfax_json', 0)
+                _aj = _sg('autocheck_json', 3)
+                if isinstance(_cj, (dict, list)): _cj = json.dumps(_cj)
+                if isinstance(_aj, (dict, list)): _aj = json.dumps(_aj)
+                _rc.execute("INSERT INTO vauto_lookups (bid_id, vin, carfax_json, carfax_screenshot, "
+                            "carfax_share_url, autocheck_json, autocheck_screenshot, looked_up_at) "
+                            "VALUES (%s,%s,%s::jsonb,%s,%s,%s::jsonb,%s,NOW()) "
+                            "ON CONFLICT (bid_id) DO UPDATE SET "
+                            "  carfax_json=EXCLUDED.carfax_json, "
+                            "  carfax_screenshot=EXCLUDED.carfax_screenshot, "
+                            "  carfax_share_url=COALESCE(EXCLUDED.carfax_share_url, vauto_lookups.carfax_share_url), "
+                            "  autocheck_json=COALESCE(EXCLUDED.autocheck_json, vauto_lookups.autocheck_json), "
+                            "  autocheck_screenshot=COALESCE(EXCLUDED.autocheck_screenshot, vauto_lookups.autocheck_screenshot), "
+                            "  vin=COALESCE(NULLIF(vauto_lookups.vin,''), EXCLUDED.vin)",
+                            (bid_id, vin, _cj, _sg('carfax_screenshot', 1), _sg('carfax_share_url', 2),
+                             _aj, _sg('autocheck_screenshot', 4)))
+                _rdb.commit()
+                _reuse_trim = _sg('cfx_trim', 5)
+                try: _rdb.close()
+                except Exception: pass
+                try: _apply_carfax_ymm_authority(bid_id)
+                except Exception: pass
+                print('[carfax-api] bid=%s VIN-REUSE from sibling same-VIN %s -> carfax+autocheck copied, trim=%r' % (bid_id, vin, _reuse_trim), flush=True)
+                return _reuse_trim
+            try: _rdb.close()
+            except Exception: pass
+    except Exception as _rue:
+        print('[carfax-api] bid=%s VIN-reuse check err %s' % (bid_id, _rue), flush=True)
     _cft_enter = time.time()
     try:
         s = _capi_session()
