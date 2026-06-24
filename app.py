@@ -41,6 +41,28 @@ try:
 except Exception:
     pass
 
+# PERF_DASH_CACHE_2026_06_24: tiny /dev/shm cache for the rendered dashboard HTML.
+def _dash_cache_get(key, ttl):
+    import os, pickle, time
+    try:
+        p = '/dev/shm/ew_dashcache/' + key.replace('/', '_').replace(':', '_') + '.pkl'
+        if time.time() - os.path.getmtime(p) <= ttl:
+            with open(p, 'rb') as f:
+                return pickle.load(f)
+    except Exception:
+        pass
+    return None
+
+def _dash_cache_set(key, obj):
+    import os, pickle
+    try:
+        d = '/dev/shm/ew_dashcache'
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, key.replace('/', '_').replace(':', '_') + '.pkl'), 'wb') as f:
+            pickle.dump(obj, f)
+    except Exception:
+        pass
+
 # JINJA_BYTECODE_CACHE_2026_05_20: gunicorn runs 10 workers; without a
 # shared bytecode cache each worker re-parses every template (bid.html
 # is 180KB / 3000 lines) on its first hit — caused first-click render
@@ -3606,6 +3628,13 @@ def time_ago(dt):
 
 @app.route('/')
 def dashboard():
+    # PERF_DASH_CACHE_2026_06_24: serve a recent rendered copy (10s) keyed by the
+    # status/rep filters so "Back to bids" / repeat loads are near-instant.
+    # Safe to share: no CSRF + no per-user content on this page.
+    _dck = 'dashhtml:' + request.args.get('status', 'all') + ':' + request.args.get('rep', 'all')
+    _dcached = _dash_cache_get(_dck, 10)
+    if _dcached is not None:
+        return _dcached
     db = get_db()
     cur = db.cursor()
 
@@ -3705,7 +3734,7 @@ def dashboard():
         LEFT JOIN dealerclub_lots dl ON dl.bid_id = b.id
         LEFT JOIN ymmt_catalog yc ON yc.id = b.ymmt_id
         {where}
-        ORDER BY b.created_at DESC LIMIT 200
+        ORDER BY b.created_at DESC LIMIT 100
     """
     cur.execute(q.format(where=where), params)
     bids = list(cur.fetchall())
@@ -3891,7 +3920,7 @@ def dashboard():
     except Exception as _poc_err:
         print(f'[index] partner_offer_counts err: {_poc_err}', flush=True)
 
-    return render_template('index.html', bids=bids, stats=stats,
+    _dhtml = render_template('index.html', bids=bids, stats=stats,
                            status_filter=status_filter, rep_filter=rep_filter,
                            reps=reps, photo_counts=photo_counts,
                            first_photos=first_photos,
@@ -3903,6 +3932,8 @@ def dashboard():
                            time_ago=time_ago,
                            network_claims=network_claims,
                            network_claims_by_bid=network_claims_by_bid)
+    _dash_cache_set(_dck, _dhtml)
+    return _dhtml
 
 
 @app.route('/shadow/data')
