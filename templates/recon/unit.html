@@ -73,6 +73,11 @@
   .tag{font-size:10px;padding:1px 7px;border-radius:20px;background:#eef0f2;color:#374151}
   .tag.open{background:rgba(226,59,59,.14);color:#c0392b}
   .empty{color:#9ca3af;font-size:12px}
+  .photo{position:relative;width:112px}
+  .photo img{width:112px;height:90px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block}
+  .photo .pcap{font-size:10px;color:var(--mut);margin-top:3px}
+  .photo .pdel{position:absolute;top:-7px;right:-7px;width:22px;height:22px;border-radius:50%;border:0;background:#c0392b;color:#fff;font-size:12px;line-height:22px;text-align:center;padding:0;cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.3)}
+  .photo .pdel:hover{background:#a93226}
   @media (max-width:760px){
     header.top{flex-wrap:wrap;gap:7px 10px;padding:10px 13px}
     header.top .back{order:1}
@@ -191,10 +196,11 @@
       <div style="display:flex;gap:10px;flex-wrap:wrap">
         {% for p in photos %}
           {% set src = p.url if p.url else ('/api/recon/photo/' ~ p.id) %}
-          <a href="{{ src }}" target="_blank" style="display:block;width:112px">
-            <img src="{{ src }}" loading="lazy" style="width:112px;height:90px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">
-            <div style="font-size:10px;color:var(--mut);margin-top:3px">{% if p.is_approval_media %}🔒 {% endif %}{{ p.caption or '' }}</div>
-          </a>
+          <div class="photo" id="photo-{{ p.id }}">
+            <a href="{{ src }}" target="_blank"><img src="{{ src }}" loading="lazy"></a>
+            <button class="pdel" title="Delete photo" onclick="deletePhoto({{ p.id }})">✕</button>
+            <div class="pcap">{% if p.is_approval_media %}🔒 {% endif %}{{ p.caption or '' }}</div>
+          </div>
         {% endfor %}
       </div>
       {% else %}<div class="empty">No photos yet — add one (camera or library). Pickup-proof photos are encrypted.</div>{% endif %}
@@ -293,6 +299,10 @@ function cancelEdit(id){const bd=document.getElementById('nbody-'+id); bd.textCo
 async function deleteNote(id){
   if(!confirm('Delete this note?')) return;
   try{const j=await api('/note/'+id+'/delete',{}); if(j.ok){const el=document.getElementById('note-'+id); if(el) el.remove();}else{alert(j.error||'failed');}}catch(e){alert('network error');}
+}
+async function deletePhoto(id){
+  if(!confirm('Delete this photo?')) return;
+  try{const j=await api('/photo/'+id+'/delete',{}); if(j.ok){var el=document.getElementById('photo-'+id); if(el) el.remove();}else{alert(j.error||'failed');}}catch(e){alert('network error');}
 }
 async function uploadPhoto(input, isPickup){
   const err=document.getElementById('photoErr'); err.textContent='';

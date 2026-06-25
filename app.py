@@ -13027,6 +13027,32 @@ def api_vauto_pending():
            SET appraisal_url = '__not_found__'
          WHERE vauto_lookups.appraisal_url IS NULL
     """)
+    # OK_BUT_EMPTY_GIVEUP_2026_06_25: vAuto api_mode can report ok/ok_api_mode
+    # while writing NO books (raw_json stays NULL) for some VINs -> the give-up
+    # above (which counts only FAILED jobs) never fires -> the bid re-serves
+    # forever (bid 3781: 86 ok_api_mode runs, never any books, infinite churn).
+    # Give up after 10 successful-but-bookless runs: mark __not_found__ so it
+    # stops cycling; the drop-sweeper / manual assess then prices it on
+    # AccuTrade/iPacket. 10 (not 5) avoids a transient session blip mass-giving-up.
+    cur.execute("""
+        INSERT INTO vauto_lookups (bid_id, vin, appraisal_url, looked_up_at)
+        SELECT b.id, b.vin, '__not_found__', NOW()
+          FROM bids b
+          JOIN (
+              SELECT bid_id FROM worker_jobs
+               WHERE job_type='vauto' AND status IN ('ok', 'ok_api_mode')
+               GROUP BY bid_id HAVING COUNT(*) >= 10
+          ) wj ON wj.bid_id = b.id
+         WHERE b.vin IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM vauto_lookups vl
+                WHERE vl.bid_id = b.id
+                  AND (vl.raw_json IS NOT NULL OR vl.appraisal_url = '__not_found__')
+           )
+        ON CONFLICT (bid_id) DO UPDATE
+           SET appraisal_url = '__not_found__'
+         WHERE vauto_lookups.appraisal_url IS NULL
+    """)
     cur.execute("""
         WITH eligible AS (
             SELECT b.id

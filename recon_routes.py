@@ -1075,6 +1075,34 @@ def api_photo_upload(unit_id):
         db.close()
 
 
+@bp.route('/api/recon/<int:unit_id>/photo/<int:photo_id>/delete', methods=['POST'])
+def api_delete_photo(unit_id, photo_id):
+    """Remove a photo row + its file on disk (plain or AES-encrypted)."""
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT local_path FROM recon_photos WHERE id=%s AND unit_id=%s",
+                    (photo_id, unit_id))
+        r = cur.fetchone()
+        if not r:
+            return jsonify({'error': 'photo not found'}), 404
+        cur.execute("DELETE FROM recon_photos WHERE id=%s AND unit_id=%s", (photo_id, unit_id))
+        _audit(cur, unit_id, 'photo', photo_id, 'delete', _actor(), {})
+        db.commit()
+        try:
+            lp = r['local_path']
+            if lp and os.path.exists(lp):
+                os.remove(lp)
+        except Exception as e:
+            print('[recon-photo] unlink failed: %s' % e, flush=True)
+        return jsonify({'ok': True})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
 @bp.route('/api/recon/photo/<int:photo_id>')
 def api_photo_serve(photo_id):
     """Login-gated serve (decrypts AES pickup-proof photos)."""
