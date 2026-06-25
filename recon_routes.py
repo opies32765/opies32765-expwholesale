@@ -322,8 +322,10 @@ def _recon_report(period, frm=None, to=None):
                      key=lambda x: -(x['recon'] + x['transport']))
     md_list = sorted([dict(name=k, **v) for k, v in by_model.items()],
                      key=lambda x: -(x['recon'] + x['transport']))
+    n = len(rows)
     return {'period': period, 'from': lo0 or '', 'to': hi0 or '',
-            'deals': len(rows), 'total_recon': tot_r, 'total_transport': tot_t,
+            'deals': n, 'total_recon': tot_r, 'total_transport': tot_t,
+            'avg_recon': (tot_r / n if n else 0.0), 'avg_transport': (tot_t / n if n else 0.0),
             'by_make': mk_list[:30], 'by_model': md_list[:30], 'cars': cars[:300]}
 
 
@@ -649,8 +651,8 @@ def api_report_text():
         plabel = {'week': 'Last 7 Days', 'month': 'This Month', 'year': 'This Year',
                   'all': 'All Time'}.get(rep['period'], rep['period'])
     lines = ['EW Recon + Transport Spend — %s' % plabel, '',
-             'Recon: $%s' % _fmt_money(rep['total_recon']),
-             'Transport: $%s' % _fmt_money(rep['total_transport']),
+             'Recon: $%s (avg $%s/veh)' % (_fmt_money(rep['total_recon']), _fmt_money(rep['avg_recon'])),
+             'Transport: $%s (avg $%s/veh)' % (_fmt_money(rep['total_transport']), _fmt_money(rep['avg_transport'])),
              'Deals: %d' % rep['deals'], '', 'Top makes:']
     for m in rep['by_make'][:6]:
         lines.append('- %s: recon $%s / transport $%s (%d)' % (
@@ -722,6 +724,56 @@ def _transport_data():
             u['via_home'] = to_home and has_dealer
             pending.append(u)
     return pending, transit, now
+
+
+def transport_sms_text(ident):
+    """SMS reply for 'ship/transport/track <stock# or VIN>': a car's transport
+    status + ETAs + from/to. Read-only; safe to call from the SMS webhook."""
+    ident = (ident or '').strip()
+    if not ident:
+        return 'Text a stock # — e.g. "ship LL37042".'
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("""SELECT u.*, sd.code AS step_code, sd.name AS step_name
+                         FROM recon_units u LEFT JOIN recon_step_defs sd ON sd.id=u.current_step_id
+                        WHERE UPPER(u.stock_no)=UPPER(%s) OR UPPER(u.vin)=UPPER(%s)
+                        ORDER BY u.id DESC LIMIT 1""", (ident, ident))
+        r = cur.fetchone()
+    finally:
+        db.close()
+    if not r:
+        return 'No recon car found for "%s". Text the stock # like: ship LL37042' % ident
+    u = dict(r)
+    code = u.get('step_code')
+    sold = (u.get('sold_to') or '').strip()
+    been_home = bool(u.get('entered_recon_at'))
+    if code in ('dealer_to_dealer', 'dealer_to_home', 'indiv_to_dealer', 'indiv_to_home'):
+        state = 'Pending pickup'
+    elif code == 'arrived_home':
+        state = 'Pending pickup (Home Base → dealer)' if sold else 'At Home Base'
+    else:
+        state = {'in_transport': 'In transit', 'arrived_dealer': 'Delivered to dealer',
+                 'ready': 'Ready', 'picked_up': 'Picked up from Home Base'}.get(
+                     code, u.get('step_name') or 'New')
+    if code in ('in_transport', 'arrived_home') and been_home and sold:
+        frm, to = HOME_BASE, sold
+    elif code in ('dealer_to_home', 'indiv_to_home') or \
+            (code == 'in_transport' and u.get('path') == 'to_home' and not been_home):
+        frm = u.get('bought_from') or 'seller'
+        to = HOME_BASE + (' → ' + sold if sold else '')
+    else:
+        frm = u.get('bought_from') or 'seller'
+        to = sold or 'buyer'
+    ymm = ('%s %s %s' % (u.get('year') or '', u.get('make') or '', u.get('model') or '')).strip()
+    out = ['%s  %s' % (u.get('stock_no') or '', ymm), 'Status: ' + state]
+    if u.get('transport_company'):
+        out.append('Carrier: ' + u['transport_company'])
+    out.append('From: ' + frm)
+    out.append('To: ' + to)
+    out.append('Est pickup: %s' % (u.get('est_pickup_date') or 'TBD'))
+    out.append('Est delivery: %s' % (u.get('est_delivery_date') or 'TBD'))
+    return '\n'.join(out)
 
 
 @bp.route('/recon/transport')

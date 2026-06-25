@@ -5215,6 +5215,24 @@ def twilio_webhook():
         except Exception:
             pass
 
+    # RECON_TRANSPORT_SMS_2026_06_25: 'ship/transport/track <stock# or vin>' replies
+    # with that car's transport status + ETAs. Keyword-gated so it never collides
+    # with VIN/miles bid intake.
+    _tx_m = re.match(r'^\s*(?:ship|transport|track)\s+([A-Za-z0-9\-]{3,20})\s*$', (body or ''), re.I)
+    if from_phone and _tx_m:
+        try:
+            from recon_routes import transport_sms_text as _tx_fn
+            _tx_reply = _tx_fn(_tx_m.group(1))
+        except Exception as _txe:
+            print('[transport-sms] %s' % _txe, flush=True)
+            _tx_reply = 'Transport lookup error - try again.'
+        try:
+            send_sms(from_phone, _tx_reply)
+        except Exception as _txse:
+            print('[transport-sms] send %s' % _txse, flush=True)
+        return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                200, {'Content-Type': 'text/xml'})
+
     # ── ROLLING_PORTAL_2026_06_02: multi-car batch intake (gated) ──────────
     # A single text with >=2 VINs from a portal-gated sender creates one bid
     # per (VIN, miles) pair instead of one bid. Gated to the rolling_portal

@@ -61,6 +61,8 @@
   .status-cell{text-align:center}
   .dot{display:inline-block;width:13px;height:13px;border-radius:50%;box-shadow:0 0 0 3px rgba(0,0,0,.04);cursor:pointer}
   .dot:hover{box-shadow:0 0 0 3px rgba(0,0,0,.12)}
+  .status-cell .qstat{display:block;margin-top:5px;font-size:11px;padding:3px 5px;border:1px solid #d8dde2;border-radius:5px;max-width:155px;color:#374151;background:#fff;cursor:pointer}
+  .status-cell .qstat:hover{border-color:#9ca3af}
   aside.steps a.step .sd{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
   .filterbar{display:flex;align-items:center;gap:11px 16px;flex-wrap:wrap;margin-bottom:11px}
   .searchbar{flex:1;min-width:220px}
@@ -71,6 +73,20 @@
   .chip .cd{width:10px;height:10px;border-radius:50%}
   .chip.on{border-color:#111;font-weight:700;box-shadow:0 0 0 2px rgba(0,0,0,.07)}
   .chip.all.on{background:#111;color:#fff;border-color:#111}
+  /* home-first wizard */
+  .wizmask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100;padding:16px}
+  .wizbox{background:#fff;border-radius:12px;width:min(460px,96vw);box-shadow:0 20px 50px rgba(0,0,0,.3);overflow:hidden}
+  .wizh{background:#c0392b;color:#fff;font-weight:700;padding:14px 18px;font-size:15px}
+  .wizb{padding:16px 18px}
+  .wizmsg{margin:0 0 13px;color:#374151}.wizmsg b{color:#111827}
+  .wizlbl{display:block;font-size:12px;font-weight:600;color:#374151;margin-bottom:6px}
+  .wiztext{width:100%;min-height:72px;border:1px solid #cbd5e1;border-radius:7px;padding:9px;font:14px inherit;resize:vertical}
+  .wizchk{display:flex;align-items:center;gap:9px;margin-top:14px;color:#374151;cursor:pointer;font-size:13px}
+  .wizchk input{width:auto}
+  .wizf{display:flex;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid #eef0f2}
+  .wbtn{cursor:pointer;font:700 13px inherit;color:#fff;background:#c0392b;border:0;border-radius:7px;padding:9px 15px}
+  .wbtn:hover{background:#a93226}
+  .wbtn.gray{background:#e5e7eb;color:#374151}.wbtn.gray:hover{background:#d1d5db}
   /* add-vehicle modal */
   dialog{border:1px solid #d8dde2;border-radius:8px;padding:0;width:min(460px,94vw);box-shadow:0 20px 50px rgba(0,0,0,.25)}
   dialog::backdrop{background:rgba(0,0,0,.4)}
@@ -177,9 +193,9 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
         {% for u in rows %}
         <tr data-search="{{ (u.vin ~ ' ' ~ (u.stock_no or '') ~ ' ' ~ (u.make or '') ~ ' ' ~ (u.model or '') ~ ' ' ~ (u.year|string if u.year else ''))|lower }}" data-dot="{{ u.dot }}" onclick="location.href='/recon/u/{{ u.vin }}'">
           <td class="step-cell"><span class="hash">#{{ stepnum.get(u.step_code, '') }}</span> {{ u.step_name or '—' }}</td>
-          <td class="stock">{% if u.stock_no %}<a href="{{ u.lsl_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Open this car's record in LiveSalesLog">{{ u.stock_no }}</a>{% else %}—{% endif %}<span class="vin">{{ u.vin }}</span></td>
+          <td class="stock">{{ u.stock_no or '—' }}<span class="vin">{{ u.vin }}</span></td>
           <td class="veh"><b>{{ u.make or '' }} {{ u.model or '' }}</b>{% if u.needs_photos %} <span title="Needs photos on arrival">📷</span>{% endif %}<div class="sub">{{ u.year or '' }} {{ u.exterior_color or '' }}<span class="fromto">{% if u.bought_from %} · from {{ u.bought_from }}{% endif %}{% if u.sold_to %} · → {{ u.sold_to }}{% endif %}</span></div></td>
-          <td class="status-cell" data-label="Status:"><span class="dot" style="background:{{ u.dot }}" title="{{ u.step_name }} — click to filter" onclick="event.stopPropagation();setColor('{{ u.dot }}')"></span></td>
+          <td class="status-cell" data-label="Status:"><span class="dot" style="background:{{ u.dot }}" title="{{ u.step_name }} — click to filter" onclick="event.stopPropagation();setColor('{{ u.dot }}')"></span><select class="qstat" data-sold="{{ u.sold_to or '' }}" data-cur="{{ u.step_code }}" data-veh="{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }}" onclick="event.stopPropagation()" onchange="quickMove({{ u.id }}, this.value, this)">{% for s in steps %}<option value="{{ s.code }}"{% if s.code==u.step_code %} selected{% endif %}>{{ s.name }}</option>{% endfor %}</select></td>
           <td class="num" data-label="In step:"><span class="daybox {{ u.sla_state }}">{{ u.d_step if u.d_step is not none else 0 }}</span></td>
           <td class="num" data-label="Recon began:">{{ u.d_recon if u.d_recon is not none else '—' }}</td>
           <td class="notes">{{ u.notes or '' }}</td>
@@ -234,6 +250,22 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
     </div>
   </form>
 </dialog>
+
+<div id="boardWiz" class="wizmask" style="display:none">
+  <div class="wizbox">
+    <div class="wizh">Routing to Home Base first</div>
+    <div class="wizb">
+      <p id="bwMsg" class="wizmsg"></p>
+      <label class="wizlbl">Why is it coming to Home Base first — does it need recon? What's needed?</label>
+      <textarea id="bwNote" class="wiztext" placeholder="e.g. needs recon: bumper + full detail before it heads to the dealer"></textarea>
+      <label class="wizchk"><input type="checkbox" id="bwPhotos"> This vehicle needs photos taken on arrival</label>
+    </div>
+    <div class="wizf">
+      <button class="wbtn gray" onclick="cancelBoardWiz()">Cancel</button>
+      <button class="wbtn" onclick="confirmBoardWiz()">Confirm &amp; route to Home Base</button>
+    </div>
+  </div>
+</div>
 
 <script>
 function showErr(m){document.getElementById('msg').textContent=m||'';}
@@ -292,6 +324,45 @@ function applyFilters(){
   _colorFilter=c; _lightChip(); applyFilters();
 }catch(e){}})();
 
+function quickMove(id, code, el){
+  var sold=(el.getAttribute('data-sold')||'').trim();
+  if((code==='dealer_to_home'||code==='indiv_to_home') && sold){ openBoardWiz(id, code, el, sold); }
+  else { doMove(id, code, el); }
+}
+async function doMove(id, code, el){
+  try{
+    const r=await fetch('/api/recon/'+id+'/move',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to_step:code})});
+    const j=await r.json();
+    if(j.ok){ location.reload(); } else { alert(j.error||'move failed'); if(el) el.value=el.getAttribute('data-cur'); }
+  }catch(e){ alert('network error'); if(el) el.value=el.getAttribute('data-cur'); }
+}
+var _bw=null;
+function openBoardWiz(id, code, el, sold){
+  _bw={id:id, code:code, el:el};
+  document.getElementById('bwMsg').innerHTML=((el.getAttribute('data-veh')||'This vehicle').trim()||'This vehicle')+
+    ' is sold to <b>'+sold.replace(/</g,'&lt;')+'</b>, but you’re routing it to <b>Home Base</b> first. Confirm and capture why:';
+  document.getElementById('bwNote').value=''; document.getElementById('bwPhotos').checked=false;
+  document.getElementById('boardWiz').style.display='flex';
+}
+function cancelBoardWiz(){
+  document.getElementById('boardWiz').style.display='none';
+  if(_bw && _bw.el){ _bw.el.value=_bw.el.getAttribute('data-cur'); }
+  _bw=null;
+}
+async function confirmBoardWiz(){
+  if(!_bw) return;
+  var id=_bw.id, code=_bw.code, sold=(_bw.el.getAttribute('data-sold')||'').trim();
+  var note=(document.getElementById('bwNote').value||'').trim();
+  var pics=document.getElementById('bwPhotos').checked;
+  try{
+    var rm=await fetch('/api/recon/'+id+'/move',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to_step:code})});
+    var jm=await rm.json();
+    if(!jm.ok){ alert(jm.error||'move failed'); return; }
+    if(note){ await fetch('/api/recon/'+id+'/note',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body:'Routed to Home Base first → '+sold+'. '+note, category:'recon'})}); }
+    if(pics){ await fetch('/api/recon/'+id+'/photos-flag',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({needs_photos:true})}); }
+    location.reload();
+  }catch(e){ alert('network error'); }
+}
 let _fp=null;
 async function poll(){
   try{
