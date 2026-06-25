@@ -59,7 +59,8 @@
   /* VIN under the stock #, status dots, search */
   .stock .vin{display:block;color:#9ca3af;font-weight:400;font-size:11px;font-family:ui-monospace,monospace;margin-top:2px;letter-spacing:.2px}
   .status-cell{text-align:center}
-  .dot{display:inline-block;width:13px;height:13px;border-radius:50%;box-shadow:0 0 0 3px rgba(0,0,0,.04)}
+  .dot{display:inline-block;width:13px;height:13px;border-radius:50%;box-shadow:0 0 0 3px rgba(0,0,0,.04);cursor:pointer}
+  .dot:hover{box-shadow:0 0 0 3px rgba(0,0,0,.12)}
   aside.steps a.step .sd{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
   .filterbar{display:flex;align-items:center;gap:11px 16px;flex-wrap:wrap;margin-bottom:11px}
   .searchbar{flex:1;min-width:220px}
@@ -165,6 +166,7 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
         <span class="chip" data-color="#eab308" onclick="setColor('#eab308')"><span class="cd" style="background:#eab308"></span>In Transit</span>
         <span class="chip" data-color="#22c55e" onclick="setColor('#22c55e')"><span class="cd" style="background:#22c55e"></span>At Dealer</span>
         <span class="chip" data-color="#3b82f6" onclick="setColor('#3b82f6')"><span class="cd" style="background:#3b82f6"></span>Home Base</span>
+        <span class="chip" data-color="#8b5cf6" onclick="setColor('#8b5cf6')"><span class="cd" style="background:#8b5cf6"></span>Ready</span>
       </span>
     </div>
     <table>
@@ -178,7 +180,7 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
           <td class="step-cell"><span class="hash">#{{ stepnum.get(u.step_code, '') }}</span> {{ u.step_name or '—' }}</td>
           <td class="stock">{% if u.stock_no %}<a href="{{ u.lsl_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Open this car's record in LiveSalesLog">{{ u.stock_no }}</a>{% else %}—{% endif %}<span class="vin">{{ u.vin }}</span></td>
           <td class="veh"><b>{{ u.make or '' }} {{ u.model or '' }}</b>{% if u.needs_photos %} <span title="Needs photos on arrival">📷</span>{% endif %}<div class="sub">{{ u.year or '' }} {{ u.exterior_color or '' }}<span class="fromto">{% if u.bought_from %} · from {{ u.bought_from }}{% endif %}{% if u.sold_to %} · → {{ u.sold_to }}{% endif %}</span></div></td>
-          <td class="status-cell" data-label="Status:"><span class="dot" style="background:{{ u.dot }}" title="{{ u.step_name }}"></span></td>
+          <td class="status-cell" data-label="Status:"><span class="dot" style="background:{{ u.dot }}" title="{{ u.step_name }} — click to filter" onclick="event.stopPropagation();setColor('{{ u.dot }}')"></span></td>
           <td class="num" data-label="In step:"><span class="daybox {{ u.sla_state }}">{{ u.d_step if u.d_step is not none else 0 }}</span></td>
           <td class="num" data-label="Recon began:">{{ u.d_recon if u.d_recon is not none else '—' }}</td>
           <td class="num" data-label="In DMS:">{{ u.d_dms if u.d_dms is not none else '—' }}</td>

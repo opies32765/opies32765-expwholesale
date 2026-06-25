@@ -55,7 +55,7 @@ DOT_COLORS = {
     'all': '#e23b3b', 'dealer_to_dealer': '#e23b3b', 'dealer_to_home': '#e23b3b',
     'indiv_to_dealer': '#e23b3b', 'indiv_to_home': '#e23b3b',
     'in_transport': '#eab308', 'arrived_dealer': '#22c55e',
-    'arrived_home': '#3b82f6', 'ready': '#10b981', 'picked_up': '#9ca3af',
+    'arrived_home': '#3b82f6', 'ready': '#8b5cf6', 'picked_up': '#9ca3af',
 }
 
 
