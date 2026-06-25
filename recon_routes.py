@@ -42,6 +42,9 @@ RECON_EMAIL_FROM = os.environ.get('RECON_EMAIL_FROM',
 RECON_EMAIL_REPLY_TO = os.environ.get('RECON_EMAIL_REPLY_TO', 'oscar@experience-wholesale.com')
 EMAIL_RECIP = {'austin': 'austin@experience-wholesale.com',
                'rose': 'Rose@experience-wholesale.com'}
+# owners who can receive the recon-spend report by text (shared 754 Twilio number)
+RECON_OWNERS = {'me': '+14074309675', 'joe': '+13522099696',
+                'todd': '+15613018622', 'gregg': '+15166803500'}
 HOME_BASE = 'Home Base (Pompano)'
 # LSL web record deep-link. %s = inventory id (recon_units.lsl_inventory_ref).
 # ⚠ best-guess path — confirm the exact app.livesaleslog.com route with the operator.
@@ -177,6 +180,151 @@ def _resolve_party(u, side):
         'contact': u.get(side + '_contact') or sug.get('contact', ''),
         'from_lsl': bool(sug) and not (u.get(side + '_address')),
     }
+
+
+# ── LSL recon + transport cost per car (deal field OR supp-cost line) ────────
+import re as _re
+_RECON_RX = _re.compile(r'Recon\s*-\s*\$?([\d,]+\.?\d*)', _re.I)
+_TRANS_RX = _re.compile(r'Transport\s*-\s*\$?([\d,]+\.?\d*)', _re.I)
+
+
+def _money(s):
+    try:
+        return float(str(s).replace(',', '').replace('$', '')) if s not in (None, '') else 0.0
+    except Exception:
+        return 0.0
+
+
+def _lsl_costs(stock_no, vin):
+    """Recon + transport cost + attachment count for a car from its LSL deal.
+    recon = recon_cost field, else the 'Recon - $X' supp-cost line; transport =
+    transport_fee field, else the 'Transport - $X' supp-cost line."""
+    out = {'recon': 0.0, 'transport': 0.0, 'attachments': 0, 'recon_note': '', 'found': False}
+    if not (stock_no or vin):
+        return out
+    try:
+        c = _lsl_conn()
+        try:
+            r = None
+            if stock_no:
+                r = c.execute("SELECT recon_cost, transport_fee, supp_costs_desc, raw_json "
+                              "FROM deals WHERE stock_no=? ORDER BY created_at DESC LIMIT 1",
+                              (stock_no,)).fetchone()
+            if not r and vin:
+                r = c.execute("SELECT recon_cost, transport_fee, supp_costs_desc, raw_json "
+                              "FROM deals WHERE vin_no=? ORDER BY created_at DESC LIMIT 1",
+                              (vin,)).fetchone()
+            if r:
+                out['found'] = True
+                desc = r['supp_costs_desc'] or ''
+                rm = _RECON_RX.search(desc)
+                tm = _TRANS_RX.search(desc)
+                out['recon'] = max(_money(r['recon_cost']), _money(rm.group(1)) if rm else 0.0)
+                out['transport'] = max(_money(r['transport_fee']), _money(tm.group(1)) if tm else 0.0)
+                try:
+                    rj = json.loads(r['raw_json']) if r['raw_json'] else {}
+                except Exception:
+                    rj = {}
+                out['attachments'] = int(rj.get('totalAttachments') or 0)
+                sn = rj.get('lastSaleNote') or ''
+                if 'recon' in sn.lower():   # LSL writes "SAVED RECON ADJUSTMENTS: …" here
+                    out['recon_note'] = _re.sub(r'<br\s*/?>', ' ', sn).strip()
+        finally:
+            c.close()
+    except Exception as e:
+        print('[recon-costs] %s' % e, flush=True)
+    return out
+
+
+# ── recon/transport SPEND report (aggregated from LSL deals) ────────────────
+def _fmt_money(x):
+    try:
+        return '{:,.0f}'.format(float(x or 0))
+    except Exception:
+        return '0'
+
+
+def _send_sms(nums, body):
+    sid = os.environ.get('TWILIO_ACCOUNT_SID')
+    tok = os.environ.get('TWILIO_AUTH_TOKEN')
+    frm = os.environ.get('TWILIO_PHONE')
+    if not (sid and tok and frm):
+        print('[recon-sms] twilio creds missing', flush=True)
+        return 0
+    n = 0
+    try:
+        from twilio.rest import Client
+        cl = Client(sid, tok)
+        for to in nums:
+            try:
+                cl.messages.create(to=to, from_=frm, body=body)
+                n += 1
+            except Exception as e:
+                print('[recon-sms] %s -> %s' % (to, e), flush=True)
+    except Exception as e:
+        print('[recon-sms] %s' % e, flush=True)
+    return n
+
+
+def _recon_report(period, frm=None, to=None):
+    """Aggregate recon + transport spend from LSL deals for a named period OR a
+    custom from/to date range (EDT). recon = recon_cost field else 'Recon - $X'
+    line; transport = transport_fee field else 'Transport - $X' line."""
+    def _sd(s):
+        s = (s or '').strip()
+        return s if _re.match(r'^\d{4}-\d{2}-\d{2}$', s) else None
+    lo0, hi0 = _sd(frm), _sd(to)
+    if lo0 or hi0:
+        lo, hi = (lo0 or '2000-01-01'), (hi0 or '2999-12-31')
+        flt = "date(d.created_at,'-4 hours') BETWEEN '" + lo + "' AND '" + hi + "'"
+        period = 'custom'
+    else:
+        period = period if period in ('week', 'month', 'year', 'all') else 'month'
+        flt = {
+            'week':  "datetime(d.created_at) >= datetime('now','-7 days')",
+            'month': "strftime('%Y-%m', d.created_at, '-4 hours') = strftime('%Y-%m','now','-4 hours')",
+            'year':  "strftime('%Y', d.created_at, '-4 hours') = strftime('%Y','now','-4 hours')",
+            'all':   "1=1",
+        }[period]
+    rows = []
+    try:
+        c = _lsl_conn()
+        try:
+            rows = list(c.execute(
+                "SELECT d.stock_no, d.make_name make, i.group_model_name model, "
+                "d.recon_cost, d.transport_fee, d.supp_costs_desc, datetime(d.created_at,'-4 hours') edt "
+                "FROM deals d LEFT JOIN inventory i ON i.stock_no=d.stock_no "
+                "WHERE " + flt + " ORDER BY d.created_at DESC"))
+        finally:
+            c.close()
+    except Exception as e:
+        print('[recon-report] %s' % e, flush=True)
+    tot_r = tot_t = 0.0
+    by_make, by_model, cars = {}, {}, []
+    for r in rows:
+        desc = r['supp_costs_desc'] or ''
+        rm = _RECON_RX.search(desc)
+        tm = _TRANS_RX.search(desc)
+        rc = max(_money(r['recon_cost']), _money(rm.group(1)) if rm else 0.0)
+        tc = max(_money(r['transport_fee']), _money(tm.group(1)) if tm else 0.0)
+        tot_r += rc
+        tot_t += tc
+        mk = (r['make'] or 'Unknown').strip() or 'Unknown'
+        md = (r['model'] or mk).strip() or mk
+        a = by_make.setdefault(mk, {'recon': 0.0, 'transport': 0.0, 'n': 0})
+        a['recon'] += rc; a['transport'] += tc; a['n'] += 1
+        b = by_model.setdefault(md, {'recon': 0.0, 'transport': 0.0, 'n': 0})
+        b['recon'] += rc; b['transport'] += tc; b['n'] += 1
+        if rc > 0 or tc > 0:
+            cars.append({'stock_no': r['stock_no'], 'make': mk, 'model': md,
+                         'recon': rc, 'transport': tc, 'edt': r['edt']})
+    mk_list = sorted([dict(name=k, **v) for k, v in by_make.items()],
+                     key=lambda x: -(x['recon'] + x['transport']))
+    md_list = sorted([dict(name=k, **v) for k, v in by_model.items()],
+                     key=lambda x: -(x['recon'] + x['transport']))
+    return {'period': period, 'from': lo0 or '', 'to': hi0 or '',
+            'deals': len(rows), 'total_recon': tot_r, 'total_transport': tot_t,
+            'by_make': mk_list[:30], 'by_model': md_list[:30], 'cars': cars[:300]}
 
 
 # ── owners' pipeline flow (path-aware next options) ─────────────────────────
@@ -443,7 +591,9 @@ def board():
         if ids:
             cur.execute("""SELECT unit_id,
                                   string_agg(body, '  •  ' ORDER BY created_at DESC) AS notes
-                             FROM recon_notes WHERE unit_id = ANY(%s) GROUP BY unit_id""",
+                             FROM recon_notes
+                            WHERE unit_id = ANY(%s) AND COALESCE(category,'general')='general'
+                            GROUP BY unit_id""",
                         (ids,))
             notes_by = {r['unit_id']: r['notes'] for r in cur.fetchall()}
     finally:
@@ -478,6 +628,207 @@ def board():
     return render_template('recon/dashboard.html', steps=steps, rows=rows,
                            counts=counts, stepnum=stepnum, total=len(units),
                            sel=sel, now=now, dot_colors=DOT_COLORS)
+
+
+@bp.route('/recon/reports')
+def reports():
+    rep = _recon_report(request.args.get('period') or 'month',
+                        request.args.get('from'), request.args.get('to'))
+    return render_template('recon/reports.html', rep=rep, owners=list(RECON_OWNERS.keys()))
+
+
+@bp.route('/api/recon/reports/text', methods=['POST'])
+def api_report_text():
+    data = request.get_json(silent=True) or request.form
+    period = data.get('period') or 'month'
+    who = (data.get('owner') or 'me').lower()
+    rep = _recon_report(period, data.get('from'), data.get('to'))
+    if rep['period'] == 'custom':
+        plabel = '%s to %s' % (rep['from'] or 'start', rep['to'] or 'today')
+    else:
+        plabel = {'week': 'Last 7 Days', 'month': 'This Month', 'year': 'This Year',
+                  'all': 'All Time'}.get(rep['period'], rep['period'])
+    lines = ['EW Recon + Transport Spend — %s' % plabel, '',
+             'Recon: $%s' % _fmt_money(rep['total_recon']),
+             'Transport: $%s' % _fmt_money(rep['total_transport']),
+             'Deals: %d' % rep['deals'], '', 'Top makes:']
+    for m in rep['by_make'][:6]:
+        lines.append('- %s: recon $%s / transport $%s (%d)' % (
+            m['name'], _fmt_money(m['recon']), _fmt_money(m['transport']), m['n']))
+    body = '\n'.join(lines)[:1500]
+    nums = list(RECON_OWNERS.values()) if who == 'all' else [RECON_OWNERS.get(who, RECON_OWNERS['me'])]
+    sent = _send_sms(nums, body)
+    return jsonify({'ok': sent > 0, 'sent': sent, 'to': who})
+
+
+# ── Austin's transport tab: pending pickup + in transit, with ETAs ──────────
+TRANSPORT_PENDING = ('dealer_to_dealer', 'dealer_to_home', 'indiv_to_dealer', 'indiv_to_home')
+
+
+def _transport_data():
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("""SELECT u.*, sd.code AS step_code, sd.name AS step_name
+                         FROM recon_units u LEFT JOIN recon_step_defs sd ON sd.id=u.current_step_id
+                        WHERE u.store_id=%s AND u.status IN ('in_transit_stage0','in_recon','on_hold')
+                          AND sd.code IN %s
+                        ORDER BY u.current_step_entered_at NULLS FIRST""",
+                    (STORE_ID, TRANSPORT_PENDING + ('in_transport', 'arrived_home')))
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        db.close()
+    now = _utcnow()
+    pending, transit = [], []
+    for u in rows:
+        d = _days(u.get('current_step_entered_at'), now)
+        u['days'] = int(d) if d is not None else 0
+        code = u.get('step_code')
+        has_dealer = bool((u.get('sold_to') or '').strip())
+        been_home = bool(u.get('entered_recon_at'))   # has arrived Home Base at least once
+        pre = 'indiv' if (u.get('buying_from_type') or '').lower() == 'individual' else 'dealer'
+        u['leg2'] = False
+        u['via_home'] = False                         # going to Home Base first, then a dealer
+        u['final_dest'] = u.get('sold_to') or ''
+        if code == 'arrived_home':
+            # at Home Base — only a transport job if it's onward-bound to a dealer
+            if not has_dealer:
+                continue
+            u['pickup_from'] = HOME_BASE
+            u['dest'] = u.get('sold_to')
+            u['arrive_to'] = 'arrived_dealer'
+            u['leg2'] = True
+            pending.append(u)
+        elif code == 'in_transport':
+            if been_home:                              # second leg: Home Base -> dealer
+                u['pickup_from'] = HOME_BASE
+                u['dest'] = u.get('sold_to') or 'dealer'
+                u['arrive_to'] = 'arrived_dealer'
+                u['leg2'] = True
+                u['back_to'] = 'arrived_home'
+            else:                                      # first leg
+                to_home = (u.get('path') == 'to_home')
+                u['pickup_from'] = u.get('bought_from') or 'seller'
+                u['dest'] = HOME_BASE if to_home else (u.get('sold_to') or 'buyer')
+                u['arrive_to'] = 'arrived_home' if to_home else 'arrived_dealer'
+                u['via_home'] = to_home and has_dealer
+                u['back_to'] = '%s_to_%s' % (pre, 'home' if to_home else 'dealer')
+            transit.append(u)
+        else:                                          # staging steps — first leg, pending pickup
+            to_home = code in ('dealer_to_home', 'indiv_to_home')
+            u['pickup_from'] = u.get('bought_from') or 'seller'
+            u['dest'] = HOME_BASE if to_home else (u.get('sold_to') or 'buyer')
+            u['arrive_to'] = 'arrived_home' if to_home else 'arrived_dealer'
+            u['via_home'] = to_home and has_dealer
+            pending.append(u)
+    return pending, transit, now
+
+
+@bp.route('/recon/transport')
+def transport_tab():
+    pending, transit, now = _transport_data()
+    return render_template('recon/transport.html', pending=pending, transit=transit,
+                           today=now.strftime('%Y-%m-%d'))
+
+
+def _transport_pdf():
+    pending, transit, now = _transport_data()
+    import io
+    from reportlab.lib.pagesizes import letter, landscape
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(letter), topMargin=34, bottomMargin=34,
+                            leftMargin=28, rightMargin=28)
+    st = getSampleStyleSheet()
+    el = [Paragraph('Experience Wholesale — Transport Status', st['Title']),
+          Paragraph(now.strftime('%b %d, %Y  %I:%M %p') + ' ET', st['Normal']), Spacer(1, 12)]
+
+    def _d(x):
+        return str(x) if x else '—'
+
+    def section(title, items):
+        el.append(Paragraph('%s (%d)' % (title, len(items)), st['Heading2']))
+        data = [['Stock #', 'Vehicle', 'Carrier', 'Pick up → Deliver', 'Est. pickup', 'Est. delivery', 'Days']]
+        for u in items:
+            veh = ('%s %s %s' % (u.get('year') or '', u.get('make') or '', u.get('model') or '')).strip()
+            route = '%s → %s' % (u.get('pickup_from') or '', u.get('dest') or '')
+            data.append([u.get('stock_no') or '—', veh[:34], (u.get('transport_company') or '—')[:18],
+                         route[:48], _d(u.get('est_pickup_date')), _d(u.get('est_delivery_date')), str(u.get('days'))])
+        t = Table(data, repeatRows=1,
+                  colWidths=[0.7*inch, 2.3*inch, 1.3*inch, 2.9*inch, 0.9*inch, 0.9*inch, 0.5*inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#c0392b')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#d8dde2')),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f7f8fa')]),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 5), ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+        ]))
+        el.append(t)
+        el.append(Spacer(1, 16))
+    section('Pending Pickup', pending)
+    section('In Transit', transit)
+    doc.build(el)
+    return buf.getvalue()
+
+
+@bp.route('/recon/transport/report.pdf')
+def transport_pdf():
+    from flask import Response
+    return Response(_transport_pdf(), mimetype='application/pdf',
+                    headers={'Content-Disposition': 'inline; filename="ew-transport-status.pdf"'})
+
+
+@bp.route('/api/recon/transport/email', methods=['POST'])
+def api_transport_email():
+    data = request.get_json(silent=True) or request.form
+    raw = (data.get('to') or '').replace(';', ',')
+    tos = [x.strip() for x in raw.split(',') if x.strip() and '@' in x]
+    if not tos:
+        return jsonify({'error': 'enter at least one email address'}), 400
+    key = os.environ.get('RESEND_API_KEY', '')
+    if not key:
+        return jsonify({'error': 'email not configured'}), 500
+    try:
+        import base64
+        pdf = _transport_pdf()
+        import resend
+        resend.api_key = key
+        resend.Emails.send({
+            'from': RECON_EMAIL_FROM, 'to': tos, 'reply_to': RECON_EMAIL_REPLY_TO,
+            'subject': 'EW Transport Status — %s' % _utcnow().strftime('%b %d, %Y'),
+            'html': '<p>Attached: the current Experience Wholesale transport status '
+                    '(cars pending pickup and in transit, with ETAs).</p>',
+            'attachments': [{'filename': 'ew-transport-status.pdf',
+                             'content': base64.b64encode(pdf).decode()}],
+        })
+        return jsonify({'ok': True, 'sent': len(tos)})
+    except Exception as e:
+        print('[transport-email] %s' % e, flush=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/recon/out-for-recon')
+def out_for_recon_tab():
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("""SELECT u.*, sd.name AS step_name FROM recon_units u
+                         LEFT JOIN recon_step_defs sd ON sd.id=u.current_step_id
+                        WHERE u.store_id=%s AND u.out_for_recon_at IS NOT NULL
+                        ORDER BY u.out_for_recon_at""", (STORE_ID,))
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        db.close()
+    now = _utcnow()
+    for u in rows:
+        u['out_days'] = round(_days(u.get('out_for_recon_at'), now) or 0, 1)
+    return render_template('recon/out_for_recon.html', rows=rows, now=now)
 
 
 @bp.route('/api/recon/board')
@@ -529,9 +880,12 @@ def unit_detail(key):
         cur.execute("SELECT * FROM recon_workitems WHERE unit_id=%s "
                     "ORDER BY created_at", (u['id'],))
         workitems = [dict(r) for r in cur.fetchall()]
-        cur.execute("SELECT * FROM recon_notes WHERE unit_id=%s "
+        cur.execute("SELECT * FROM recon_notes WHERE unit_id=%s AND COALESCE(category,'general')='general' "
                     "ORDER BY created_at DESC", (u['id'],))
         notes = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT * FROM recon_notes WHERE unit_id=%s AND category='recon' "
+                    "ORDER BY created_at DESC", (u['id'],))
+        rnotes = [dict(r) for r in cur.fetchall()]
         cur.execute("SELECT * FROM recon_photos WHERE unit_id=%s ORDER BY created_at DESC", (u['id'],))
         photos = [dict(r) for r in cur.fetchall()]
         steps = _steps(cur)
@@ -563,11 +917,13 @@ def unit_detail(key):
     next_opts = _next_options(cur_code, u.get('path'))
     pickup = _resolve_party(u, 'pickup')
     delivery = _resolve_party(u, 'delivery')
+    costs = _lsl_costs(u.get('stock_no'), u.get('vin'))
+    out_days = round(_days(u.get('out_for_recon_at'), now) or 0, 1) if u.get('out_for_recon_at') else None
     return render_template('recon/unit.html', u=u, events=events,
-                           workitems=workitems, notes=notes, photos=photos, steps=steps, now=now,
-                           cur_code=cur_code, cur_name=cur_name, next_opts=next_opts,
-                           companies=companies, pickup=pickup, delivery=delivery,
-                           dot=DOT_COLORS.get(cur_code, '#cbd5e1'))
+                           workitems=workitems, notes=notes, rnotes=rnotes, photos=photos,
+                           steps=steps, now=now, cur_code=cur_code, cur_name=cur_name,
+                           next_opts=next_opts, companies=companies, pickup=pickup, delivery=delivery,
+                           costs=costs, out_days=out_days, dot=DOT_COLORS.get(cur_code, '#cbd5e1'))
 
 
 # ============================================================================
@@ -762,6 +1118,9 @@ def api_advance(unit_id):
 def api_add_note(unit_id):
     data = request.get_json(silent=True) or request.form
     body = (data.get('body') or '').strip()
+    category = (data.get('category') or 'general').strip().lower()
+    if category not in ('general', 'recon'):
+        category = 'general'
     if not body:
         return jsonify({'error': 'note is empty'}), 400
     if len(body) > 4000:
@@ -773,9 +1132,9 @@ def api_add_note(unit_id):
         row = cur.fetchone()
         if not row:
             return jsonify({'error': 'unit not found'}), 404
-        cur.execute("""INSERT INTO recon_notes (unit_id, step_id, author, body)
-                       VALUES (%s,%s,%s,%s) RETURNING id""",
-                    (unit_id, row['current_step_id'], _actor(), body))
+        cur.execute("""INSERT INTO recon_notes (unit_id, step_id, author, body, category)
+                       VALUES (%s,%s,%s,%s,%s) RETURNING id""",
+                    (unit_id, row['current_step_id'], _actor(), body, category))
         nid = cur.fetchone()['id']
         _audit(cur, unit_id, 'note', nid, 'add', _actor(), {'len': len(body)})
         db.commit()
@@ -979,6 +1338,60 @@ def api_transport_details(unit_id):
                         "ON CONFLICT (name) DO NOTHING", (company,))
         _audit(cur, unit_id, 'unit', unit_id, 'transport_details', _actor(),
                {'company': company})
+        db.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+@bp.route('/api/recon/<int:unit_id>/set-eta', methods=['POST'])
+def api_set_eta(unit_id):
+    """Update just one ETA date (from the transport tab) without touching the
+    rest of the transport details."""
+    data = request.get_json(silent=True) or request.form
+    col = {'pickup': 'est_pickup_date', 'delivery': 'est_delivery_date'}.get(data.get('field'))
+    if not col:
+        return jsonify({'error': 'bad field'}), 400
+    val = (data.get('date') or '').strip() or None
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("UPDATE recon_units SET " + col + "=%s, updated_at=now() "
+                    "WHERE id=%s RETURNING id", (val, unit_id))
+        if not cur.fetchone():
+            return jsonify({'error': 'unit not found'}), 404
+        _audit(cur, unit_id, 'unit', unit_id, 'set_eta', _actor(), {'field': data.get('field'), 'date': val})
+        db.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+@bp.route('/api/recon/<int:unit_id>/recon-out', methods=['POST'])
+def api_recon_out(unit_id):
+    """Ship a car OUT for recon work (starts the out-for-recon timer) or mark it
+    returned. out_for_recon_at is the timer start; COALESCE keeps it if already set."""
+    data = request.get_json(silent=True) or request.form
+    out = bool(data.get('out'))
+    vendor = (data.get('vendor') or '').strip() or None
+    db = _db()
+    cur = db.cursor()
+    try:
+        if out:
+            cur.execute("UPDATE recon_units SET out_for_recon_at=COALESCE(out_for_recon_at, now()), "
+                        "out_for_recon_to=%s, updated_at=now() WHERE id=%s RETURNING id", (vendor, unit_id))
+        else:
+            cur.execute("UPDATE recon_units SET out_for_recon_at=NULL, out_for_recon_to=NULL, "
+                        "updated_at=now() WHERE id=%s RETURNING id", (unit_id,))
+        if not cur.fetchone():
+            return jsonify({'error': 'unit not found'}), 404
+        _audit(cur, unit_id, 'unit', unit_id, 'recon_out' if out else 'recon_back', _actor(), {'vendor': vendor})
         db.commit()
         return jsonify({'ok': True})
     except Exception as e:

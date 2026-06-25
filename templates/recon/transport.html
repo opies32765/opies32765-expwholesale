@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transport · EW Recon</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#eef0f2;color:#1f2937;font:13px/1.45 -apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  a{color:inherit;text-decoration:none}
+  .topbar{background:#2b2f33;color:#fff;display:flex;align-items:center;height:54px;padding:0 18px}
+  .brand{font-weight:800;font-size:20px;letter-spacing:.5px}.brand .r{color:#e23b3b}
+  .topbar .back{margin-left:22px;color:#cbd5e1;border:1px solid #4b5056;padding:6px 13px;border-radius:6px;font-size:13px}
+  .topbar .back:hover{color:#fff}
+  .top-right{margin-left:auto;display:flex;gap:14px;align-items:center;color:#cbd5e1;font-size:12px}
+  .top-right a{border:1px solid #4b5056;padding:5px 12px;border-radius:6px}
+  .top-right a:hover{color:#fff;border-color:#6b7280}
+  .wrap{max-width:1180px;margin:0 auto;padding:16px 18px 60px}
+  h1{font-size:18px;margin:0}
+  .toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:4px 0 14px}
+  .toolbar .sp{flex:1}
+  #search{padding:8px 11px;border:1px solid #cbd5e1;border-radius:7px;font:13px inherit;min-width:230px}
+  .toolbar input.em{padding:8px 10px;border:1px solid #cbd5e1;border-radius:7px;font:13px inherit;min-width:190px}
+  .btn{cursor:pointer;font:700 13px inherit;color:#fff;background:#c0392b;border:0;border-radius:7px;padding:9px 13px;white-space:nowrap}
+  .btn:hover{background:#a93226}
+  .btn.alt{background:#fff;color:#c0392b;border:1px solid #c0392b}
+  .btn.alt:hover{background:#fdecec}
+  .btn.gray{background:#fff;color:#374151;border:1px solid #cbd5e1}
+  .btn.gray:hover{background:#f3f4f6}
+  .msg{font-size:12px;color:#6b7280}.msg.ok{color:#157347}.msg.err{color:#c0392b}
+  .cols{display:flex;gap:16px;align-items:flex-start}
+  .col{flex:1;min-width:0}
+  .colhead{color:#fff;font-weight:700;font-size:13px;padding:10px 14px;border-radius:9px 9px 0 0;text-transform:uppercase;letter-spacing:.4px}
+  .colhead.pp{background:#c0392b}.colhead.it{background:#eab308;color:#5b4708}
+  .colhead .c{float:right;opacity:.9}
+  .colbody{background:#fff;border:1px solid #d8dde2;border-top:0;border-radius:0 0 9px 9px;padding:10px;min-height:70px}
+  .tcard{border:1px solid #e5e7eb;border-radius:9px;margin-bottom:9px;overflow:hidden}
+  .thead{display:flex;align-items:flex-start;gap:8px;padding:10px 12px;cursor:pointer}
+  .thead:hover{background:#f7fbff}
+  .cv{color:#9ca3af;font-size:11px;margin-top:3px;transition:transform .12s}
+  .tcard.collapsed .cv{transform:rotate(-90deg)}
+  .tcard.collapsed .tbody{display:none}
+  .hinfo{min-width:0;flex:1}
+  .vh{font-weight:700;font-size:14px;color:#111827}
+  .meta{font-size:12px;color:#6b7280;margin-top:1px;overflow:hidden;text-overflow:ellipsis}
+  .meta .stock{color:#2563eb;font-weight:700}
+  .meta .ar{color:#9ca3af;margin:0 4px}
+  .leg2{display:inline-block;background:#ede9fe;color:#6d28d9;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;margin-left:6px}
+  .tbody{padding:0 12px 11px 32px}
+  .etas{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0}
+  .eta{font-size:11px;color:#6b7280}.eta label{display:block;margin-bottom:2px}
+  .eta input{padding:5px 7px;border:1px solid #cbd5e1;border-radius:6px;font:12px inherit}
+  .eta input.overdue{border-color:#c0392b;background:#fdeaea;color:#b91c1c;font-weight:700}
+  .foot{display:flex;align-items:center;justify-content:space-between;margin-top:6px}
+  .day{font-size:11px;color:#6b7280}
+  .mv{cursor:pointer;font:700 11px inherit;border:0;border-radius:6px;padding:6px 10px}
+  .mv.go{background:#eab308;color:#5b4708}.mv.done{background:#22c55e;color:#fff}
+  .mv.back{background:#e5e7eb;color:#374151}.mv.back:hover{background:#d1d5db}
+  .empty{color:#9ca3af;padding:16px;text-align:center;font-size:12px}
+  @media (max-width:820px){ .cols{flex-direction:column} }
+</style>
+<script>try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.parentNode.removeChild(_s);}catch(e){}</script>
+</head>
+<body>
+<div class="topbar">
+  <span class="brand"><span class="r">EW</span>RECON</span>
+  <a class="back" href="/recon">&larr; Board</a>
+  <div class="top-right"><a href="/logout?next=/recon/transport">Log out</a></div>
+</div>
+<div class="wrap">
+  <div class="toolbar">
+    <h1>Transport</h1>
+    <input id="search" type="search" placeholder="Search VIN, stock, make, carrier…" oninput="filterCards()" autocomplete="off">
+    <button class="btn gray" id="collapseBtn" onclick="collapseAll()">Collapse all</button>
+    <span class="sp"></span>
+    <a class="btn alt" href="/recon/transport/report.pdf" target="_blank">⬇ Download PDF</a>
+    <input class="em" id="email" type="email" placeholder="email to send PDF…" autocomplete="off">
+    <button class="btn" onclick="emailPdf()">Email PDF</button>
+    <span id="emsg" class="msg"></span>
+  </div>
+
+  <div class="cols">
+    <div class="col">
+      <div class="colhead pp">Pending Pickups <span class="c">{{ pending|length }}</span></div>
+      <div class="colbody" id="pendCol">
+        {% for u in pending %}
+        <div class="tcard" data-search="{{ ((u.year|string if u.year else '') ~ ' ' ~ (u.make or '') ~ ' ' ~ (u.model or '') ~ ' ' ~ (u.stock_no or '') ~ ' ' ~ u.vin ~ ' ' ~ (u.transport_company or '') ~ ' ' ~ (u.pickup_from or '') ~ ' ' ~ (u.dest or ''))|lower }}">
+          <div class="thead" onclick="toggleCard(this)">
+            <span class="cv">▾</span>
+            <div class="hinfo">
+              <div class="vh">{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }}{% if u.leg2 %}<span class="leg2">↩ leg 2</span>{% endif %}</div>
+              <div class="meta"><a class="stock" href="/recon/u/{{ u.vin }}" onclick="event.stopPropagation()">{{ u.stock_no or '—' }}</a> · {{ u.transport_company or 'no carrier' }} · {{ u.pickup_from }}<span class="ar">→</span>{{ u.dest }}{% if u.via_home %}<span class="ar">→</span>{{ u.final_dest }}{% endif %}</div>
+            </div>
+          </div>
+          <div class="tbody">
+            <div class="etas">
+              <span class="eta"><label>Est. pickup</label>
+                <input type="date" value="{{ u.est_pickup_date or '' }}" onchange="setEta({{ u.id }},'pickup',this)"
+                  class="{% if u.est_pickup_date and (u.est_pickup_date|string) < today %}overdue{% endif %}"></span>
+              <span class="eta"><label>Est. delivery</label>
+                <input type="date" value="{{ u.est_delivery_date or '' }}" onchange="setEta({{ u.id }},'delivery',this)"
+                  class="{% if u.est_delivery_date and (u.est_delivery_date|string) < today %}overdue{% endif %}"></span>
+            </div>
+            <div class="foot"><span class="day">waiting {{ u.days }}d</span>
+              <button class="mv go" onclick="moveCar({{ u.id }},'in_transport')">Mark In Transit</button></div>
+          </div>
+        </div>
+        {% else %}<div class="empty">Nothing pending pickup. Stage a car (or arrive one Home Base that's sold to a dealer) and it shows here.</div>{% endfor %}
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="colhead it">In Transit <span class="c">{{ transit|length }}</span></div>
+      <div class="colbody" id="transCol">
+        {% for u in transit %}
+        <div class="tcard" data-search="{{ ((u.year|string if u.year else '') ~ ' ' ~ (u.make or '') ~ ' ' ~ (u.model or '') ~ ' ' ~ (u.stock_no or '') ~ ' ' ~ u.vin ~ ' ' ~ (u.transport_company or '') ~ ' ' ~ (u.pickup_from or '') ~ ' ' ~ (u.dest or ''))|lower }}">
+          <div class="thead" onclick="toggleCard(this)">
+            <span class="cv">▾</span>
+            <div class="hinfo">
+              <div class="vh">{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }}{% if u.leg2 %}<span class="leg2">↩ leg 2</span>{% endif %}</div>
+              <div class="meta"><a class="stock" href="/recon/u/{{ u.vin }}" onclick="event.stopPropagation()">{{ u.stock_no or '—' }}</a> · {{ u.transport_company or 'no carrier' }} · {{ u.pickup_from }}<span class="ar">→</span>{{ u.dest }}{% if u.via_home %}<span class="ar">→</span>{{ u.final_dest }}{% endif %}</div>
+            </div>
+          </div>
+          <div class="tbody">
+            <div class="etas">
+              <span class="eta"><label>Est. delivery (ETA)</label>
+                <input type="date" value="{{ u.est_delivery_date or '' }}" onchange="setEta({{ u.id }},'delivery',this)"
+                  class="{% if u.est_delivery_date and (u.est_delivery_date|string) < today %}overdue{% endif %}"></span>
+            </div>
+            <div class="foot"><span class="day">in transit {{ u.days }}d</span>
+              <span style="display:flex;gap:6px">
+                <button class="mv back" onclick="moveCar({{ u.id }},'{{ u.back_to }}')">↩ Pending</button>
+                <button class="mv done" onclick="moveCar({{ u.id }},'{{ u.arrive_to }}')">Mark Delivered</button>
+              </span></div>
+          </div>
+        </div>
+        {% else %}<div class="empty">No cars in transit right now.</div>{% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+function go(vin){ location.href='/recon/u/'+vin; }
+function toggleCard(head){ head.parentNode.classList.toggle('collapsed'); }
+var allCollapsed=false;
+function setAll(c){
+  allCollapsed=c;
+  document.querySelectorAll('.tcard').forEach(function(t){ t.classList.toggle('collapsed', c); });
+  document.getElementById('collapseBtn').textContent = c ? 'Expand all' : 'Collapse all';
+  try{ sessionStorage.setItem('txCollapsed', c?'1':''); }catch(e){}
+}
+function collapseAll(){ setAll(!allCollapsed); }
+function filterCards(){
+  var q=(document.getElementById('search').value||'').toLowerCase().trim();
+  try{ sessionStorage.setItem('txSearch', q); }catch(e){}
+  document.querySelectorAll('.tcard').forEach(function(t){
+    t.style.display = (!q || (t.getAttribute('data-search')||'').indexOf(q)>=0) ? '' : 'none';
+  });
+}
+async function setEta(id, field, el){
+  el.classList.remove('overdue');
+  try{
+    const r=await fetch('/api/recon/'+id+'/set-eta',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({field:field,date:el.value})});
+    const j=await r.json();
+    if(j.ok){ el.style.borderColor='#22c55e'; setTimeout(function(){el.style.borderColor='';},1200); }
+    else{ alert(j.error||'could not save ETA'); }
+  }catch(e){ alert('network error'); }
+}
+async function moveCar(id, to){
+  try{
+    const r=await fetch('/api/recon/'+id+'/move',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to_step:to})});
+    const j=await r.json();
+    if(j.ok){ location.reload(); } else { alert(j.error||'move failed'); }
+  }catch(e){ alert('network error'); }
+}
+async function emailPdf(){
+  const m=document.getElementById('emsg'); m.className='msg'; m.textContent='';
+  const to=document.getElementById('email').value.trim();
+  if(!to){ m.className='msg err'; m.textContent='Enter an email address.'; return; }
+  m.textContent='sending…';
+  try{
+    const r=await fetch('/api/recon/transport/email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:to})});
+    const j=await r.json();
+    if(j.ok){ m.className='msg ok'; m.textContent='Emailed the PDF to '+to+'.'; document.getElementById('email').value=''; }
+    else{ m.className='msg err'; m.textContent=j.error||'failed'; }
+  }catch(e){ m.className='msg err'; m.textContent='network error'; }
+}
+(function(){try{
+  var q=sessionStorage.getItem('txSearch')||''; if(q){ document.getElementById('search').value=q; filterCards(); }
+  if(sessionStorage.getItem('txCollapsed')){ setAll(true); }
+}catch(e){}})();
+</script>
+</body>
+</html>

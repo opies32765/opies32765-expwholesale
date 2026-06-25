@@ -129,19 +129,18 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
 </head>
 <body>
 <div class="topbar">
-  <span class="brand"><span class="r">EW</span>RECON</span>
+  <a href="/recon" class="brand"><span class="r">EW</span>RECON</a>
   <div class="top-right">
     <span class="store">Experience Wholesale</span>
+    <a href="/recon/transport" class="logout">🚚 Transport</a>
+    <a href="/recon/out-for-recon" class="logout">🔧 Out for Recon</a>
+    <a href="/recon/reports" class="logout">📊 Reports</a>
     <a href="/logout?next=/recon" class="logout">Log out</a>
   </div>
 </div>
 
 <div class="layout">
   <aside class="steps">
-    <a class="step {% if not sel %}on{% endif %}" href="/recon">
-      <span class="n">0</span><span class="nm">ALL</span>
-      <span class="c {% if total==0 %}zero{% endif %}">{{ total }}</span>
-    </a>
     {% for s in steps if not s.is_terminal %}
       <a class="step {% if s.is_gate %}gate{% endif %} {% if sel==s.code %}on{% endif %}" href="/recon?step={{ s.code }}">
         <span class="n">{{ stepnum[s.code] }}</span>
@@ -172,7 +171,7 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
     <table>
       <thead><tr>
         <th>Step</th><th>Stock #</th><th>Vehicle</th><th>Status</th>
-        <th>Days In&nbsp;Step</th><th>Days Since Recon&nbsp;Began</th><th>Days In&nbsp;DMS</th><th>Notes</th>
+        <th>Days In&nbsp;Step</th><th>Days Since Recon&nbsp;Began</th><th>Notes</th>
       </tr></thead>
       <tbody>
         {% for u in rows %}
@@ -183,11 +182,10 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
           <td class="status-cell" data-label="Status:"><span class="dot" style="background:{{ u.dot }}" title="{{ u.step_name }} — click to filter" onclick="event.stopPropagation();setColor('{{ u.dot }}')"></span></td>
           <td class="num" data-label="In step:"><span class="daybox {{ u.sla_state }}">{{ u.d_step if u.d_step is not none else 0 }}</span></td>
           <td class="num" data-label="Recon began:">{{ u.d_recon if u.d_recon is not none else '—' }}</td>
-          <td class="num" data-label="In DMS:">{{ u.d_dms if u.d_dms is not none else '—' }}</td>
           <td class="notes">{{ u.notes or '' }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="8" class="empty">No vehicles{% if sel %} in this step{% endif %} yet. Click <b>+ Add Vehicle</b> to put one in recon.</td></tr>
+        <tr><td colspan="7" class="empty">No vehicles{% if sel %} in this step{% endif %} yet. Click <b>+ Add Vehicle</b> to put one in recon.</td></tr>
         {% endfor %}
       </tbody>
     </table>

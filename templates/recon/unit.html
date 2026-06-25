@@ -55,6 +55,28 @@
   .party .est{color:#c0392b;font-weight:800;text-transform:uppercase;letter-spacing:.4px}
   .party input[type=date]{margin-top:4px}
   .pill .hdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .austin{margin-top:16px;padding-top:14px;border-top:1px dashed #d8dde2}
+  .austin-h{font-size:12px;font-weight:700;color:#374151;margin-bottom:9px;text-transform:uppercase;letter-spacing:.4px}
+  .costs{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px}
+  .cost{flex:1 1 150px;border:1px solid #eef0f2;border-radius:9px;padding:10px 13px;background:#fafbfc}
+  .cost .cl{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.4px}
+  .cost .cv{font-size:19px;font-weight:700;color:#111827;margin-top:3px}
+  .rnotes-h{font-size:12px;font-weight:700;color:#374151;margin:14px 0 8px;text-transform:uppercase;letter-spacing:.4px;border-top:1px dashed #d8dde2;padding-top:12px}
+  .lslnote{background:#fff7ed;border-left:3px solid #fb923c;padding:9px 12px;border-radius:6px;font-size:13px;color:#7c2d12;margin-bottom:10px}
+  .outrecon{margin:12px 0 4px}
+  .out-on{background:#fdeaea;border-left:3px solid #c0392b;padding:9px 12px;border-radius:6px;font-size:13px;color:#7c2d12;margin-bottom:8px}
+  .wizmask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:50;padding:16px}
+  .wizbox{background:#fff;border-radius:12px;width:min(460px,96vw);box-shadow:0 20px 50px rgba(0,0,0,.3);overflow:hidden}
+  .wizh{background:#c0392b;color:#fff;font-weight:700;padding:14px 18px;font-size:15px}
+  .wizb{padding:16px 18px}
+  .wizmsg{margin:0 0 13px;color:#374151}.wizmsg b{color:#111827}
+  .wizlbl{display:block;font-size:12px;font-weight:600;color:#374151;margin-bottom:6px}
+  .wiztext{width:100%;min-height:72px;border:1px solid #cbd5e1;border-radius:7px;padding:9px;font:14px inherit;resize:vertical}
+  .wizchk{display:flex;align-items:center;gap:9px;margin-top:14px;color:#374151;cursor:pointer;font-size:13px}
+  .wizchk input{width:auto}
+  .wizf{display:flex;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid #eef0f2}
+  .tcost{font-size:13px;color:#374151;margin-bottom:12px}
+  .tcost b{font-size:16px;color:#111827}
   .note{padding:9px 0;border-bottom:1px solid #eef0f2}
   .note:last-child{border-bottom:0}
   .nmeta{font-size:11px;color:var(--mut);margin-bottom:3px}
@@ -128,6 +150,7 @@
   <div class="panel">
     <h2>Transport</h2>
     <div class="body">
+      <div class="tcost">Transport cost (LSL): <b>${{ '{:,.0f}'.format(costs.transport or 0) }}</b></div>
       <div class="field">
         <label class="lbl">Transport company</label>
         <input id="tcompany" list="carrierList" value="{{ u.transport_company or '' }}" placeholder="Pick a carrier or type a new one…" oninput="carrierSearch(this.value)" autocomplete="off">
@@ -152,16 +175,46 @@
         </div>
       </div>
       <div class="row" style="margin-top:12px"><button class="btn" onclick="saveTransport()">Save transport</button><span id="tmsg" class="msg"></span></div>
+
+      <div class="austin">
+        <div class="austin-h">Email Austin (transport guy)</div>
+        <label class="chk" style="margin-top:0"><input type="checkbox" id="emailAustin"> Send Austin an email to arrange transport</label>
+        <textarea id="austinNote" class="addr" style="margin-top:10px" placeholder="Optional note for Austin (timing, gate code, etc.)…"></textarea>
+        <div class="row" style="margin-top:10px"><button class="btn" onclick="sendAustin()">Send</button><span id="austinMsg" class="msg"></span></div>
+        <div class="hint">The carrier + pickup/delivery address &amp; contact above are included automatically.</div>
+      </div>
     </div>
   </div>
 
   <div class="panel">
-    <h2>Email Austin (transport)</h2>
+    <h2>Recon</h2>
     <div class="body">
-      <label class="chk" style="margin-top:0"><input type="checkbox" id="emailAustin"> Send Austin an email to arrange transport</label>
-      <textarea id="austinNote" class="addr" style="margin-top:10px" placeholder="Optional note for Austin (timing, gate code, etc.)…"></textarea>
-      <div class="row" style="margin-top:10px"><button class="btn" onclick="sendAustin()">Send</button><span id="austinMsg" class="msg"></span></div>
-      <div class="hint">The carrier + pickup/delivery address &amp; contact above are included automatically. (Staged to the test inbox.)</div>
+      <div class="costs">
+        <div class="cost"><div class="cl">Recon cost (LSL)</div><div class="cv">${{ '{:,.0f}'.format(costs.recon or 0) }}</div></div>
+      </div>
+      {% if costs.recon_note %}<div class="lslnote"><b>LSL recon note:</b> {{ costs.recon_note }}</div>{% endif %}
+      <div class="hint">Recon cost pulled from this car's LSL deal, refreshed every 5 min. Shows $0 until the work is logged on the deal in LSL.</div>
+      <div class="outrecon">
+        {% if u.out_for_recon_at %}
+          <div class="out-on">🔧 Out for recon since {{ u.out_for_recon_at.strftime('%b %-d') }} · <b>{{ out_days }} days</b>{% if u.out_for_recon_to %} · at {{ u.out_for_recon_to }}{% endif %}</div>
+          <button class="btn gray" onclick="reconBack()">Mark returned from recon</button>
+        {% else %}
+          <div class="row">
+            <input id="reconVendor" class="grow" placeholder="Shop / vendor (optional)">
+            <button class="btn" onclick="reconOut()">🔧 Ship out for recon</button>
+          </div>
+        {% endif %}
+      </div>
+      <div class="rnotes-h">Recon notes</div>
+      <div class="row"><input id="rnoteInput" class="grow" placeholder="Add a recon note…" autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();addReconNote();}"><button class="btn" onclick="addReconNote()">Add</button></div>
+      <div id="rnoteErr" class="err"></div>
+      {% for n in rnotes %}
+      <div class="note" id="note-{{ n.id }}">
+        <div class="nmeta"><b>{{ n.author or 'note' }}</b> · <span>{{ n.created_at.strftime('%b %-d %H:%M') if n.created_at else '' }}</span>
+          <span class="nact"><a onclick="startEdit({{ n.id }})">edit</a> · <a onclick="deleteNote({{ n.id }})">delete</a></span></div>
+        <div class="nbody" id="nbody-{{ n.id }}">{{ n.body }}</div>
+      </div>
+      {% else %}<div class="empty">No recon notes yet.</div>{% endfor %}
     </div>
   </div>
 
@@ -226,8 +279,25 @@
   </div>
 </div>
 
+<div id="homeWiz" class="wizmask" style="display:none">
+  <div class="wizbox">
+    <div class="wizh">Routing to Home Base first</div>
+    <div class="wizb">
+      <p id="wizMsg" class="wizmsg"></p>
+      <label class="wizlbl">Why is it coming to Home Base first — does it need recon? What's needed?</label>
+      <textarea id="wizNote" class="wiztext" placeholder="e.g. needs recon: bumper + full detail before it heads to the dealer"></textarea>
+      <label class="wizchk"><input type="checkbox" id="wizPhotos"> This vehicle needs photos taken on arrival</label>
+    </div>
+    <div class="wizf">
+      <button class="btn gray" onclick="closeHomeWiz()">Cancel</button>
+      <button class="btn" onclick="confirmHomeWizard()">Confirm &amp; route to Home Base</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const UNIT_ID = {{ u.id }};
+const SOLD_TO = {{ (u.sold_to or '')|tojson }};
 function val(id){return (document.getElementById(id).value||'').trim();}
 async function api(path, body){
   const r=await fetch('/api/recon/'+UNIT_ID+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
@@ -238,7 +308,32 @@ async function move(code){
   setMsg('msg','');
   try{const j=await api('/move',{to_step:code}); if(j.ok){location.reload();}else{setMsg('msg',j.error||'failed','err');}}catch(e){setMsg('msg','network error','err');}
 }
-function moveAny(){ move(document.getElementById('anyStep').value); }
+function moveAny(){
+  var code=document.getElementById('anyStep').value;
+  // routing a dealer-bound car to Home Base first -> wizard to capture why + photos
+  if((code==='dealer_to_home' || code==='indiv_to_home') && SOLD_TO){ openHomeWiz(code); }
+  else { move(code); }
+}
+function openHomeWiz(code){
+  window._wizCode=code;
+  document.getElementById('wizMsg').innerHTML='This vehicle is sold to <b>'+SOLD_TO.replace(/</g,'&lt;')+
+    '</b>, but you’re routing it to <b>Home Base</b> first. Confirm and capture why:';
+  document.getElementById('wizNote').value=''; document.getElementById('wizPhotos').checked=false;
+  document.getElementById('homeWiz').style.display='flex';
+}
+function closeHomeWiz(){ document.getElementById('homeWiz').style.display='none'; }
+async function confirmHomeWizard(){
+  var code=window._wizCode;
+  var note=(document.getElementById('wizNote').value||'').trim();
+  var pics=document.getElementById('wizPhotos').checked;
+  try{
+    var j=await api('/move',{to_step:code});
+    if(!j.ok){ alert(j.error||'move failed'); return; }
+    if(note){ await api('/note',{body:'Routed to Home Base first → '+SOLD_TO+'. '+note, category:'recon'}); }
+    if(pics){ await api('/photos-flag',{needs_photos:true}); }
+    location.reload();
+  }catch(e){ alert('network error'); }
+}
 
 let carrierTimer=null;
 function carrierSearch(q){
@@ -280,6 +375,20 @@ async function addNote(){
   const err=document.getElementById('noteErr'); err.textContent='';
   if(!body){return;}
   try{const j=await api('/note',{body}); if(j.ok){location.reload();}else{err.textContent=j.error||'could not save note';}}catch(e){err.textContent='network error';}
+}
+async function addReconNote(){
+  const el=document.getElementById('rnoteInput'); const body=(el.value||'').trim();
+  const err=document.getElementById('rnoteErr'); err.textContent='';
+  if(!body){return;}
+  try{const j=await api('/note',{body,category:'recon'}); if(j.ok){location.reload();}else{err.textContent=j.error||'could not save note';}}catch(e){err.textContent='network error';}
+}
+async function reconOut(){
+  const vEl=document.getElementById('reconVendor'); const vendor=vEl?vEl.value.trim():'';
+  try{const j=await api('/recon-out',{out:true,vendor:vendor}); if(j.ok){location.reload();}else{alert(j.error||'failed');}}catch(e){alert('network error');}
+}
+async function reconBack(){
+  if(!confirm('Mark this car returned from recon?')) return;
+  try{const j=await api('/recon-out',{out:false}); if(j.ok){location.reload();}else{alert(j.error||'failed');}}catch(e){alert('network error');}
 }
 function startEdit(id){
   const bd=document.getElementById('nbody-'+id); if(bd.querySelector('textarea')) return;

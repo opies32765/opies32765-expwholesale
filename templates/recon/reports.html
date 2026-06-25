@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recon Spend · EW Recon</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#eef0f2;color:#1f2937;font:13px/1.45 -apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  a{color:inherit;text-decoration:none}
+  .topbar{background:#2b2f33;color:#fff;display:flex;align-items:center;height:54px;padding:0 18px}
+  .brand{font-weight:800;font-size:20px;letter-spacing:.5px}
+  .brand .r{color:#e23b3b}
+  .topbar .back{margin-left:22px;color:#cbd5e1;border:1px solid #4b5056;padding:6px 13px;border-radius:6px;font-size:13px}
+  .topbar .back:hover{color:#fff}
+  .top-right{margin-left:auto;display:flex;gap:14px;align-items:center;color:#cbd5e1;font-size:12px}
+  .top-right a.logout{border:1px solid #4b5056;padding:5px 12px;border-radius:6px}
+  .top-right a.logout:hover{color:#fff;border-color:#6b7280}
+  .wrap{max-width:1000px;margin:0 auto;padding:18px 20px 60px}
+  h1{font-size:18px;margin:0 0 4px;color:#111827}
+  .periods{display:flex;gap:6px;margin:14px 0;flex-wrap:wrap}
+  .periods a{padding:7px 14px;border:1px solid #d8dde2;border-radius:18px;background:#fff;font-weight:600;font-size:13px;color:#374151}
+  .periods a.on{background:#c0392b;border-color:#c0392b;color:#fff}
+  .range{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 14px;font-size:13px;color:#374151}
+  .range input[type=date]{padding:7px 9px;border:1px solid #cbd5e1;border-radius:7px;font:13px inherit}
+  .range .cap{color:#9ca3af;font-size:11px}
+  .cards{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px}
+  .card{flex:1 1 180px;background:#fff;border:1px solid #d8dde2;border-radius:10px;padding:14px 16px}
+  .card .l{font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px}
+  .card .v{font-size:26px;font-weight:800;color:#111827;margin-top:4px}
+  .card .v.recon{color:#c0392b}
+  .card .v.trans{color:#2563eb}
+  .textbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:#fff;border:1px solid #d8dde2;border-radius:10px;padding:12px 14px;margin:12px 0}
+  .textbar select{padding:8px 10px;border:1px solid #cbd5e1;border-radius:7px;font:13px inherit}
+  .btn{cursor:pointer;font:700 13px inherit;color:#fff;background:#c0392b;border:0;border-radius:7px;padding:9px 15px}
+  .btn:hover{background:#a93226}
+  .msg{font-size:12px;color:#6b7280}.msg.ok{color:#157347}.msg.err{color:#c0392b}
+  h2{font-size:13px;color:#6b7280;text-transform:uppercase;letter-spacing:.4px;margin:22px 0 8px}
+  table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d8dde2;font-size:13px}
+  th{background:#f3f4f6;text-align:left;padding:8px 11px;border-bottom:2px solid #d8dde2;color:#4b5563;font-size:11px;text-transform:uppercase}
+  td{padding:8px 11px;border-bottom:1px solid #eef0f2}
+  td.r{text-align:right;font-weight:600}
+  .empty{color:#9ca3af;padding:14px;text-align:center}
+  @media (max-width:760px){ .card{flex:1 1 100%} }
+</style>
+<script>try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.parentNode.removeChild(_s);}catch(e){}</script>
+</head>
+<body>
+<div class="topbar">
+  <span class="brand"><span class="r">EW</span>RECON</span>
+  <a class="back" href="/recon">&larr; Board</a>
+  <div class="top-right"><a href="/logout?next=/recon/reports" class="logout">Log out</a></div>
+</div>
+<div class="wrap">
+  <h1>Recon &amp; Transport Spend</h1>
+  {% set p = rep.period %}
+  <div class="periods">
+    <a href="?period=week"  class="{% if p=='week' %}on{% endif %}">Last 7 Days</a>
+    <a href="?period=month" class="{% if p=='month' %}on{% endif %}">This Month</a>
+    <a href="?period=year"  class="{% if p=='year' %}on{% endif %}">This Year</a>
+    <a href="?period=all"   class="{% if p=='all' %}on{% endif %}">All Time</a>
+  </div>
+  <div class="range">
+    <span>Custom range:</span>
+    <input type="date" id="from" value="{{ rep.from }}">
+    <span>to</span>
+    <input type="date" id="to" value="{{ rep.to }}">
+    <button class="btn" onclick="applyRange()">Apply</button>
+    {% if p=='custom' %}<span class="cap">Showing {{ rep.from or 'start' }} → {{ rep.to or 'today' }}</span>
+    {% else %}<span class="cap">Last 7 Days = rolling last 7 days · This Month / This Year = calendar to-date</span>{% endif %}
+  </div>
+  <div class="cards">
+    <div class="card"><div class="l">Recon spend</div><div class="v recon">${{ '{:,.0f}'.format(rep.total_recon) }}</div></div>
+    <div class="card"><div class="l">Transport spend</div><div class="v trans">${{ '{:,.0f}'.format(rep.total_transport) }}</div></div>
+    <div class="card"><div class="l">Deals</div><div class="v">{{ rep.deals }}</div></div>
+  </div>
+  <div class="textbar">
+    <span>Text this report to</span>
+    <select id="who">
+      {% for o in owners %}<option value="{{ o }}">{{ o }}</option>{% endfor %}
+      <option value="all">all owners</option>
+    </select>
+    <button class="btn" onclick="textReport()">Text report</button>
+    <span id="tmsg" class="msg"></span>
+  </div>
+
+  <h2>By make</h2>
+  <table><thead><tr><th>Make</th><th>Cars</th><th>Recon</th><th>Transport</th><th>Total</th></tr></thead><tbody>
+    {% for m in rep.by_make %}<tr><td>{{ m.name }}</td><td>{{ m.n }}</td><td class="r">${{ '{:,.0f}'.format(m.recon) }}</td><td class="r">${{ '{:,.0f}'.format(m.transport) }}</td><td class="r">${{ '{:,.0f}'.format(m.recon + m.transport) }}</td></tr>
+    {% else %}<tr><td colspan="5" class="empty">No spend in this period.</td></tr>{% endfor %}
+  </tbody></table>
+
+  <h2>By model</h2>
+  <table><thead><tr><th>Model</th><th>Cars</th><th>Recon</th><th>Transport</th><th>Total</th></tr></thead><tbody>
+    {% for m in rep.by_model %}<tr><td>{{ m.name }}</td><td>{{ m.n }}</td><td class="r">${{ '{:,.0f}'.format(m.recon) }}</td><td class="r">${{ '{:,.0f}'.format(m.transport) }}</td><td class="r">${{ '{:,.0f}'.format(m.recon + m.transport) }}</td></tr>
+    {% else %}<tr><td colspan="5" class="empty">No spend in this period.</td></tr>{% endfor %}
+  </tbody></table>
+
+  <h2>Cars with spend</h2>
+  <table><thead><tr><th>Stock #</th><th>Vehicle</th><th>Recon</th><th>Transport</th><th>Date</th></tr></thead><tbody>
+    {% for car in rep.cars %}<tr><td>{{ car.stock_no }}</td><td>{{ car.make }} {{ car.model }}</td><td class="r">${{ '{:,.0f}'.format(car.recon) }}</td><td class="r">${{ '{:,.0f}'.format(car.transport) }}</td><td>{{ car.edt[:10] if car.edt else '' }}</td></tr>
+    {% else %}<tr><td colspan="5" class="empty">No cars with recon/transport spend in this period.</td></tr>{% endfor %}
+  </tbody></table>
+</div>
+<script>
+async function textReport(){
+  var m=document.getElementById('tmsg'); m.className='msg'; m.textContent='sending…';
+  var who=document.getElementById('who').value;
+  var q=new URLSearchParams(location.search);
+  var payload={owner:who, period:q.get('period')||'month', from:q.get('from')||'', to:q.get('to')||''};
+  try{
+    var r=await fetch('/api/recon/reports/text',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    var j=await r.json();
+    if(j.ok){m.className='msg ok';m.textContent='Texted to '+j.to+' ('+j.sent+' sent).';}
+    else{m.className='msg err';m.textContent='Failed — '+(j.error||'check Twilio creds');}
+  }catch(e){m.className='msg err';m.textContent='network error';}
+}
+function applyRange(){
+  var f=document.getElementById('from').value, t=document.getElementById('to').value;
+  if(!f && !t){ return; }
+  location.href='?from='+encodeURIComponent(f)+'&to='+encodeURIComponent(t);
+}
+</script>
+</body>
+</html>
