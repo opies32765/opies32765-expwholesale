@@ -1,9 +1,9 @@
 {
   "make_name": "TOYOTA",
-  "trained_at": "2026-06-24T08:30:42.942612Z",
-  "n_total": 1166,
+  "trained_at": "2026-06-25T08:30:44.940511Z",
+  "n_total": 1168,
   "n_train": 1071,
-  "n_test": 95,
+  "n_test": 97,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -225,15 +225,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2289.0,
-    "mape_pct": 8.01,
-    "r2": 0.9522,
-    "within_5pct": 46.3,
-    "within_10pct": 76.8
+    "mae_dollars": 2248.0,
+    "mape_pct": 7.86,
+    "r2": 0.9523,
+    "within_5pct": 47.4,
+    "within_10pct": 77.3
   },
   "baseline_metrics": {
-    "mae_dollars": 11268.0,
-    "mape_pct": 37.38,
+    "mae_dollars": 11315.0,
+    "mape_pct": 37.34,
     "ratio": 1.4211
   },
   "top_features": [

@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-# EW WEEKLY RECAP — texts the Saturday digest to me/joe/todd/gregg.
-# Top: Month-to-Date (this MTD vs prior-month MTD vs last-year MTD, same-day aligned).
-# Then: This Week vs Prior Week. Plus a verbose narrative. Clean "## + bullets" format.
+# EW WEEKLY RECAP - texts the Saturday digest to me/joe/todd/gregg.
+# COMPACT_ASCII_2026_06_25: body is ASCII-only (GSM-7) + tightly formatted so it
+#   stays ~2-3 SMS segments. The old format used Unicode bullets (U+2022) which
+#   forced UCS-2 encoding (70 chars/seg) -> ~12 segments -> Twilio error 30019
+#   (content size exceeds carrier limit) -> 3 of 4 recipients silently undelivered.
+# DELIVERY_CHECK_2026_06_25: send() returns the Twilio message SID; after a short
+#   wait we poll each message's real status so a carrier rejection shows as failed
+#   in the log instead of a false "True" (HTTP 200 = queued, NOT delivered).
 # Self-contained: read-only LSL + direct Twilio.
 #   python3 ew_weekly_recap.py          -> send to ALL 4
 #   python3 ew_weekly_recap.py test     -> send to operator ('me') only + print
-import os, re, sys, base64, sqlite3, urllib.parse, urllib.request
+import os, re, sys, time, json, base64, sqlite3, urllib.parse, urllib.request
 
 RECIPS = {'me': '+14074309675', 'joe': '+13522099696',
           'todd': '+15613018622', 'gregg': '+15166803500'}
@@ -45,13 +50,6 @@ def pct(a, b):
     return (' (%+.0f%%)' % ((a - b) / b * 100.0)) if b else ''
 
 
-def section(label, rng, n, p, v):
-    return ["## %s (%s)" % (label, rng),
-            "• Units Sold: %d" % n,
-            "• Total Profit: $%s" % comma(p),
-            "• PVR: $%s" % comma(v), ""]
-
-
 def build_body():
     c = sqlite3.connect(DB, uri=True); cur = c.cursor()
     cur.execute("SELECT date('now','start of month'), date('now'), "
@@ -71,45 +69,65 @@ def build_body():
     tw = st(tw_lo, tw_hi); pw = st(pw_lo, pw_hi)
     c.close()
 
-    out = ["EW Sales Recap", ""]
-    out += section("Month-to-Date", nice(mtd_lo, mtd_hi), *m)
-    out += section("Prior Month MTD", nice(pm_lo, pm_hi), *pm)
-    out += section("Last Year MTD", nice(ly_lo, ly_hi), *ly)
-    out += section("This Week", nice(tw_lo, tw_hi), *tw)
-    out += section("Prior Week", nice(pw_lo, pw_hi), *pw)
-
-    narr = (
-        "Month-to-date we've booked %d units for $%s in front profit (PVR $%s)%s vs the same point last month "
-        "($%s) and%s vs the same period last year ($%s). This past week brought %d units / $%s (PVR $%s)%s from "
-        "$%s the prior week."
-        % (m[0], comma(m[1]), comma(m[2]), pct(m[1], pm[1]), comma(pm[1]),
-           pct(m[1], ly[1]), comma(ly[1]),
-           tw[0], comma(tw[1]), comma(tw[2]), pct(tw[1], pw[1]), comma(pw[1]))
-    )
-    out.append(narr)
+    # COMPACT, ASCII-only (GSM-7). Keep ~2-3 segments.
+    out = []
+    out.append("EW Sales Recap (%s)" % nice(tw_lo, tw_hi))
+    out.append("")
+    out.append("This week: %d units, $%s, PVR $%s%s vs prior wk %d/$%s"
+               % (tw[0], comma(tw[1]), comma(tw[2]), pct(tw[1], pw[1]), pw[0], comma(pw[1])))
+    out.append("")
+    out.append("MTD %s: %d units, $%s, PVR $%s" % (nice(mtd_lo, mtd_hi), m[0], comma(m[1]), comma(m[2])))
+    out.append("- vs last month MTD: %d, $%s%s" % (pm[0], comma(pm[1]), pct(m[1], pm[1])))
+    out.append("- vs last year MTD: %d, $%s%s" % (ly[0], comma(ly[1]), pct(m[1], ly[1])))
     return "\n".join(out).strip()
 
 
 def send(to, text):
+    """Returns the Twilio message SID on a successful API call, else None."""
     try:
         data = urllib.parse.urlencode({"To": to, "From": FROM, "Body": text}).encode()
         req = urllib.request.Request(
             "https://api.twilio.com/2010-04-01/Accounts/%s/Messages.json" % SID, data=data)
         req.add_header("Authorization", "Basic " +
                        base64.b64encode(("%s:%s" % (SID, TOK)).encode()).decode())
-        urllib.request.urlopen(req, timeout=25).read()
-        return True
+        resp = json.loads(urllib.request.urlopen(req, timeout=25).read())
+        return resp.get("sid")
     except Exception as e:
         sys.stderr.write("[weekly-recap] send err %s: %s\n" % (to, e))
-        return False
+        return None
+
+
+def status(sid):
+    """Poll a message's real delivery status (status, error_code)."""
+    try:
+        req = urllib.request.Request(
+            "https://api.twilio.com/2010-04-01/Accounts/%s/Messages/%s.json" % (SID, sid))
+        req.add_header("Authorization", "Basic " +
+                       base64.b64encode(("%s:%s" % (SID, TOK)).encode()).decode())
+        r = json.loads(urllib.request.urlopen(req, timeout=20).read())
+        return r.get("status"), r.get("error_code")
+    except Exception as e:
+        return "status_check_failed", str(e)[:40]
 
 
 def main():
     test = len(sys.argv) > 1 and sys.argv[1] == 'test'
     body = build_body()
+    seg = -(-len(body) // 153)  # GSM-7 concatenated ~153 chars/segment
     targets = {'me': RECIPS['me']} if test else RECIPS
-    results = [(nm, send(num, body)) for nm, num in targets.items()]
-    print("[weekly-recap] %s sent=%s" % ("TEST" if test else "LIVE", results))
+    sent = [(nm, num, send(num, body)) for nm, num in targets.items()]
+    time.sleep(15)  # let carriers report delivery / 30019-type rejections
+    results = []
+    for nm, num, sid in sent:
+        if not sid:
+            results.append((nm, 'api_error', None)); continue
+        stt, ec = status(sid)
+        results.append((nm, stt, ec))
+    good = {'delivered', 'sent', 'queued', 'accepted'}
+    bad = [r for r in results if r[1] not in good]
+    print("[weekly-recap] %s segments=%d results=%s" % ("TEST" if test else "LIVE", seg, results))
+    if bad:
+        print("[weekly-recap] WARNING -- undelivered/failed: %s" % bad)
     print(body)
 
 
