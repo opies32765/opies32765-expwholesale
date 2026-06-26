@@ -1,9 +1,9 @@
 {
   "make_name": "PORSCHE",
-  "trained_at": "2026-06-25T08:30:36.462008Z",
-  "n_total": 2037,
+  "trained_at": "2026-06-26T08:30:32.939462Z",
+  "n_total": 2039,
   "n_train": 1866,
-  "n_test": 171,
+  "n_test": 173,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -221,49 +221,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 10336.0,
-    "mape_pct": 9.19,
-    "r2": 0.9185,
-    "within_5pct": 41.5,
-    "within_10pct": 69.6
+    "mae_dollars": 10423.0,
+    "mape_pct": 9.17,
+    "r2": 0.9204,
+    "within_5pct": 41.0,
+    "within_10pct": 69.4
   },
   "baseline_metrics": {
-    "mae_dollars": 8859.0,
-    "mape_pct": 11.15,
+    "mae_dollars": 8998.0,
+    "mape_pct": 11.13,
     "ratio": 1.0378
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.5385556221008301
+      "importance": 0.539299726486206
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.1903015822172165
+      "importance": 0.18938426673412323
     },
     {
       "name": "market_asking_price",
-      "importance": 0.12758395075798035
+      "importance": 0.12725317478179932
     },
     {
       "name": "body_type_OTHER",
-      "importance": 0.019112616777420044
+      "importance": 0.01902048848569393
     },
     {
       "name": "model_name_OTHER",
-      "importance": 0.01234897505491972
+      "importance": 0.012289449572563171
     },
     {
       "name": "supplier_name_Bmw Mini South Atlanta",
-      "importance": 0.008408119902014732
+      "importance": 0.008367589674890041
     },
     {
       "name": "model_name_718 Cayman",
-      "importance": 0.007727041840553284
+      "importance": 0.0076897949911653996
     },
     {
       "name": "original_msrp",
-      "importance": 0.007085190620273352
+      "importance": 0.007201625499874353
     }
   ]
 }

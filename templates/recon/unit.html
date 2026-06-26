@@ -9,7 +9,7 @@
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif}
   a{color:inherit}
-  header.top{display:flex;align-items:center;gap:14px;padding:12px 20px;border-bottom:1px solid var(--line);background:#fff;position:sticky;top:0;z-index:5}
+  header.top{display:flex;align-items:center;gap:14px;padding:12px 20px;border-bottom:1px solid var(--line);background:#fff;position:sticky;top:0;z-index:5;flex-wrap:wrap}
   .back{font-size:13px;color:var(--mut);text-decoration:none;padding:5px 12px;border:1px solid var(--line);border-radius:6px}
   .back:hover{color:var(--txt);border-color:#9ca3af}
   header.top h1{font-size:17px;margin:0;font-weight:700;color:#111827}
@@ -57,6 +57,15 @@
   .pill .hdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
   .austin{margin-top:16px;padding-top:14px;border-top:1px dashed #d8dde2}
   .austin-h{font-size:12px;font-weight:700;color:#374151;margin-bottom:9px;text-transform:uppercase;letter-spacing:.4px}
+  .ae-notes{margin:0 0 11px;border-left:3px solid #16a34a;background:#f0fdf4;border-radius:7px;padding:8px 11px}
+  .ae-nh{font-size:10px;font-weight:700;color:#15803d;text-transform:uppercase;letter-spacing:.4px;margin-bottom:5px}
+  .ae-note{font-size:13px;color:#374151;padding:5px 0;border-top:1px solid #dcfce7;white-space:pre-wrap}
+  .ae-note:first-of-type{border-top:0;padding-top:0}
+  .ae-when{display:block;font-size:10px;color:#9ca3af;font-weight:700;margin-bottom:1px}
+  .ship-stamp{display:flex;align-items:center;gap:10px;background:#f0fdf4;border-left:3px solid #16a34a;border-radius:7px;padding:8px 11px;margin-bottom:12px;color:#15803d;font-weight:600;font-size:13px}
+  .ship-clear{margin-left:auto;color:#c0392b;cursor:pointer;font-weight:600;font-size:12px;text-decoration:underline;white-space:nowrap}
+  .shipbox{margin:4px 0 10px;padding:10px 12px;border:1px solid #eef0f2;border-radius:9px;background:#fafbfc}
+  .shipbox .addr{margin-top:0}
   .costs{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px}
   .cost{flex:1 1 150px;border:1px solid #eef0f2;border-radius:9px;padding:10px 13px;background:#fafbfc}
   .cost .cl{font-size:11px;color:var(--mut);text-transform:uppercase;letter-spacing:.4px}
@@ -117,7 +126,11 @@
 </head>
 <body>
 <header class="top">
-  <a class="back" href="/recon">&larr; Board</a>
+  <a class="back" id="backBoard" href="/recon{% if request.args.get('from') %}?step={{ request.args.get('from') }}{% endif %}">&larr; Recon Dashboard</a>
+  <script>/* if we didn't arrive with a ?from step, fall back to the last board step the user viewed */
+  (function(){try{var b=document.getElementById('backBoard');
+    if(b&&b.getAttribute('href')==='/recon'){var st=sessionStorage.getItem('reconStep')||'';
+      if(st) b.href='/recon?step='+encodeURIComponent(st);}}catch(e){}})();</script>
   <h1>{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }} {{ u.trim or '' }}</h1>
   <span class="vin">{{ u.vin }}{% if u.stock_no %} · {{ u.stock_no }}{% endif %}</span>
   <span class="spacer"></span>
@@ -177,11 +190,32 @@
       <div class="row" style="margin-top:12px"><button class="btn" onclick="saveTransport()">Save transport</button><span id="tmsg" class="msg"></span></div>
 
       <div class="austin">
-        <div class="austin-h">Email Austin (transport guy)</div>
-        <label class="chk" style="margin-top:0"><input type="checkbox" id="emailAustin"> Send Austin an email to arrange transport</label>
-        <textarea id="austinNote" class="addr" style="margin-top:10px" placeholder="Optional note for Austin (timing, gate code, etc.)…"></textarea>
-        <div class="row" style="margin-top:10px"><button class="btn" onclick="sendAustin()">Send</button><span id="austinMsg" class="msg"></span></div>
-        <div class="hint">The carrier + pickup/delivery address &amp; contact above are included automatically.</div>
+        <div class="austin-h">Shipping arrangement</div>
+        <div id="shipStamp" class="ship-stamp"{% if not u.ship.arranged %} style="display:none"{% endif %}>
+          <span>✓ Shipping arranged{% if u.ship.who %} — {{ u.ship.who }}{% endif %}{% if u.ship.when %} · {{ u.ship.when }}{% endif %}</span>
+          <a class="ship-clear" onclick="clearShipping()">clear</a>
+        </div>
+
+        <label class="chk" style="margin-top:2px"><input type="checkbox" id="optAustin" onchange="toggleShipOpt(this)"> Austin to coordinate — email him</label>
+        <div id="austinBox" class="shipbox" style="display:none">
+          <textarea id="austinNote" class="addr" placeholder="Note for Austin (timing, gate code, etc.)…"></textarea>
+          <div class="row" style="margin-top:8px"><button class="btn" onclick="sendAustin()">Email Austin</button><span id="austinMsg" class="msg"></span></div>
+          <div class="hint">The carrier + pickup/delivery address &amp; contact above are included automatically.</div>
+          {% set ae_notes = austin_emails|selectattr('note')|list %}
+          {% if ae_notes %}
+          <div class="ae-notes" style="margin-top:10px">
+            <div class="ae-nh">Notes sent to Austin</div>
+            {% for ae in ae_notes %}<div class="ae-note"><span class="ae-when">{{ ae.when }}</span>{{ ae.note }}</div>{% endfor %}
+          </div>
+          {% endif %}
+        </div>
+
+        <label class="chk"><input type="checkbox" id="optManual" onchange="toggleShipOpt(this)"> Someone else is picking it up</label>
+        <div id="manualBox" class="shipbox" style="display:none">
+          <textarea id="manualNote" class="addr" placeholder="Who's picking it up + details — e.g. &quot;Tactical Transport picking up Tue AM at home base&quot;"></textarea>
+          <div class="row" style="margin-top:8px"><button class="btn" onclick="saveManual()">Save shipping</button><span id="manualMsg" class="msg"></span></div>
+          <div class="hint">No email is sent — this just records who is handling pickup.</div>
+        </div>
       </div>
     </div>
   </div>
@@ -356,16 +390,37 @@ async function saveTransport(){
     est_pickup_date:val('est_pickup_date'),est_delivery_date:val('est_delivery_date')};
   try{const j=await api('/transport-details',payload); if(j.ok){setMsg('tmsg','saved ✓','ok');}else{setMsg('tmsg',j.error||'failed','err');}}catch(e){setMsg('tmsg','network error','err');}
 }
+function toggleShipOpt(el){
+  var a=document.getElementById('optAustin'), m=document.getElementById('optManual');
+  if(el && el.id==='optAustin' && a.checked) m.checked=false;   // one arrangement at a time
+  if(el && el.id==='optManual' && m.checked) a.checked=false;
+  document.getElementById('austinBox').style.display=a.checked?'':'none';
+  document.getElementById('manualBox').style.display=m.checked?'':'none';
+}
 async function sendAustin(){
-  setMsg('austinMsg','');
-  if(!document.getElementById('emailAustin').checked){ setMsg('austinMsg','Check the box first.','err'); return; }
   setMsg('austinMsg','sending…');
   try{
     const j=await api('/email-austin',{note:val('austinNote')});
-    if(j.ok){ setMsg('austinMsg','Sent to Austin (staged to test inbox).','ok');
-      document.getElementById('emailAustin').checked=false; document.getElementById('austinNote').value=''; }
+    if(j.ok){ setMsg('austinMsg','Emailed Austin ✓','ok'); setTimeout(function(){ location.reload(); }, 700); }
     else{ setMsg('austinMsg',j.error||'failed','err'); }
   }catch(e){ setMsg('austinMsg','network error','err'); }
+}
+async function saveManual(){
+  var note=val('manualNote');
+  if(!note){ setMsg('manualMsg','Add a note — who is picking it up?','err'); return; }
+  setMsg('manualMsg','saving…');
+  try{
+    const j=await api('/arrange-pickup',{note:note});
+    if(j.ok){ setMsg('manualMsg','Shipping saved ✓','ok'); setTimeout(function(){ location.reload(); }, 700); }
+    else{ setMsg('manualMsg',j.error||'failed','err'); }
+  }catch(e){ setMsg('manualMsg','network error','err'); }
+}
+async function clearShipping(){
+  if(!confirm('Clear the shipping-arranged status for this car?')) return;
+  try{
+    const j=await api('/arrange-pickup/clear',{});
+    if(j.ok){ location.reload(); } else { alert(j.error||'failed'); }
+  }catch(e){ alert('network error'); }
 }
 async function togglePhotos(){
   try{await api('/photos-flag',{needs_photos:document.getElementById('needsPhotos').checked});}catch(e){}

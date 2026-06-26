@@ -45,6 +45,9 @@
   .meta .stock{color:#2563eb;font-weight:700}
   .meta .ar{color:#9ca3af;margin:0 4px}
   .leg2{display:inline-block;background:#ede9fe;color:#6d28d9;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;margin-left:6px}
+  .abadge{display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;border-radius:10px;margin-left:6px;vertical-align:middle;white-space:nowrap}
+  .abadge.ok{background:#dcfce7;color:#15803d}
+  .abadge.no{background:#fee2e2;color:#b91c1c}
   .tbody{padding:0 12px 11px 32px}
   .etas{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0}
   .eta{font-size:11px;color:#6b7280}.eta label{display:block;margin-bottom:2px}
@@ -82,7 +85,7 @@
 <body>
 <div class="topbar">
   <span class="brand"><span class="r">EW</span>RECON</span>
-  <a class="back" href="/recon">&larr; Board</a>
+  <a class="back" href="/recon">&larr; Recon Dashboard</a>
   <div class="top-right"><a href="/logout?next=/recon/transport">Log out</a></div>
 </div>
 <div class="wrap">
@@ -105,7 +108,7 @@
             <span class="cv">▾</span>
             <div class="hinfo">
               <div class="vh">{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }}{% if u.leg2 %}<span class="leg2">↩ leg 2</span>{% endif %}</div>
-              <div class="meta"><a class="stock" href="/recon/u/{{ u.vin }}" onclick="event.stopPropagation()">{{ u.stock_no or '—' }}</a> · {{ u.transport_company or 'no carrier' }} · {{ u.pickup_from }}<span class="ar">→</span>{{ u.dest }}{% if u.via_home %}<span class="ar">→</span>{{ u.final_dest }}{% endif %}</div>
+              <div class="meta"><a class="stock" href="/recon/u/{{ u.vin }}" onclick="event.stopPropagation()">{{ u.stock_no or '—' }}</a> · {{ u.transport_company or 'no carrier' }} · {{ u.pickup_from }}<span class="ar">→</span>{{ u.dest }}{% if u.via_home %}<span class="ar">→</span>{{ u.final_dest }}{% endif %}{% if u.ship.arranged %}<span class="abadge ok" title="{{ u.ship.tip }}">✓ {{ u.ship.who }}</span>{% else %}<span class="abadge no" title="Shipping not arranged yet">✕ shipping</span>{% endif %}</div>
             </div>
           </div>
           <div class="tbody">
@@ -134,7 +137,7 @@
             <span class="cv">▾</span>
             <div class="hinfo">
               <div class="vh">{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }}{% if u.leg2 %}<span class="leg2">↩ leg 2</span>{% endif %}</div>
-              <div class="meta"><a class="stock" href="/recon/u/{{ u.vin }}" onclick="event.stopPropagation()">{{ u.stock_no or '—' }}</a> · {{ u.transport_company or 'no carrier' }} · {{ u.pickup_from }}<span class="ar">→</span>{{ u.dest }}{% if u.via_home %}<span class="ar">→</span>{{ u.final_dest }}{% endif %}</div>
+              <div class="meta"><a class="stock" href="/recon/u/{{ u.vin }}" onclick="event.stopPropagation()">{{ u.stock_no or '—' }}</a> · {{ u.transport_company or 'no carrier' }} · {{ u.pickup_from }}<span class="ar">→</span>{{ u.dest }}{% if u.via_home %}<span class="ar">→</span>{{ u.final_dest }}{% endif %}{% if u.ship.arranged %}<span class="abadge ok" title="{{ u.ship.tip }}">✓ {{ u.ship.who }}</span>{% else %}<span class="abadge no" title="Shipping not arranged yet">✕ shipping</span>{% endif %}</div>
             </div>
           </div>
           <div class="tbody">

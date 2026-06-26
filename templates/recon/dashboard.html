@@ -42,6 +42,8 @@
   .toolbar h2{margin:0;font-size:14px;color:#6b7280;font-weight:600}
   .addbtn{margin-left:auto;cursor:pointer;background:#fff;border:1px solid #c0392b;color:#c0392b;font-weight:700;padding:7px 16px;border-radius:4px;font-size:13px}
   .addbtn:hover{background:#c0392b;color:#fff}
+  /* wide table never clips the page — it scrolls inside this box at any width */
+  .tscroll{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
   table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d8dde2;font-size:13px}
   thead th{background:#f3f4f6;text-align:left;padding:9px 10px;border-bottom:2px solid #d8dde2;color:#4b5563;font-size:11px;text-transform:uppercase;letter-spacing:.3px;white-space:nowrap}
   tbody td{padding:9px 10px;border-bottom:1px solid #eef0f2;vertical-align:top}
@@ -71,10 +73,17 @@
   .searchbar input{width:100%;max-width:540px;padding:9px 12px;border:1px solid #cbd5e1;border-radius:7px;font:13px inherit;background:#fff}
   .searchbar input:focus{outline:none;border-color:#c0392b}
   .chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-  .chip{display:inline-flex;align-items:center;gap:6px;cursor:pointer;border:1px solid #d8dde2;background:#fff;border-radius:16px;padding:5px 11px;font-size:12px;color:#374151;user-select:none}
+  /* color chips are a reference KEY only — the left sidebar steps drive the view */
+  .legendlbl{font-size:12px;color:#6b7280;font-weight:600;margin-right:2px}
+  .chip{display:inline-flex;align-items:center;gap:6px;cursor:default;border:1px solid #e5e7eb;background:#fff;border-radius:16px;padding:5px 11px;font-size:12px;color:#374151;user-select:none}
   .chip .cd{width:10px;height:10px;border-radius:50%}
-  .chip.on{border-color:#111;font-weight:700;box-shadow:0 0 0 2px rgba(0,0,0,.07)}
-  .chip.all.on{background:#111;color:#fff;border-color:#111}
+  /* "Emailed Austin?" column — hidden until the board filters out new/staged */
+  .austincol{display:none}
+  body.show-austin th.austincol,body.show-austin td.austincol{display:table-cell}
+  td.austincol{text-align:center;white-space:nowrap}
+  .achk{color:#16a34a;font-size:16px;font-weight:700}
+  .ax{color:#dc2626;font-size:16px;font-weight:700}
+  .shipwho{font-size:11px;color:#6b7280;margin-left:5px}
   /* home-first wizard */
   .wizmask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100;padding:16px}
   .wizbox{background:#fff;border-radius:12px;width:min(460px,96vw);box-shadow:0 20px 50px rgba(0,0,0,.3);overflow:hidden}
@@ -102,8 +111,16 @@
   .dlg-f .ok{background:#c0392b;color:#fff}
   .dlg-f .cancel{background:#fff;color:#6b7280;border-color:#cbd5e1}
   #msg{color:#b91c1c;font-size:12px;min-height:16px;margin:0 0 8px}
+  /* ── tablet / narrowed desktop window: tighten so the board still fits ── */
+  @media (max-width:1024px){
+    aside.steps{flex:0 0 178px}
+    main{padding:12px 14px 50px}
+    td.notes{max-width:220px}
+    .searchbar input{max-width:none}
+  }
   /* ── mobile: chip status bar on top + full-width, readable car cards ── */
   @media (max-width:760px){
+    .tscroll{overflow:visible}   /* cards stack — no inner scrollbar */
     .topbar{padding:8px 12px}
     .brand{font-size:17px}
     .topbar .store{font-size:11px}
@@ -136,6 +153,8 @@
     td.status-cell{display:inline-block;width:auto;margin:7px 16px 0 0;text-align:left}
     td.status-cell::before{content:"Status ";color:#9ca3af;font-size:11px;vertical-align:middle}
     td.status-cell .dot{vertical-align:middle}
+    body.show-austin td.austincol{display:inline-block;width:auto;margin:7px 16px 0 0;text-align:left}
+    td.austincol::before{content:attr(data-label) " ";color:#9ca3af;font-size:11px;font-weight:400}
     .chip{font-size:11px;padding:4px 9px}
     td.notes{font-size:12px;margin-top:6px;white-space:pre-wrap;max-width:none;color:#4b5563}
     /* Add Vehicle modal fits the screen */
@@ -147,7 +166,7 @@
 <script>/* strip the EW-app's injected mobile CSS so the recon page controls its own layout */
 try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.parentNode.removeChild(_s);}catch(e){}</script>
 </head>
-<body>
+<body class="{% if show_austin_col %}show-austin{% endif %}">
 <div class="topbar">
   <a href="/recon" class="brand"><span class="r">EW</span>RECON</a>
   <div class="top-right">
@@ -182,36 +201,41 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
     <div id="msg"></div>
     <div class="filterbar">
       <span class="searchbar"><input id="search" type="search" placeholder="Search VIN, make, model, stock #…" oninput="applyFilters()" autocomplete="off"></span>
-      <span class="chips">
-        <span class="chip all on" data-color="" onclick="setColor('')">All</span>
-        <span class="chip" data-color="#e23b3b" onclick="setColor('#e23b3b')"><span class="cd" style="background:#e23b3b"></span>New / Staged</span>
-        <span class="chip" data-color="#eab308" onclick="setColor('#eab308')"><span class="cd" style="background:#eab308"></span>In Transit</span>
-        <span class="chip" data-color="#22c55e" onclick="setColor('#22c55e')"><span class="cd" style="background:#22c55e"></span>At Dealer</span>
-        <span class="chip" data-color="#3b82f6" onclick="setColor('#3b82f6')"><span class="cd" style="background:#3b82f6"></span>Home Base</span>
-        <span class="chip" data-color="#8b5cf6" onclick="setColor('#8b5cf6')"><span class="cd" style="background:#8b5cf6"></span>Ready</span>
+      <span class="chips" aria-label="Status color key">
+        <span class="legendlbl">Status key:</span>
+        <span class="chip"><span class="cd" style="background:#e23b3b"></span>New / Staged</span>
+        <span class="chip"><span class="cd" style="background:#eab308"></span>In Transit</span>
+        <span class="chip"><span class="cd" style="background:#22c55e"></span>At Dealer</span>
+        <span class="chip"><span class="cd" style="background:#3b82f6"></span>Home Base</span>
+        <span class="chip"><span class="cd" style="background:#8b5cf6"></span>Ready</span>
+        <span class="chip"><span class="cd" style="background:#9ca3af"></span>Picked Up</span>
       </span>
     </div>
+    <div class="tscroll">
     <table>
       <thead><tr>
         <th>Step</th><th>Stock #</th><th>Vehicle</th><th>Status</th>
+        <th class="austincol">Shipping&nbsp;Arranged</th>
         <th>Days In&nbsp;Step</th><th>Days Since Recon&nbsp;Began</th><th>Notes</th>
       </tr></thead>
       <tbody>
         {% for u in rows %}
-        <tr data-search="{{ (u.vin ~ ' ' ~ (u.stock_no or '') ~ ' ' ~ (u.make or '') ~ ' ' ~ (u.model or '') ~ ' ' ~ (u.year|string if u.year else ''))|lower }}" data-dot="{{ u.dot }}" onclick="location.href='/recon/u/{{ u.vin }}'">
+        <tr data-search="{{ (u.vin ~ ' ' ~ (u.stock_no or '') ~ ' ' ~ (u.make or '') ~ ' ' ~ (u.model or '') ~ ' ' ~ (u.year|string if u.year else ''))|lower }}" data-dot="{{ u.dot }}" onclick="location.href='/recon/u/{{ u.vin }}{% if sel %}?from={{ sel }}{% endif %}'">
           <td class="step-cell"><span class="hash">#{{ stepnum.get(u.step_code, '') }}</span> {{ u.step_name or '—' }}</td>
           <td class="stock">{{ u.stock_no or '—' }}<span class="vin">{{ u.vin }}</span></td>
           <td class="veh"><b>{{ u.make or '' }} {{ u.model or '' }}</b>{% if u.needs_photos %} <span title="Needs photos on arrival">📷</span>{% endif %}<div class="sub">{{ u.year or '' }} {{ u.exterior_color or '' }}<span class="fromto">{% if u.bought_from %} · from {{ u.bought_from }}{% endif %}{% if u.sold_to %} · → {{ u.sold_to }}{% endif %}</span></div></td>
-          <td class="status-cell" data-label="Status:"><span class="dot" style="background:{{ u.dot }}" title="{{ u.step_name }} — click to filter" onclick="event.stopPropagation();setColor('{{ u.dot }}')"></span><select class="qstat" data-sold="{{ u.sold_to or '' }}" data-cur="{{ u.step_code }}" data-veh="{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }}" onclick="event.stopPropagation()" onchange="quickMove({{ u.id }}, this.value, this)">{% for s in steps %}<option value="{{ s.code }}"{% if s.code==u.step_code %} selected{% endif %}>{{ s.name }}</option>{% endfor %}</select></td>
+          <td class="status-cell" data-label="Status:"><span class="dot" style="background:{{ u.dot }}" title="{{ u.step_name }}"></span><select class="qstat" data-sold="{{ u.sold_to or '' }}" data-cur="{{ u.step_code }}" data-veh="{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }}" onclick="event.stopPropagation()" onchange="quickMove({{ u.id }}, this.value, this)">{% for s in steps %}<option value="{{ s.code }}"{% if s.code==u.step_code %} selected{% endif %}>{{ s.name }}</option>{% endfor %}</select></td>
+          <td class="austincol" data-label="Shipping:">{% if u.ship.arranged %}<span class="achk" title="{{ u.ship.tip }}">✓</span><span class="shipwho">{{ u.ship.who }}</span>{% else %}<span class="ax" title="Shipping not arranged yet">✕</span>{% endif %}</td>
           <td class="num" data-label="In step:"><span class="daybox {{ u.sla_state }}">{{ u.d_step if u.d_step is not none else 0 }}</span></td>
           <td class="num" data-label="Recon began:">{{ u.d_recon if u.d_recon is not none else '—' }}</td>
           <td class="notes">{{ u.notes or '' }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="7" class="empty">No vehicles{% if sel %} in this step{% endif %} yet. Click <b>+ Add Vehicle</b> to put one in recon.</td></tr>
+        <tr><td colspan="8" class="empty">No vehicles{% if sel %} in this step{% endif %} yet. Click <b>+ Add Vehicle</b> to put one in recon.</td></tr>
         {% endfor %}
       </tbody>
     </table>
+    </div>
   </main>
 </div>
 
@@ -303,32 +327,21 @@ async function scanPhoto(input, kind){
   }catch(e){ m.style.color='#f87171'; m.textContent='network error'; }
   input.value='';
 }
-/* ── search + colored-dot status filters (client-side) ── */
-var _colorFilter='';
-function _lightChip(){
-  document.querySelectorAll('.chips .chip').forEach(function(c){c.classList.remove('on');});
-  var sel=document.querySelector('.chip[data-color="'+_colorFilter+'"]');
-  if(sel) sel.classList.add('on');
-}
-function setColor(color){
-  _colorFilter=(_colorFilter===color)?'':color;
-  _lightChip();
-  try{sessionStorage.setItem('reconColor',_colorFilter);}catch(e){}
-  applyFilters();
-}
+/* ── search only (client-side). The view is driven by the left sidebar steps;
+   the top-right color chips are a reference KEY, not a filter. The "Austin
+   Emailed" column is shown server-side via the body.show-austin class. ── */
 function applyFilters(){
   var q=(document.getElementById('search').value||'').toLowerCase().trim();
   try{sessionStorage.setItem('reconSearch',q);}catch(e){}
   document.querySelectorAll('tbody tr[data-search]').forEach(function(tr){
-    var okQ=!q || tr.getAttribute('data-search').indexOf(q)>=0;
-    var okC=!_colorFilter || tr.getAttribute('data-dot')===_colorFilter;
-    tr.style.display=(okQ&&okC)?'':'none';
+    tr.style.display=(!q || tr.getAttribute('data-search').indexOf(q)>=0)?'':'none';
   });
 }
 (function(){try{
-  var q=sessionStorage.getItem('reconSearch')||'', c=sessionStorage.getItem('reconColor')||'';
+  sessionStorage.setItem('reconStep','{{ sel }}');   /* remember the step for the car-page back button */
+  var q=sessionStorage.getItem('reconSearch')||'';
   var s=document.getElementById('search'); if(s&&q) s.value=q;
-  _colorFilter=c; _lightChip(); applyFilters();
+  applyFilters();
 }catch(e){}})();
 
 function quickMove(id, code, el){

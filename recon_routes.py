@@ -111,6 +111,48 @@ def _now_et():
         return _utcnow() - timedelta(hours=4)  # EDT fallback if tzdata missing
 
 
+def _fmt_et(dt):
+    """Short human ET stamp for a tz-aware datetime, e.g. 'Jun 26, 3:14 PM'."""
+    if not dt:
+        return ''
+    try:
+        from zoneinfo import ZoneInfo
+        dt = dt.astimezone(ZoneInfo('America/New_York'))
+    except Exception:
+        try:
+            dt = dt - timedelta(hours=4)
+        except Exception:
+            pass
+    try:
+        return dt.strftime('%b %-d, %-I:%M %p')
+    except Exception:
+        return dt.strftime('%b %d')
+
+
+def _shipping_disp(u):
+    """Display dict for the 'Shipping Arranged' column / badges.
+    Shipping can be arranged via Austin (email) or manually (a company picking
+    it up). Returns arranged flag + a short 'who' label + a hover tip."""
+    ts = u.get('shipping_arranged_at')
+    if not ts:
+        return {'arranged': False, 'who': '', 'when': '',
+                'tip': 'Shipping not arranged yet'}
+    via = (u.get('shipping_arranged_via') or '').lower()
+    note = (u.get('shipping_arranged_note') or '').strip()
+    when = _fmt_et(ts)
+    if via == 'austin':
+        who = 'Austin'
+        tip = 'Shipping arranged via Austin (%s)' % when
+        if note:
+            tip += ' — ' + note
+    else:
+        who = note or 'arranged'
+        tip = 'Shipping arranged (%s)' % when
+        if note:
+            tip = 'Shipping arranged: %s (%s)' % (note, when)
+    return {'arranged': True, 'who': who, 'when': when, 'tip': tip}
+
+
 def _actor():
     try:
         return (session.get('username') or session.get('user')
@@ -642,6 +684,7 @@ def board():
                                 else 'ok'))
         u['notes'] = notes_by.get(u['id'], '')
         u['dot'] = DOT_COLORS.get(u.get('step_code'), '#cbd5e1')
+        u['ship'] = _shipping_disp(u)
         ref = u.get('lsl_inventory_ref')
         u['lsl_url'] = (LSL_RECORD_URL % ref) if ref else \
             ('https://app.livesaleslog.com/inventory?query=%s' % (u.get('stock_no') or ''))
@@ -664,10 +707,15 @@ def board():
     if extras:
         flow_groups.append(extras)
     rows = units if not sel else [u for u in units if u.get('step_code') == sel]
+    # The "Austin Emailed" column shows on any specific step EXCEPT the default
+    # "all vehicles" board and the very first "New" bucket (code 'all') — so the
+    # 4 staging lanes + In Transit + Home Base + Ready + Picked Up + At Dealer
+    # all surface it (those are where transport / Austin is actually in play).
+    show_austin_col = bool(sel and sel != 'all')
     return render_template('recon/dashboard.html', steps=steps, rows=rows,
                            counts=counts, stepnum=stepnum, total=len(units),
-                           sel=sel, now=now, dot_colors=DOT_COLORS,
-                           flow_groups=flow_groups)
+                           sel=sel, show_austin_col=show_austin_col, now=now,
+                           dot_colors=DOT_COLORS, flow_groups=flow_groups)
 
 
 @bp.route('/recon/reports')
@@ -723,6 +771,7 @@ def _transport_data():
     for u in rows:
         d = _days(u.get('current_step_entered_at'), now)
         u['days'] = int(d) if d is not None else 0
+        u['ship'] = _shipping_disp(u)
         code = u.get('step_code')
         has_dealer = bool((u.get('sold_to') or '').strip())
         been_home = bool(u.get('entered_recon_at'))   # has arrived Home Base at least once
@@ -1027,6 +1076,20 @@ def unit_detail(key):
         rnotes = [dict(r) for r in cur.fetchall()]
         cur.execute("SELECT * FROM recon_photos WHERE unit_id=%s ORDER BY created_at DESC", (u['id'],))
         photos = [dict(r) for r in cur.fetchall()]
+        # history of "Email Austin" sends (timestamp + the note that went with it)
+        cur.execute("""SELECT created_at, detail FROM recon_audit
+                        WHERE unit_id=%s AND action='austin_manual'
+                        ORDER BY created_at DESC""", (u['id'],))
+        austin_emails = []
+        for r in cur.fetchall():
+            d = r.get('detail') or {}
+            if isinstance(d, str):
+                try:
+                    d = json.loads(d)
+                except Exception:
+                    d = {}
+            austin_emails.append({'when': _fmt_et(r.get('created_at')),
+                                  'note': (d.get('note') or '').strip()})
         steps = _steps(cur)
         companies = _companies(cur)
     finally:
@@ -1039,6 +1102,7 @@ def unit_detail(key):
         else:
             e['hours'] = _hours(e['entered_at'], now)
             e['open'] = True
+    u['ship'] = _shipping_disp(u)
     u['days_in_recon'] = _days(u.get('entered_recon_at'), now)
     u['time_in_transit'] = _days(u.get('acquired_at'), u.get('delivered_at') or now)
     if u.get('frontline_ready_at') and u.get('entered_recon_at'):
@@ -1062,7 +1126,8 @@ def unit_detail(key):
                            workitems=workitems, notes=notes, rnotes=rnotes, photos=photos,
                            steps=steps, now=now, cur_code=cur_code, cur_name=cur_name,
                            next_opts=next_opts, companies=companies, pickup=pickup, delivery=delivery,
-                           costs=costs, out_days=out_days, dot=DOT_COLORS.get(cur_code, '#cbd5e1'))
+                           costs=costs, out_days=out_days, austin_emails=austin_emails,
+                           dot=DOT_COLORS.get(cur_code, '#cbd5e1'))
 
 
 # ============================================================================
@@ -1732,6 +1797,76 @@ def api_email_austin(unit_id):
         _recon_email(cur, unit_id, 'austin_manual', EMAIL_RECIP['austin'],
                      'Transport needed: %s' % ymm, body, dedupe=False)
         _audit(cur, unit_id, 'email', None, 'austin_manual', _actor(), {'note': note[:200]})
+        # stamp the unit: Austin emailed -> shipping is arranged (via Austin)
+        cur.execute("""UPDATE recon_units
+                          SET austin_emailed_at=now(), updated_at=now(),
+                              shipping_arranged_at=now(), shipping_arranged_via='austin',
+                              shipping_arranged_note=%s
+                        WHERE id=%s RETURNING austin_emailed_at""",
+                    (note[:500] or None, unit_id))
+        stamped = cur.fetchone()
+        ts = stamped['austin_emailed_at'] if stamped else None
+        # leave a visible note in the transport log so there's a record on the car
+        nbody = '📧 Emailed Austin to arrange transport.'
+        if note:
+            nbody += ' Note: ' + note
+        cur.execute("INSERT INTO recon_notes (unit_id, step_id, author, body, category) "
+                    "VALUES (%s,%s,%s,%s,'general')",
+                    (unit_id, u.get('current_step_id'), _actor(), nbody))
+        db.commit()
+        return jsonify({'ok': True, 'emailed_at': _fmt_et(ts)})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+# ── manual "someone else is picking it up" — arrange shipping without Austin ──
+@bp.route('/api/recon/<int:unit_id>/arrange-pickup', methods=['POST'])
+def api_arrange_pickup(unit_id):
+    data = request.get_json(silent=True) or request.form
+    note = (data.get('note') or '').strip()
+    if not note:
+        return jsonify({'error': 'add a note — who is picking it up?'}), 400
+    note = note[:500]
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT current_step_id FROM recon_units WHERE id=%s", (unit_id,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'unit not found'}), 404
+        cur.execute("""UPDATE recon_units
+                          SET shipping_arranged_at=now(), shipping_arranged_via='manual',
+                              shipping_arranged_note=%s, updated_at=now()
+                        WHERE id=%s""", (note, unit_id))
+        cur.execute("INSERT INTO recon_notes (unit_id, step_id, author, body, category) "
+                    "VALUES (%s,%s,%s,%s,'general')",
+                    (unit_id, row['current_step_id'], _actor(),
+                     '🚚 Shipping arranged: ' + note))
+        _audit(cur, unit_id, 'shipping', None, 'arrange_manual', _actor(), {'note': note[:200]})
+        db.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+# ── clear the shipping-arranged status (e.g. plans changed) ─────────────────
+@bp.route('/api/recon/<int:unit_id>/arrange-pickup/clear', methods=['POST'])
+def api_arrange_pickup_clear(unit_id):
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("""UPDATE recon_units
+                          SET shipping_arranged_at=NULL, shipping_arranged_via=NULL,
+                              shipping_arranged_note=NULL, austin_emailed_at=NULL,
+                              updated_at=now()
+                        WHERE id=%s""", (unit_id,))
+        _audit(cur, unit_id, 'shipping', None, 'clear', _actor(), {})
         db.commit()
         return jsonify({'ok': True})
     except Exception as e:
