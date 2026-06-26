@@ -129,6 +129,73 @@ def _fmt_et(dt):
         return dt.strftime('%b %d')
 
 
+def _normalize_shipping(note):
+    """Turn a free-text pickup note into a SHORT, consistent dashboard label
+    (e.g. 'Beaver Mazda pickup', 'Enterprise delivery') via the local 9B, so the
+    board stays aligned regardless of how each person phrases it. Returns '' on
+    any failure — callers fall back to the raw note."""
+    note = (note or '').strip()
+    if not note:
+        return ''
+    try:
+        from app import gemini_call
+        prompt = (
+            "You normalize a car-shipping note into a SHORT dashboard label.\n"
+            "Identify the company/dealer MOVING the vehicle and whether they "
+            "PICK UP or DELIVER it. Output ONLY '<Company> pickup' or "
+            "'<Company> delivery'. Company = 1-3 words, Title Case. No quotes, "
+            "no other words.\n\n"
+            'Note: "beaver creek picking up"\nLabel: Beaver Creek pickup\n\n'
+            'Note: "Enterprise delivering, Beaver Mazda picking up"\nLabel: Beaver Mazda pickup\n\n'
+            'Note: "we are shipping to Buford Chevy"\nLabel: Buford Chevy pickup\n\n'
+            'Note: "Enterprise delivering to us"\nLabel: Enterprise delivery\n\n'
+            'Note: "%s"\nLabel:' % note[:200])
+        out = gemini_call(prompt, max_tokens=16, temperature=0.0, disable_thinking=True)
+        if out:
+            lab = out.strip().splitlines()[0].strip().strip('"').strip()
+            if 0 < len(lab) <= 40:
+                return lab
+    except Exception as e:
+        print('[recon] shipping normalize failed: %s' % e, flush=True)
+    return ''
+
+
+_SHIP_HINTS = ('ship', 'pick', 'deliver', 'transport', 'haul', 'carrier', 'tow', 'driver')
+
+
+def _shipping_from_note(note):
+    """If a plain note describes WHO is shipping / picking up / delivering the
+    car, return a normalized '<Company> pickup/delivery' label; else ''. A cheap
+    keyword pre-filter avoids a 9B call on the vast majority of notes."""
+    note = (note or '').strip()
+    if len(note) < 4:
+        return ''
+    low = note.lower()
+    if not any(h in low for h in _SHIP_HINTS):
+        return ''   # not shipping-ish — skip the model entirely
+    try:
+        from app import gemini_call
+        prompt = (
+            "Read a note about a vehicle. If it says WHO is shipping, picking up, "
+            "or delivering the car, output a SHORT label '<Company> pickup' or "
+            "'<Company> delivery' (Company = 1-3 words, Title Case). If the note "
+            "is NOT about who is moving the car, output exactly NONE.\n\n"
+            'Note: "We are shipping to Buford Chevy"\nLabel: Buford Chevy pickup\n\n'
+            'Note: "Enterprise delivering to us"\nLabel: Enterprise delivery\n\n'
+            'Note: "Marshall Goldman picking up"\nLabel: Marshall Goldman pickup\n\n'
+            'Note: "call seller about title"\nLabel: NONE\n\n'
+            'Note: "needs front bumper repaint"\nLabel: NONE\n\n'
+            'Note: "%s"\nLabel:' % note[:200])
+        out = gemini_call(prompt, max_tokens=16, temperature=0.0, disable_thinking=True)
+        if out:
+            lab = out.strip().splitlines()[0].strip().strip('"').strip()
+            if lab and 'NONE' not in lab.upper() and len(lab) <= 40:
+                return lab
+    except Exception as e:
+        print('[recon] shipping note-detect failed: %s' % e, flush=True)
+    return ''
+
+
 def _shipping_disp(u):
     """Display dict for the 'Shipping Arranged' column / badges.
     Shipping can be arranged via Austin (email) or manually (a company picking
@@ -139,14 +206,15 @@ def _shipping_disp(u):
                 'tip': 'Shipping not arranged yet'}
     via = (u.get('shipping_arranged_via') or '').lower()
     note = (u.get('shipping_arranged_note') or '').strip()
+    who_norm = (u.get('shipping_arranged_who') or '').strip()
     when = _fmt_et(ts)
     if via == 'austin':
-        who = 'Austin'
+        who = 'Austin emailed'
         tip = 'Shipping arranged via Austin (%s)' % when
         if note:
             tip += ' — ' + note
     else:
-        who = note or 'arranged'
+        who = who_norm or note or 'arranged'
         tip = 'Shipping arranged (%s)' % when
         if note:
             tip = 'Shipping arranged: %s (%s)' % (note, when)
@@ -1332,7 +1400,8 @@ def api_add_note(unit_id):
     db = _db()
     cur = db.cursor()
     try:
-        cur.execute("SELECT current_step_id FROM recon_units WHERE id=%s", (unit_id,))
+        cur.execute("SELECT current_step_id, shipping_arranged_at "
+                    "FROM recon_units WHERE id=%s", (unit_id,))
         row = cur.fetchone()
         if not row:
             return jsonify({'error': 'unit not found'}), 404
@@ -1341,8 +1410,21 @@ def api_add_note(unit_id):
                     (unit_id, row['current_step_id'], _actor(), body, category))
         nid = cur.fetchone()['id']
         _audit(cur, unit_id, 'note', nid, 'add', _actor(), {'len': len(body)})
+        # auto-detect a shipping arrangement from a plain note (operator opt-in).
+        # Only fills in cars not already arranged — never overrides Austin/manual.
+        auto_ship = None
+        if category == 'general' and not row.get('shipping_arranged_at'):
+            label = _shipping_from_note(body)
+            if label:
+                cur.execute("""UPDATE recon_units
+                                  SET shipping_arranged_at=now(), shipping_arranged_via='note',
+                                      shipping_arranged_note=%s, shipping_arranged_who=%s,
+                                      updated_at=now()
+                                WHERE id=%s""", (body[:500], label, unit_id))
+                _audit(cur, unit_id, 'shipping', None, 'auto_from_note', _actor(), {'who': label})
+                auto_ship = label
         db.commit()
-        return jsonify({'ok': True, 'note_id': nid})
+        return jsonify({'ok': True, 'note_id': nid, 'shipping': auto_ship})
     except Exception as e:
         db.rollback()
         return jsonify({'error': str(e)}), 500
@@ -1837,10 +1919,11 @@ def api_arrange_pickup(unit_id):
         row = cur.fetchone()
         if not row:
             return jsonify({'error': 'unit not found'}), 404
+        who = _normalize_shipping(note)   # 9B -> consistent "<Company> pickup" label
         cur.execute("""UPDATE recon_units
                           SET shipping_arranged_at=now(), shipping_arranged_via='manual',
-                              shipping_arranged_note=%s, updated_at=now()
-                        WHERE id=%s""", (note, unit_id))
+                              shipping_arranged_note=%s, shipping_arranged_who=%s, updated_at=now()
+                        WHERE id=%s""", (note, who or None, unit_id))
         cur.execute("INSERT INTO recon_notes (unit_id, step_id, author, body, category) "
                     "VALUES (%s,%s,%s,%s,'general')",
                     (unit_id, row['current_step_id'], _actor(),
@@ -1863,8 +1946,8 @@ def api_arrange_pickup_clear(unit_id):
     try:
         cur.execute("""UPDATE recon_units
                           SET shipping_arranged_at=NULL, shipping_arranged_via=NULL,
-                              shipping_arranged_note=NULL, austin_emailed_at=NULL,
-                              updated_at=now()
+                              shipping_arranged_note=NULL, shipping_arranged_who=NULL,
+                              austin_emailed_at=NULL, updated_at=now()
                         WHERE id=%s""", (unit_id,))
         _audit(cur, unit_id, 'shipping', None, 'clear', _actor(), {})
         db.commit()

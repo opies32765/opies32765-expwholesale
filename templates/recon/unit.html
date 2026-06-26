@@ -190,7 +190,7 @@
       <div class="row" style="margin-top:12px"><button class="btn" onclick="saveTransport()">Save transport</button><span id="tmsg" class="msg"></span></div>
 
       <div class="austin">
-        <div class="austin-h">Shipping arrangement</div>
+        <div class="austin-h">Outbound Shipping Arrangement</div>
         <div id="shipStamp" class="ship-stamp"{% if not u.ship.arranged %} style="display:none"{% endif %}>
           <span>✓ Shipping arranged{% if u.ship.who %} — {{ u.ship.who }}{% endif %}{% if u.ship.when %} · {{ u.ship.when }}{% endif %}</span>
           <a class="ship-clear" onclick="clearShipping()">clear</a>
@@ -226,7 +226,6 @@
       <div class="costs">
         <div class="cost"><div class="cl">Recon cost (LSL)</div><div class="cv">${{ '{:,.0f}'.format(costs.recon or 0) }}</div></div>
       </div>
-      {% if costs.recon_note %}<div class="lslnote"><b>LSL recon note:</b> {{ costs.recon_note }}</div>{% endif %}
       <div class="hint">Recon cost pulled from this car's LSL deal, refreshed every 5 min. Shows $0 until the work is logged on the deal in LSL.</div>
       <div class="outrecon">
         {% if u.out_for_recon_at %}
