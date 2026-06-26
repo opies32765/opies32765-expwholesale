@@ -875,3 +875,97 @@ def parse_pasted_text(text, gemini_fn):
             continue
         out.append(row)
     return out
+
+
+# -- IMAGE_INTAKE_2026_06_26 -------------------------------------------------
+# Parse a SCREENSHOT / PHOTO of a vehicle list (auction run sheet, vAuto
+# "N Selected", a SmartAuction listing grab, a pasted spreadsheet image) into
+# the same candidate-row shape as parse_upload(), using a MULTIMODAL model to
+# read the visual table layout. Flat OCR scrambles multi-column tables and
+# mis-pairs odometer-vs-price; a vision model reads the columns as a human
+# would. The caller passes its multimodal vision callable so this module stays
+# import-free of app.py (same contract as parse_pasted_text).
+
+_IMAGE_PROMPT = (
+    "You are reading a SCREENSHOT or PHOTO of a wholesale/auction vehicle "
+    "list (e.g. a SmartAuction / vAuto / dealer inventory table, or a pasted "
+    "spreadsheet image). It usually has one ROW per vehicle across several "
+    "COLUMNS. Read it column-by-column like a human; do NOT flatten the table. "
+    "Return ONLY a JSON array (no prose, no markdown fences). One object per "
+    "VEHICLE with keys: "
+    "vin (the 17-character VIN exactly as shown, or null), "
+    "year (4-digit model year integer or null), "
+    "make (string or null), "
+    "model (string or null), "
+    "trim (trim/series text or null), "
+    "drivetrain (RWD/FWD/AWD/4WD or null), "
+    "mileage (odometer integer; ONLY the column labeled Odometer/Odo/Miles - "
+    "NEVER the price, stock number, or model year; null if not shown), "
+    "color (exterior color or null), "
+    "location (city/state or null), "
+    "price (the per-car asking / Buy-Now price as an integer, $ and commas "
+    "stripped, or null), "
+    "floor (the Floor / minimum price as an integer or null), "
+    "stock (stock/unit number or null).\n"
+    "Rules: one object per distinct vehicle; never invent or merge vehicles. "
+    "Ignore titles, headlines, column headers, totals, and decorative text. A "
+    "VIN is exactly 17 chars [A-HJ-NPR-Z0-9] (no I/O/Q); if a cell is "
+    "unreadable or partial use null - do not guess digits. Only report "
+    "mileage when an actual odometer number is visible. Return [] if you see "
+    "no vehicles."
+)
+
+
+def parse_image(file_bytes, mime, vision_fn):
+    """IMAGE_INTAKE_2026_06_26: parse a screenshot/photo of a vehicle list
+    into parse_upload()-shaped rows using a multimodal model.
+
+    vision_fn(prompt, image_bytes, mime) -> str | None
+        runs ONE multimodal vision request and returns the model's text (the
+        caller wires this to its Gemini/9B vision helper).
+    Rows go through _finalize_record() so they match a spreadsheet upload.
+    """
+    if not file_bytes:
+        return []
+    raw = vision_fn(_IMAGE_PROMPT, file_bytes, mime)
+    if not raw:
+        raise RuntimeError('AI image read returned nothing (vision model unavailable)')
+    items = _json_array_salvage(raw)
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        vin = it.get('vin')
+        vin = '' if (vin is None or str(vin).strip().lower() in ('', 'null', 'none')) else str(vin)
+        # Build the verbatim YMM string from the discrete columns so the
+        # existing splitter/labels render the same as a spreadsheet row.
+        ymm = ' '.join(
+            str(p).strip() for p in (
+                it.get('year'), it.get('make'), it.get('model'), it.get('trim'))
+            if p not in (None, '', 'null', 'None')).strip()
+        # Fold wholesale-only extras (drivetrain, location, floor) into notes —
+        # they aren't bid columns but the operator wants to see them.
+        extras = []
+        for label, key in (('Drivetrain', 'drivetrain'),
+                           ('Location', 'location'), ('Floor', 'floor')):
+            v = it.get(key)
+            if v not in (None, '', 'null', 'None'):
+                extras.append(f'{label}: {v}')
+        rec = {
+            'raw_vehicle': ymm,
+            'vin': vin,
+            'year_col': it.get('year'),
+            'make_col': it.get('make'),
+            'model_col': it.get('model'),
+            'trim_col': it.get('trim'),
+            'color': it.get('color'),
+            'mileage': it.get('mileage'),
+            'asking_price': it.get('price'),
+            'stock': it.get('stock'),
+            'notes': ' | '.join(extras),
+        }
+        row = _finalize_record(rec)
+        if not row.get('vin') and not row.get('raw_vehicle'):
+            continue
+        out.append(row)
+    return out

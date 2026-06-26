@@ -165,6 +165,7 @@ _PUBLIC_PREFIXES = (
     '/api/ipacket/', '/ipacket_reports/',
     '/api/enrichment/',  # rbook/manheim enrichment workers (oscar VMs)
     '/api/thalist/',     # thalist.com scraper -> EW (shared-secret auth)
+    '/api/dealerprice/',  # dealerprice.net public lead-gen -> EW (shared-secret auth)
     '/api/comp_msrp/',   # VM 121 comp_msrp worker (claim, submit, jwt, status)
     "/api/internal/",  # internal worker -> SMS bridge (X-Auth gated inside handler)
     '/api/worker/',  # progress, session_lost — worker-facing, no login
@@ -11616,9 +11617,31 @@ def api_admin_bulk_upload_parse():
     paste_text = (request.form.get('paste_text') or '').strip()
     try:
         if f and f.filename:
-            from bulk_upload import parse_upload
-            rows = parse_upload(f.filename, f.read())
-            src_label = f.filename
+            fname = f.filename
+            fbytes = f.read()
+            # IMAGE_INTAKE_2026_06_26: a screenshot/photo of a vehicle list
+            # (SmartAuction grab, vAuto "N Selected", a phone pic of a sheet)
+            # is read by the Gemini multimodal model into the same rows a
+            # spreadsheet produces. Detect by extension OR by content-type.
+            _ext = (fname.rsplit('.', 1)[-1].lower() if '.' in fname else '')
+            _ctype = (f.mimetype or '').lower()
+            _is_img = (_ext in ('png', 'jpg', 'jpeg', 'webp', 'gif', 'heic',
+                                'heif', 'bmp')
+                       or _ctype.startswith('image/'))
+            if _is_img:
+                from bulk_upload import parse_image
+                _mime = _ctype if _ctype.startswith('image/') else (
+                    'image/png' if _ext == 'png' else 'image/jpeg')
+                rows = parse_image(
+                    fbytes, _mime,
+                    lambda prompt, img, mime: gemini_call(
+                        prompt, image_bytes=img, mime=mime,
+                        model='gemini-2.5-pro', max_tokens=4096,
+                        temperature=0))
+            else:
+                from bulk_upload import parse_upload
+                rows = parse_upload(fname, fbytes)
+            src_label = fname
         elif paste_text:
             from bulk_upload import parse_pasted_text
             rows = parse_pasted_text(paste_text, gemini_call)
@@ -12402,6 +12425,194 @@ def notify_thalist_member(bid_id, kind, text, amount=None):
                       json=payload, headers={'X-Auth': THALIST_SECRET}, timeout=10)
     except Exception as e:
         print(f'[thalist-app] notify member failed bid={bid_id}: {e}', flush=True)
+
+
+# ============================================================================
+# DEALERPRICE_BRIDGE_2026_06_26 — dealerprice.net (public lead-gen) -> EW bids.
+# Additive, shared-secret gated. Mirrors the ThaList member_bid path. A US
+# dealer submits a car on dealerprice.net; it lands as a normal EW bid
+# (creation_source='dealerprice') and runs the SAME enrichment every bid runs
+# through (trigger_market_check) — NEVER gated on the AI assessment (HARD RULE).
+# VIN/odometer photo decode reuses the EW 9B vision helpers (which route through
+# gemini_call -> local_brain_shim -> the local 9B brain).
+# ============================================================================
+DEALERPRICE_SECRET = (os.environ.get('EW_DEALERPRICE_SECRET') or '').strip()
+
+
+@app.route('/api/dealerprice/decode', methods=['POST'])
+def api_dealerprice_decode():
+    """dealerprice.net mobile capture -> read a VIN or odometer from a photo
+    with the EW 9B vision brain. Auth: header X-Auth == EW_DEALERPRICE_SECRET.
+    Body: {kind:'vin'|'odometer', image:<data-url or bare base64>}."""
+    auth = (request.headers.get('X-Auth') or '').strip()
+    if not DEALERPRICE_SECRET or auth != DEALERPRICE_SECRET:
+        return jsonify({'error': 'bad auth'}), 401
+    data = request.get_json(silent=True) or {}
+    kind = (data.get('kind') or '').strip().lower()
+    image = data.get('image') or ''
+    media_type = 'image/jpeg'
+    if isinstance(image, str) and image.startswith('data:'):
+        try:
+            head, image = image.split(',', 1)
+            media_type = head.split(';')[0].split(':', 1)[1] or 'image/jpeg'
+        except Exception:
+            return jsonify({'ok': False, 'error': 'bad image'}), 400
+    try:
+        file_bytes = base64.b64decode(image)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'bad image'}), 400
+    if not file_bytes:
+        return jsonify({'ok': False, 'error': 'empty image'}), 400
+    try:
+        if kind == 'vin':
+            val = extract_vin_from_file(file_bytes, media_type=media_type)
+        elif kind in ('odometer', 'odo', 'mileage'):
+            val = extract_mileage_from_file(file_bytes, media_type=media_type)
+        else:
+            return jsonify({'ok': False, 'error': 'kind must be vin or odometer'}), 400
+    except Exception as e:
+        print(f'[dealerprice] decode {kind} error: {e}', flush=True)
+        return jsonify({'ok': False, 'error': 'decode failed'}), 200
+    if val:
+        return jsonify({'ok': True, 'kind': kind, 'value': str(val)})
+    return jsonify({'ok': False, 'error': 'not_found'}), 200
+
+
+@app.route('/api/dealerprice/bid', methods=['POST'])
+def api_dealerprice_bid():
+    """A US dealer submits a car on dealerprice.net for an EW wholesale bid.
+    Auth: header X-Auth == EW_DEALERPRICE_SECRET. Required: vin(17), mileage,
+    asking_price, location, dealer_name, phone, dealer_email. Optional: notes,
+    photos[] (base64 data-urls, up to 6)."""
+    auth = (request.headers.get('X-Auth') or '').strip()
+    if not DEALERPRICE_SECRET or auth != DEALERPRICE_SECRET:
+        return jsonify({'error': 'bad auth'}), 401
+    data = request.get_json(silent=True) or {}
+
+    vin = (data.get('vin') or '').strip().upper()
+    if len(vin) != 17:
+        return jsonify({'error': 'valid 17-char VIN required'}), 400
+    try:
+        mileage = int(re.sub(r'[^0-9]', '', str(data.get('mileage') or '')))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'mileage required'}), 400
+    try:
+        asking_price = float(re.sub(r'[^0-9.]', '', str(data.get('asking_price') or '')))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'asking_price required'}), 400
+
+    dealer_name = (data.get('dealer_name') or '').strip() or 'Dealer'
+    dealer_email = (data.get('dealer_email') or '').strip().lower()
+    location = (data.get('location') or '').strip()
+    notes_in = (data.get('notes') or '').strip()
+
+    # DealerPrice carries a REAL mobile -> store it straight in bids.phone
+    # (varchar(20)) so the desk can SMS the offer back. Fall back to a stable
+    # hash sentinel only if the phone is unusable.
+    import hashlib as _hl
+    phone_digits = re.sub(r'[^0-9]', '', str(data.get('phone') or ''))
+    if len(phone_digits) == 11 and phone_digits.startswith('1'):
+        phone_digits = phone_digits[1:]
+    if len(phone_digits) == 10:
+        contact_phone = phone_digits
+    else:
+        contact_phone = 'dp:' + _hl.sha1((dealer_email or vin).encode()).hexdigest()[:14]
+
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("""SELECT id FROM bids WHERE vin=%s AND phone=%s
+                       AND COALESCE(status,'') NOT IN ('cancelled','rejected')
+                       ORDER BY id DESC LIMIT 1""", (vin, contact_phone))
+        dupe = cur.fetchone()
+        if dupe:
+            db.close()
+            return jsonify({'ok': True, 'status': 'dupe', 'bid_id': dupe['id'], 'vin': vin})
+
+        cur.execute("""
+            INSERT INTO contacts (phone, name, company)
+            VALUES (%s, %s, 'DealerPrice')
+            ON CONFLICT (phone) DO UPDATE
+              SET name = COALESCE(EXCLUDED.name, contacts.name)
+            RETURNING id
+        """, (contact_phone, dealer_name))
+        contact_id = cur.fetchone()['id']
+
+        rm = ['[DEALERPRICE]', dealer_name, f'VIN: {vin}',
+              f'{mileage:,} mi', f'Asking: ${asking_price:,.0f}']
+        if location:
+            rm.append(location)
+        raw_message = ' | '.join(rm)
+        note_bits = [f'[DealerPrice] {dealer_name}']
+        if dealer_email:
+            note_bits.append(dealer_email)
+        if location:
+            note_bits.append(location)
+        notes_text = ' · '.join(note_bits)
+        if notes_in:
+            notes_text += f'\n{notes_in}'
+
+        cur.execute("""
+            INSERT INTO bids (contact_id, phone, vin, mileage, raw_message,
+                              asking_price, notes, status, creation_source,
+                              vauto_priority)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,'new','dealerprice',TRUE)
+            RETURNING id
+        """, (contact_id, contact_phone, vin, mileage, raw_message,
+              asking_price, notes_text))
+        bid_id = cur.fetchone()['id']
+
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        for photo in (data.get('photos') or [])[:6]:
+            try:
+                s = photo
+                if isinstance(s, str) and s.startswith('data:'):
+                    s = s.split(',', 1)[1]
+                img = base64.b64decode(s)
+                fname = f'{uuid.uuid4().hex}.jpg'
+                with open(os.path.join(UPLOAD_DIR, fname), 'wb') as f:
+                    f.write(img)
+                cur.execute("INSERT INTO bid_photos (bid_id, url) VALUES (%s,%s)",
+                            (bid_id, f'/static/uploads/{fname}'))
+            except Exception:
+                pass
+
+        # Surface dealer location/notes as an inbound message -> flags the bid
+        # unread on the dashboard (same path SMS/field-rep messages use).
+        inbound = f'DealerPrice submission - {dealer_name}'
+        if location:
+            inbound += f' · {location}'
+        if dealer_email:
+            inbound += f' · {dealer_email}'
+        if notes_in:
+            inbound += f'\n{notes_in}'
+        cur.execute("""INSERT INTO bid_messages (bid_id, direction, message, from_phone)
+                       VALUES (%s, 'inbound', %s, %s)""",
+                    (bid_id, inbound, contact_phone))
+        cur.execute("UPDATE bids SET has_unread=TRUE WHERE id=%s", (bid_id,))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        try:
+            db.close()
+        except Exception:
+            pass
+        return jsonify({'error': f'{type(e).__name__}: {e}'}), 500
+
+    try:
+        _tg_worker_alert(
+            f'\U0001f7e6 <b>New DealerPrice bid</b> → bid #<b>{bid_id}</b>\n'
+            f'VIN: <code>{vin}</code>\n'
+            f'${asking_price:,.0f} · {mileage:,} mi\n'
+            f'{dealer_name} · {location or "?"}\n'
+            f'{dealer_email or contact_phone}')
+    except Exception as e:
+        print(f'[dealerprice] alert error: {e}', flush=True)
+    try:
+        trigger_market_check(bid_id, vin)
+    except Exception as e:
+        print(f'[dealerprice] market_check kick failed: {e}', flush=True)
+
+    return jsonify({'ok': True, 'status': 'new', 'bid_id': bid_id, 'vin': vin})
 
 
 @app.route('/api/thalist/member_bid', methods=['POST'])

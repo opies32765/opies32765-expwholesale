@@ -76,8 +76,9 @@
         <input type="text" id="source_name" placeholder='e.g. "Bob @ ABC Motors"' required />
       </div>
       <div>
-        <label>Spreadsheet (.xlsx or .csv)</label>
-        <input type="file" id="file" accept=".xlsx,.xlsm,.csv,.tsv,.txt" />
+        <label>Spreadsheet (.xlsx / .csv) or a screenshot / photo of a list</label>
+        <input type="file" id="file" accept=".xlsx,.xlsm,.csv,.tsv,.txt,.png,.jpg,.jpeg,.webp,.gif,.heic,.heif,.bmp,image/*" />
+        <div style="font-size:12px; color:#6b7280; margin-top:4px;">Got a screenshot or phone pic of an auction/inventory list (SmartAuction, vAuto, a dealer's sheet)? Drop the image right here &mdash; AI reads the VIN, miles, year/make/model, color &amp; price out of it.</div>
       </div>
       <div style="display:flex; align-items:flex-end;">
         <button id="btn-parse">Parse</button>
