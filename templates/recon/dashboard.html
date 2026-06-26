@@ -35,6 +35,8 @@
   aside.steps a.step .c{font-weight:700;color:#e23b3b;min-width:22px;text-align:right}
   aside.steps a.step .c.zero{color:#cbd5e1;font-weight:400}
   aside.steps a.step.gate .nm::after{content:" ▣";color:#d97706;font-size:10px}
+  aside.steps .flowarrow{display:flex;align-items:center;justify-content:center;height:26px;background:#fafbfc;border-bottom:1px solid #eef0f2;color:#e23b3b;font-size:22px;font-weight:800;line-height:1}
+  aside.steps .flowarrow::before{content:"\2193"}
   main{flex:1;min-width:0;padding:14px 18px 50px}
   .toolbar{display:flex;align-items:center;margin-bottom:10px}
   .toolbar h2{margin:0;font-size:14px;color:#6b7280;font-weight:600}
@@ -114,6 +116,8 @@
     aside.steps a.step .nm{font-size:13px}
     aside.steps a.step .c{font-size:12px}
     aside.steps a.step.on{border-left:0;border-bottom:3px solid #e23b3b}
+    aside.steps .flowarrow{height:auto;border-bottom:0;border-right:1px solid #eef0f2;padding:0 8px;align-self:stretch;font-size:22px}
+    aside.steps .flowarrow::before{content:"\2192"}
     main{padding:10px 12px 44px}
     .toolbar h2{font-size:13px}
     /* table rows -> full-width cards */
@@ -157,13 +161,16 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
 
 <div class="layout">
   <aside class="steps">
-    {% for s in steps if not s.is_terminal %}
+    {% for grp in flow_groups %}
+      {% if not loop.first %}<div class="flowarrow" aria-hidden="true"></div>{% endif %}
+      {% for s in grp %}
       <a class="step {% if s.is_gate %}gate{% endif %} {% if sel==s.code %}on{% endif %}" href="/recon?step={{ s.code }}">
         <span class="n">{{ stepnum[s.code] }}</span>
         <span class="sd" style="background:{{ dot_colors.get(s.code, '#cbd5e1') }}"></span>
         <span class="nm">{{ s.name }}</span>
         <span class="c {% if counts.get(s.code,0)==0 %}zero{% endif %}">{{ counts.get(s.code, 0) }}</span>
       </a>
+      {% endfor %}
     {% endfor %}
   </aside>
 

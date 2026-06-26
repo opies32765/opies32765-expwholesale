@@ -61,6 +61,20 @@ DOT_COLORS = {
     'arrived_home': '#3b82f6', 'ready': '#8b5cf6', 'picked_up': '#9ca3af',
 }
 
+# Board pipeline laid out as ordered STAGES (arrows render between stages on the
+# sidebar). The 4 staging statuses are ONE stage (parallel options) so no arrow
+# sits between them. "Arrived at Dealer" is deliberately LAST — a home-base car
+# is picked up from Home Base and only then arrives at the buying dealer.
+RECON_FLOW = [
+    ['all'],
+    ['dealer_to_dealer', 'dealer_to_home', 'indiv_to_dealer', 'indiv_to_home'],
+    ['in_transport'],
+    ['arrived_home'],
+    ['ready'],
+    ['picked_up'],
+    ['arrived_dealer'],
+]
+
 
 def _recon_enabled():
     """True only when the sentinel file exists. 10s cache; file-based, survives
@@ -85,6 +99,16 @@ def _db():
 
 def _utcnow():
     return datetime.now(timezone.utc)
+
+
+def _now_et():
+    """Current wall-clock time in US Eastern (handles EST/EDT) for human-facing
+    timestamps. The server runs on UTC/Europe — never label UTC as 'ET'."""
+    try:
+        from zoneinfo import ZoneInfo
+        return _utcnow().astimezone(ZoneInfo('America/New_York'))
+    except Exception:
+        return _utcnow() - timedelta(hours=4)  # EDT fallback if tzdata missing
 
 
 def _actor():
@@ -340,8 +364,9 @@ def _next_options(code, path):
         'dealer_to_home': [('in_transport', 'Move to In Transit')],
         'indiv_to_dealer': [('in_transport', 'Move to In Transit')],
         'indiv_to_home': [('in_transport', 'Move to In Transit')],
-        'arrived_home': [('ready', 'Mark Ready')],
+        'arrived_home': [('ready', 'Mark Ready for Pickup')],
         'ready': [('picked_up', 'Mark Picked Up from Home Base')],
+        'picked_up': [('arrived_dealer', 'Mark Arrived at Dealer')],
     }
     if code == 'in_transport':
         if path == 'to_dealer':
@@ -626,10 +651,23 @@ def board():
         c = u.get('step_code') or '?'
         counts[c] = counts.get(c, 0) + 1
     stepnum = {s['code']: i + 1 for i, s in enumerate(steps)}
+    # Pipeline laid out as ordered STAGES with arrow connectors between them.
+    # The 4 staging statuses are ONE stage (parallel options) — no arrow between them.
+    by_code = {s['code']: s for s in steps}
+    flow_groups = []
+    for grp in RECON_FLOW:
+        g = [by_code[c] for c in grp if c in by_code]
+        if g:
+            flow_groups.append(g)
+    known = {c for grp in RECON_FLOW for c in grp}
+    extras = [s for s in steps if s['code'] not in known]
+    if extras:
+        flow_groups.append(extras)
     rows = units if not sel else [u for u in units if u.get('step_code') == sel]
     return render_template('recon/dashboard.html', steps=steps, rows=rows,
                            counts=counts, stepnum=stepnum, total=len(units),
-                           sel=sel, now=now, dot_colors=DOT_COLORS)
+                           sel=sel, now=now, dot_colors=DOT_COLORS,
+                           flow_groups=flow_groups)
 
 
 @bp.route('/recon/reports')
@@ -780,7 +818,8 @@ def transport_sms_text(ident):
 def transport_tab():
     pending, transit, now = _transport_data()
     return render_template('recon/transport.html', pending=pending, transit=transit,
-                           today=now.strftime('%Y-%m-%d'))
+                           today=now.strftime('%Y-%m-%d'),
+                           recipients=_report_recipients())
 
 
 def _transport_pdf():
@@ -796,7 +835,7 @@ def _transport_pdf():
                             leftMargin=28, rightMargin=28)
     st = getSampleStyleSheet()
     el = [Paragraph('Experience Wholesale — Transport Status', st['Title']),
-          Paragraph(now.strftime('%b %d, %Y  %I:%M %p') + ' ET', st['Normal']), Spacer(1, 12)]
+          Paragraph(_now_et().strftime('%b %d, %Y  %I:%M %p') + ' ET', st['Normal']), Spacer(1, 12)]
 
     def _d(x):
         return str(x) if x else '—'
@@ -853,7 +892,7 @@ def api_transport_email():
         resend.api_key = key
         resend.Emails.send({
             'from': RECON_EMAIL_FROM, 'to': tos, 'reply_to': RECON_EMAIL_REPLY_TO,
-            'subject': 'EW Transport Status — %s' % _utcnow().strftime('%b %d, %Y'),
+            'subject': 'EW Transport Status — %s' % _now_et().strftime('%b %d, %Y'),
             'html': '<p>Attached: the current Experience Wholesale transport status '
                     '(cars pending pickup and in transit, with ETAs).</p>',
             'attachments': [{'filename': 'ew-transport-status.pdf',
@@ -863,6 +902,54 @@ def api_transport_email():
     except Exception as e:
         print('[transport-email] %s' % e, flush=True)
         return jsonify({'error': str(e)}), 500
+
+
+def _report_recipients():
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT id, email FROM recon_report_recipients WHERE active ORDER BY lower(email)")
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        db.close()
+
+
+@bp.route('/api/recon/transport/recipients/add', methods=['POST'])
+def api_recipient_add():
+    data = request.get_json(silent=True) or request.form
+    email = (data.get('email') or '').strip()
+    if '@' not in email or len(email) < 5:
+        return jsonify({'error': 'enter a valid email'}), 400
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("INSERT INTO recon_report_recipients (email) VALUES (%s) "
+                    "ON CONFLICT (email) DO UPDATE SET active=TRUE RETURNING id, email", (email,))
+        r = cur.fetchone()
+        db.commit()
+        return jsonify({'ok': True, 'id': r['id'], 'email': r['email']})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+@bp.route('/api/recon/transport/recipients/delete', methods=['POST'])
+def api_recipient_delete():
+    data = request.get_json(silent=True) or request.form
+    rid = data.get('id')
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("DELETE FROM recon_report_recipients WHERE id=%s", (rid,))
+        db.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
 
 
 @bp.route('/recon/out-for-recon')
