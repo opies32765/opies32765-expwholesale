@@ -27,6 +27,11 @@
   .day.warn{background:#fff3cd;color:#92660a}
   .day.breach{background:#fde2e2;color:#b91c1c}
   .empty{text-align:center;color:#9ca3af;padding:34px;background:#fff;border:1px solid #d8dde2;border-radius:8px}
+  .garagebar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 16px}
+  .garagebar .lbl{color:#6b7280;font-size:11px;text-transform:uppercase;font-weight:700;margin-right:2px}
+  .gchip{border:1px solid #d8dde2;background:#fff;padding:5px 12px;border-radius:999px;font-size:12px;color:#374151;font-weight:600}
+  .gchip:hover{border-color:#9ca3af}
+  .gchip.on{background:#c0392b;color:#fff;border-color:#c0392b}
   @media (max-width:760px){ .veh .vin{display:none} td,th{padding:7px 7px}
     table{display:block;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch} }
 </style>
@@ -39,8 +44,17 @@
   <div class="top-right"><a href="/recon/transport">🚚 Transport</a><a href="/recon/reports">📊 Reports</a><a href="/logout?next=/recon/out-for-recon">Log out</a></div>
 </div>
 <div class="wrap">
-  <h1>Out for Recon <span style="color:#c0392b">({{ rows|length }})</span></h1>
+  <h1>{% if sel_garage %}{{ sel_garage }} <span style="color:#6b7280;font-weight:400;font-size:14px">· out for recon</span>{% else %}Out for Recon{% endif %} <span style="color:#c0392b">({{ rows|length }})</span></h1>
   <div class="sub">Cars shipped out to a shop/vendor for work — the timer runs until someone marks the car returned on its page.</div>
+  {% if garages %}
+  <div class="garagebar">
+    <span class="lbl">Shop:</span>
+    <a class="gchip {% if not sel_garage %}on{% endif %}" href="/recon/out-for-recon">All</a>
+    {% for g in garages %}
+    <a class="gchip {% if sel_garage and sel_garage|lower == g.g|lower %}on{% endif %}" href="/recon/out-for-recon?garage={{ g.g|urlencode }}">{{ g.g }} ({{ g.c }})</a>
+    {% endfor %}
+  </div>
+  {% endif %}
   {% if rows %}
   <table><thead><tr>
     <th>Stock #</th><th>Vehicle</th><th>Shipped to</th><th>Days out</th><th>Since</th><th>Board status</th>
@@ -49,7 +63,7 @@
     <tr onclick="location.href='/recon/u/{{ u.vin }}'">
       <td class="stock">{{ u.stock_no or '—' }}</td>
       <td class="veh"><b>{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }}</b><span class="vin">{{ u.vin }}</span></td>
-      <td>{{ u.out_for_recon_to or '—' }}</td>
+      <td>{% if u.out_for_recon_to %}<a href="/recon/out-for-recon?garage={{ u.out_for_recon_to|urlencode }}" onclick="event.stopPropagation()" style="color:#2563eb;font-weight:600">{{ u.out_for_recon_to }}</a>{% else %}—{% endif %}</td>
       <td><span class="day {% if u.out_days >= 14 %}breach{% elif u.out_days >= 7 %}warn{% endif %}">{{ u.out_days }}d</span></td>
       <td>{{ u.out_for_recon_at.strftime('%b %-d, %-I:%M %p') if u.out_for_recon_at else '' }}</td>
       <td>{{ u.step_name or '—' }}</td>

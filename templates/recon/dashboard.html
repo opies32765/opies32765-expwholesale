@@ -171,9 +171,11 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
   <a href="/recon" class="brand"><span class="r">EW</span>RECON</a>
   <div class="top-right">
     <span class="store">Experience Wholesale</span>
+    <a href="/recon/checkin" class="logout" style="border-color:#16a34a;color:#fff;font-weight:600">📲 Check-In</a>
     <a href="/recon/transport" class="logout">🚚 Transport</a>
     <a href="/recon/out-for-recon" class="logout">🔧 Out for Recon</a>
     <a href="/recon/reports" class="logout">📊 Reports</a>
+    <a href="/recon/bol-inbox" class="logout" style="border-color:#e23b3b;color:#fff;font-weight:600">📄 BOL Inbox</a>
     <a href="/logout?next=/recon" class="logout">Log out</a>
   </div>
 </div>
@@ -200,13 +202,16 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
     </div>
     <div id="msg"></div>
     <div class="filterbar">
-      <span class="searchbar"><input id="search" type="search" placeholder="Search VIN, make, model, stock #…" oninput="applyFilters()" autocomplete="off"></span>
+      <span class="searchbar" style="position:relative"><input id="search" type="search" placeholder="Search VIN, make, model, stock #… (any status)" oninput="onSearch()" autocomplete="off">
+        <div id="searchResults" style="display:none;position:absolute;z-index:60;left:0;right:0;top:100%;margin-top:4px;background:#fff;border:1px solid #d1d5db;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.15);max-height:55vh;overflow:auto;text-align:left"></div>
+      </span>
       <span class="chips" aria-label="Status color key">
         <span class="legendlbl">Status key:</span>
         <span class="chip"><span class="cd" style="background:#e23b3b"></span>New / Staged</span>
         <span class="chip"><span class="cd" style="background:#eab308"></span>In Transit</span>
         <span class="chip"><span class="cd" style="background:#22c55e"></span>At Dealer</span>
         <span class="chip"><span class="cd" style="background:#3b82f6"></span>Home Base</span>
+        <span class="chip"><span class="cd" style="background:#f97316"></span>Recon</span>
         <span class="chip"><span class="cd" style="background:#8b5cf6"></span>Ready</span>
         <span class="chip"><span class="cd" style="background:#9ca3af"></span>Picked Up</span>
       </span>
@@ -252,7 +257,13 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
         </span>
       </label>
       <label>Year<input id="f_year" type="number" placeholder="2022"></label>
-      <label>Stock #<input id="f_stock" placeholder="LL36388"></label>
+      <label class="full">Stock # <span style="font-weight:400;color:#9ca3af;font-size:11px">— type it, we pull the vehicle from LSL</span>
+        <span style="display:flex;gap:6px">
+          <input id="f_stock" placeholder="LL36388" autocomplete="off" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();pullFromLSL();}" onblur="pullFromLSL()">
+          <button type="button" class="addbtn" style="margin:0;padding:8px 12px;white-space:nowrap" onclick="pullFromLSL()">⬇ Pull from LSL</button>
+        </span>
+      </label>
+      <div id="pullMsg" class="full" style="font-size:12px;min-height:14px;color:#22c55e;margin-top:-4px"></div>
       <label>Make<input id="f_make" placeholder="Bentley"></label>
       <label>Model<input id="f_model" placeholder="Bentayga"></label>
       <label>Trim<input id="f_trim"></label>
@@ -277,7 +288,7 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
     </div>
     <div class="dlg-f">
       <button class="cancel" value="cancel">Cancel</button>
-      <button class="ok" value="ok" onclick="event.preventDefault();addUnit()">Add to Intake</button>
+      <button class="ok" value="ok" onclick="event.preventDefault();addUnit()">Add Vehicle</button>
     </div>
   </form>
 </dialog>
@@ -300,12 +311,37 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
 
 <script>
 function showErr(m){document.getElementById('msg').textContent=m||'';}
+let _lslExtra={};
+async function pullFromLSL(){
+  const sn=document.getElementById('f_stock').value.trim();
+  const pm=document.getElementById('pullMsg');
+  if(!sn){return;}
+  pm.style.color='#9ca3af';pm.textContent='Looking up '+sn+' in LSL…';
+  try{
+    const r=await fetch('/api/recon/lsl-stock-lookup?stock='+encodeURIComponent(sn));
+    const j=await r.json();
+    if(!j.ok){pm.style.color='#fb923c';pm.textContent=j.error||'no LSL match — enter manually';return;}
+    const setv=(id,v)=>{if(v!==null&&v!==undefined&&v!=='')document.getElementById(id).value=v;};
+    setv('f_vin',j.vin);setv('f_year',j.year);setv('f_make',j.make);setv('f_model',j.model);
+    setv('f_trim',j.trim);setv('f_miles',j.miles);setv('f_cost',j.purchase_cost);
+    if(j.vehicle_class)document.getElementById('f_class').value=j.vehicle_class;
+    _lslExtra={exterior_color:j.exterior_color,lsl_inventory_ref:j.lsl_inventory_ref,
+      bought_from:j.bought_from,buying_from_type:j.buying_from_type,acquired_at:j.acquired_at};
+    if(j.already_in_recon){
+      const d=j.already_in_recon;
+      pm.style.color='#fb923c';
+      pm.innerHTML='⚠ Already in recon — '+(j.label||sn)+' · step "'+(d.step_name||'?')+'" · <a href="/recon/u/'+encodeURIComponent(j.vin)+'" style="color:#60a5fa;text-decoration:underline">open the car ↗</a>';
+    }else{
+      pm.style.color='#22c55e';pm.textContent='✓ Pulled from LSL: '+(j.label||sn)+(j.exterior_color?(' · '+j.exterior_color):'');
+    }
+  }catch(e){pm.style.color='#fb923c';pm.textContent='LSL lookup error';}
+}
 async function addUnit(){
   const g=id=>document.getElementById(id).value.trim();
-  const body={vin:g('f_vin'),year:g('f_year'),stock_no:g('f_stock'),make:g('f_make'),
+  const body=Object.assign({vin:g('f_vin'),year:g('f_year'),stock_no:g('f_stock'),make:g('f_make'),
     model:g('f_model'),trim:g('f_trim'),miles:g('f_miles'),purchase_cost:g('f_cost'),
-    vehicle_class:document.getElementById('f_class').value};
-  if(body.vin.length<11){showErr('VIN required (>= 11 chars)');return;}
+    vehicle_class:document.getElementById('f_class').value}, _lslExtra);
+  if(body.vin.length<11){showErr('VIN required — type a stock # and Pull from LSL, or enter the VIN');return;}
   try{
     const r=await fetch('/api/recon/add-unit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const j=await r.json();
@@ -337,6 +373,38 @@ function applyFilters(){
     tr.style.display=(!q || tr.getAttribute('data-search').indexOf(q)>=0)?'':'none';
   });
 }
+var _searchT=null;
+function onSearch(){
+  applyFilters();
+  clearTimeout(_searchT);
+  var q=(document.getElementById('search').value||'').trim();
+  var box=document.getElementById('searchResults');
+  if(q.length<2){ if(box){box.style.display='none';box.innerHTML='';} return; }
+  _searchT=setTimeout(function(){ runSearch(q); }, 220);
+}
+async function runSearch(q){
+  var box=document.getElementById('searchResults'); if(!box) return;
+  try{
+    const r=await fetch('/api/recon/search?q='+encodeURIComponent(q));
+    const j=await r.json();
+    var rows=(j&&j.rows)||[];
+    if(!rows.length){ box.innerHTML='<div style="padding:10px 12px;color:#6b7280;font-size:13px">No vehicles match "'+q+'" in any status.</div>'; box.style.display='block'; return; }
+    var html='<div style="padding:6px 12px;color:#6b7280;font-size:11px;border-bottom:1px solid #eee">'+rows.length+' match'+(rows.length>1?'es':'')+' · searching all statuses</div>';
+    rows.forEach(function(u){
+      var veh=(((u.year||'')+' '+(u.make||'')+' '+(u.model||'')).trim())||u.vin;
+      html+='<a href="/recon/u/'+encodeURIComponent(u.vin)+'" style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #f3f4f6;text-decoration:none;color:#111">'
+        +'<span style="width:9px;height:9px;border-radius:50%;background:'+(u.dot||'#cbd5e1')+';flex:none"></span>'
+        +'<span style="flex:1;min-width:0"><b style="font-size:13px">'+veh+'</b>'
+        +'<span style="display:block;font-size:11px;color:#6b7280">'+(u.stock_no||'—')+' · '+u.vin+'</span></span>'
+        +'<span style="font-size:11px;color:#374151;text-align:right;flex:none">'+(u.step_name||'')+'<br><span style="color:#9ca3af">'+(u.status||'')+'</span></span></a>';
+    });
+    box.innerHTML=html; box.style.display='block';
+  }catch(e){ box.style.display='none'; }
+}
+document.addEventListener('click',function(e){
+  var box=document.getElementById('searchResults'); var sb=document.querySelector('.searchbar');
+  if(box&&sb&&!sb.contains(e.target)){ box.style.display='none'; }
+});
 (function(){try{
   sessionStorage.setItem('reconStep','{{ sel }}');   /* remember the step for the car-page back button */
   var q=sessionStorage.getItem('reconSearch')||'';

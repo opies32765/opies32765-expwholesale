@@ -1,0 +1,72 @@
+Received: from a9-86.smtp-out.amazonses.com (54.240.9.86)
+        by cloudflare-email.net (cloudflare) id OoZQx9LjyLut
+        for <recon@experience-wholesale.net>; Fri, 26 Jun 2026 21:11:45 +0000
+ARC-Seal: i=1; a=rsa-sha256; s=cf2024-1; d=cloudflare-email.net; cv=none;
+	b=KjX5nltE0G7DRTdxqDkHcVYnMuIOrtfz620QOmVGMRce7xiKdvH6Sf2zRu7fPgz726J7N3txG
+	etF8R0ae537q18lmOTuDhpAQOQZpvmRcVHPDlLwLQjUqUId4QTX9accZz6tgOXNXK0MFfReg4cB
+	6O4vY3IAlvT55A/jOfCmihNLpswDlaK2bj1AMRBk2a9O3wScOnuhPw8WzgUbb3kagp0OjftIkbh
+	a6iI+xysl/uX4AttbrAisXCUTzJeQVEKCVzBKrRewlsoHP/aBGjIbdmZ92dcsT3ByNtzZUwEGkj
+	y9a7zzofaa8COzj0Q6u5Z6sBqLcFhH5DswYsuGVuP6+g==;
+ARC-Message-Signature: i=1; a=rsa-sha256; s=cf2024-1; d=cloudflare-email.net; c=relaxed/relaxed;
+	h=Date:Subject:To:From:from:reply-to:cc:resent-date:resent-from:resent-to
+	:resent-cc:in-reply-to:references:list-id:list-help:list-subscribe
+	:list-post:list-owner:list-archive; t=1782508305; x=1783113105; bh=6+Bja7pj
+	HK5Cu1wCLDi8f0xTd/gU2VIXbtEQzDbfSB4=; b=EKN2ue4BVkHRtXqQrmwbKUml+Yqc9bvGOk7
+	vdkYlo8HR6LJoMSWFtNemIwnYkrMuzonOZNt7fJUJ3Z5mp26AWZMyuzwMJ3tvjIoNgWnpVTSjqJ
+	tM4+VREof07rv5HXUW9307GM2IzxLunF7dSniTgCUjSU6ndVDMWN8GB55sutsCFX+lD+ze2KvHf
+	7QPdQO1gcNjHmPRf/a1HX0muk2Op0pn1kl56A7kJaofC3FRmpUlF03O5qQLgE9jFh/9deTPD/Do
+	IB5pwMvFJqaoHkeZNMT7nYZt/jxJBZ8lISYRS1SrMB61afJt9lYDxruHKxN/5Q1zk2/mFIsbfAF
+	Qse7qQg==;
+ARC-Authentication-Results: i=1; mx.cloudflare.net;
+	dkim=pass header.d=experience-wholesale.net header.s=resend header.b=JWJSK14s;
+	dkim=pass header.d=amazonses.com header.s=224i4yxa5dv7c2xz3womw6peuasteono header.b=IP+8kjqs;
+	dmarc=pass header.from=experience-wholesale.net policy.dmarc=quarantine;
+	spf=none (mx.cloudflare.net: no SPF records found for postmaster@a9-86.smtp-out.amazonses.com) smtp.helo=a9-86.smtp-out.amazonses.com;
+	spf=pass (mx.cloudflare.net: domain of 0100019f0598e202-8d1a0d7a-cad8-45e1-a066-c731d0b4e4c8-000000@send.experience-wholesale.net designates 54.240.9.86 as permitted sender) smtp.mailfrom=0100019f0598e202-8d1a0d7a-cad8-45e1-a066-c731d0b4e4c8-000000@send.experience-wholesale.net;
+	arc=none smtp.remote-ip=54.240.9.86
+Received-SPF: pass (mx.cloudflare.net: domain of 0100019f0598e202-8d1a0d7a-cad8-45e1-a066-c731d0b4e4c8-000000@send.experience-wholesale.net designates 54.240.9.86 as permitted sender)
+	receiver=mx.cloudflare.net; client-ip=54.240.9.86; envelope-from="0100019f0598e202-8d1a0d7a-cad8-45e1-a066-c731d0b4e4c8-000000@send.experience-wholesale.net"; helo=a9-86.smtp-out.amazonses.com;
+Authentication-Results: mx.cloudflare.net;
+	dkim=pass header.d=experience-wholesale.net header.s=resend header.b=JWJSK14s;
+	dkim=pass header.d=amazonses.com header.s=224i4yxa5dv7c2xz3womw6peuasteono header.b=IP+8kjqs;
+	dmarc=pass header.from=experience-wholesale.net policy.dmarc=quarantine;
+	spf=none (mx.cloudflare.net: no SPF records found for postmaster@a9-86.smtp-out.amazonses.com) smtp.helo=a9-86.smtp-out.amazonses.com;
+	spf=pass (mx.cloudflare.net: domain of 0100019f0598e202-8d1a0d7a-cad8-45e1-a066-c731d0b4e4c8-000000@send.experience-wholesale.net designates 54.240.9.86 as permitted sender) smtp.mailfrom=0100019f0598e202-8d1a0d7a-cad8-45e1-a066-c731d0b4e4c8-000000@send.experience-wholesale.net;
+	arc=none smtp.remote-ip=54.240.9.86
+X-CF-SpamH-Score: 1
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple; s=resend;
+	d=experience-wholesale.net; t=1782505333;
+	h=From:To:Subject:Message-ID:Date:MIME-Version:Content-Type;
+	bh=6+Bja7pjHK5Cu1wCLDi8f0xTd/gU2VIXbtEQzDbfSB4=;
+	b=JWJSK14soYTPpgESJcxCrIm6maqronZ5HbeV2m5xwPyTybLPhAZz5/h2WdnRsrfS
+	6uTZxdTIEOh3LbgrRep5gDKrPQFSXptgG7PyzodiTUXhhCNiAKuzO5+O8LgZlqieqwt
+	yI0HFJfUToVaK9iCs+LeCDV8QSsvCz9igvIkKwCg=
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple;
+	s=224i4yxa5dv7c2xz3womw6peuasteono; d=amazonses.com; t=1782505333;
+	h=From:To:Subject:Message-ID:Date:MIME-Version:Content-Type:Feedback-ID;
+	bh=6+Bja7pjHK5Cu1wCLDi8f0xTd/gU2VIXbtEQzDbfSB4=;
+	b=IP+8kjqsafR05up+wfFacZbYDmCJnVyJrSszltCO8S4nHEG/Hpb1SO1m1CoVoDXc
+	jm3m7mPHStqNYGnkchhXjZwlMVDjGzRfMzGd2NGMYE5DNRXjihljtbzD9kpRct0Erfr
+	u0IS1J0LWOOOSCcXi8NW2yjBrNzrY05LQunVcEok=
+From: Experience Wholesale <bids@experience-wholesale.net>
+To: recon@experience-wholesale.net
+Subject: BOL path test
+Message-ID: <0100019f0598e202-8d1a0d7a-cad8-45e1-a066-c731d0b4e4c8-000000@email.amazonses.com>
+Date: Fri, 26 Jun 2026 20:22:13 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="--_NmP-fe21fea2d6930928-Part_1"
+Feedback-ID: :1.us-east-1.HrftnyL+WsKhbThzlrugP4zhkFvwFNLHEtV3ecVjzPDUiI3vpj/KvgotbeVRzAHIp5c2s4mqPyjoGgtizxpQmaFeOGQyKj/0hnYCSFwtFUx9YH1nDd7BXx0pZ8cawZrVTVfHvjOXITLy0Ni6rOsyUB8fx1qZsUfOKpEebmDl6SE=:1.us-east-1.epbACCJLarUaEI78XZoGREJ9LamRjxMH5pM2kZb64rA=:AmazonSES
+X-SES-Outgoing: 2026.06.26-54.240.9.86
+
+----_NmP-fe21fea2d6930928-Part_1
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+test BOL
+----_NmP-fe21fea2d6930928-Part_1
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<p>test BOL</p>
+----_NmP-fe21fea2d6930928-Part_1--

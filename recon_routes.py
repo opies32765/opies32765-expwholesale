@@ -58,7 +58,7 @@ DOT_COLORS = {
     'all': '#e23b3b', 'dealer_to_dealer': '#e23b3b', 'dealer_to_home': '#e23b3b',
     'indiv_to_dealer': '#e23b3b', 'indiv_to_home': '#e23b3b',
     'in_transport': '#eab308', 'arrived_dealer': '#22c55e',
-    'arrived_home': '#3b82f6', 'ready': '#8b5cf6', 'picked_up': '#9ca3af',
+    'arrived_home': '#3b82f6', 'recon': '#f97316', 'ready': '#8b5cf6', 'picked_up': '#9ca3af',
 }
 
 # Board pipeline laid out as ordered STAGES (arrows render between stages on the
@@ -70,6 +70,7 @@ RECON_FLOW = [
     ['dealer_to_dealer', 'dealer_to_home', 'indiv_to_dealer', 'indiv_to_home'],
     ['in_transport'],
     ['arrived_home'],
+    ['recon'],  # RECON_LANE_2026_06_26 — in-recon at home base
     ['ready'],
     ['picked_up'],
     ['arrived_dealer'],
@@ -1071,20 +1072,35 @@ def api_recipient_delete():
 
 @bp.route('/recon/out-for-recon')
 def out_for_recon_tab():
+    # RECON_GARAGE_FILTER_2026_06_26: filter the out-for-recon list by shop/garage
+    garage = (request.args.get('garage') or '').strip()
     db = _db()
     cur = db.cursor()
     try:
-        cur.execute("""SELECT u.*, sd.name AS step_name FROM recon_units u
-                         LEFT JOIN recon_step_defs sd ON sd.id=u.current_step_id
-                        WHERE u.store_id=%s AND u.out_for_recon_at IS NOT NULL
-                        ORDER BY u.out_for_recon_at""", (STORE_ID,))
+        cur.execute("""SELECT out_for_recon_to AS g, count(*) AS c FROM recon_units
+                        WHERE store_id=%s AND out_for_recon_at IS NOT NULL
+                          AND COALESCE(out_for_recon_to,'') <> ''
+                        GROUP BY out_for_recon_to ORDER BY lower(out_for_recon_to)""", (STORE_ID,))
+        garages = [dict(r) for r in cur.fetchall()]
+        if garage:
+            cur.execute("""SELECT u.*, sd.name AS step_name FROM recon_units u
+                             LEFT JOIN recon_step_defs sd ON sd.id=u.current_step_id
+                            WHERE u.store_id=%s AND u.out_for_recon_at IS NOT NULL
+                              AND lower(COALESCE(u.out_for_recon_to,''))=lower(%s)
+                            ORDER BY u.out_for_recon_at""", (STORE_ID, garage))
+        else:
+            cur.execute("""SELECT u.*, sd.name AS step_name FROM recon_units u
+                             LEFT JOIN recon_step_defs sd ON sd.id=u.current_step_id
+                            WHERE u.store_id=%s AND u.out_for_recon_at IS NOT NULL
+                            ORDER BY u.out_for_recon_at""", (STORE_ID,))
         rows = [dict(r) for r in cur.fetchall()]
     finally:
         db.close()
     now = _utcnow()
     for u in rows:
         u['out_days'] = round(_days(u.get('out_for_recon_at'), now) or 0, 1)
-    return render_template('recon/out_for_recon.html', rows=rows, now=now)
+    return render_template('recon/out_for_recon.html', rows=rows, now=now,
+                           garages=garages, sel_garage=garage)
 
 
 @bp.route('/api/recon/board')
@@ -1201,6 +1217,88 @@ def unit_detail(key):
 # ============================================================================
 # MANUAL UNIT ENTRY (Phase 1 — operator seeds the board by hand)
 # ============================================================================
+@bp.route('/api/recon/search')
+def api_recon_search():
+    """RECON_SEARCH_ALL_2026_06_26: find a unit by VIN/stock/make/model/year across
+    ALL statuses (incl. sold/removed/off-board), not just the open board rows."""
+    q = (request.args.get('q') or '').strip()
+    if len(q) < 2:
+        return jsonify({'ok': True, 'rows': []})
+    like = '%' + q.lower() + '%'
+    db = _db(); cur = db.cursor()
+    try:
+        cur.execute("SELECT u.id, u.vin, u.stock_no, u.year, u.make, u.model, u.exterior_color, "
+                    "u.status, sd.code AS step_code, COALESCE(sd.name,'') AS step_name "
+                    "FROM recon_units u LEFT JOIN recon_step_defs sd ON sd.id=u.current_step_id "
+                    "WHERE u.store_id=%s AND ("
+                    "lower(u.vin) LIKE %s OR lower(COALESCE(u.stock_no,'')) LIKE %s "
+                    "OR lower(COALESCE(u.make,'')) LIKE %s OR lower(COALESCE(u.model,'')) LIKE %s "
+                    "OR CAST(u.year AS text) LIKE %s) "
+                    "ORDER BY u.updated_at DESC NULLS LAST LIMIT 80",
+                    (STORE_ID, like, like, like, like, like))
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        db.close()
+    for r in rows:
+        r['dot'] = DOT_COLORS.get(r.get('step_code'), '#cbd5e1')
+    return jsonify({'ok': True, 'rows': rows})
+
+
+@bp.route('/api/recon/lsl-stock-lookup')
+def api_lsl_stock_lookup():
+    """RECON_STOCK_LOOKUP_2026_06_26: type a stock # -> pull that vehicle from LSL
+    (read-only inventory) so the Add modal can auto-fill. Mirrors the field
+    mapping the LSL sync uses (HR6-safe: LSL opened read-only)."""
+    sn = (request.args.get('stock') or '').strip()
+    if not sn:
+        return jsonify({'ok': False, 'error': 'stock number required'}), 400
+    _EXOTIC = {'maserati', 'bentley', 'ferrari', 'lamborghini', 'rolls-royce',
+               'aston martin', 'mclaren', 'bugatti'}
+    try:
+        conn = _lsl_conn()
+        row = conn.execute(
+            "SELECT id, stock_no, vin_no, group_model_trim_year, vehicle_make_name, "
+            "group_model_name, exterior_color, usage, purchase_cost, source, "
+            "purchased_from_type, datetime(created_at) AS cdt "
+            "FROM inventory WHERE stock_no = ? COLLATE NOCASE "
+            "ORDER BY created_at DESC LIMIT 1", (sn,)).fetchone()
+        conn.close()
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'LSL lookup failed: %s' % e}), 200
+    if not row:
+        return jsonify({'ok': False, 'error': 'No vehicle in LSL for stock #%s' % sn}), 200
+    mk = row['vehicle_make_name']
+    md = (row['group_model_name'] or '').replace(mk or '', '').strip() or row['group_model_name']
+    ym = _re.search(r'(19|20)\d\d', row['group_model_trim_year'] or '')
+    year = int(ym.group(0)) if ym else None
+    bft = 'Individual' if (row['purchased_from_type'] or '').lower() == 'individual' else 'Dealer'
+    cls = 'exotic' if (mk or '').lower() in _EXOTIC else 'highline'
+    vin = (row['vin_no'] or '').strip().upper()
+    dup = None
+    try:
+        rdb = _db(); rc = rdb.cursor()
+        rc.execute("SELECT u.id, u.status, COALESCE(s.name,'') AS step_name "
+                   "FROM recon_units u LEFT JOIN recon_step_defs s ON s.id=u.current_step_id "
+                   "WHERE u.vin=%s AND u.status IN "
+                   "('in_transit_stage0','in_recon','frontline_ready','on_hold') "
+                   "ORDER BY u.id DESC LIMIT 1", (vin,))
+        rr2 = rc.fetchone()
+        rdb.close()
+        if rr2:
+            dup = {'unit_id': rr2['id'], 'status': rr2['status'], 'step_name': rr2['step_name']}
+    except Exception:
+        dup = None
+    return jsonify({
+        'ok': True, 'vin': vin, 'stock_no': row['stock_no'], 'year': year, 'already_in_recon': dup,
+        'make': mk, 'model': md, 'trim': None,
+        'exterior_color': row['exterior_color'], 'miles': row['usage'],
+        'purchase_cost': row['purchase_cost'], 'vehicle_class': cls,
+        'bought_from': row['source'], 'buying_from_type': bft,
+        'lsl_inventory_ref': row['id'], 'acquired_at': row['cdt'],
+        'label': ('%s %s %s' % (year or '', mk or '', md or '')).strip(),
+    })
+
+
 @bp.route('/api/recon/add-unit', methods=['POST'])
 def api_add_unit():
     data = request.get_json(silent=True) or request.form
@@ -1229,15 +1327,24 @@ def api_add_unit():
     purchase_cost = _f(data.get('purchase_cost'))
     vclass = (data.get('vehicle_class') or 'highline').strip()
     is_exotic = vclass == 'exotic'
+    # Carried over when the row was pulled from LSL by stock # so stock-added
+    # cars get the same LSL deep-link + transport auto-fill as synced ones.
+    exterior_color = (data.get('exterior_color') or '').strip() or None
+    lsl_inventory_ref = _i(data.get('lsl_inventory_ref'))
+    bought_from = (data.get('bought_from') or '').strip() or None
+    buying_from_type = (data.get('buying_from_type') or '').strip() or None
+    acquired_at = (data.get('acquired_at') or '').strip() or None
 
     db = _db()
     cur = db.cursor()
     try:
+        # ADD_UNIT_INTO_ALL_2026_06_26: manual/stock adds land in the live "New"
+        # lane (code='all'), NOT the inactive off-board 'intake' step.
         cur.execute("SELECT id, sla_hours, sla_hours_exotic FROM recon_step_defs "
-                    "WHERE store_id=%s AND code='intake'", (STORE_ID,))
+                    "WHERE store_id=%s AND code='all'", (STORE_ID,))
         st = cur.fetchone()
         if not st:
-            return jsonify({'error': 'intake step missing — run the migration'}), 500
+            return jsonify({'error': 'New step missing — run the migration'}), 500
         intake_id = st['id']
         now = _utcnow()
         sla = st['sla_hours_exotic'] if is_exotic else st['sla_hours']
@@ -1245,13 +1352,23 @@ def api_add_unit():
         cur.execute("""
             INSERT INTO recon_units
                 (vin, stock_no, year, make, model, trim, miles, purchase_cost,
-                 vehicle_class, is_exotic, entered_recon_at, current_step_id,
-                 current_step_entered_at, status, source, recon_token)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'in_recon','manual',%s)
+                 vehicle_class, is_exotic, exterior_color, lsl_inventory_ref,
+                 bought_from, buying_from_type, acquired_at,
+                 entered_recon_at, current_step_id, current_step_entered_at,
+                 status, source, recon_token)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,
+                    %s,%s,%s,%s,
+                    %s,%s,COALESCE(%s::timestamptz, %s),
+                    %s,%s,%s,
+                    'in_recon','manual',%s)
             RETURNING id
         """, (vin, stock_no, year, make, model, trim, miles, purchase_cost,
-              vclass, is_exotic, now, intake_id, now, secrets.token_urlsafe(16)))
+              vclass, is_exotic, exterior_color, lsl_inventory_ref,
+              bought_from, buying_from_type, acquired_at, now,
+              now, intake_id, now,
+              secrets.token_urlsafe(16)))
         unit_id = cur.fetchone()['id']
+        cur.execute("INSERT INTO recon_seen (vin) VALUES (%s) ON CONFLICT (vin) DO NOTHING", (vin,))
         cur.execute("""INSERT INTO recon_step_events
                           (unit_id, step_id, entered_at, moved_by, move_reason)
                        VALUES (%s,%s,%s,%s,'manual_add') RETURNING id""",
@@ -2013,3 +2130,335 @@ def api_scan_miles():
         return jsonify({'ok': True, 'miles': int(m.group(0))})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ============================================================================
+# RECON_BOL_INBOX_2026_06_26 — inbound Bill-of-Lading email pipeline.
+# Trucking co emails recon@experience-wholesale.net -> Cloudflare Email Routing
+# -> tiny Worker POSTs the raw email here -> the 9B reads each doc -> VIN/stock#
+# matched to a recon car -> doc attached + note, else queued as 'needs_match'.
+# All LSL/9B usage is read-only/vision; nothing blocks enrichment.
+# ============================================================================
+from flask import send_file
+import re as _bre, json as _bjson, uuid as _buuid, os as _bos, subprocess as _bsub, tempfile as _btemp, glob as _bglob, email as _bemail
+from email import policy as _bpolicy
+
+_BOL_DIR = _bos.path.join(RECON_MEDIA_DIR, 'bol')
+_VINRE = _bre.compile(r'^[A-HJ-NPR-Z0-9]{17}$')
+_BOL_OPEN_ORDER = "(status NOT IN ('removed','sold')) DESC, id DESC"
+
+
+def _bol_extract(file_bytes, content_type):
+    """9B reads a BOL doc (image or PDF) -> {vins, stocks, label}."""
+    from app import gemini_call
+    prompt = (
+        "This image is a vehicle transport document (Bill of Lading, dispatch / load "
+        "sheet, gate pass, or shipping confirmation). For EVERY vehicle listed, extract "
+        "the 17-character VIN (only A-Z and 0-9; the letters I, O, Q never appear in a "
+        "VIN), any stock number (often like LL##### or a short code), and the "
+        "year/make/model. Reply with ONLY compact JSON and nothing else: "
+        '{"vins":["..."],"stocks":["..."],"label":"<first vehicle year make model>"}. '
+        'If there are no vehicles, reply {"vins":[],"stocks":[],"label":""}.'
+    )
+    imgs = []
+    ct = (content_type or '').lower()
+    if 'pdf' in ct or file_bytes[:5] == b'%PDF-':
+        with _btemp.TemporaryDirectory() as td:
+            pin = _bos.path.join(td, 'in.pdf')
+            with open(pin, 'wb') as f:
+                f.write(file_bytes)
+            try:
+                _bsub.run(['pdftoppm', '-png', '-r', '150', '-l', '5', pin, _bos.path.join(td, 'pg')],
+                          check=True, timeout=90)
+                for p in sorted(_bglob.glob(_bos.path.join(td, 'pg*.png')))[:5]:
+                    imgs.append((open(p, 'rb').read(), 'image/png'))
+            except Exception as e:
+                print('[bol] pdftoppm failed: %s' % e, flush=True)
+    elif 'image' in ct:
+        imgs.append((file_bytes, ct if '/' in ct else 'image/jpeg'))
+    vins, stocks, label = set(), set(), ''
+    for (data, mime) in imgs:
+        try:
+            out = gemini_call(prompt, image_bytes=data, mime=mime, model='gemini-2.5-flash',
+                              max_tokens=900, temperature=0, img_max_dim=2400, img_quality=90)
+        except Exception as e:
+            print('[bol] 9B error: %s' % e, flush=True)
+            continue
+        if not out:
+            continue
+        m = _bre.search(r'\{.*\}', out, _bre.S)
+        if not m:
+            continue
+        try:
+            d = _bjson.loads(m.group(0))
+        except Exception:
+            continue
+        for v in (d.get('vins') or []):
+            v = str(v).strip().upper().replace(' ', '')
+            if _VINRE.match(v):
+                vins.add(v)
+        for s in (d.get('stocks') or []):
+            s = str(s).strip().upper()
+            if s and len(s) <= 16:
+                stocks.add(s)
+        if not label and d.get('label'):
+            label = str(d['label']).strip()
+    return {'vins': sorted(vins), 'stocks': sorted(stocks), 'label': label}
+
+
+def _bol_match_unit(cur, vins, stocks):
+    for v in vins:
+        cur.execute("SELECT id, stock_no, year, make, model, current_step_id FROM recon_units "
+                    "WHERE vin=%s ORDER BY " + _BOL_OPEN_ORDER + " LIMIT 1", (v,))
+        u = cur.fetchone()
+        if u:
+            return u
+    for s in stocks:
+        cur.execute("SELECT id, stock_no, year, make, model, current_step_id FROM recon_units "
+                    "WHERE UPPER(stock_no)=%s ORDER BY " + _BOL_OPEN_ORDER + " LIMIT 1", (s,))
+        u = cur.fetchone()
+        if u:
+            return u
+    return None
+
+
+def _bol_attach(cur, unit, bol_id, subject, saved):
+    for i, s in enumerate(saved):
+        url = '/api/recon/bol/%d/doc/%d' % (bol_id, i)
+        cap = ('BOL: ' + (subject[:70] or 'document')) if 'pdf' not in (s.get('content_type') or '') \
+              else ('BOL (PDF): ' + (subject[:60] or 'document'))
+        cur.execute("INSERT INTO recon_photos (unit_id, local_path, url, caption, uploaded_by) "
+                    "VALUES (%s,%s,%s,%s,'email_bol')", (unit['id'], s.get('path'), url, cap))
+
+
+@bp.route('/api/recon/inbound-email', methods=['POST'])
+def api_inbound_email():
+    """Inbound BOL email from the Cloudflare Email Worker. Auth: X-Recon-Inbound."""
+    secret = (_bos.environ.get('EW_RECON_INBOUND_SECRET') or '').strip()
+    if not secret or (request.headers.get('X-Recon-Inbound') or '').strip() != secret:
+        return jsonify({'error': 'bad auth'}), 401
+    raw = request.get_data() or b''
+    try:
+        msg = _bemail.message_from_bytes(raw, policy=_bpolicy.default)
+    except Exception:
+        msg = None
+    hfrom = (request.headers.get('X-Mail-From') or (msg.get('From') if msg else '') or '').strip()
+    hto = (request.headers.get('X-Mail-To') or (msg.get('To') if msg else '') or '').strip()
+    subject = ((msg.get('Subject') if msg else '') or request.headers.get('X-Mail-Subject') or '').strip()
+    body_text, atts = '', []
+    if msg:
+        for part in msg.walk():
+            ctype = (part.get_content_type() or '').lower()
+            disp = part.get_content_disposition()
+            if ctype == 'text/plain' and disp != 'attachment':
+                try:
+                    body_text += (part.get_content() or '')
+                except Exception:
+                    pass
+            elif disp == 'attachment' or ctype in ('application/pdf', 'image/jpeg', 'image/jpg', 'image/png'):
+                try:
+                    payload = part.get_payload(decode=True)
+                    if payload and len(payload) < 25 * 1024 * 1024:
+                        atts.append((part.get_filename() or ('doc.' + ctype.split('/')[-1]), ctype, payload))
+                except Exception:
+                    pass
+    # persist raw + attachments
+    bdir = _bos.path.join(_BOL_DIR, _buuid.uuid4().hex)
+    _bos.makedirs(bdir, exist_ok=True)
+    try:
+        with open(_bos.path.join(bdir, 'raw.eml'), 'wb') as f:
+            f.write(raw)
+    except Exception:
+        pass
+    saved = []
+    for i, (fn, ct, data) in enumerate(atts):
+        ext = '.pdf' if 'pdf' in ct else ('.' + (ct.split('/')[-1] if '/' in ct else 'bin'))
+        sp = _bos.path.join(bdir, 'doc%d%s' % (i, ext))
+        try:
+            with open(sp, 'wb') as f:
+                f.write(data)
+            saved.append({'filename': fn, 'path': sp, 'content_type': ct})
+        except Exception:
+            pass
+    # VIN/stock from body (regex) + each attachment (9B)
+    vins, stocks, label = set(), set(), ''
+    for m in _bre.findall(r'[A-HJ-NPR-Z0-9]{17}', (body_text or '').upper()):
+        if _VINRE.match(m):
+            vins.add(m)
+    for m in _bre.findall(r'\bLL\d{3,6}\b', (body_text or '').upper()):
+        stocks.add(m)
+    for (fn, ct, data) in atts:
+        ex = _bol_extract(data, ct)
+        vins.update(ex['vins'])
+        stocks.update(ex['stocks'])
+        if not label and ex['label']:
+            label = ex['label']
+    db = _db(); cur = db.cursor()
+    try:
+        unit = _bol_match_unit(cur, sorted(vins), sorted(stocks))
+        status = 'matched' if unit else ('needs_match' if (vins or stocks) else 'no_vin')
+        cur.execute("""INSERT INTO recon_inbound_bol
+              (from_addr, to_addr, subject, status, matched_unit_id, extracted_vin,
+               extracted_stock, extracted_label, body_text, attach_count, raw_path, attachments)
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (hfrom[:300], hto[:300], subject[:500], status, (unit['id'] if unit else None),
+                     (sorted(vins)[0] if vins else None), (sorted(stocks)[0] if stocks else None),
+                     label[:200], (body_text or '')[:4000], len(saved),
+                     _bos.path.join(bdir, 'raw.eml'), _bjson.dumps(saved)))
+        bol_id = cur.fetchone()['id']
+        if unit:
+            _bol_attach(cur, unit, bol_id, subject, saved)
+            note = '\U0001f4c4 BOL received from %s%s — auto-matched & attached' % (
+                hfrom or 'carrier', (' (%s)' % subject[:60]) if subject else '')
+            cur.execute("INSERT INTO recon_notes (unit_id, step_id, author, body, category) "
+                        "VALUES (%s,%s,'email_bol',%s,'general')", (unit['id'], unit['current_step_id'], note))
+            try:
+                cur.execute("UPDATE recon_units SET has_bol=TRUE WHERE id=%s", (unit['id'],))
+            except Exception:
+                pass
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({'ok': True, 'bol_id': bol_id, 'matched': bool(unit),
+                    'unit_id': (unit['id'] if unit else None), 'status': status,
+                    'vins': sorted(vins), 'stocks': sorted(stocks)})
+
+
+@bp.route('/recon/bol-inbox')
+def bol_inbox():
+    db = _db(); cur = db.cursor()
+    try:
+        cur.execute("""SELECT b.*, u.stock_no AS u_stock, u.vin AS u_vin, u.make AS u_make,
+                              u.model AS u_model, u.year AS u_year
+                         FROM recon_inbound_bol b LEFT JOIN recon_units u ON u.id=b.matched_unit_id
+                        ORDER BY b.created_at DESC LIMIT 300""")
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        db.close()
+    for r in rows:
+        a = r.get('attachments')
+        if isinstance(a, str):
+            try:
+                a = _bjson.loads(a or '[]')
+            except Exception:
+                a = []
+        r['attachments'] = a or []
+    nmatch = sum(1 for r in rows if r['status'] == 'needs_match')
+    return render_template('recon/bol_inbox.html', rows=rows, nmatch=nmatch)
+
+
+@bp.route('/api/recon/bol/<int:bol_id>/assign', methods=['POST'])
+def api_bol_assign(bol_id):
+    data = request.get_json(silent=True) or request.form
+    key = (data.get('stock_or_vin') or '').strip().upper()
+    if not key:
+        return jsonify({'error': 'enter a stock # or VIN'}), 400
+    db = _db(); cur = db.cursor()
+    try:
+        cur.execute("SELECT id, subject, from_addr, attachments FROM recon_inbound_bol WHERE id=%s", (bol_id,))
+        bol = cur.fetchone()
+        if not bol:
+            return jsonify({'error': 'BOL not found'}), 404
+        cur.execute("SELECT id, current_step_id FROM recon_units WHERE vin=%s OR UPPER(stock_no)=%s "
+                    "ORDER BY " + _BOL_OPEN_ORDER + " LIMIT 1", (key, key))
+        unit = cur.fetchone()
+        if not unit:
+            return jsonify({'ok': False, 'error': 'no recon car matches %s' % key}), 200
+        atts = bol['attachments'] if isinstance(bol['attachments'], list) else _bjson.loads(bol['attachments'] or '[]')
+        _bol_attach(cur, unit, bol_id, bol['subject'] or '', atts)
+        cur.execute("INSERT INTO recon_notes (unit_id, step_id, author, body, category) "
+                    "VALUES (%s,%s,'email_bol',%s,'general')",
+                    (unit['id'], unit['current_step_id'], '\U0001f4c4 BOL from %s manually assigned' % (bol['from_addr'] or 'carrier')))
+        cur.execute("UPDATE recon_inbound_bol SET status='matched', matched_unit_id=%s WHERE id=%s", (unit['id'], bol_id))
+        try:
+            cur.execute("UPDATE recon_units SET has_bol=TRUE WHERE id=%s", (unit['id'],))
+        except Exception:
+            pass
+        db.commit()
+    finally:
+        db.close()
+    return jsonify({'ok': True, 'unit_id': unit['id']})
+
+
+@bp.route('/api/recon/bol/<int:bol_id>/doc/<int:n>')
+def api_bol_doc(bol_id, n):
+    db = _db(); cur = db.cursor()
+    try:
+        cur.execute("SELECT attachments FROM recon_inbound_bol WHERE id=%s", (bol_id,))
+        r = cur.fetchone()
+    finally:
+        db.close()
+    if not r:
+        abort(404)
+    atts = r['attachments'] if isinstance(r['attachments'], list) else _bjson.loads(r['attachments'] or '[]')
+    if n < 0 or n >= len(atts):
+        abort(404)
+    s = atts[n]
+    p, ct = s.get('path'), (s.get('content_type') or 'application/octet-stream')
+    if not p or not _bos.path.exists(p):
+        abort(404)
+    return send_file(p, mimetype=ct, download_name=(s.get('filename') or ('doc%d' % n)))
+
+
+# ============================================================================
+# RECON_CHECKIN_2026_06_26 — mobile scan-to-check-in. Pick a status, scan the
+# VIN (9B vision, from anywhere on the car), and the car auto-moves to that
+# status. The page then calls the canonical /api/recon/<id>/move so all the
+# move side-effects (timers, emails, push) fire exactly as a manual move.
+# ============================================================================
+@bp.route('/recon/checkin')
+def recon_checkin_page():
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT code, name FROM recon_step_defs WHERE store_id=%s AND active=true "
+                    "ORDER BY sort_order", (STORE_ID,))
+        steps = [dict(r) for r in cur.fetchall()]
+    finally:
+        db.close()
+    return render_template('recon/checkin.html', steps=steps, dot_colors=DOT_COLORS)
+
+
+@bp.route('/api/recon/checkin-scan', methods=['POST'])
+def api_checkin_scan():
+    """Scan a VIN photo (9B) -> find the recon car. No move here; the page calls
+    /api/recon/<id>/move next so the full move logic runs."""
+    import re as _cre
+    f = request.files.get('photo')
+    vin = (request.form.get('vin') or '').strip().upper()
+    if f is not None and not vin:
+        raw = f.read()
+        if len(raw) < 200:
+            return jsonify({'ok': False, 'error': 'image too small — retake the photo'})
+        try:
+            res = _scan_image(raw,
+                "Read the 17-character VIN from this photo of a car, its door-jamb "
+                "sticker, windshield plate, or the dash. A VIN is exactly 17 characters "
+                "of uppercase letters and digits and never uses the letters I, O or Q. "
+                "Reply with ONLY the VIN, nothing else. If you cannot clearly read a "
+                "17-character VIN, reply NONE.", f.mimetype)
+        except Exception as e:
+            return jsonify({'ok': False, 'error': 'scan failed: %s' % e})
+        txt = (res or '').strip().upper().replace(' ', '').replace('-', '')
+        m = _cre.search(r'[A-HJ-NPR-Z0-9]{17}', txt)
+        vin = m.group(0) if m else ''
+    if len(vin) != 17:
+        return jsonify({'ok': False, 'error': 'could not read a VIN — get a closer, clearer shot of the VIN'})
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT id, year, make, model, stock_no, current_step_id FROM recon_units "
+                    "WHERE vin=%s ORDER BY (status NOT IN ('removed','sold')) DESC, id DESC LIMIT 1", (vin,))
+        u = cur.fetchone()
+        cur_name = None
+        if u and u.get('current_step_id'):
+            cur.execute("SELECT name FROM recon_step_defs WHERE id=%s", (u['current_step_id'],))
+            sr = cur.fetchone()
+            cur_name = sr['name'] if sr else None
+    finally:
+        db.close()
+    if not u:
+        return jsonify({'ok': False, 'error': 'VIN %s is not on the recon board' % vin, 'vin': vin})
+    label = ('%s %s %s' % (u.get('year') or '', u.get('make') or '', u.get('model') or '')).strip()
+    return jsonify({'ok': True, 'vin': vin, 'unit_id': u['id'], 'stock_no': u.get('stock_no'),
+                    'label': label, 'current_step': cur_name})

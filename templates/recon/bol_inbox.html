@@ -1,0 +1,65 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BOL Inbox · Recon</title>
+<style>
+body{margin:0;font:14px/1.45 system-ui,Segoe UI,Roboto,Arial;background:#f6f7f9;color:#111}
+.top{display:flex;align-items:center;gap:14px;padding:13px 20px;background:#0f172a;color:#fff;position:sticky;top:0;z-index:5}
+.top a{color:#93c5fd;text-decoration:none;font-weight:600}
+.top .muted{color:#cbd5e1;font-size:12px}
+.wrap{max-width:1100px;margin:18px auto;padding:0 16px}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;margin-bottom:12px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+.row{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.veh{font-weight:700}
+.muted{color:#6b7280;font-size:12px}
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700}
+.b-matched{background:#dcfce7;color:#166534}
+.b-need{background:#fef3c7;color:#92400e}
+.b-novin{background:#f3f4f6;color:#6b7280}
+.docs a{display:inline-block;margin:5px 6px 0 0;padding:4px 9px;border:1px solid #d1d5db;border-radius:7px;text-decoration:none;color:#1d4ed8;font-size:12px;background:#f8fafc}
+.assign{margin-top:8px;display:flex;gap:6px;justify-content:flex-end}
+.assign input{padding:6px 9px;border:1px solid #d1d5db;border-radius:7px;font-size:13px;width:150px}
+.assign button{padding:6px 12px;border:0;border-radius:7px;background:#0f172a;color:#fff;font-weight:600;cursor:pointer}
+.car{margin-top:6px;padding:7px 11px;background:#eff6ff;border-radius:8px;display:inline-block}
+.car a{text-decoration:none;color:#111}
+</style></head><body>
+<div class="top"><a href="/recon">← Recon board</a><b>📄 BOL Inbox</b><span class="muted">{{ rows|length }} emails · {{ nmatch }} need a match</span></div>
+<div class="wrap">
+{% for r in rows %}
+  <div class="card" id="bol{{ r.id }}">
+    <div class="row">
+      <div style="flex:1;min-width:240px">
+        <div class="veh">{{ r.subject or '(no subject)' }}</div>
+        <div class="muted">from {{ r.from_addr or '—' }} · {{ r.created_at.strftime('%b %d, %I:%M %p') if r.created_at else '' }}</div>
+        <div class="muted">9B read → VIN: <b>{{ r.extracted_vin or '—' }}</b> · Stock: <b>{{ r.extracted_stock or '—' }}</b>{% if r.extracted_label %} · {{ r.extracted_label }}{% endif %}</div>
+        <div class="docs">{% for a in r.attachments %}<a href="/api/recon/bol/{{ r.id }}/doc/{{ loop.index0 }}" target="_blank">📎 {{ a.filename or 'doc' }}</a>{% else %}<span class="muted">no attachments</span>{% endfor %}</div>
+      </div>
+      <div style="text-align:right;min-width:200px">
+        {% if r.status=='matched' %}
+          <span class="badge b-matched">✓ Matched & attached</span>
+          {% if r.u_vin %}<div class="car"><a href="/recon/u/{{ r.u_vin }}"><b>{{ r.u_year or '' }} {{ r.u_make or '' }} {{ r.u_model or '' }}</b><br><span class="muted">{{ r.u_stock or r.u_vin }} — open car ↗</span></a></div>{% endif %}
+        {% elif r.status=='needs_match' %}
+          <span class="badge b-need">Needs match</span>
+          <div class="assign"><input id="k{{ r.id }}" placeholder="stock # or VIN" value="{{ r.extracted_stock or r.extracted_vin or '' }}" autocomplete="off"><button onclick="assign({{ r.id }})">Assign</button></div>
+          <div class="muted" id="m{{ r.id }}" style="margin-top:4px"></div>
+        {% else %}
+          <span class="badge b-novin">No VIN found</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+{% else %}
+  <div class="card muted">No BOL emails yet. Once Cloudflare Email Routing is on, anything sent to <b>recon@experience-wholesale.net</b> lands here, gets read by the 9B, and auto-attaches to the matching car.</div>
+{% endfor %}
+</div>
+<script>
+async function assign(id){
+  var el=document.getElementById('k'+id), m=document.getElementById('m'+id);
+  var k=(el.value||'').trim(); if(!k) return;
+  if(m) m.textContent='Matching…';
+  try{
+    const r=await fetch('/api/recon/bol/'+id+'/assign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stock_or_vin:k})});
+    const j=await r.json();
+    if(j.ok){ location.reload(); } else { if(m){m.style.color='#b45309';m.textContent=j.error||'no match';} }
+  }catch(e){ if(m){m.textContent='error';} }
+}
+</script>
+</body></html>

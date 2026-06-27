@@ -1,0 +1,75 @@
+Received: from a9-68.smtp-out.amazonses.com (54.240.9.68)
+        by cloudflare-email.net (cloudflare) id Yg1kxp43dVSz
+        for <recon@experience-wholesale.net>; Fri, 26 Jun 2026 20:41:26 +0000
+ARC-Seal: i=1; a=rsa-sha256; s=cf2024-1; d=cloudflare-email.net; cv=none;
+	b=OLzylNQ9sM7F59IbWkXJOk1/AYlHyLle/lf0mAJCeMq3rRR8xcr+NUoZI+XFgP19uUtqSepmT
+	VWe37hcWLGxmK5H00+OmD5KZ+EW2o1XMmqHDO6v9nV7taGbZf6GgaBr5bunUMCgIl0FTtwM93CH
+	+HMwl8OCRLbwngRqnL/2cpj9LfmDOWZ2i1FM/icsxR0f+10wBporMMlATFg2REDJtuU561HHQsr
+	qyN1Jf2gTEB0oEqjyF7P4jwkadx3BB6bJv0wC7Y70v+AsV1YZQAzbSxGCbXCSaJVBQNRXaB+/gd
+	IXe0Q3HZfk9ZrpfSn8ClgVWy46hfXKpv1lo9/ETeHgEg==;
+ARC-Message-Signature: i=1; a=rsa-sha256; s=cf2024-1; d=cloudflare-email.net; c=relaxed/relaxed;
+	h=Date:Subject:To:From:from:reply-to:cc:resent-date:resent-from:resent-to
+	:resent-cc:in-reply-to:references:list-id:list-help:list-subscribe
+	:list-post:list-owner:list-archive; t=1782506486; x=1783111286; bh=1BtcHtdE
+	22f2p6up8K0eppy27Zoa/wYKR474KzAkSvA=; b=dDEQm9JsyQCohxqg2P40tVR1HJmhYkG47Qq
+	dmv1YB9N+j4CYrffpW17euu1xsSYoR4ZOcp3UTQLSEVSXTKKog8LZ1/U7fnEONJrN4n87uI71Wg
+	KujjTAMMYHT3slT32XnIeM+hW0BbVbMFEOUxLBIsxfwuqlWaJFhKgZSl9LO7xIOfhrDXgurpDSW
+	NB/LYjVWCwvcmUqclV0yiR+iQK7Kc41eoZRlAyLKFiIv0HwrdVYDrLyVlyJk1/GIHKLUlu5ausx
+	NlrvaS/qSYDZVQ2N9bJAuDrFRsS3WMoyezGjJEqVIZA/9x05JH0SAxFxUzTIUabUm+Rg97C1dRe
+	L5JcnXA==;
+ARC-Authentication-Results: i=1; mx.cloudflare.net;
+	dkim=pass header.d=experience-wholesale.net header.s=resend header.b=NkvGWbWK;
+	dkim=pass header.d=amazonses.com header.s=224i4yxa5dv7c2xz3womw6peuasteono header.b=ej7nVMPI;
+	dmarc=pass header.from=experience-wholesale.net policy.dmarc=quarantine;
+	spf=none (mx.cloudflare.net: no SPF records found for postmaster@a9-68.smtp-out.amazonses.com) smtp.helo=a9-68.smtp-out.amazonses.com;
+	spf=pass (mx.cloudflare.net: domain of 0100019f05aa7929-bfebb69d-509d-42f8-942e-4b638280bd02-000000@send.experience-wholesale.net designates 54.240.9.68 as permitted sender) smtp.mailfrom=0100019f05aa7929-bfebb69d-509d-42f8-942e-4b638280bd02-000000@send.experience-wholesale.net;
+	arc=none smtp.remote-ip=54.240.9.68
+Received-SPF: pass (mx.cloudflare.net: domain of 0100019f05aa7929-bfebb69d-509d-42f8-942e-4b638280bd02-000000@send.experience-wholesale.net designates 54.240.9.68 as permitted sender)
+	receiver=mx.cloudflare.net; client-ip=54.240.9.68; envelope-from="0100019f05aa7929-bfebb69d-509d-42f8-942e-4b638280bd02-000000@send.experience-wholesale.net"; helo=a9-68.smtp-out.amazonses.com;
+Authentication-Results: mx.cloudflare.net;
+	dkim=pass header.d=experience-wholesale.net header.s=resend header.b=NkvGWbWK;
+	dkim=pass header.d=amazonses.com header.s=224i4yxa5dv7c2xz3womw6peuasteono header.b=ej7nVMPI;
+	dmarc=pass header.from=experience-wholesale.net policy.dmarc=quarantine;
+	spf=none (mx.cloudflare.net: no SPF records found for postmaster@a9-68.smtp-out.amazonses.com) smtp.helo=a9-68.smtp-out.amazonses.com;
+	spf=pass (mx.cloudflare.net: domain of 0100019f05aa7929-bfebb69d-509d-42f8-942e-4b638280bd02-000000@send.experience-wholesale.net designates 54.240.9.68 as permitted sender) smtp.mailfrom=0100019f05aa7929-bfebb69d-509d-42f8-942e-4b638280bd02-000000@send.experience-wholesale.net;
+	arc=none smtp.remote-ip=54.240.9.68
+X-CF-SpamH-Score: 1
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple; s=resend;
+	d=experience-wholesale.net; t=1782506486;
+	h=From:To:Subject:Message-ID:Date:MIME-Version:Content-Type;
+	bh=1BtcHtdE22f2p6up8K0eppy27Zoa/wYKR474KzAkSvA=;
+	b=NkvGWbWKEovhZCdsCXDjRgIxKUp0LI3mN+0lTUO0lPYBER6E9S2BrYIfjHiWY/VD
+	zqUu5gFEvCqD2R8cO8EoYamDTqo3+AD5pLyFNxiGGg7oG0F9pC6uPfN9Onjt2VHMqrC
+	cw8UVJAmH42xP3GLXRXqfBHrMQoYy0RFhzLX5amU=
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple;
+	s=224i4yxa5dv7c2xz3womw6peuasteono; d=amazonses.com; t=1782506486;
+	h=From:To:Subject:Message-ID:Date:MIME-Version:Content-Type:Feedback-ID;
+	bh=1BtcHtdE22f2p6up8K0eppy27Zoa/wYKR474KzAkSvA=;
+	b=ej7nVMPI51g0YTSumw1zdGjUGxckXnyCKtHdzG/fF2bW4yNUKGqWohhSETXJpufY
+	CwxFvJtXuNHTaFGrNNuLT74BTokKU5Tn2K/cum2JMXYpXjEcZJ/kUt0HFjVjaeP0dcm
+	U55i0cRKqtbIY5kjFYJ890Mx4j6hPFgI8BJfpENk=
+From: Experience Wholesale <bids@experience-wholesale.net>
+To: recon@experience-wholesale.net
+Subject: BOL - Porsche Taycan 4S (LIVE PATH TEST)
+Message-ID: <0100019f05aa7929-bfebb69d-509d-42f8-942e-4b638280bd02-000000@email.amazonses.com>
+Date: Fri, 26 Jun 2026 20:41:26 +0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="--_NmP-51d61b0d621c807f-Part_1"
+Feedback-ID: :1.us-east-1.HrftnyL+WsKhbThzlrugP4zhkFvwFNLHEtV3ecVjzPDUiI3vpj/KvgotbeVRzAHIp5c2s4mqPyjoGgtizxpQmaFeOGQyKj/0hnYCSFwtFUx9YH1nDd7BXx0pZ8cawZrVTVfHvjOXITLy0Ni6rOsyUB8fx1qZsUfOKpEebmDl6SE=:1.us-east-1.epbACCJLarUaEI78XZoGREJ9LamRjxMH5pM2kZb64rA=:AmazonSES
+X-SES-Outgoing: 2026.06.26-54.240.9.68
+
+----_NmP-51d61b0d621c807f-Part_1
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Bill of lading. VIN WP0AB2Y10PSA35095 - 2023 Porsche Taycan 4S, stock =
+LL37037. Pickup: Germain Honda Beavercreek. Deliver: Experience Wholesale =
+Home Base. Carrier: Reliable Auto Transport.
+----_NmP-51d61b0d621c807f-Part_1
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<p>Bill of lading. VIN WP0AB2Y10PSA35095 - 2023 Porsche Taycan 4S, stock =
+LL37037.</p>
+----_NmP-51d61b0d621c807f-Part_1--

@@ -180,6 +180,7 @@ _PUBLIC_PREFIXES = (
     '/.well-known/', '/api/tesla-vin/', '/share/', '/m/',
     '/s/',  # ROLLING_PORTAL_2026_06_02 — per-sender rolling portal (token-auth in handler)
     '/api/quick-extract',
+    '/api/recon/inbound-email',  # BOL inbound (CF Email Worker; X-Recon-Inbound secret)
     '/api/voice/', '/api/app/', '/v/', '/mobile/ewbot', '/model/ewbot', '/ewbot', '/m/ewbot', '/bot',  # VOICE_AGENT_2026_05_20 EW bot — partner-token auth inside handlers
     '/wholesaler-',  # public self-serve signup at /wholesaler-<reviewer>/signup; admin routes still gated by _require_admin().
 )
