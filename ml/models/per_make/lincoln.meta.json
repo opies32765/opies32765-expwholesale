@@ -1,9 +1,9 @@
 {
   "make_name": "LINCOLN",
-  "trained_at": "2026-06-26T08:31:31.282523Z",
-  "n_total": 181,
+  "trained_at": "2026-06-27T08:31:12.960812Z",
+  "n_total": 182,
   "n_train": 174,
-  "n_test": 7,
+  "n_test": 8,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -211,49 +211,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1305.0,
-    "mape_pct": 4.05,
-    "r2": 0.9641,
-    "within_5pct": 57.1,
+    "mae_dollars": 1317.0,
+    "mape_pct": 3.9,
+    "r2": 0.9536,
+    "within_5pct": 75.0,
     "within_10pct": 100.0
   },
   "baseline_metrics": {
-    "mae_dollars": 2073.0,
-    "mape_pct": 6.11,
+    "mae_dollars": 2111.0,
+    "mape_pct": 6.21,
     "ratio": 1.0062
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.39527982473373413
+      "importance": 0.46083205938339233
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.3634492754936218
+      "importance": 0.2800728976726532
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.16551044583320618
-    },
-    {
-      "name": "original_msrp",
-      "importance": 0.014232020825147629
+      "importance": 0.18747776746749878
     },
     {
       "name": "model_name_Continental Reserve Sedan",
-      "importance": 0.005228930152952671
+      "importance": 0.011607722379267216
     },
     {
-      "name": "supplier_name_Parks Ford",
-      "importance": 0.003979641478508711
+      "name": "original_msrp",
+      "importance": 0.009685486555099487
     },
     {
-      "name": "year",
-      "importance": 0.003847741521894932
+      "name": "supplier_name_Infiniti Of Coconut Creek",
+      "importance": 0.006283011753112078
     },
     {
-      "name": "odometer",
-      "importance": 0.003579135984182358
+      "name": "supplier_name_Ed Voyles Chrysler Jeep",
+      "importance": 0.004913156386464834
+    },
+    {
+      "name": "model_name_MKC Reserve Sport Utility Vehicle",
+      "importance": 0.0034727344755083323
     }
   ]
 }

@@ -57,7 +57,7 @@ LSL_DB = os.environ.get('LSL_DB_PATH', '/opt/livesaleslog/crm.db')
 DOT_COLORS = {
     'all': '#e23b3b', 'dealer_to_dealer': '#e23b3b', 'dealer_to_home': '#e23b3b',
     'indiv_to_dealer': '#e23b3b', 'indiv_to_home': '#e23b3b',
-    'in_transport': '#eab308', 'arrived_dealer': '#22c55e',
+    'in_transport': '#eab308', 'in_transit_home': '#eab308', 'in_transit_dealer': '#f59e0b', 'arrived_dealer': '#22c55e',  # RECON_TRANSIT_SPLIT_2026_06_27
     'arrived_home': '#3b82f6', 'recon': '#f97316', 'ready': '#8b5cf6', 'picked_up': '#9ca3af',
 }
 
@@ -68,7 +68,7 @@ DOT_COLORS = {
 RECON_FLOW = [
     ['all'],
     ['dealer_to_dealer', 'dealer_to_home', 'indiv_to_dealer', 'indiv_to_home'],
-    ['in_transport'],
+    ['in_transit_home', 'in_transit_dealer'],
     ['arrived_home'],
     ['recon'],  # RECON_LANE_2026_06_26 — in-recon at home base
     ['ready'],
@@ -1626,6 +1626,10 @@ def api_move(unit_id):
             new_path = 'to_dealer'
         elif to_code in ('dealer_to_home', 'indiv_to_home'):
             new_path = 'to_home'
+        elif to_code == 'in_transit_dealer':
+            new_path = 'to_dealer'
+        elif to_code == 'in_transit_home':
+            new_path = 'to_home'
         if to_code in ('indiv_to_dealer', 'indiv_to_home'):
             new_bft = 'Individual'
         elif to_code in ('dealer_to_dealer', 'dealer_to_home'):
@@ -1637,7 +1641,7 @@ def api_move(unit_id):
         cur.execute("DELETE FROM recon_unit_active_steps WHERE unit_id=%s", (unit_id,))
         cur.execute("""UPDATE recon_units SET current_step_id=%s, current_step_entered_at=%s,
               path=%s, buying_from_type=%s, updated_at=now(),
-              in_transit_at=CASE WHEN %s='in_transport' AND in_transit_at IS NULL THEN %s ELSE in_transit_at END,
+              in_transit_at=CASE WHEN %s IN ('in_transit_home','in_transit_dealer') AND in_transit_at IS NULL THEN %s ELSE in_transit_at END,
               delivered_at=CASE WHEN %s IN ('arrived_home','arrived_dealer') AND delivered_at IS NULL THEN %s ELSE delivered_at END,
               entered_recon_at=CASE WHEN %s='arrived_home' AND entered_recon_at IS NULL THEN %s ELSE entered_recon_at END,
               frontline_ready_at=CASE WHEN %s='ready' AND frontline_ready_at IS NULL THEN %s ELSE frontline_ready_at END
@@ -2411,8 +2415,9 @@ def recon_checkin_page():
     db = _db()
     cur = db.cursor()
     try:
-        cur.execute("SELECT code, name FROM recon_step_defs WHERE store_id=%s AND active=true "
-                    "ORDER BY sort_order", (STORE_ID,))
+        # RECON_CHECKIN_REFINE_2026_06_27 — just the two home-base statuses
+        cur.execute("SELECT code, name FROM recon_step_defs WHERE store_id=%s "
+                    "AND code IN ('arrived_home','ready') ORDER BY sort_order", (STORE_ID,))
         steps = [dict(r) for r in cur.fetchall()]
     finally:
         db.close()

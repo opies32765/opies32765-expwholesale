@@ -8,22 +8,23 @@ body{margin:0;background:#11151a;color:#e5e7eb;font:15px/1.4 -apple-system,Segoe
 .topbar .brand{font-weight:800;font-size:18px}.brand .r{color:#e23b3b}
 .topbar a{color:#9ca3af;text-decoration:none;font-size:13px;margin-left:auto;border:1px solid #374151;padding:6px 12px;border-radius:8px}
 .wrap{max-width:560px;margin:0 auto;padding:16px 16px 80px}
-h1{font-size:18px;margin:0 0 4px}
+h1{font-size:19px;margin:0 0 4px}
 .sub{color:#9ca3af;font-size:13px;margin-bottom:6px}
-.lbl{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#6b7280;font-weight:700;margin:18px 0 9px}
-.steps{display:flex;flex-wrap:wrap;gap:8px}
-.sbtn{display:flex;align-items:center;gap:7px;padding:10px 13px;border-radius:12px;background:#1b212a;border:2px solid #232a34;color:#cbd5e1;font-weight:600;font-size:14px;cursor:pointer}
-.sbtn .d{width:11px;height:11px;border-radius:50%;flex:none}
-.sbtn.on{border-color:#fff;background:#2b333f;color:#fff}
-.scanbtn{margin-top:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:100%;padding:32px;border-radius:18px;background:linear-gradient(180deg,#e23b3b,#b01818);color:#fff;border:0;font-size:20px;font-weight:800;cursor:pointer;box-shadow:0 10px 30px rgba(226,59,59,.32)}
+.lbl{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#9ca3af;font-weight:700;margin:20px 0 10px}
+.steps{display:flex;flex-direction:column;gap:12px}
+.sbtn{display:flex;align-items:center;justify-content:center;gap:10px;padding:22px;border-radius:16px;background:#1b212a;border:2px solid #232a34;color:#cbd5e1;font-weight:700;font-size:19px;cursor:pointer;width:100%}
+.sbtn .d{width:14px;height:14px;border-radius:50%;flex:none}
+.sbtn.on{border-color:#fff;background:#2b333f;color:#fff;box-shadow:0 0 0 3px rgba(255,255,255,.08)}
+.scanbtn{margin-top:6px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:100%;padding:38px;border-radius:18px;background:linear-gradient(180deg,#e23b3b,#b01818);color:#fff;border:0;font-size:22px;font-weight:800;cursor:pointer;box-shadow:0 10px 30px rgba(226,59,59,.32)}
 .scanbtn:active{transform:scale(.99)}
-.scanbtn .big{font-size:44px;line-height:1}
+.scanbtn .big{font-size:50px;line-height:1}
 .scanbtn.busy{opacity:.65;pointer-events:none}
-.result{margin-top:16px;padding:15px 16px;border-radius:14px;font-weight:600;display:none;font-size:15px}
+.hint{margin-top:10px;text-align:center;color:#6b7280;font-size:12px}
+.result{margin-top:16px;padding:16px;border-radius:14px;font-weight:600;display:none;font-size:16px}
 .result.ok{background:#0c2a17;border:1px solid #16a34a;color:#d1fae5;display:block}
 .result.err{background:#2a1313;border:1px solid #b91c1c;color:#fecaca;display:block}
 .result.wait{background:#1b212a;border:1px solid #374151;color:#cbd5e1;display:block}
-.recent .it{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:10px 12px;background:#161b22;border:1px solid #232a34;border-radius:10px;margin-bottom:8px;font-size:13px}
+.recent .it{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:11px 13px;background:#161b22;border:1px solid #232a34;border-radius:10px;margin-bottom:8px;font-size:14px}
 .recent .it .v{color:#9ca3af;font-size:11px;font-family:ui-monospace,monospace}
 .recent .it .to{color:#86efac;font-weight:700;white-space:nowrap}
 </style>
@@ -32,12 +33,12 @@ h1{font-size:18px;margin:0 0 4px}
 <div class="topbar"><span class="brand"><span class="r">EW</span>RECON</span><a href="/recon">&larr; Board</a></div>
 <div class="wrap">
   <h1>📲 Vehicle Check-In</h1>
-  <div class="sub">Pick the status, then scan the VIN anywhere on the car — windshield, door-jamb, or dash. It moves automatically.</div>
+  <div class="sub">Pick the status, then scan the VIN — it moves the car automatically.</div>
 
   <div class="lbl">1 · Check car in to</div>
   <div class="steps" id="steps">
     {% for s in steps %}
-    <button class="sbtn {% if s.code=='arrived_home' %}on{% endif %}" data-code="{{ s.code }}" data-name="{{ s.name }}" onclick="pick(this)">
+    <button class="sbtn {% if loop.first %}on{% endif %}" data-code="{{ s.code }}" data-name="{{ s.name }}" onclick="pick(this)">
       <span class="d" style="background:{{ dot_colors.get(s.code,'#9ca3af') }}"></span>{{ s.name }}
     </button>
     {% endfor %}
@@ -48,7 +49,8 @@ h1{font-size:18px;margin:0 0 4px}
     <span class="big">📷</span>
     <span id="scanLbl">Scan VIN</span>
   </button>
-  <input id="photo" type="file" accept="image/*" capture="environment" style="display:none" onchange="onPhoto(this)">
+  <div class="hint">Opens your camera or photo library</div>
+  <input id="photo" type="file" accept="image/*" style="display:none" onchange="onPhoto(this)">
 
   <div class="result" id="result"></div>
 
@@ -58,7 +60,7 @@ h1{font-size:18px;margin:0 0 4px}
   </div>
 </div>
 <script>
-var selCode='arrived_home', selName='Arrived Home Base';
+var selCode='', selName='';
 (function(){var on=document.querySelector('.sbtn.on'); if(on){selCode=on.dataset.code;selName=on.dataset.name;}})();
 function pick(b){ document.querySelectorAll('.sbtn').forEach(function(x){x.classList.remove('on');}); b.classList.add('on'); selCode=b.dataset.code; selName=b.dataset.name; }
 function busy(b){ var btn=document.getElementById('scanBtn'); btn.classList.toggle('busy',b); document.getElementById('scanLbl').textContent=b?'Reading VIN…':'Scan VIN'; }

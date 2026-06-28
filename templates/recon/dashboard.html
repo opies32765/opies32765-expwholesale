@@ -22,6 +22,7 @@
   .top-right a:hover{color:#fff}
   .top-right a.logout{border:1px solid #4b5056;padding:5px 12px;border-radius:6px;color:#cbd5e1;text-decoration:none}
   .top-right a.logout:hover{color:#fff;border-color:#6b7280}
+  @media (min-width:760px){ .mobonly{display:none!important} }
   /* sub bar */
   .subbar{background:#fff;border-bottom:1px solid #d8dde2;padding:10px 18px;font-size:15px;font-weight:700;color:#c0392b}
   /* layout */
@@ -37,6 +38,11 @@
   aside.steps a.step.gate .nm::after{content:" ▣";color:#d97706;font-size:10px}
   aside.steps .flowarrow{display:flex;align-items:center;justify-content:center;height:26px;background:#fafbfc;border-bottom:1px solid #eef0f2;color:#e23b3b;font-size:22px;font-weight:800;line-height:1}
   aside.steps .flowarrow::before{content:"\2193"}
+  aside.steps .bsplit{font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#9ca3af;text-align:center;padding:8px 6px;background:#fafbfc;border-bottom:1px solid #eef0f2;font-weight:700}
+  aside.steps .bhdr{font-size:11px;font-weight:800;padding:8px 12px;color:#fff;letter-spacing:.3px}
+  aside.steps .bhdr.home{background:#2563eb}
+  aside.steps .bhdr.dealer{background:#16a34a}
+  aside.steps .bhdr.both{background:#475569}
   main{flex:1;min-width:0;padding:14px 18px 50px}
   .toolbar{display:flex;align-items:center;margin-bottom:10px}
   .toolbar h2{margin:0;font-size:14px;color:#6b7280;font-weight:600}
@@ -171,7 +177,7 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
   <a href="/recon" class="brand"><span class="r">EW</span>RECON</a>
   <div class="top-right">
     <span class="store">Experience Wholesale</span>
-    <a href="/recon/checkin" class="logout" style="border-color:#16a34a;color:#fff;font-weight:600">📲 Check-In</a>
+    <a href="/recon/checkin" class="logout mobonly" style="border-color:#16a34a;color:#fff;font-weight:600">📲 Check-In</a>
     <a href="/recon/transport" class="logout">🚚 Transport</a>
     <a href="/recon/out-for-recon" class="logout">🔧 Out for Recon</a>
     <a href="/recon/reports" class="logout">📊 Reports</a>
@@ -181,18 +187,28 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
 </div>
 
 <div class="layout">
-  <aside class="steps">
-    {% for grp in flow_groups %}
-      {% if not loop.first %}<div class="flowarrow" aria-hidden="true"></div>{% endif %}
-      {% for s in grp %}
-      <a class="step {% if s.is_gate %}gate{% endif %} {% if sel==s.code %}on{% endif %}" href="/recon?step={{ s.code }}">
-        <span class="n">{{ stepnum[s.code] }}</span>
-        <span class="sd" style="background:{{ dot_colors.get(s.code, '#cbd5e1') }}"></span>
-        <span class="nm">{{ s.name }}</span>
-        <span class="c {% if counts.get(s.code,0)==0 %}zero{% endif %}">{{ counts.get(s.code, 0) }}</span>
-      </a>
-      {% endfor %}
-    {% endfor %}
+  <aside class="steps">  {# RECON_BRANCH_2026_06_27 #}
+    <a class="step {% if sel=='all' %}on{% endif %}" href="/recon?step=all"><span class="sd" style="background:{{ dot_colors.get('all','#cbd5e1') }}"></span><span class="nm">New</span><span class="c {% if counts.get('all',0)==0 %}zero{% endif %}">{{ counts.get('all',0) }}</span></a>
+    <div class="flowarrow"></div>
+    <a class="step {% if sel=='dealer_to_dealer' %}on{% endif %}" href="/recon?step=dealer_to_dealer"><span class="sd" style="background:{{ dot_colors.get('dealer_to_dealer','#cbd5e1') }}"></span><span class="nm">Dealer → Dealer</span><span class="c {% if counts.get('dealer_to_dealer',0)==0 %}zero{% endif %}">{{ counts.get('dealer_to_dealer',0) }}</span></a>
+    <a class="step {% if sel=='dealer_to_home' %}on{% endif %}" href="/recon?step=dealer_to_home"><span class="sd" style="background:{{ dot_colors.get('dealer_to_home','#cbd5e1') }}"></span><span class="nm">Dealer → Home</span><span class="c {% if counts.get('dealer_to_home',0)==0 %}zero{% endif %}">{{ counts.get('dealer_to_home',0) }}</span></a>
+    <a class="step {% if sel=='indiv_to_dealer' %}on{% endif %}" href="/recon?step=indiv_to_dealer"><span class="sd" style="background:{{ dot_colors.get('indiv_to_dealer','#cbd5e1') }}"></span><span class="nm">Indiv → Dealer</span><span class="c {% if counts.get('indiv_to_dealer',0)==0 %}zero{% endif %}">{{ counts.get('indiv_to_dealer',0) }}</span></a>
+    <a class="step {% if sel=='indiv_to_home' %}on{% endif %}" href="/recon?step=indiv_to_home"><span class="sd" style="background:{{ dot_colors.get('indiv_to_home','#cbd5e1') }}"></span><span class="nm">Indiv → Home</span><span class="c {% if counts.get('indiv_to_home',0)==0 %}zero{% endif %}">{{ counts.get('indiv_to_home',0) }}</span></a>
+    <div class="bsplit">splits by destination</div>
+    <div class="bhdr home">🏠 To Home Base</div>
+    <a class="step {% if sel=='in_transit_home' %}on{% endif %}" href="/recon?step=in_transit_home"><span class="sd" style="background:{{ dot_colors.get('in_transit_home','#cbd5e1') }}"></span><span class="nm">In Transit → Home</span><span class="c {% if counts.get('in_transit_home',0)==0 %}zero{% endif %}">{{ counts.get('in_transit_home',0) }}</span></a>
+    <div class="flowarrow"></div>
+    <a class="step {% if sel=='arrived_home' %}on{% endif %}" href="/recon?step=arrived_home"><span class="sd" style="background:{{ dot_colors.get('arrived_home','#cbd5e1') }}"></span><span class="nm">Arrived Home Base</span><span class="c {% if counts.get('arrived_home',0)==0 %}zero{% endif %}">{{ counts.get('arrived_home',0) }}</span></a>
+    <div class="flowarrow"></div>
+    <a class="step {% if sel=='recon' %}on{% endif %}" href="/recon?step=recon"><span class="sd" style="background:{{ dot_colors.get('recon','#cbd5e1') }}"></span><span class="nm">Recon</span><span class="c {% if counts.get('recon',0)==0 %}zero{% endif %}">{{ counts.get('recon',0) }}</span></a>
+    <div class="flowarrow"></div>
+    <a class="step {% if sel=='ready' %}on{% endif %}" href="/recon?step=ready"><span class="sd" style="background:{{ dot_colors.get('ready','#cbd5e1') }}"></span><span class="nm">Ready for Pickup</span><span class="c {% if counts.get('ready',0)==0 %}zero{% endif %}">{{ counts.get('ready',0) }}</span></a>
+    <div class="flowarrow"></div>
+    <a class="step {% if sel=='picked_up' %}on{% endif %}" href="/recon?step=picked_up"><span class="sd" style="background:{{ dot_colors.get('picked_up','#cbd5e1') }}"></span><span class="nm">Picked Up</span><span class="c {% if counts.get('picked_up',0)==0 %}zero{% endif %}">{{ counts.get('picked_up',0) }}</span></a>
+    <div class="bhdr dealer">🏢 To Dealer (direct)</div>
+    <a class="step {% if sel=='in_transit_dealer' %}on{% endif %}" href="/recon?step=in_transit_dealer"><span class="sd" style="background:{{ dot_colors.get('in_transit_dealer','#cbd5e1') }}"></span><span class="nm">In Transit → Dealer</span><span class="c {% if counts.get('in_transit_dealer',0)==0 %}zero{% endif %}">{{ counts.get('in_transit_dealer',0) }}</span></a>
+    <div class="bhdr both">🏁 Both paths arrive here  {# RECON_CONVERGE_2026_06_27 #}</div>
+    <a class="step {% if sel=='arrived_dealer' %}on{% endif %}" href="/recon?step=arrived_dealer"><span class="sd" style="background:{{ dot_colors.get('arrived_dealer','#cbd5e1') }}"></span><span class="nm">Arrived at Dealer</span><span class="c {% if counts.get('arrived_dealer',0)==0 %}zero{% endif %}">{{ counts.get('arrived_dealer',0) }}</span></a>
   </aside>
 
   <main>
