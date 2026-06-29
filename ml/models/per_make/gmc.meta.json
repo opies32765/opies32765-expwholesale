@@ -1,9 +1,9 @@
 {
   "make_name": "GMC",
-  "trained_at": "2026-06-27T08:30:45.581257Z",
-  "n_total": 822,
+  "trained_at": "2026-06-28T08:30:55.271006Z",
+  "n_total": 823,
   "n_train": 727,
-  "n_test": 95,
+  "n_test": 96,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -217,49 +217,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2543.0,
-    "mape_pct": 5.95,
+    "mae_dollars": 2533.0,
+    "mape_pct": 5.85,
     "r2": 0.9755,
-    "within_5pct": 53.7,
-    "within_10pct": 88.4
+    "within_5pct": 53.1,
+    "within_10pct": 88.5
   },
   "baseline_metrics": {
-    "mae_dollars": 3223.0,
-    "mape_pct": 7.49,
+    "mae_dollars": 3253.0,
+    "mape_pct": 7.52,
     "ratio": 1.0594
   },
   "top_features": [
     {
       "name": "base_appraised_value",
-      "importance": 0.46952858567237854
+      "importance": 0.44443580508232117
     },
     {
       "name": "market_asking_price",
-      "importance": 0.23320305347442627
+      "importance": 0.24220436811447144
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.20649456977844238
+      "importance": 0.2198403924703598
     },
     {
       "name": "sold_year",
-      "importance": 0.017240993678569794
+      "importance": 0.01831803284585476
     },
     {
       "name": "original_msrp",
-      "importance": 0.008032475598156452
+      "importance": 0.007668230216950178
     },
     {
       "name": "odometer",
-      "importance": 0.004210702143609524
-    },
-    {
-      "name": "body_type_OTHER",
-      "importance": 0.0030183515045791864
+      "importance": 0.00389375863596797
     },
     {
       "name": "mileage_adjustment_value",
-      "importance": 0.002962072379887104
+      "importance": 0.0030061770230531693
+    },
+    {
+      "name": "model_name_Sierra 1500 SLT Pickup Truck Truck",
+      "importance": 0.0029891510494053364
     }
   ]
 }

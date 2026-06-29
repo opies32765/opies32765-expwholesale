@@ -1,9 +1,9 @@
 {
   "make_name": "ACURA",
-  "trained_at": "2026-06-27T08:31:10.327922Z",
-  "n_total": 232,
+  "trained_at": "2026-06-28T08:31:35.336663Z",
+  "n_total": 233,
   "n_train": 218,
-  "n_test": 14,
+  "n_test": 15,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,49 +215,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1710.0,
-    "mape_pct": 10.7,
-    "r2": 0.942,
-    "within_5pct": 50.0,
-    "within_10pct": 78.6
+    "mae_dollars": 6921.0,
+    "mape_pct": 11.75,
+    "r2": 0.8227,
+    "within_5pct": 40.0,
+    "within_10pct": 60.0
   },
   "baseline_metrics": {
-    "mae_dollars": 2273.0,
-    "mape_pct": 12.32,
+    "mae_dollars": 4887.0,
+    "mape_pct": 12.76,
     "ratio": 1.0181
   },
   "top_features": [
     {
       "name": "original_msrp",
-      "importance": 0.7683677673339844
+      "importance": 0.631621778011322
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.11869250237941742
-    },
-    {
-      "name": "base_appraised_value",
-      "importance": 0.04922992363572121
+      "importance": 0.20798014104366302
     },
     {
       "name": "market_asking_price",
-      "importance": 0.0327087938785553
+      "importance": 0.06177045777440071
+    },
+    {
+      "name": "base_appraised_value",
+      "importance": 0.052379537373781204
     },
     {
       "name": "model_name_TLX Technology Package Sedan",
-      "importance": 0.0021303563844412565
-    },
-    {
-      "name": "odometer",
-      "importance": 0.002123782876878977
+      "importance": 0.004076342098414898
     },
     {
       "name": "supplier_name_Manheim Orlando",
-      "importance": 0.0017966765444725752
+      "importance": 0.0035752851981669664
     },
     {
       "name": "days_on_lot",
-      "importance": 0.0016189104644581676
+      "importance": 0.00331383035518229
+    },
+    {
+      "name": "supplier_name_Mall Of Georgia Mazda",
+      "importance": 0.002655887044966221
     }
   ]
 }
