@@ -161,6 +161,21 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 .lightbox img{max-width:90vw;max-height:90vh;object-fit:contain;border-radius:8px}
 .lightbox-close{position:fixed;top:20px;right:24px;color:#fff;font-size:28px;cursor:pointer;opacity:.7;line-height:1}
 .lightbox-close:hover{opacity:1}
+.photos-chipbar{padding:8px 24px;background:#0e1420;border-bottom:1px solid #1e293b}
+.photos-chip{display:inline-flex;align-items:center;gap:8px;background:#13203a;border:1px solid #25406b;border-radius:8px;color:#cbd5e1;font-size:13px;font-weight:700;padding:7px 14px;cursor:pointer;font-family:'Inter',sans-serif}
+.photos-chip:hover{background:#1a2c4d;border-color:#3b82f6;color:#fff}
+.lb-nav{position:fixed;top:50%;transform:translateY(-50%);width:52px;height:84px;display:none;align-items:center;justify-content:center;background:rgba(15,23,42,.65);border:1px solid rgba(148,163,184,.25);border-radius:10px;color:#fff;font-size:40px;line-height:1;cursor:pointer;z-index:1002}
+.lb-nav:hover{background:rgba(30,58,95,.92)}
+.lb-prev{left:18px}.lb-next{right:18px}
+.lb-counter{position:fixed;top:22px;left:50%;transform:translateX(-50%);color:#e2e8f0;font-size:14px;font-weight:700;background:rgba(15,23,42,.7);padding:5px 12px;border-radius:20px;z-index:1002}
+.lb-share{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);display:none;align-items:center;gap:8px;color:#fff;font-size:13px;font-weight:600;background:rgba(15,23,42,.85);border:1px solid rgba(148,163,184,.3);padding:8px 14px;border-radius:8px;cursor:pointer;z-index:1002}
+.lb-share input{width:16px;height:16px;cursor:pointer}
+.lb-dealer{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);display:none;align-items:center;gap:8px;z-index:1002}
+.lb-dealer-btn{background:#16a34a;border:none;border-radius:8px;color:#fff;font-size:13px;font-weight:700;padding:9px 18px;cursor:pointer}
+.lb-dealer-btn:hover{background:#15803d}
+.lb-dealer-btn.added{background:#334155;cursor:default}
+.lb-dealer-btn:disabled{opacity:.85}
+@media(max-width:639px){.lb-nav{width:42px;height:64px;font-size:30px}.lb-prev{left:6px}.lb-next{right:6px}.photos-chipbar{padding:8px 12px}}
 .toast{position:fixed;bottom:24px;right:24px;background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:12px 20px;border-radius:8px;font-size:13px;font-weight:500;display:none;z-index:999}
 
 /* ====== RESPONSIVE ====== */
@@ -429,7 +444,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
       </div>
       <button class="qs-btn" id="shareBtn" onclick="openShareModal()" style="background:rgba(59,130,246,.12);color:#60a5fa;border-color:#3b82f6;margin-left:8px">Share</button>
     </div>
-    {% if bid.asking_price or bid.ai_price or (bid.bid_amount and bid.bid_sent_at) %}
+    {% if bid.asking_price or (bid.bid_amount and bid.bid_sent_at) %}
     <div style="width:100%;border-top:1px solid #1e293b;margin-top:8px;padding-top:8px;display:flex;gap:24px;font-size:13px">
       {% if bid.asking_price %}
       <div style="display:flex;gap:8px;align-items:center">
@@ -437,12 +452,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         <span style="color:#94a3b8;font-weight:700">${{ '{:,.0f}'.format(bid.asking_price) }}</span>
       </div>
       {% endif %}
-      {% if bid.ai_price %}
-      <div style="display:flex;gap:8px;align-items:center">
-        <span style="color:#7a9bb5">AI Price:</span>
-        <span style="color:#c084fc;font-weight:700">${{ '{:,.0f}'.format(bid.ai_price) }}</span>
-      </div>
-      {% endif %}
+      {# AI_PRICE_BAND_REMOVED_2026_06_30 (operator): AI price readout removed here -- redundant with the AI Assessment card below #}
       {% if bid.bid_amount and bid.bid_sent_at %}
       <div style="display:flex;gap:8px;align-items:center">
         <span style="color:#7a9bb5">Bid Sent:</span>
@@ -455,84 +465,19 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 
   <!-- SOURCE_STATUS_STRIP removed 2026-05-31 per operator: redundant with the source cards below; was showing the live enrichment trickle -->
 
-  <!-- ROW 2: Photos Strip (full-width, always visible) -->
-  {% if photos %}
-  {% set max_visible = 8 %}
-  {% set extra = photos|length - max_visible if photos|length > max_visible else 0 %}
-  <div class="photos-strip">
-    <div class="photos-top">
-      <span class="photos-label">Photos ({{ photos|length }})</span>
-      {% if extra > 0 %}
-      <button class="photos-toggle" id="photos-toggle-btn" onclick="toggleAllPhotos()">Show all {{ photos|length }}</button>
-      {% endif %}
-    </div>
-    <div class="photos-scroll" id="photos-scroll">
-      {% for photo in photos %}
-      {% set _src = photo.local_path or photo.url %}
-      <div class="photo-thumb{% if loop.index > max_visible %} photo-hidden{% endif %}{% if not photo.include_in_share %} photo-excluded{% endif %}"
-           id="photo-tile-{{ photo.id }}"
-           onclick="openLightbox('{{ _src|thumb_url('full') }}')"
-           style="position:relative">
-        <img src="{{ _src|thumb_url('strip') }}" alt="Vehicle photo" loading="lazy" referrerpolicy="no-referrer">
-        <label onclick="event.stopPropagation()"
-               style="position:absolute;bottom:4px;left:4px;right:4px;background:rgba(0,0,0,.75);color:#fff;padding:4px 6px;border-radius:5px;font-size:11px;font-weight:600;display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none">
-          <input type="checkbox"
-                 class="share-check"
-                 {% if photo.include_in_share %}checked{% endif %}
-                 onchange="setPhotoShare({{ photo.id }}, this.checked)"
-                 style="margin:0;cursor:pointer;width:14px;height:14px">
-          Include on share
-        </label>
-      </div>
-      {% endfor %}
-      {% if extra > 0 %}
-      <div class="photo-more" id="photo-more-btn" onclick="toggleAllPhotos()">+{{ extra }}</div>
-      {% endif %}
-    </div>
-    <style>
-      .photo-excluded img { opacity: .35; filter: grayscale(0.8); }
-      .photo-excluded label { background: rgba(127,29,29,.85) !important; }
-    </style>
-    <script>
-      // Explicit set (not toggle) — the checkbox.checked value IS the desired
-      // end state. POSTs the target value directly so multiple clicks can't
-      // leave the DB and UI out of sync.
-      function setPhotoShare(photoId, wantInclude) {
-        const tile = document.getElementById('photo-tile-' + photoId);
-        // Optimistic UI
-        if (wantInclude) tile.classList.remove('photo-excluded');
-        else tile.classList.add('photo-excluded');
-        fetch('/api/bid-photo/' + photoId + '/set-share', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({include: wantInclude})
-        })
-          .then(r => {
-            if (!r.ok) throw new Error('auth or server');
-            return r.json();
-          })
-          .then(d => {
-            if (!d.ok) throw new Error(d.error || 'unknown');
-            // Sync with server truth in case of race
-            if (d.include_in_share) tile.classList.remove('photo-excluded');
-            else tile.classList.add('photo-excluded');
-          })
-          .catch(e => {
-            alert('Could not save. You may need to log back in. Reloading…');
-            location.reload();
-          });
-      }
-    </script>
+  <!-- ROW 2: Photos chip (collapsed; ALL pics + dealer VIN-match) PHOTOS_CHIP_2026_06_30 / DEALER_INTO_CAROUSEL_2026_06_30 -->
+  <div class="photos-chipbar" id="photos-chipbar"{% if not photos %} style="display:none"{% endif %}>
+    <button type="button" id="photos-chip-btn" class="photos-chip" onclick="openPhotoCarousel(0)" title="View all photos">&#128247; Photos ({{ photos|length }})</button>
   </div>
-  {% endif %}
-
-  <!-- DEALER GALLERY: VIN-matched photos from tracked dealers (auto-loaded by JS) -->
-<div id="dealer-gallery-section" style="display:none;margin:0 0 12px 0;padding:12px;background:#0f1e0f;border:1px solid #1a3d1a;border-radius:8px">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-    <span style="font-size:13px;font-weight:700;color:#86efac">Photos from dealer gallery (VIN match)</span>
-    <button id="dealer-gallery-add-btn" onclick="addSelectedDealerPhotos()" style="padding:6px 14px;background:#16a34a;border:none;border-radius:6px;color:#fff;font-size:13px;font-weight:600;cursor:pointer" disabled>Add Selected (0)</button>
-  </div>
-  <div id="dealer-gallery-groups"></div>
+  <script>
+    window.BID_PHOTOS = [{% for photo in photos %}{% set _src = photo.local_path or photo.url %}{"kind":"customer","id":{{ photo.id }},"url":{{ _src|thumb_url('full')|tojson }},"share":{{ 'true' if photo.include_in_share else 'false' }}}{% if not loop.last %},{% endif %}{% endfor %}];
+    function setPhotoShare(photoId, wantInclude){
+      fetch('/api/bid-photo/'+photoId+'/set-share',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({include:wantInclude})})
+        .then(function(r){ if(!r.ok) throw new Error('auth'); return r.json(); })
+        .then(function(d){ if(!d.ok) throw new Error(d.error||'x'); var p=(window.BID_PHOTOS||[]).find(function(x){return x.id===photoId;}); if(p)p.share=!!d.include_in_share; })
+        .catch(function(e){ alert('Could not save. You may need to log back in. Reloading.'); location.reload(); });
+    }
+  </script>
 </div>
 
 <!-- DRAG-DROP UPLOAD ZONE -->
@@ -594,54 +539,27 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         dzText.textContent = "Drag photos here from Messages, Finder, or click to choose files";
       });
   }
+  // DEALER_INTO_CAROUSEL_2026_06_30: dealer VIN-match photos now live IN the
+  // collapsed Photos carousel (no green block). Fetch -> append to window.BID_PHOTOS
+  // as kind:"dealer" -> bump the chip count.
   fetch("/api/bid/" + BID_ID + "/dealer_gallery")
     .then(r => r.ok ? r.json() : {groups: []})
     .then(d => {
-      const section = document.getElementById("dealer-gallery-section");
-      const groupsDiv = document.getElementById("dealer-gallery-groups");
       if (!d.groups || !d.groups.length) return;
-      section.style.display = "block";
-      groupsDiv.innerHTML = d.groups.map(g => 
-        "<div class=\"dealer-gallery-group\">" +
-        "<div class=\"dealer-gallery-group-name\">" + escapeHtml(g.dealer_name) + " (" + g.photos.length + " photos)</div>" +
-        "<div class=\"dealer-gallery-thumbs\">" +
-        g.photos.map(url =>
-          "<div class=\"dealer-gallery-thumb\" data-url=\"" + escapeAttr(url) + "\" onclick=\"toggleDealerThumb(this)\">" +
-          "<img src=\"" + escapeAttr(url) + "\" referrerpolicy=\"no-referrer\" loading=\"lazy\">" +
-          "<span class=\"chk\">✓</span></div>"
-        ).join("") +
-        "</div></div>"
-      ).join("");
-    });
-  window.toggleDealerThumb = function(el) {
-    el.classList.toggle("selected");
-    const n = document.querySelectorAll(".dealer-gallery-thumb.selected").length;
-    const btn = document.getElementById("dealer-gallery-add-btn");
-    btn.disabled = n === 0;
-    btn.textContent = "Add Selected (" + n + ")";
-  };
-  window.addSelectedDealerPhotos = function() {
-    const urls = Array.from(document.querySelectorAll(".dealer-gallery-thumb.selected")).map(el => el.dataset.url);
-    if (!urls.length) return;
-    const btn = document.getElementById("dealer-gallery-add-btn");
-    btn.disabled = true;
-    btn.textContent = "Adding...";
-    fetch("/api/bid/" + BID_ID + "/add_dealer_photos", {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({urls})
-    })
+      window.BID_PHOTOS = window.BID_PHOTOS || [];
+      d.groups.forEach(g => (g.photos || []).forEach(url =>
+        window.BID_PHOTOS.push({kind:"dealer", url:url, dealer:g.dealer_name, added:false})));
+      if (typeof _lbSyncChip === "function") _lbSyncChip();
+    }).catch(function(){});
+  window.addDealerPhotoToBid = function(url, btn) {
+    if (!url) return;
+    btn.disabled = true; btn.textContent = "Adding...";
+    fetch("/api/bid/" + BID_ID + "/add_dealer_photos", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({urls:[url]})})
       .then(r => r.json())
-      .then(d => {
-        if (d.error) { alert(d.error); return; }
-        btn.textContent = "Added " + d.count + ". Reloading...";
-        setTimeout(() => location.reload(), 500);
-      })
-      .catch(e => {
-        alert("Failed: " + e.message);
-        btn.disabled = false;
-        btn.textContent = "Add Selected";
-      });
+      .then(d => { if (d.error) { alert(d.error); btn.disabled=false; btn.textContent="+ Add to bid"; return; }
+        var dp=(window.BID_PHOTOS||[]).find(function(x){return x.url===url;}); if(dp) dp.added=true;
+        btn.disabled=true; btn.textContent="✓ Added to bid"; btn.classList.add("added"); })
+      .catch(e => { alert("Failed: " + e.message); btn.disabled=false; btn.textContent="+ Add to bid"; });
   };
   function escapeHtml(s) {
     const d = document.createElement("div");
@@ -2951,9 +2869,14 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
 </script>
 
 <!-- Photo Lightbox -->
-<div class="lightbox" id="lightbox" onclick="closeLightbox()">
+<div class="lightbox" id="lightbox" onclick="if(event.target===this)closeLightbox()">
   <span class="lightbox-close" onclick="closeLightbox()">✕</span>
-  <img id="lightbox-img" src="" alt="">
+  <button type="button" class="lb-nav lb-prev" id="lb-prev" onclick="event.stopPropagation();lbStep(-1)" aria-label="Previous">&#8249;</button>
+  <img id="lightbox-img" src="" alt="" onclick="event.stopPropagation()">
+  <button type="button" class="lb-nav lb-next" id="lb-next" onclick="event.stopPropagation();lbStep(1)" aria-label="Next">&#8250;</button>
+  <div class="lb-counter" id="lb-counter" onclick="event.stopPropagation()"></div>
+  <label class="lb-share" id="lb-share" onclick="event.stopPropagation()"><input type="checkbox" id="lb-share-cb" onchange="lbToggleShare(this.checked)"> Include on share</label>
+  <div class="lb-dealer" id="lb-dealer" onclick="event.stopPropagation()"><button type="button" id="lb-dealer-btn" class="lb-dealer-btn">+ Add to bid</button></div>
 </div>
 
 <!-- Report Lightbox (scrollable, for tall Carfax/AutoCheck screenshots) -->
@@ -3306,14 +3229,61 @@ function toggleAllPhotos() {
   }
 }
 
-function openLightbox(url) {
+var _lbIdx = 0, _lbCarousel = false;
+function openLightbox(url) {            // single-image viewer (Carfax/AccuTrade/iPacket screenshots)
+  _lbCarousel = false;
   document.getElementById('lightbox-img').src = url;
+  ['lb-prev','lb-next','lb-counter','lb-share'].forEach(function(id){var e=document.getElementById(id); if(e) e.style.display='none';});
   document.getElementById('lightbox').classList.add('open');
 }
+function _lbSyncChip(){ var n=(window.BID_PHOTOS||[]).length, bar=document.getElementById('photos-chipbar'), b=document.getElementById('photos-chip-btn'); if(b) b.innerHTML='&#128247; Photos ('+n+')'; if(bar) bar.style.display = n>0 ? 'block' : 'none'; }
+function openPhotoCarousel(i){          // PHOTOS_CAROUSEL_2026_06_30: ALL pics (customer + dealer VIN-match)
+  var ph = window.BID_PHOTOS || []; if(!ph.length) return;
+  _lbCarousel = true; _lbIdx = Math.max(0, Math.min(i, ph.length-1));
+  _lbRenderCarousel();
+  document.getElementById('lightbox').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+function _lbRenderCarousel(){
+  var ph = window.BID_PHOTOS || []; if(!ph.length) return;
+  if(_lbIdx >= ph.length) _lbIdx = ph.length - 1; if(_lbIdx < 0) _lbIdx = 0;
+  var p = ph[_lbIdx], multi = ph.length > 1;
+  document.getElementById('lightbox-img').src = p.url;
+  var prev=document.getElementById('lb-prev'), next=document.getElementById('lb-next');
+  if(prev) prev.style.display = multi ? 'flex' : 'none';
+  if(next) next.style.display = multi ? 'flex' : 'none';
+  var c=document.getElementById('lb-counter');
+  if(c){ c.textContent=(_lbIdx+1)+' / '+ph.length+(p.kind==='dealer' ? ('  ·  dealer'+(p.dealer ? (': '+p.dealer) : '')) : ''); c.style.display='block'; }
+  var sw=document.getElementById('lb-share'), cb=document.getElementById('lb-share-cb'), da=document.getElementById('lb-dealer');
+  if(p.kind==='dealer'){
+    if(sw) sw.style.display='none';
+    if(da){ da.style.display='inline-flex';
+      var btn=document.getElementById('lb-dealer-btn');
+      if(btn){
+        if(p.added){ btn.disabled=true; btn.textContent='✓ Added to bid'; btn.classList.add('added'); }
+        else { btn.disabled=false; btn.textContent='+ Add to bid'; btn.classList.remove('added'); }
+        btn.onclick=function(e){ e.stopPropagation(); if(typeof addDealerPhotoToBid==='function') addDealerPhotoToBid(p.url, btn); };
+      }
+    }
+  } else {
+    if(da) da.style.display='none';
+    if(sw) sw.style.display='inline-flex';
+    if(cb){ cb.checked=!!p.share; cb.dataset.pid=p.id; }
+  }
+}
+function lbStep(d){ var ph=window.BID_PHOTOS||[]; if(!_lbCarousel||!ph.length) return; _lbIdx=(_lbIdx+d+ph.length)%ph.length; _lbRenderCarousel(); }
+function lbToggleShare(checked){ var cb=document.getElementById('lb-share-cb'); var pid=parseInt(cb&&cb.dataset.pid,10); if(pid && typeof setPhotoShare==='function') setPhotoShare(pid, checked); }
 function closeLightbox() {
   document.getElementById('lightbox').classList.remove('open');
   document.getElementById('lightbox-img').src = '';
+  _lbCarousel = false; document.body.style.overflow = '';
 }
+document.addEventListener('keydown', function(e){
+  var lb=document.getElementById('lightbox'); if(!lb || !lb.classList.contains('open')) return;
+  if(e.key==='Escape'){ closeLightbox(); }
+  else if(_lbCarousel && e.key==='ArrowLeft'){ e.preventDefault(); lbStep(-1); }
+  else if(_lbCarousel && e.key==='ArrowRight'){ e.preventDefault(); lbStep(1); }
+});
 function openReportLightbox(url) {
   document.getElementById('report-lightbox-img').src = url;
   document.getElementById('report-lightbox').style.display = 'block';

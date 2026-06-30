@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dealer Network · Members</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#eef0f2;color:#1f2937;font:13px/1.45 -apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  a{color:inherit;text-decoration:none}
+  .topbar{background:#2b2f33;color:#fff;display:flex;align-items:center;height:54px;padding:0 18px;gap:18px}
+  .brand{font-weight:800;font-size:18px}.brand .b{color:#3b82f6}
+  .topbar .nav{display:flex;gap:14px;margin-left:10px}
+  .topbar .nav a{color:#cbd5e1;font-size:13px;font-weight:600}
+  .topbar .nav a.on{color:#fff}
+  .topbar .back{color:#9ca3af;font-size:12px;margin-left:auto}
+  .wrap{max-width:1180px;margin:18px auto;padding:0 16px}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:#6b7280;font-size:12px;margin-bottom:14px}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+  th,td{padding:9px 11px;text-align:left;border-bottom:1px solid #f0f1f3;white-space:nowrap}
+  th{background:#f8fafc;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#6b7280}
+  tr:hover td{background:#fafbfc}
+  td.dealer{white-space:normal;font-weight:700;max-width:280px}
+  .pill{display:inline-block;border-radius:999px;background:#eff6ff;color:#1e40af;padding:2px 9px;font-weight:700;font-size:12px}
+  .pill.zero{background:#f3f4f6;color:#9ca3af}
+  .badge{display:inline-block;border-radius:6px;padding:2px 7px;font-size:11px;font-weight:700;background:#dbeafe;color:#1e40af}
+  .muted{color:#9ca3af}
+  .view{color:#2563eb;font-weight:700}
+  .empty{padding:40px;text-align:center;color:#9ca3af}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="brand">Dealer<span class="b">Price</span> · Network</span>
+    <span class="nav"><a href="/network/applications">Applications</a><a class="on" href="/network/members">Members</a></span>
+    <a class="back" href="/">← EW Dashboard</a>
+  </div>
+  <div class="wrap">
+    <h1>Onboarded dealers</h1>
+    <div class="sub">Approved network members and the bids they&apos;ve sent in. Click a dealer to see their full packet + bid history.</div>
+
+    {% if rows %}
+    <table>
+      <thead><tr>
+        <th>Dealer</th><th>Contact</th><th>Approved</th><th>By</th><th>Bids</th><th>Last bid</th><th>Submits</th><th></th>
+      </tr></thead>
+      <tbody>
+        {% for m in rows %}
+        <tr>
+          <td class="dealer">{{ m.dealership_name or '—' }}
+            {% if m.is_existing %}<span class="badge">EXISTING</span>{% endif %}
+            {% if m.status != 'active' %}<span class="badge" style="background:#fee2e2;color:#991b1b">{{ m.status }}</span>{% endif %}
+          </td>
+          <td>{{ m.contact_name or '' }}<br><span class="muted">{{ m.contact_email or m.contact_phone or '' }}</span></td>
+          <td>{{ m.approved_at.strftime('%m/%d/%y') if m.approved_at else '' }}</td>
+          <td class="muted">{{ m.approved_by or '' }}</td>
+          <td><span class="pill {{ 'zero' if not m.bid_count }}">{{ m.bid_count or 0 }}</span></td>
+          <td class="muted">{{ m.last_bid.strftime('%m/%d %H:%M') if m.last_bid else '—' }}</td>
+          <td class="muted">{{ m.submit_count or 0 }}</td>
+          <td>{% if m.application_id %}<a class="view" href="/network/application/{{ m.application_id }}">View →</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No onboarded dealers yet. Approve an application to add one.</div>
+    {% endif %}
+  </div>
+</body>
+</html>

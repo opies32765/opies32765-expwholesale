@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dealer Network · Applications</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#eef0f2;color:#1f2937;font:13px/1.45 -apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  a{color:inherit;text-decoration:none}
+  .topbar{background:#2b2f33;color:#fff;display:flex;align-items:center;height:54px;padding:0 18px;gap:18px}
+  .brand{font-weight:800;font-size:18px;letter-spacing:.4px}
+  .brand .b{color:#3b82f6}
+  .topbar .nav{display:flex;gap:14px;margin-left:10px}
+  .topbar .nav a{color:#cbd5e1;font-size:13px;font-weight:600}
+  .topbar .nav a.on{color:#fff}
+  .topbar .back{color:#9ca3af;font-size:12px;margin-left:auto}
+  .wrap{max-width:1280px;margin:18px auto;padding:0 16px}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:#6b7280;font-size:12px;margin-bottom:14px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+  .chip{border:1px solid #d1d5db;background:#fff;border-radius:999px;padding:5px 12px;cursor:pointer;font-weight:600;font-size:12px}
+  .chip.on{background:#111827;color:#fff;border-color:#111827}
+  .chip .n{opacity:.7;margin-left:5px;font-weight:700}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+  th,td{padding:9px 11px;text-align:left;border-bottom:1px solid #f0f1f3;white-space:nowrap}
+  th{background:#f8fafc;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#6b7280}
+  tr:hover td{background:#fafbfc}
+  td.dealer{white-space:normal;font-weight:700;max-width:260px}
+  .badge{display:inline-block;border-radius:6px;padding:2px 7px;font-size:11px;font-weight:700}
+  .b-existing{background:#dbeafe;color:#1e40af}
+  .b-known{background:#dcfce7;color:#166534}
+  .b-new{background:#fef3c7;color:#92400e}
+  .b-partner{background:#dbeafe;color:#1e40af}
+  .st{font-weight:700;text-transform:capitalize}
+  .st-pending{color:#b45309}.st-approved{color:#15803d}.st-rejected{color:#b91c1c}.st-needs_info{color:#6d28d9}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .d-pending{background:#f59e0b}.d-approved{background:#22c55e}.d-rejected{background:#ef4444}.d-needs_info{background:#8b5cf6}
+  .review{color:#2563eb;font-weight:700}
+  .muted{color:#9ca3af}
+  .empty{padding:40px;text-align:center;color:#9ca3af}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="brand">Dealer<span class="b">Price</span> · Network</span>
+    <span class="nav"><a class="on" href="/network/applications">Applications</a><a href="/network/members">Members</a></span>
+    <a class="back" href="/">← EW Dashboard</a>
+  </div>
+  <div class="wrap">
+    <h1>Network applications</h1>
+    <div class="sub">New dealers vetted before they can submit. Existing EW dealers fast-track. Review a packet, then Approve / Reject.</div>
+
+    <div class="chips" id="chips">
+      <span class="chip on" data-f="all">All</span>
+      <span class="chip" data-f="pending">Pending <span class="n">{{ counts.get('pending', 0) }}</span></span>
+      <span class="chip" data-f="needs_info">Needs info <span class="n">{{ counts.get('needs_info', 0) }}</span></span>
+      <span class="chip" data-f="approved">Approved <span class="n">{{ counts.get('approved', 0) }}</span></span>
+      <span class="chip" data-f="rejected">Rejected <span class="n">{{ counts.get('rejected', 0) }}</span></span>
+    </div>
+
+    {% if rows %}
+    <table id="apps">
+      <thead><tr>
+        <th>#</th><th>Received</th><th>Dealership</th><th>Type</th><th>Units/mo</th>
+        <th>Avg inv</th><th>Credit line</th><th>License #</th><th>Contact</th><th>Status</th><th></th>
+      </tr></thead>
+      <tbody>
+        {% for a in rows %}
+        <tr data-status="{{ a.status }}">
+          <td class="muted">{{ a.id }}</td>
+          <td>{{ a.created_at.strftime('%m/%d %H:%M') if a.created_at else '' }}</td>
+          <td class="dealer">
+            {{ a.dealership_name or '—' }}
+            {% if a.classification == 'new_applicant' %}<span class="badge b-new">New Applicant</span>
+            {% elif a.classification %}<span class="badge b-partner">{{ class_labels.get(a.classification, a.classification) }}</span>{% endif %}
+            {% if a.name_match and a.name_match.matched %}<span class="badge b-known" title="Matched LSL roster: {{ a.name_match.name }}">✓ on roster</span>{% endif %}
+          </td>
+          <td>{{ a.dealer_types or '—' }}</td>
+          <td>{{ a.units_per_month if a.units_per_month is not none else '—' }}</td>
+          <td>{{ a.avg_investment_band or '—' }}</td>
+          <td>{% if a.credit_line %}${{ '{:,.0f}'.format(a.credit_line) }}{% else %}—{% endif %}</td>
+          <td class="muted">{{ a.license_number or '—' }}</td>
+          <td>{{ a.contact_name or '' }}<br><span class="muted">{{ a.contact_email or a.contact_phone or '' }}</span></td>
+          <td><span class="st st-{{ a.status }}"><span class="dot d-{{ a.status }}"></span>{{ a.status.replace('_',' ') }}</span></td>
+          <td><a class="review" href="/network/application/{{ a.id }}">Review →</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No applications yet.</div>
+    {% endif %}
+  </div>
+
+<script>
+  var chips=document.getElementById('chips');
+  if(chips){chips.addEventListener('click',function(e){
+    var c=e.target.closest('.chip'); if(!c)return;
+    chips.querySelectorAll('.chip').forEach(function(x){x.classList.remove('on')});
+    c.classList.add('on');
+    var f=c.dataset.f;
+    document.querySelectorAll('#apps tbody tr').forEach(function(tr){
+      tr.style.display=(f==='all'||tr.dataset.status===f)?'':'none';
+    });
+  });}
+</script>
+</body>
+</html>

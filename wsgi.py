@@ -64,3 +64,12 @@ try:
     _start_cmp()
 except Exception as _cmp_e:
     print(f'[wsgi] comp_msrp daemon start failed: {_cmp_e}', flush=True)
+
+
+try:
+    from dealerprice_network import bp as _dpn_bp
+    if "dealerprice_network" not in app.blueprints:
+        app.register_blueprint(_dpn_bp)
+        print("[wsgi] dealerprice_network blueprint registered (DEALERPRICE_NETWORK_2026_06_30)", flush=True)
+except Exception as _e:
+    print(f"[wsgi] dealerprice_network register failed: {_e}", flush=True)

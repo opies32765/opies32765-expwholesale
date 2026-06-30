@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Application #{{ a.id }} · {{ a.dealership_name }}</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#eef0f2;color:#1f2937;font:13px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  a{color:#2563eb;text-decoration:none}
+  .topbar{background:#2b2f33;color:#fff;display:flex;align-items:center;height:54px;padding:0 18px;gap:18px}
+  .brand{font-weight:800;font-size:18px}.brand .b{color:#3b82f6}
+  .topbar .back{color:#9ca3af;font-size:12px}
+  .wrap{max-width:1080px;margin:18px auto;padding:0 16px}
+  .head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+  h1{font-size:21px;margin:0}
+  .badge{display:inline-block;border-radius:6px;padding:3px 9px;font-size:12px;font-weight:700}
+  .b-existing{background:#dbeafe;color:#1e40af}.b-known{background:#dcfce7;color:#166534}
+  .b-pending{background:#fef3c7;color:#92400e}.b-approved{background:#dcfce7;color:#166534}
+  .b-rejected{background:#fee2e2;color:#991b1b}.b-needs_info{background:#ede9fe;color:#5b21b6}
+  .b-class-current_partner,.b-class-previous_partner{background:#dbeafe;color:#1e40af}
+  .b-class-new_applicant{background:#fef3c7;color:#92400e}
+  .classify{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+  .classify .clabel{font-size:12px;color:#6b7280;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+  .cbtn{border:1px solid #d1d5db;background:#fff;border-radius:999px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer}
+  .cbtn.on{background:#111827;color:#fff;border-color:#111827}
+  .sub{color:#6b7280;font-size:12px;margin-bottom:16px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .card{background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+  .card h3{margin:0 0 10px;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#6b7280}
+  .kv{display:grid;grid-template-columns:140px 1fr;gap:5px 10px}
+  .kv .k{color:#6b7280}.kv .v{font-weight:600;word-break:break-word}
+  .full{grid-column:1 / -1}
+  .match{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:9px 12px;font-size:12px;color:#166534;margin-bottom:14px}
+  .nomatch{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412}
+  .docs{display:flex;gap:14px;flex-wrap:wrap}
+  .doc{flex:1;min-width:240px}
+  .doc img{width:100%;max-height:280px;object-fit:contain;border:1px solid #e5e7eb;border-radius:8px;background:#fafafa}
+  .doc .missing{padding:24px;text-align:center;color:#b91c1c;border:1px dashed #fca5a5;border-radius:8px}
+  .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+  textarea{width:100%;min-height:60px;border:1px solid #d1d5db;border-radius:8px;padding:8px;font:inherit;margin-bottom:8px}
+  button{border:0;border-radius:8px;padding:10px 18px;font-weight:700;font-size:13px;cursor:pointer;color:#fff}
+  .approve{background:#16a34a}.reject{background:#dc2626}.info{background:#7c3aed}
+  form.inline{display:inline}
+  .member{background:#ecfdf5;border:1px solid #a7f3d0;border-radius:10px;padding:14px 16px;margin-bottom:16px}
+  .member code{background:#064e3b;color:#d1fae5;padding:2px 7px;border-radius:5px;font-size:12px}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="brand">Dealer<span class="b">Price</span> · Network</span>
+    <a class="back" href="/network/applications">← All applications</a>
+  </div>
+  <div class="wrap">
+    <div class="head">
+      <h1>{{ a.dealership_name or 'Application' }}</h1>
+      <span class="badge b-{{ a.status }}">{{ a.status.replace('_',' ')|upper }}</span>
+      {% if a.classification %}<span class="badge b-class-{{ a.classification }}">{{ class_labels.get(a.classification, a.classification)|upper }}</span>{% endif %}
+      {% if a.name_match and a.name_match.matched %}<span class="badge b-known">✓ ON LSL ROSTER</span>{% endif %}
+    </div>
+    <div class="sub">Application #{{ a.id }} · received {{ a.created_at.strftime('%b %-d, %Y %-I:%M %p') if a.created_at else '' }}{% if a.reviewer %} · last action by {{ a.reviewer }}{% endif %}</div>
+
+    {% if a.name_match and a.name_match.matched %}
+      <div class="match">✓ Dealership matches an existing LSL counterparty: <b>{{ a.name_match.name }}</b>
+        ({{ a.name_match.source }}){% if a.name_match.city %} — {{ a.name_match.city }}, {{ a.name_match.state }}{% endif %}{% if a.name_match.phone %} · {{ a.name_match.phone }}{% endif %}. Likely safe to fast-track.</div>
+    {% else %}
+      <div class="match nomatch">No LSL roster match on the dealership name — vet fully.</div>
+    {% endif %}
+
+    <form method="post" action="/network/application/{{ a.id }}/classify" class="classify">
+      <span class="clabel">Classify:</span>
+      {% for key, lbl in class_labels.items() %}
+        <button name="classification" value="{{ key }}" class="cbtn {{ 'on' if a.classification == key else '' }}">{{ lbl }}</button>
+      {% endfor %}
+    </form>
+
+    {% if member %}
+      <div class="member">✅ <b>Approved</b> — member #{{ member.id }} provisioned {{ member.approved_at.strftime('%b %-d %-I:%M %p') if member.approved_at else '' }} by {{ member.approved_by }}.
+        Access link sent to {{ member.contact_phone }} / {{ member.contact_email }}.<br>
+        Token: <code>{{ member.token }}</code> · submits: {{ member.submit_count }}</div>
+      <div class="card full" style="margin-bottom:16px">
+        <h3>Bids from this dealer ({{ member_bids|length }})</h3>
+        {% if member_bids %}
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead><tr style="text-align:left;color:#6b7280">
+              <th style="padding:6px 8px">#</th><th style="padding:6px 8px">Vehicle</th><th style="padding:6px 8px">Miles</th>
+              <th style="padding:6px 8px">Status</th><th style="padding:6px 8px">AI buy</th><th style="padding:6px 8px">When</th></tr></thead>
+            <tbody>
+            {% for b in member_bids %}
+              <tr style="border-top:1px solid #f0f1f3">
+                <td style="padding:6px 8px"><a href="/bid/{{ b.id }}" target="_blank" style="color:#2563eb;font-weight:700">{{ b.id }}</a></td>
+                <td style="padding:6px 8px">{{ b.year or '' }} {{ b.make or '' }} {{ b.model or '' }} {{ b.trim or '' }}</td>
+                <td style="padding:6px 8px">{{ '{:,}'.format(b.mileage) if b.mileage else '—' }}</td>
+                <td style="padding:6px 8px">{{ b.status }}</td>
+                <td style="padding:6px 8px">{% if b.ai_price %}${{ '{:,.0f}'.format(b.ai_price) }}{% else %}—{% endif %}</td>
+                <td style="padding:6px 8px;color:#6b7280">{{ b.created_at.strftime('%m/%d %H:%M') if b.created_at else '' }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="v" style="color:#9ca3af">No bids submitted yet — they&apos;ll appear here as this dealer sends cars in.</div>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    <div class="grid">
+      <div class="card"><h3>Identity</h3><div class="kv">
+        <div class="k">Dealership</div><div class="v">{{ a.dealership_name or '—' }}</div>
+        <div class="k">DBA</div><div class="v">{{ a.dba or '—' }}</div>
+        <div class="k">Dealer group</div><div class="v">{{ a.dealer_group or '—' }}</div>
+        <div class="k">Franchises</div><div class="v">{{ a.franchises or '—' }}</div>
+        <div class="k">Entity</div><div class="v">{{ a.entity_type or '—' }}{% if a.entity_state %} · {{ a.entity_state }}{% endif %}</div>
+      </div></div>
+
+      <div class="card"><h3>Scale &amp; fit</h3><div class="kv">
+        <div class="k">Years in business</div><div class="v">{{ a.years_in_business if a.years_in_business is not none else '—' }}{% if a.years_at_location is not none %} ({{ a.years_at_location }} at location){% endif %}</div>
+        <div class="k">Used units/mo</div><div class="v">{{ a.units_per_month if a.units_per_month is not none else '—' }}{% if a.units_annual %} ({{ '{:,}'.format(a.units_annual) }}/yr){% endif %}</div>
+        <div class="k">Avg investment</div><div class="v">{{ a.avg_investment_band or '—' }}{% if a.avg_investment_num %} (~${{ '{:,.0f}'.format(a.avg_investment_num) }}){% endif %}</div>
+        <div class="k">Credit line</div><div class="v">{% if a.credit_line %}${{ '{:,.0f}'.format(a.credit_line) }}{% else %}—{% endif %}</div>
+        <div class="k">Floor plan</div><div class="v">{{ a.floorplan_provider or '—' }}{% if a.floorplan_line %} · ${{ '{:,.0f}'.format(a.floorplan_line) }}{% endif %}</div>
+        <div class="k">Dealer type</div><div class="v">{{ a.dealer_types or '—' }}</div>
+        <div class="k">Primary makes</div><div class="v">{{ a.primary_makes or '—' }}</div>
+        <div class="k">Price tier</div><div class="v">{{ a.price_tier or '—' }}</div>
+      </div></div>
+
+      <div class="card"><h3>Legitimacy</h3><div class="kv">
+        <div class="k">License #</div><div class="v">{{ a.license_number or '—' }}{% if a.license_state %} ({{ a.license_state }}){% endif %}{% if a.license_exp %} · exp {{ a.license_exp }}{% endif %}</div>
+        <div class="k">Tax ID / EIN</div><div class="v">{{ a.tax_id or '—' }}</div>
+        <div class="k">Surety bond</div><div class="v">{{ a.bond_provider or '—' }}{% if a.bond_amount %} · ${{ '{:,.0f}'.format(a.bond_amount) }}{% endif %}</div>
+        <div class="k">Physical lot</div><div class="v">{{ 'Yes' if a.physical_lot else ('No' if a.physical_lot is not none else '—') }}{% if a.lot_address %} · {{ a.lot_address }}{% endif %}</div>
+        <div class="k">Website</div><div class="v">{% if a.website %}<a href="{{ a.website }}" target="_blank">{{ a.website }}</a>{% else %}—{% endif %}</div>
+        <div class="k">Reputation</div><div class="v">{% if a.reputation_url %}<a href="{{ a.reputation_url }}" target="_blank">{{ a.reputation_url }}</a>{% else %}—{% endif %}</div>
+        <div class="k">Auction access</div><div class="v">{{ a.auction_access or '—' }}</div>
+      </div></div>
+
+      <div class="card"><h3>References &amp; readiness</h3><div class="kv">
+        <div class="k">Payment / funding</div><div class="v">{{ a.payment_ready or '—' }}</div>
+        <div class="k">Bank reference</div><div class="v">{{ a.bank_reference or '—' }}</div>
+        <div class="k">Trade reference</div><div class="v">{{ a.trade_reference or '—' }}</div>
+        <div class="k">Referred by</div><div class="v">{{ a.referrer_name or '—' }}
+          {% if a.referrer_match and a.referrer_match.matched %}<span class="badge b-known" title="{{ a.referrer_match.source }}">✓ verified referrer</span>{% endif %}</div>
+      </div></div>
+
+      <div class="card"><h3>Contact</h3><div class="kv">
+        <div class="k">Name</div><div class="v">{{ a.contact_name or '—' }}</div>
+        <div class="k">Email</div><div class="v">{{ a.contact_email or '—' }}</div>
+        <div class="k">Mobile</div><div class="v">{{ a.contact_phone or '—' }}</div>
+        <div class="k">Consent</div><div class="v">Attestation: {{ 'Yes' if a.attestation else 'No' }} · TCPA: {{ 'Yes' if a.tcpa_consent else 'No' }}</div>
+      </div></div>
+
+      <div class="card"><h3>Notes</h3><div class="v">{{ a.notes or '—' }}</div></div>
+
+      <div class="card full"><h3>Uploaded documents</h3>
+        <div class="docs">
+          <div class="doc"><div class="k" style="color:#6b7280;margin-bottom:6px">Dealer license</div>
+            {% if a.license_doc_path %}
+              <a href="/network/application/{{ a.id }}/doc/license" target="_blank"><img src="/network/application/{{ a.id }}/doc/license" onerror="this.outerHTML='<div class=&quot;missing&quot;>Open document ↗</div>'"></a>
+            {% else %}<div class="missing">No license uploaded</div>{% endif %}
+          </div>
+          <div class="doc"><div class="k" style="color:#6b7280;margin-bottom:6px">Tax ID / resale cert</div>
+            {% if a.taxid_doc_path %}
+              <a href="/network/application/{{ a.id }}/doc/taxid" target="_blank"><img src="/network/application/{{ a.id }}/doc/taxid" onerror="this.outerHTML='<div class=&quot;missing&quot;>Open document ↗</div>'"></a>
+            {% else %}<div class="missing">No Tax-ID uploaded</div>{% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {% if a.review_notes %}<div class="card full" style="margin-top:14px"><h3>Reviewer notes</h3><div class="v">{{ a.review_notes }}</div></div>{% endif %}
+
+    {% if not member %}
+    <div class="card full" style="margin-top:14px">
+      <h3>Decision</h3>
+      <form method="post" action="/network/application/{{ a.id }}/approve">
+        <textarea name="review_notes" placeholder="Optional note (saved with the decision)…"></textarea>
+        <div class="actions">
+          <button class="approve" type="submit">✓ Approve &amp; provision access</button>
+        </div>
+      </form>
+      <div class="actions" style="margin-top:6px">
+        <form class="inline" method="post" action="/network/application/{{ a.id }}/needs-info"><button class="info" type="submit">Needs more info</button></form>
+        <form class="inline" method="post" action="/network/application/{{ a.id }}/reject"><button class="reject" type="submit">Reject</button></form>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</body>
+</html>

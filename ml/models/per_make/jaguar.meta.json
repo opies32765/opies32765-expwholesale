@@ -1,6 +1,6 @@
 {
   "make_name": "JAGUAR",
-  "trained_at": "2026-06-29T08:30:48.643326Z",
+  "trained_at": "2026-06-30T08:30:59.896822Z",
   "n_total": 278,
   "n_train": 270,
   "n_test": 8,
@@ -219,9 +219,9 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2641.0,
-    "mape_pct": 14.06,
-    "r2": 0.9519,
+    "mae_dollars": 2705.0,
+    "mape_pct": 14.65,
+    "r2": 0.9504,
     "within_5pct": 37.5,
     "within_10pct": 50.0
   },

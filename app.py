@@ -12562,6 +12562,17 @@ def api_dealerprice_bid():
               asking_price, notes_text))
         bid_id = cur.fetchone()['id']
 
+        # DEALERPRICE_NETWORK_2026_06_30: tag the bid to the submitting network member
+        try:
+            _mt = (data.get('member_token') or '').strip()
+            if _mt:
+                from dealerprice_network import _member_by_token
+                _m = _member_by_token(_mt, count_submit=True)
+                if _m:
+                    cur.execute("UPDATE bids SET dp_member_id=%s WHERE id=%s", (_m['id'], bid_id))
+        except Exception as _e:
+            print('[dealerprice] member tag: %s' % _e, flush=True)
+
         os.makedirs(UPLOAD_DIR, exist_ok=True)
         for photo in (data.get('photos') or [])[:6]:
             try:
