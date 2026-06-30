@@ -2149,6 +2149,46 @@ from email import policy as _bpolicy
 
 _BOL_DIR = _bos.path.join(RECON_MEDIA_DIR, 'bol')
 _VINRE = _bre.compile(r'^[A-HJ-NPR-Z0-9]{17}$')
+
+# _VIN_CHECKDIGIT_2026_06_29 — reject noise/hallucinated VINs via the NA check digit.
+_VIN_TRANS = dict({str(d): d for d in range(10)}, **{
+    'A':1,'B':2,'C':3,'D':4,'E':5,'F':6,'G':7,'H':8,
+    'J':1,'K':2,'L':3,'M':4,'N':5,'P':7,'R':9,
+    'S':2,'T':3,'U':4,'V':5,'W':6,'X':7,'Y':8,'Z':9})
+_VIN_WEIGHTS = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2]
+
+def _vin_ok(v):
+    """True only if v is a 17-char VIN with a valid North-American check digit."""
+    v = (v or '').strip().upper()
+    if not _VINRE.match(v):
+        return False
+    try:
+        total = sum(_VIN_TRANS[c] * w for c, w in zip(v, _VIN_WEIGHTS))
+    except KeyError:
+        return False
+    chk = total % 11
+    return v[8] == ('X' if chk == 10 else str(chk))
+
+_VIN_CONFUSE = {'0':'OQD','O':'0DQ','Q':'0OD','D':'0OQ','1':'IL7','I':'1L','L':'1I',
+                '5':'S','S':'5','8':'B','B':'8','2':'Z','Z':'2','6':'G','G':'6',
+                '4':'A','A':'4','7':'1T','T':'7'}
+
+def _vin_fix(v):
+    """A near-miss from a real document (one OCR error) -> the check-digit-valid
+    VIN, but only if exactly one single-char correction validates (else None)."""
+    v = (v or '').strip().upper()
+    if len(v) != 17:
+        return None
+    if _vin_ok(v):
+        return v
+    found = set()
+    for i, c in enumerate(v):
+        for alt in _VIN_CONFUSE.get(c, ''):
+            cand = v[:i] + alt + v[i+1:]
+            if _vin_ok(cand):
+                found.add(cand)
+    return found.pop() if len(found) == 1 else None
+
 _BOL_OPEN_ORDER = "(status NOT IN ('removed','sold')) DESC, id DESC"
 
 
@@ -2199,7 +2239,8 @@ def _bol_extract(file_bytes, content_type):
             continue
         for v in (d.get('vins') or []):
             v = str(v).strip().upper().replace(' ', '')
-            if _VINRE.match(v):
+            v = v if _vin_ok(v) else _vin_fix(v)
+            if v:
                 vins.add(v)
         for s in (d.get('stocks') or []):
             s = str(s).strip().upper()
@@ -2287,7 +2328,7 @@ def api_inbound_email():
     # VIN/stock from body (regex) + each attachment (9B)
     vins, stocks, label = set(), set(), ''
     for m in _bre.findall(r'[A-HJ-NPR-Z0-9]{17}', (body_text or '').upper()):
-        if _VINRE.match(m):
+        if _vin_ok(m):
             vins.add(m)
     for m in _bre.findall(r'\bLL\d{3,6}\b', (body_text or '').upper()):
         stocks.add(m)
@@ -2297,6 +2338,16 @@ def api_inbound_email():
         stocks.update(ex['stocks'])
         if not label and ex['label']:
             label = ex['label']
+    # RECON_BOL_CONTEXT_2026_06_29 — link-only BOLs (Super Dispatch etc.) carry no
+    # VIN; capture Load ID + carrier so the inbox entry is actionable.
+    if not label and body_text:
+        _lid = _bre.search(r'Load ID[:#\s]*([A-Za-z0-9-]{3,24})', body_text, _bre.I)
+        _car = _bre.search(r'(?:from|carrier[:\s])\s+([A-Z][A-Za-z0-9 .,&\'-]{2,44}?(?:INC|LLC|TRANSPORT|LOGISTICS|TRUCKING|CARRIER|EXPRESS|HAULING))', body_text)
+        _p = []
+        if _lid: _p.append('Load ' + _lid.group(1))
+        if _car: _p.append(_car.group(1).strip())
+        if 'superdispatch' in body_text.lower(): _p.append('Super Dispatch \u2014 open email link for VIN/PDF')
+        if _p: label = ' \u00b7 '.join(_p)
     db = _db(); cur = db.cursor()
     try:
         unit = _bol_match_unit(cur, sorted(vins), sorted(stocks))
