@@ -172,6 +172,52 @@ def _roster_search(q, limit=8):
     return out
 
 
+def _lsl_history(name):
+    """The applicant's REAL transaction history with EW, from the LSL deals
+    ledger — the ground-truth vetting signal. Matches supplier_name (they SELL
+    cars to EW) + customer_name (they BUY cars from EW). buyer_name is the
+    internal EW rep, so it's intentionally ignored. Returns {} if no history.
+    Pure read-only (HR6)."""
+    name = _s(name)
+    if len(name) < 3:
+        return {}
+    like = '%' + name + '%'
+    try:
+        c = _lsl_conn()
+        try:
+            s = c.execute(
+                "SELECT count(*) n, COALESCE(SUM(purchase_cost),0) paid, "
+                "COALESCE(SUM(front_value),0) gross, MIN(sold_at) f, MAX(sold_at) l "
+                "FROM deals WHERE supplier_name LIKE ? COLLATE NOCASE", (like,)).fetchone()
+            b = c.execute(
+                "SELECT count(*) n, COALESCE(SUM(sale_price),0) spent, "
+                "MIN(sold_at) f, MAX(sold_at) l "
+                "FROM deals WHERE customer_name LIKE ? COLLATE NOCASE", (like,)).fetchone()
+            sn, bn = (s['n'] or 0), (b['n'] or 0)
+            if sn + bn == 0:
+                return {}
+            names = [r['nm'] for r in c.execute(
+                "SELECT supplier_name nm FROM deals WHERE supplier_name LIKE ? COLLATE NOCASE "
+                "UNION SELECT customer_name nm FROM deals WHERE customer_name LIKE ? COLLATE NOCASE "
+                "LIMIT 6", (like, like)).fetchall() if r['nm']]
+            firsts = [d for d in (s['f'], b['f']) if d]
+            lasts = [d for d in (s['l'], b['l']) if d]
+            return {
+                'matched': True,
+                'names': names,
+                'total_deals': sn + bn,
+                'source_deals': sn, 'source_paid': int(s['paid'] or 0), 'source_gross': int(s['gross'] or 0),
+                'buyer_deals': bn, 'buyer_spent': int(b['spent'] or 0),
+                'first_deal': (min(firsts)[:10] if firsts else None),
+                'last_deal': (max(lasts)[:10] if lasts else None),
+            }
+        finally:
+            c.close()
+    except Exception as e:
+        print('[dp-network] lsl_history: %s' % e, flush=True)
+    return {}
+
+
 # ── private document storage (NOT under /static) ────────────────────────────
 def _save_doc(app_id, which, data_url):
     """Persist a base64 data-url (license / tax-id image or PDF) to a private,
@@ -238,8 +284,9 @@ def _email(to_addr, subject, html):
 
 
 def _invite_member(m):
-    """Text + email an approved dealer their access magic link."""
-    link = '%s/access/%s' % (DP_PUBLIC_BASE.rstrip('/'), m['token'])
+    """Text + email an approved dealer their private portal link (hex token =
+    SMS-safe; /d/<token> = encrypted-looking + bookmarkable)."""
+    link = '%s/d/%s' % (DP_PUBLIC_BASE.rstrip('/'), m['token'])
     name = _s(m.get('dealership_name')) or 'there'
     phone = _digits(m.get('contact_phone'))
     if len(phone) == 10:
@@ -356,6 +403,7 @@ def api_dp_apply():
         types = _s(types)
 
     name_match = _roster_match(dealership)
+    lsl_hist = _lsl_history(dealership)
     referrer = _s(d.get('referrer_name'))
     referrer_match = _roster_match(referrer) if referrer and referrer.lower() not in ('none', 'n/a') else {}
 
@@ -402,11 +450,15 @@ def api_dp_apply():
 
         lic = _save_doc(app_id, 'license', d.get('license_image'))
         tax = _save_doc(app_id, 'taxid', d.get('taxid_image'))
-        # auto-classify: existing-dealer self-declaration OR an LSL roster match
-        # => current partner; otherwise a brand-new applicant (operator can override)
-        classification = 'current_partner' if (is_existing or (name_match or {}).get('matched')) else 'new_applicant'
-        cur.execute("UPDATE dealer_applications SET license_doc_path=%s, taxid_doc_path=%s, classification=%s WHERE id=%s",
-                    (lic, tax, classification, app_id))
+        # auto-classify: existing-dealer self-declaration, an LSL roster match, OR
+        # real LSL deal history => current partner; else a brand-new applicant.
+        # (LSL history is the strongest signal — it catches a returning dealer who
+        # mistakenly applied as "new".) Operator can override.
+        classification = ('current_partner'
+                          if (is_existing or (name_match or {}).get('matched') or (lsl_hist or {}).get('matched'))
+                          else 'new_applicant')
+        cur.execute("UPDATE dealer_applications SET license_doc_path=%s, taxid_doc_path=%s, classification=%s, lsl_history=%s WHERE id=%s",
+                    (lic, tax, classification, Json(lsl_hist or None), app_id))
         db.commit()
     except Exception as e:
         db.rollback(); db.close()
@@ -416,8 +468,9 @@ def api_dp_apply():
 
     tag = 'EXISTING ✓' if is_existing else 'NEW'
     mtag = (' · roster:%s' % name_match['name']) if name_match.get('matched') else ''
-    _tg('🪪 <b>New Dealer-Network application</b> #%d (%s)\n%s%s\n%s · %s\nReview: /network/applications'
-        % (app_id, tag, dealership or '?', mtag, cname, cemail or cphone))
+    ltag = ('\n📊 LSL: <b>%d</b> prior deals with EW' % lsl_hist['total_deals']) if lsl_hist.get('matched') else '\n📊 no prior LSL history'
+    _tg('🪪 <b>New Dealer-Network application</b> #%d (%s)\n%s%s%s\n%s · %s\nReview: /network/applications'
+        % (app_id, tag, dealership or '?', mtag, ltag, cname, cemail or cphone))
     return jsonify({'ok': True, 'application_id': app_id, 'status': 'pending', 'existing': is_existing})
 
 
@@ -430,7 +483,7 @@ def network_applications():
     cur.execute("""SELECT id, created_at, status, is_existing, dealership_name,
                           dealer_types, units_per_month, avg_investment_band,
                           credit_line, license_number, contact_name, contact_email,
-                          contact_phone, name_match, member_id, classification
+                          contact_phone, name_match, member_id, classification, lsl_history
                      FROM dealer_applications
                     ORDER BY (status='pending') DESC, created_at DESC LIMIT 300""")
     rows = cur.fetchall()
@@ -473,7 +526,9 @@ def network_application(app_id):
         member = cur.fetchone()
     db.close()
     member_bids = _member_bids(member['id']) if member else []
-    return render_template('network/application.html', a=a, member=member, member_bids=member_bids, class_labels=CLASS_LABELS)
+    lsl_hist = _lsl_history(a.get('dealership_name'))   # live, always current
+    return render_template('network/application.html', a=a, member=member, member_bids=member_bids,
+                           class_labels=CLASS_LABELS, lsl_hist=lsl_hist)
 
 
 @bp.route('/network/application/<int:app_id>/doc/<which>')
@@ -504,7 +559,8 @@ def network_application_approve(app_id):
         db.close()
         return redirect(url_for('dealerprice_network.network_application', app_id=app_id))
     from psycopg2.extras import Json
-    token = secrets.token_urlsafe(24)
+    # hex token (no -/_): survives SMS auto-linkifiers + looks like a secure key
+    token = secrets.token_hex(16)
     try:
         cur.execute("""INSERT INTO dealerprice_members
                          (application_id, dealership_name, contact_name, contact_email,

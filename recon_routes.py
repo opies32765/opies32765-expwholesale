@@ -1103,6 +1103,33 @@ def out_for_recon_tab():
                            garages=garages, sel_garage=garage)
 
 
+@bp.route('/api/recon/new-count')
+def api_recon_new_count():
+    """RECON_NEW_BADGE_2026_06_30: live count of OPEN units still at the 'New'
+    step (current_step_id = the New step, code 'all' / name 'New') -- pulled in
+    but not yet moved to another status. Drives the count badge on the dashboard
+    Recon tab. Gated by the blueprint before_request (404 when recon is off)."""
+    n = 0
+    try:
+        db = _db()
+        cur = db.cursor()
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM recon_units u "
+            "WHERE u.store_id=%s "
+            "AND u.status IN ('in_transit_stage0','in_recon','frontline_ready','on_hold') "
+            "AND u.current_step_id IN (SELECT id FROM recon_step_defs WHERE code='all' OR name='New')",
+            (STORE_ID,))
+        row = cur.fetchone()
+        if row is not None:
+            n = int((row['c'] if hasattr(row, 'keys') else row[0]) or 0)
+        try: db.close()
+        except Exception: pass
+    except Exception as e:
+        print('[recon] new-count error: %s' % e, flush=True)
+        n = 0
+    return jsonify({'count': n})
+
+
 @bp.route('/api/recon/board')
 def api_board():
     steps, units, kpis, transit_rows, tcounts = _load_board()

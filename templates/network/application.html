@@ -24,6 +24,14 @@
   .classify .clabel{font-size:12px;color:#6b7280;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
   .cbtn{border:1px solid #d1d5db;background:#fff;border-radius:999px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer}
   .cbtn.on{background:#111827;color:#fff;border-color:#111827}
+  .lsl-card{background:#0b1220;color:#e2e8f0;border-radius:12px;padding:16px 18px;margin-bottom:16px}
+  .lsl-head{font-size:13px;font-weight:700;letter-spacing:.3px;margin-bottom:12px;display:flex;align-items:center;gap:10px}
+  .lsl-verdict{background:#16a34a;color:#fff;border-radius:999px;padding:2px 10px;font-size:11px;font-weight:700}
+  .lsl-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:12px}
+  .lsl-stat b{display:block;font-size:19px;font-weight:800;color:#fff;line-height:1.1}
+  .lsl-stat span{font-size:11px;color:#94a3b8}
+  .lsl-names{margin-top:12px;font-size:11px;color:#64748b}
+  .lsl-none{background:#fff7ed;color:#9a3412;border:1px solid #fed7aa}
   .sub{color:#6b7280;font-size:12px;margin-bottom:16px}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   .card{background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
@@ -73,6 +81,23 @@
         <button name="classification" value="{{ key }}" class="cbtn {{ 'on' if a.classification == key else '' }}">{{ lbl }}</button>
       {% endfor %}
     </form>
+
+    {% if lsl_hist and lsl_hist.matched %}
+      <div class="lsl-card">
+        <div class="lsl-head">📊 Real history with EW (from LSL) <span class="lsl-verdict">Established partner</span></div>
+        <div class="lsl-stats">
+          <div class="lsl-stat"><b>{{ lsl_hist.total_deals }}</b><span>total deals</span></div>
+          {% if lsl_hist.source_deals %}<div class="lsl-stat"><b>{{ lsl_hist.source_deals }}</b><span>sold to EW · ${{ '{:,.0f}'.format(lsl_hist.source_paid) }}</span></div>{% endif %}
+          {% if lsl_hist.buyer_deals %}<div class="lsl-stat"><b>{{ lsl_hist.buyer_deals }}</b><span>bought from EW · ${{ '{:,.0f}'.format(lsl_hist.buyer_spent) }}</span></div>{% endif %}
+          {% if lsl_hist.source_gross %}<div class="lsl-stat"><b>${{ '{:,.0f}'.format(lsl_hist.source_gross) }}</b><span>gross EW made</span></div>{% endif %}
+          <div class="lsl-stat"><b>{{ lsl_hist.first_deal or '—' }}</b><span>first deal</span></div>
+          <div class="lsl-stat"><b>{{ lsl_hist.last_deal or '—' }}</b><span>last deal</span></div>
+        </div>
+        {% if lsl_hist.names %}<div class="lsl-names">Matched in LSL as: {{ lsl_hist.names|join(', ') }}</div>{% endif %}
+      </div>
+    {% else %}
+      <div class="lsl-card lsl-none">📊 <b>No prior history with EW</b> on this name — a genuinely new dealer (or a store name that doesn&apos;t match your ledger). Lean on the license/docs + the answers below.</div>
+    {% endif %}
 
     {% if member %}
       <div class="member">✅ <b>Approved</b> — member #{{ member.id }} provisioned {{ member.approved_at.strftime('%b %-d %-I:%M %p') if member.approved_at else '' }} by {{ member.approved_by }}.
