@@ -276,6 +276,7 @@
         <label class="btn gray" style="cursor:pointer">🔒 Pickup proof (person)
           <input type="file" accept="image/*" style="display:none" onchange="uploadPhoto(this,true)">
         </label>
+        <span style="font-size:11px;color:#94a3b8;align-self:center">or paste (⌘/Ctrl+V) → proof</span>
         <span id="photoErr" class="msg err"></span>
       </div>
       {% if photos %}
@@ -479,6 +480,28 @@ async function uploadPhoto(input, isPickup){
   }catch(e){err.textContent='network error';}
   input.value='';
 }
+/* RECON_PASTE_PROOF_2026_06_30: Cmd/Ctrl+V an image anywhere on this page uploads
+   it as a pickup/driver-proof photo (server normalizes HEIC/PNG -> JPEG). */
+function uploadBlobAsProof(blob, fname){
+  const err=document.getElementById('photoErr'); if(err) err.textContent='pasting proof\u2026';
+  const fd=new FormData();
+  fd.append('photo', blob, fname || ('pasted-proof-'+Date.now()+'.png'));
+  fd.append('is_pickup','1');
+  fetch('/api/recon/'+UNIT_ID+'/photo',{method:'POST',body:fd})
+    .then(r=>r.json())
+    .then(j=>{ if(j && j.ok){ location.reload(); } else { if(err) err.textContent=(j&&j.error)||'paste upload failed'; } })
+    .catch(()=>{ if(err) err.textContent='network error'; });
+}
+document.addEventListener('paste', function(e){
+  const items=(e.clipboardData && e.clipboardData.items) || [];
+  for(let i=0;i<items.length;i++){
+    const it=items[i];
+    if(it.kind==='file' && it.type && it.type.indexOf('image/')===0){
+      const blob=it.getAsFile();
+      if(blob){ e.preventDefault(); uploadBlobAsProof(blob); return; }
+    }
+  }
+});
 </script>
 </body>
 </html>

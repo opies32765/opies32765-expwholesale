@@ -29,6 +29,14 @@ from flask import (Blueprint, render_template, request, jsonify, abort, session)
 
 bp = Blueprint('recon', __name__)
 
+# RECON_HEIC_2026_06_30: register the pillow-heif opener so Pillow can decode
+# iPhone HEIC/HEIF; uploaded recon photos are then normalized to JPEG (_to_jpeg).
+try:
+    import pillow_heif as _pillow_heif
+    _pillow_heif.register_heif_opener()
+except Exception as _heif_e:
+    print('[recon] pillow_heif unavailable (HEIC->JPEG disabled): %s' % _heif_e, flush=True)
+
 SENTINEL = '/opt/expwholesale/RECON_ENABLED'
 _RECON_CACHE = {'t': 0.0, 'v': False}
 STORE_ID = 1
@@ -1860,6 +1868,35 @@ def api_lsl_company_search():
 # ============================================================================
 # PHOTOS  (camera/library upload; pickup-proof photos AES-encrypted at rest)
 # ============================================================================
+def _to_jpeg(raw, filename=''):
+    """RECON_HEIC_2026_06_30: normalize any uploaded image (JPEG/PNG/HEIC/WEBP/...)
+    to JPEG bytes -- honor EXIF orientation, flatten transparency onto white.
+    Returns (jpeg_bytes, True) on success, or (raw, False) if it is not a decodable
+    image (caller then stores the original untouched)."""
+    try:
+        import io as _io
+        from PIL import Image as _Image, ImageOps as _ImageOps
+        im = _Image.open(_io.BytesIO(raw))
+        im.load()
+        try:
+            im = _ImageOps.exif_transpose(im)
+        except Exception:
+            pass
+        if im.mode in ('RGBA', 'LA', 'P'):
+            im = im.convert('RGBA')
+            bg = _Image.new('RGB', im.size, (255, 255, 255))
+            bg.paste(im, mask=im.split()[-1])
+            im = bg
+        elif im.mode != 'RGB':
+            im = im.convert('RGB')
+        out = _io.BytesIO()
+        im.save(out, 'JPEG', quality=88, optimize=True)
+        return out.getvalue(), True
+    except Exception as e:
+        print('[recon-photo] JPEG normalize failed (%s): %s' % (filename, e), flush=True)
+        return raw, False
+
+
 @bp.route('/api/recon/<int:unit_id>/photo', methods=['POST'])
 def api_photo_upload(unit_id):
     import uuid as _uuid
@@ -1869,6 +1906,7 @@ def api_photo_upload(unit_id):
     raw = f.read()
     if not raw:
         return jsonify({'error': 'empty file'}), 400
+    raw, _jpg_ok = _to_jpeg(raw, f.filename or '')   # RECON_HEIC_2026_06_30: store JPEG
     is_pickup = (request.form.get('is_pickup') in ('1', 'true', 'True', 'on'))
     caption = (request.form.get('caption') or '').strip() or None
     db = _db()
@@ -1896,12 +1934,7 @@ def api_photo_upload(unit_id):
         else:
             d = os.path.join(RECON_STATIC_DIR, str(unit_id))
             os.makedirs(d, exist_ok=True)
-            ext = '.jpg'
-            fn = (f.filename or '')
-            if '.' in fn:
-                e = fn.rsplit('.', 1)[1].lower()
-                if e in ('jpg', 'jpeg', 'png', 'heic', 'webp'):
-                    ext = '.' + e
+            ext = '.jpg' if _jpg_ok else (os.path.splitext(f.filename or '')[1].lower() or '.jpg')
             path = os.path.join(d, name + ext)
             with open(path, 'wb') as out:
                 out.write(raw)
