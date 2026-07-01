@@ -105,6 +105,10 @@
   .wbtn{cursor:pointer;font:700 13px inherit;color:#fff;background:#c0392b;border:0;border-radius:7px;padding:9px 15px}
   .wbtn:hover{background:#a93226}
   .wbtn.gray{background:#e5e7eb;color:#374151}.wbtn.gray:hover{background:#d1d5db}
+  .rwopt{display:flex;align-items:center;gap:9px;padding:9px 0;color:#374151;cursor:pointer;font-size:14px;border-top:1px solid #f1f3f5}
+  .rwopt:first-of-type{border-top:0}.rwopt input{width:auto;margin:0}
+  .rwsub{margin:0 0 10px 27px}
+  .rwin{width:100%;border:1px solid #cbd5e1;border-radius:7px;padding:8px 10px;font:14px inherit;margin-bottom:6px}
   /* add-vehicle modal */
   dialog{border:1px solid #d8dde2;border-radius:8px;padding:0;width:min(460px,94vw);box-shadow:0 20px 50px rgba(0,0,0,.25)}
   dialog::backdrop{background:rgba(0,0,0,.4)}
@@ -326,6 +330,32 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
   </div>
 </div>
 
+<div id="readyWiz" class="wizmask" style="display:none">
+  <div class="wizbox">
+    <div class="wizh">Ready for Pickup &mdash; who&#8217;s collecting it?</div>
+    <div class="wizb">
+      <p id="rwMsg" class="wizmsg"></p>
+      <label class="rwopt"><input type="radio" name="rwwho" value="buyer" onchange="rwPick('buyer')"> <b>Buyer picking up</b></label>
+      <div id="rw-buyer" class="rwsub" style="display:none">
+        <input id="rwBuyerName" class="rwin" placeholder="Buyer name">
+        <input id="rwBuyerPhone" class="rwin" placeholder="Buyer phone (from the deal)">
+      </div>
+      <label class="rwopt"><input type="radio" name="rwwho" value="austin" onchange="rwPick('austin')"> <b>Austin picking up</b></label>
+      <div id="rw-austin" class="rwsub" style="display:none">
+        <label class="wizchk" style="margin-top:0"><input type="checkbox" id="rwEmailAustin" checked> &#9993; Email Austin that he&#8217;s collecting this car</label>
+      </div>
+      <label class="rwopt"><input type="radio" name="rwwho" value="other" onchange="rwPick('other')"> <b>Other</b></label>
+      <div id="rw-other" class="rwsub" style="display:none">
+        <input id="rwOtherName" class="rwin" placeholder="Who&#8217;s picking up?">
+      </div>
+    </div>
+    <div class="wizf">
+      <button class="wbtn gray" onclick="cancelReadyWiz()">Cancel</button>
+      <button class="wbtn" onclick="confirmReadyWiz()">Confirm &amp; mark Ready</button>
+    </div>
+  </div>
+</div>
+
 <script>
 function showErr(m){document.getElementById('msg').textContent=m||'';}
 let _lslExtra={};
@@ -431,8 +461,48 @@ document.addEventListener('click',function(e){
 
 function quickMove(id, code, el){
   var sold=(el.getAttribute('data-sold')||'').trim();
-  if((code==='dealer_to_home'||code==='indiv_to_home') && sold){ openBoardWiz(id, code, el, sold); }
+  if(code==='ready'){ openReadyWiz(id, el); }
+  else if((code==='dealer_to_home'||code==='indiv_to_home') && sold){ openBoardWiz(id, code, el, sold); }
   else { doMove(id, code, el); }
+}
+var _rw=null;
+function rwPick(which){ ['buyer','austin','other'].forEach(function(k){ var e=document.getElementById('rw-'+k); if(e) e.style.display=(k===which)?'block':'none'; }); }
+function openReadyWiz(id, el){
+  _rw={id:id, el:el};
+  var veh=((el.getAttribute('data-veh')||'').trim()||'This vehicle');
+  var sold=(el.getAttribute('data-sold')||'').trim();
+  document.getElementById('rwMsg').innerHTML=veh+(sold?(' &middot; sold to <b>'+sold.replace(/</g,'&lt;')+'</b>'):'');
+  document.getElementById('rwBuyerName').value=sold||'';
+  document.getElementById('rwBuyerPhone').value='';
+  document.getElementById('rwOtherName').value='';
+  document.getElementById('rwEmailAustin').checked=true;
+  var def=sold?'buyer':'other';
+  var r=document.querySelector('input[name=rwwho][value="'+def+'"]'); if(r) r.checked=true;
+  rwPick(def);
+  document.getElementById('readyWiz').style.display='flex';
+  fetch('/api/recon/'+id+'/pickup-info',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+    if(d&&d.buyer){ if(!document.getElementById('rwBuyerName').value) document.getElementById('rwBuyerName').value=d.buyer.name||''; document.getElementById('rwBuyerPhone').value=d.buyer.phone||''; }
+  }).catch(function(){});
+}
+function cancelReadyWiz(){ document.getElementById('readyWiz').style.display='none'; if(_rw&&_rw.el){ _rw.el.value=_rw.el.getAttribute('data-cur'); } _rw=null; }
+async function confirmReadyWiz(){
+  if(!_rw) return;
+  var id=_rw.id;
+  var chk=document.querySelector('input[name=rwwho]:checked');
+  var who=chk?chk.value:'';
+  if(!who){ alert('Pick who is collecting it.'); return; }
+  var note='', emailAustin=false;
+  if(who==='buyer'){ var bn=(document.getElementById('rwBuyerName').value||'').trim(); var bp=(document.getElementById('rwBuyerPhone').value||'').trim(); note='Ready for pickup — Buyer picking up'+(bn?(': '+bn):'')+(bp?(' · '+bp):''); }
+  else if(who==='austin'){ note='Ready for pickup — Austin picking up.'; emailAustin=document.getElementById('rwEmailAustin').checked; }
+  else { var on=(document.getElementById('rwOtherName').value||'').trim(); if(!on){ alert('Type who is picking up.'); return; } note='Ready for pickup — '+on+' picking up.'; }
+  var btns=document.querySelectorAll('#readyWiz .wbtn'); btns.forEach(function(b){b.disabled=true;});
+  try{
+    var rm=await fetch('/api/recon/'+id+'/move',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to_step:'ready'})});
+    var jm=await rm.json(); if(!jm.ok){ alert(jm.error||'move failed'); btns.forEach(function(b){b.disabled=false;}); return; }
+    await fetch('/api/recon/'+id+'/note',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body:note, category:'recon'})});
+    if(emailAustin){ await fetch('/api/recon/'+id+'/email-austin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note:'Austin is picking up this car (Ready for Pickup).'})}); }
+    location.reload();
+  }catch(e){ alert('network error'); btns.forEach(function(b){b.disabled=false;}); }
 }
 async function doMove(id, code, el){
   try{

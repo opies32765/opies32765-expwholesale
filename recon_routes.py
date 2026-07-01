@@ -1111,6 +1111,29 @@ def out_for_recon_tab():
                            garages=garages, sel_garage=garage)
 
 
+@bp.route('/api/recon/<int:unit_id>/pickup-info')
+def api_recon_pickup_info(unit_id):
+    """READY_PICKUP_WIZ_2026_07_01: buyer (delivery party) contact for the
+    Ready-for-Pickup wizard prefill (option 1)."""
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT * FROM recon_units WHERE id=%s", (unit_id,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'not found'}), 404
+        u = dict(row)
+        b = _resolve_party(u, 'delivery')
+        return jsonify({'buyer': {'name': b.get('name') or (u.get('sold_to') or ''),
+                                  'phone': b.get('phone') or '',
+                                  'contact': b.get('contact') or '',
+                                  'address': b.get('address') or ''}})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
 @bp.route('/api/recon/new-count')
 def api_recon_new_count():
     """RECON_NEW_BADGE_2026_06_30: live count of OPEN units still at the 'New'
