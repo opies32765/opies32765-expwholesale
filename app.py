@@ -3697,13 +3697,13 @@ def dashboard():
     network_claims = [dict(r) for r in cur.fetchall()]
     network_claims_by_bid = {c['bid_id']: c for c in network_claims}
 
-    cur.execute("SELECT status, COUNT(*) as cnt FROM bids GROUP BY status")
+    cur.execute("SELECT status, COUNT(*) as cnt FROM bids WHERE COALESCE(creation_source,'') != 'tl_ai_compare' GROUP BY status")
     stats = {'new': 0, 'reviewing': 0, 'bid_sent': 0, 'passed': 0, 'bought': 0, 'total': 0}
     for r in cur.fetchall():
         stats[r['status']] = int(r['cnt'])
         stats['total'] += int(r['cnt'])
 
-    cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE created_at::date = CURRENT_DATE")
+    cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE created_at::date = CURRENT_DATE AND COALESCE(creation_source,'') != 'tl_ai_compare'")
     stats['today'] = int(cur.fetchone()['cnt'])
 
     cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE phone LIKE 'field:%'")
@@ -3758,6 +3758,8 @@ def dashboard():
         conditions.append("b.phone = %s")
         params.append(f'field:{rep_filter}')
 
+    # TL_AI_COMPARE_2026_07_02: comparison bids never surface on the dashboard
+    conditions.append("COALESCE(b.creation_source,'') != 'tl_ai_compare'")
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     q = """
         SELECT b.*, c.name as contact_name, c.company as contact_company,
@@ -9759,9 +9761,9 @@ def update_contact(bid_id):
 def api_stats():
     db = get_db()
     cur = db.cursor()
-    cur.execute("SELECT status, COUNT(*) as cnt FROM bids GROUP BY status")
+    cur.execute("SELECT status, COUNT(*) as cnt FROM bids WHERE COALESCE(creation_source,'') != 'tl_ai_compare' GROUP BY status")
     stats = {r['status']: int(r['cnt']) for r in cur.fetchall()}
-    cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE created_at::date = CURRENT_DATE")
+    cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE created_at::date = CURRENT_DATE AND COALESCE(creation_source,'') != 'tl_ai_compare'")
     stats['today'] = int(cur.fetchone()['cnt'])
     cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE phone LIKE 'field:%'")
     stats['field'] = int(cur.fetchone()['cnt'])
@@ -9788,14 +9790,14 @@ def api_bids():
         """, (client_ip,))
         db.commit()
 
-    cur.execute("SELECT status, COUNT(*) as cnt FROM bids GROUP BY status")
+    cur.execute("SELECT status, COUNT(*) as cnt FROM bids WHERE COALESCE(creation_source,'') != 'tl_ai_compare' GROUP BY status")
     stats = {'new': 0, 'reviewing': 0, 'bid_sent': 0, 'passed': 0, 'bought': 0, 'total': 0}
     for r in cur.fetchall():
         stats[r['status']] = int(r['cnt'])
         stats['total'] += int(r['cnt'])
-    cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE created_at::date = CURRENT_DATE")
+    cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE created_at::date = CURRENT_DATE AND COALESCE(creation_source,'') != 'tl_ai_compare'")
     stats['today'] = int(cur.fetchone()['cnt'])
-    cur.execute("SELECT status, COUNT(*) as cnt FROM bids WHERE created_at::date = CURRENT_DATE GROUP BY status")
+    cur.execute("SELECT status, COUNT(*) as cnt FROM bids WHERE created_at::date = CURRENT_DATE AND COALESCE(creation_source,'') != 'tl_ai_compare' GROUP BY status")
     for r in cur.fetchall():
         stats[f'today_{r["status"]}'] = int(r['cnt'])
     cur.execute("SELECT COUNT(*) as cnt FROM bids WHERE phone LIKE 'field:%'")
@@ -9839,6 +9841,7 @@ def api_bids():
         conditions.append("b.phone = %s")
         params.append(f'field:{rep_filter}')
 
+    conditions.append("COALESCE(b.creation_source,'') != 'tl_ai_compare'")   # TL_AI_COMPARE hidden
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     q = """
         SELECT b.id, b.phone, b.vin, b.year, b.make, b.model, b.mileage,
@@ -12653,6 +12656,10 @@ def api_thalist_member_bid():
     except (TypeError, ValueError):
         return jsonify({'error': 'asking_price required'}), 400
 
+    # TL_AI_COMPARE_2026_07_02: ThaList-AI comparison run — full A-to-Z
+    # enrichment like any bid, but hidden from the dashboard (list + counts)
+    # and never routed back to the member app as an offer thread.
+    compare_mode = bool(data.get('compare_mode'))
     member_name = (data.get('member_name') or '').strip() or member_email
     # bids.phone / contacts.phone are varchar(20), so we can't store the email
     # in the phone sentinel. Use a short stable per-member hash key, and keep the
@@ -12697,10 +12704,12 @@ def api_thalist_member_bid():
                               mileage, raw_message, asking_price, notes,
                               status, creation_source, thalist_member_email,
                               vauto_priority)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'new','thalist_app',%s,TRUE)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'new',%s,%s,TRUE)
             RETURNING id
         """, (contact_id, contact_phone, vin, year, make, model, trim,
-              mileage, raw_message, asking_price, notes_text, member_email))
+              mileage, raw_message, asking_price, notes_text,
+              ('tl_ai_compare' if compare_mode else 'thalist_app'),
+              (None if compare_mode else member_email)))
         bid_id = cur.fetchone()['id']
 
         for purl in (data.get('photos') or []):
@@ -12739,6 +12748,8 @@ def api_thalist_member_bid():
     # the shared intake hook (NHTSA decode + iPacket cache prewarm; the market
     # check runs on the worker fleet). No iPacket retry is introduced.
     try:
+        if compare_mode:
+            raise RuntimeError('skip-alert')   # silent by design (TL_AI_COMPARE)
         ymm = ' '.join(str(x) for x in (year, make, model) if x) or vin
         _tg_worker_alert(
             f'📲 <b>New ThaList member bid</b> → bid #<b>{bid_id}</b>\n'
