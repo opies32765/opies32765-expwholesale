@@ -1,9 +1,9 @@
 {
   "make_name": "ASTON MARTIN",
-  "trained_at": "2026-07-02T08:30:58.985986Z",
-  "n_total": 163,
+  "trained_at": "2026-07-03T08:30:51.368154Z",
+  "n_total": 164,
   "n_train": 138,
-  "n_test": 25,
+  "n_test": 26,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -205,49 +205,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 15473.0,
-    "mape_pct": 10.48,
-    "r2": 0.8764,
-    "within_5pct": 36.0,
-    "within_10pct": 56.0
+    "mae_dollars": 15311.0,
+    "mape_pct": 10.3,
+    "r2": 0.8778,
+    "within_5pct": 34.6,
+    "within_10pct": 57.7
   },
   "baseline_metrics": {
-    "mae_dollars": 25261.0,
-    "mape_pct": 22.26,
+    "mae_dollars": 26674.0,
+    "mape_pct": 22.66,
     "ratio": 1.2152
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.46079516410827637
+      "importance": 0.4587603807449341
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.24679359793663025
+      "importance": 0.2496577799320221
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.12601126730442047
+      "importance": 0.12501993775367737
     },
     {
       "name": "original_msrp",
-      "importance": 0.03058096021413803
+      "importance": 0.03083195351064205
     },
     {
       "name": "model_name_OTHER",
-      "importance": 0.02292151004076004
+      "importance": 0.02274118736386299
     },
     {
       "name": "model_name_DB9 GT Volante Convertible",
-      "importance": 0.013353242538869381
+      "importance": 0.013248192146420479
     },
     {
       "name": "year",
-      "importance": 0.01218379195779562
+      "importance": 0.012127969413995743
     },
     {
       "name": "odometer",
-      "importance": 0.010176447220146656
+      "importance": 0.010339937172830105
     }
   ]
 }
