@@ -355,6 +355,12 @@ def _load_recent_bids_for_alerts():
                 " FROM bids WHERE status = 'new'"
                 " AND created_at > NOW() - (%s || ' minutes')::interval"
                 " AND COALESCE(canon_make, make) IS NOT NULL"
+                # ALERT_AFTER_ENRICH_2026_07_04: text the rep only after the
+                # bid is fully enriched + assessed (ai fields set = all legs
+                # landed and YMM reconciled). 10-min fallback so a stuck
+                # assessment can never silently kill alerts.
+                " AND (ai_price IS NOT NULL OR ai_assessed_at IS NOT NULL"
+                "      OR created_at < NOW() - INTERVAL '10 minutes')"
                 " ORDER BY id ASC LIMIT 500", (str(BID_ALERT_WINDOW_MIN),))
             return [dict(r) for r in cur.fetchall()]
 
@@ -385,7 +391,7 @@ def _format_alert_message(bid, a):
     md = bid.get("model") or ""
     tr = bid.get("trim") or ""
     veh = " ".join(str(x) for x in [y, mk, md, tr] if x).strip()
-    msg = ("Hey, it's Anna at Experience Wholesale - you asked me to flag any "
+    msg = ("Hey, it's Bill at Experience Wholesale - you asked me to flag any "
            + want + ". One just hit our bid dashboard: Bid #" + str(bid["id"])
            + ", a " + veh)
     miles = bid.get("mileage")
@@ -431,8 +437,13 @@ def _scan_bid_alerts():
         bcreated = bid.get("created_at")
         for a in alerts:
             acreated = a.get("created_at")
-            if bcreated and acreated and bcreated < acreated:
-                continue
+            # TZFIX_2026_07_04: bids.created_at is naive, bid_alerts.created_at is
+            # timestamptz — comparing raised TypeError and killed EVERY scan.
+            if bcreated and acreated:
+                _b = bcreated.replace(tzinfo=None) if getattr(bcreated, "tzinfo", None) else bcreated
+                _a = acreated.replace(tzinfo=None) if getattr(acreated, "tzinfo", None) else acreated
+                if _b < _a:
+                    continue
             try:
                 if not _matches(bid, _alert_to_conds(a)):
                     continue
