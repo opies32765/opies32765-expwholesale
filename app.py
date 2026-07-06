@@ -149,6 +149,14 @@ try:
 except Exception as _e:
     print(f'[voice_agent] blueprint not loaded: {_e}', flush=True)
 
+# LSL_REPORTS_9B_2026_07_05 — owner self-serve LSL data/reports on the local 9B
+# (page /lsl-reports, API /api/lsl-reports/ask; session-gated by require_login).
+try:
+    from lsl_reports import bp as _lslr_bp
+    app.register_blueprint(_lslr_bp)
+except Exception as _e:
+    print(f'[lsl_reports] blueprint not loaded: {_e}', flush=True)
+
 # ── Dashboard login ───────────────────────────────────────────────────────────
 EW_USERNAME = os.environ.get('EW_USERNAME', 'admin')
 EW_PASSWORD = os.environ.get('EW_PASSWORD', 'Sedecrem3')

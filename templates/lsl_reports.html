@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSL Reports — Experience Wholesale</title>
+<style>
+  :root { --ink:#0A0E1A; --muted:#5b6472; --line:#e6e8ee; --blue:#0B5FFF; --bg:#FAFAFB; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.5 -apple-system, "Segoe UI", Inter, Roboto, sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 16px 80px; }
+  h1 { font-size: 22px; margin: 6px 0 2px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+  .askbox { display:flex; gap:8px; }
+  .askbox input { flex:1; padding: 12px 14px; font-size: 15px; border:1px solid var(--line);
+                  border-radius: 10px; background:#fff; }
+  .askbox button { padding: 12px 22px; font-size: 15px; border:0; border-radius: 10px;
+                   background: var(--blue); color:#fff; cursor:pointer; font-weight:600; }
+  .askbox button:disabled { opacity:.5; }
+  .chips { margin: 10px 0 4px; display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { font-size: 12px; padding: 5px 10px; border:1px solid var(--line); border-radius: 999px;
+          background:#fff; color:var(--muted); cursor:pointer; }
+  .chip:hover { border-color: var(--blue); color: var(--blue); }
+  .qa { margin-top: 22px; }
+  .qcard { background:#fff; border:1px solid var(--line); border-radius: 12px;
+           padding: 16px 18px; margin-bottom: 16px; }
+  .qtext { font-weight: 600; margin-bottom: 8px; }
+  .answer { white-space: pre-wrap; }
+  .thinking { color: var(--muted); font-style: italic; }
+  .step { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 10px; }
+  .step summary { cursor:pointer; color:var(--muted); font-size:13px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 13px; }
+  th, td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; }
+  th { background: #f2f4f8; font-weight: 600; white-space: nowrap; }
+  tr:nth-child(even) td { background:#fafbfd; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .csv { margin-top:6px; font-size:12px; color:var(--blue); cursor:pointer;
+         background:none; border:none; padding:0; }
+  .kv { display:grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin-top:8px; font-size:13px; }
+  .kv b { color: var(--muted); font-weight: 500; }
+  .err { color:#b3261e; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>LSL Reports</h1>
+  <div class="sub">Ask in plain English — runs on EW's own local model against the live LSL ledger. Tables come straight from the data; download any table as CSV.</div>
+  <div class="askbox">
+    <input id="q" placeholder="e.g. deals and gross by salesperson last month" autofocus
+           onkeydown="if(event.key==='Enter')ask()">
+    <button id="go" onclick="ask()">Ask</button>
+  </div>
+  <div class="chips" id="chips"></div>
+  <div class="qa" id="qa"></div>
+</div>
+<script>
+const EXAMPLES = [
+  "deals booked and total gross this month",
+  "top 10 salespeople by gross YTD",
+  "how many deals lost money this year and how much",
+  "top makes by volume last 30 days",
+  "average days on lot by make this year",
+  "what's on the lot right now",
+];
+const chips = document.getElementById('chips');
+EXAMPLES.forEach(t => {
+  const c = document.createElement('span');
+  c.className = 'chip'; c.textContent = t;
+  c.onclick = () => { document.getElementById('q').value = t; ask(); };
+  chips.appendChild(c);
+});
+
+function esc(s){ return String(s ?? '').replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
+function fmt(v){
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'number') return Number.isInteger(v) ? v.toLocaleString() : v.toLocaleString(undefined,{maximumFractionDigits:2});
+  return String(v);
+}
+
+function findRows(result){
+  // locate the first array-of-objects anywhere at the top level
+  if (Array.isArray(result) && result.length && typeof result[0] === 'object') return result;
+  if (result && typeof result === 'object'){
+    for (const k of Object.keys(result)){
+      const v = result[k];
+      if (Array.isArray(v) && v.length && typeof v[0] === 'object' && !Array.isArray(v[0])) return v;
+    }
+  }
+  return null;
+}
+
+function renderResult(result, idx){
+  const rows = findRows(result);
+  if (rows){
+    const cols = [...new Set(rows.flatMap(r => Object.keys(r)))];
+    let h = '<table><thead><tr>' + cols.map(c=>`<th>${esc(c)}</th>`).join('') + '</tr></thead><tbody>';
+    for (const r of rows){
+      h += '<tr>' + cols.map(c=>{
+        const v = r[c]; const num = typeof v === 'number';
+        return `<td class="${num?'num':''}">${esc(fmt(v))}</td>`;
+      }).join('') + '</tr>';
+    }
+    h += '</tbody></table>';
+    h += `<button class="csv" onclick='csv(${idx})'>⬇ download CSV (${rows.length} rows)</button>`;
+    return h;
+  }
+  if (result && typeof result === 'object'){
+    const scal = Object.entries(result).filter(([,v]) => typeof v !== 'object' || v === null);
+    if (scal.length){
+      return '<div class="kv">' + scal.map(([k,v])=>`<b>${esc(k)}</b><span>${esc(fmt(v))}</span>`).join('') + '</div>';
+    }
+  }
+  return '<pre style="font-size:12px;overflow:auto">' + esc(JSON.stringify(result, null, 2)).slice(0, 4000) + '</pre>';
+}
+
+const stepData = [];
+function csv(idx){
+  const rows = findRows(stepData[idx]); if (!rows) return;
+  const cols = [...new Set(rows.flatMap(r => Object.keys(r)))];
+  const lines = [cols.join(',')].concat(rows.map(r => cols.map(c => {
+    let v = r[c]; v = (v===null||v===undefined) ? '' : String(v);
+    return /[",\n]/.test(v) ? '"' + v.replace(/"/g,'""') + '"' : v;
+  }).join(',')));
+  const blob = new Blob([lines.join('\n')], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'lsl_report_' + idx + '.csv';
+  a.click();
+}
+
+async function ask(){
+  const q = document.getElementById('q').value.trim();
+  if (!q) return;
+  const go = document.getElementById('go'); go.disabled = true;
+  const card = document.createElement('div');
+  card.className = 'qcard';
+  card.innerHTML = `<div class="qtext">${esc(q)}</div><div class="answer thinking">running…</div>`;
+  document.getElementById('qa').prepend(card);
+  try {
+    const r = await fetch('/api/lsl-reports/ask', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({question: q}),
+    });
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    let h = `<div class="answer">${esc(d.answer)}</div>`;
+    if (d.warning) h += `<div class="err" style="font-size:12px;margin-top:4px">⚠ ${esc(d.warning)}</div>`;
+    (d.steps || []).forEach(s => {
+      const idx = stepData.length; stepData.push(s.result);
+      h += `<div class="step"><details open><summary>${esc(s.tool)} ${esc(JSON.stringify(s.args)).slice(0,140)}</summary>` +
+           renderResult(s.result, idx) + '</details></div>';
+    });
+    card.innerHTML = `<div class="qtext">${esc(q)}</div>` + h;
+  } catch(e){
+    card.querySelector('.answer').className = 'answer err';
+    card.querySelector('.answer').textContent = 'Error: ' + e.message;
+  } finally {
+    go.disabled = false;
+    document.getElementById('q').value = '';
+  }
+}
+</script>
+</body>
+</html>

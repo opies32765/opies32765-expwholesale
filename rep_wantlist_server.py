@@ -17,7 +17,7 @@ webhook, app.py, or the running voice services.
 """
 from __future__ import annotations
 
-import asyncio, base64, json, logging, os, time, audioop, io, wave
+import asyncio, base64, json, logging, os, random, time, audioop, io, wave
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -43,12 +43,25 @@ os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GOOGLE_CREDS
 PUBLIC_WS_URL      = os.environ.get("REP_VOICE_WS_URL",
     "wss://experience-wholesale.net/rep-voice/stream")
 PORT               = int(os.environ.get("REP_VOICE_PORT", "5211"))
+# REP_MODE=raw  -> the 9B words EVERYTHING (greeting + post-action replies);
+#                  guards run log-only ("[raw-telemetry]") and never interfere.
+# REP_MODE=guarded -> Python words action confirmations from DB results.
+RAW_MODE           = os.environ.get("REP_MODE", "guarded").lower() == "raw"
 
 log = logging.getLogger("ew-rep-voice")
 logging.basicConfig(level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 SYSTEM_PROMPT = open("/opt/expwholesale/rep_wantlist_prompt.txt").read()
+if RAW_MODE:
+    SYSTEM_PROMPT += (
+        "\nAfter you emit an action, the next message will be `[tool_result] {json}` — "
+        "the actual outcome. Reply with a new JSON object whose \"say\" words that outcome "
+        "naturally: brief, factual, strictly from the result. Never claim success before "
+        "seeing the result.\n")
+else:
+    SYSTEM_PROMPT += (
+        "\nWhen action is set, leave \"say\" empty — the system speaks the confirmation for you.\n")
 
 # ─── STT: Google phone_call model primary, ElevenLabs scribe fallback ──
 _gstt = None
@@ -255,6 +268,36 @@ class RepCall:
         self._turn_lock = asyncio.Lock()
         self._debounce_task: Optional[asyncio.Task] = None
         self._done_actions: set = set()
+        # QA 2026-07-05: anti-robotic variety + anti-fabrication guards
+        self._last_lines: dict = {}      # phrase-pool key -> last used line
+        self._asked_tail = False         # "Anything else?" at most once per call
+        self._heard_numbers: set = set() # every number the CALLER actually said
+
+    def _pick(self, key: str, options: list[str]) -> str:
+        """Pseudo-random line from a pool, never the same one twice in a row."""
+        last = self._last_lines.get(key)
+        pool = [o for o in options if o != last] or options
+        line = random.choice(pool)
+        self._last_lines[key] = line
+        return line
+
+    def _tail(self, line: str) -> str:
+        if not self._asked_tail:
+            self._asked_tail = True
+            return line + " Anything else?"
+        return line
+
+    def _note_heard_numbers(self, text: str):
+        import re as _re
+        for m in _re.finditer(r"\b(\d[\d,]*)\s*([kK]|grand)?\b", text):
+            try:
+                n = int(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            self._heard_numbers.add(n)
+            if m.group(2):
+                self._heard_numbers.add(n * 1000)
+            self._heard_numbers.add(n * 1000)  # "ninety" -> STT often "90"
 
     async def send_event(self, evt: dict):
         await self.ws.send_text(json.dumps(evt))
@@ -330,6 +373,7 @@ class RepCall:
             return
         self._last_text, self._last_ts = text, now
         log.info(f"{self._tag} USER: {text!r}")
+        self._note_heard_numbers(text)
         self.messages.append({"role": "user", "content": text})
         # Debounce: a follow-on fragment within 700ms joins this turn instead
         # of spawning its own — then turns run one at a time under the lock.
@@ -376,72 +420,177 @@ class RepCall:
 
     async def start_call(self):
         wants = await asyncio.to_thread(self._refresh_ctx)
-        # Deterministic opener — Python picks it, not the LLM.
-        if wants:
-            w = wants[0]
-            first = (w.get("label") or f"{(w['make'] or '').title()} {w['model'] or ''}").strip()
-            more = f" and {len(wants)-1} more" if len(wants) > 1 else ""
-            opener = (f"Hey, it's Bill at Experience Wholesale. Still watching for that "
-                      f"{first}{more} for you. What can I do for you?")
+        # Deterministic opener — Python picks it, not the LLM. Varied per
+        # call so repeat callers don't hear the same script every time.
+        def _desc(w):
+            return (w.get("label") or f"{(w.get('make') or '').title()} {w.get('model') or ''}").strip()
+        SMALL = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+        if not wants:
+            opener = self._pick("open0", [
+                "This is Bill at Experience Wholesale. What's your customer looking for?",
+                "Bill at Experience Wholesale — what are we hunting for?",
+                "Hey, Bill here at Experience Wholesale. Who's looking for what?",
+            ])
+        elif len(wants) == 1:
+            d = _desc(wants[0])
+            opener = self._pick("open1", [
+                f"Hey, it's Bill. Still watching for that {d} for you. What's up?",
+                f"Bill here — that {d} is still on my radar. What can I do for you?",
+                f"Hey, it's Bill at Experience Wholesale. Haven't forgotten the {d}. What do you need?",
+            ])
+        elif len(wants) == 2:
+            d1, d2 = _desc(wants[0]), _desc(wants[1])
+            opener = self._pick("open2", [
+                f"Hey, it's Bill. Still on the hunt for the {d1} and the {d2} for you. What's up?",
+                f"Bill here — got you covered on the {d1} and the {d2}. What else you got?",
+            ])
         else:
-            opener = ("This is Bill at Experience Wholesale. What's your customer looking for?")
+            d1 = _desc(wants[0])
+            n = SMALL[len(wants) - 1] if len(wants) - 1 < len(SMALL) else str(len(wants) - 1)
+            opener = (f"Hey, it's Bill. Still watching the {d1} and {n} others for you. "
+                      "What can I do for you?")
+        if RAW_MODE:
+            # raw mode: the 9B words its own greeting (pool opener = fallback)
+            self.messages.append({"role": "user",
+                                  "content": "[call_connected] The caller just dialed in. Greet them."})
+            try:
+                out = await brain_chat(self.full_prompt, self.messages, self._tag)
+                if (out.get("say") or "").strip():
+                    opener = out["say"].strip()
+            except Exception as e:
+                log.warning(f"{self._tag} raw opener failed ({e}); using pool opener")
         self.messages.append({"role": "assistant", "content": opener})
-        log.info(f"{self._tag} BOT (opener): {opener!r}")
+        log.info(f"{self._tag} BOT (opener{'/raw' if RAW_MODE else ''}): {opener!r}")
         await self.speak(opener)
 
-    # ─── 9B turn: strict JSON in/out, deterministic confirmations ──────
+    # ─── 9B turn ─────────────────────────────────────────────────────────
+    # guarded: Python words action confirmations from DB results.
+    # raw:     the 9B sees [tool_result] and words everything itself.
     async def run_llm_turn(self):
-        try:
-            out = await brain_chat(self.full_prompt, self.messages, self._tag)
-        except Exception as e:
-            log.exception(f"brain err: {e}")
-            await self.speak("Sorry, having a connection issue. Text this same number and we'll take care of you.")
+        for _cycle in range(3):
+            try:
+                out = await brain_chat(self.full_prompt, self.messages, self._tag)
+            except Exception as e:
+                log.exception(f"brain err: {e}")
+                await self.speak("Sorry, having a connection issue. Text this same number and we'll take care of you.")
+                return
+            say, action = out.get("say", ""), out.get("action")
+            actions = action if isinstance(action, list) else ([action] if isinstance(action, dict) else [])
+            if actions and RAW_MODE:
+                results = []
+                for act in actions[:4]:
+                    if not isinstance(act, dict):
+                        continue
+                    name = str(act.get("name") or "")
+                    args = act.get("args") or {}
+                    log.info(f"{self._tag} ACTION(raw): {name}({json.dumps(args, default=str)[:150]})")
+                    try:
+                        results.append({name: await asyncio.to_thread(self._run_action_raw, name, args)})
+                        await asyncio.to_thread(self._refresh_ctx)
+                    except Exception as e:
+                        log.exception(f"{self._tag} raw action failed: {e}")
+                        results.append({name: {"error": str(e)}})
+                self.messages.append({"role": "assistant",
+                                      "content": json.dumps({"say": say, "action": actions}, default=str)})
+                self.messages.append({"role": "user",
+                                      "content": "[tool_result] " + json.dumps(results, default=str)[:2000]})
+                continue  # model now words the outcome itself
+            if actions:
+                says = []
+                for act in actions[:4]:
+                    if not isinstance(act, dict):
+                        continue
+                    name = str(act.get("name") or "")
+                    args = act.get("args") or {}
+                    sig = json.dumps([name, args], sort_keys=True, default=str)
+                    if name == "add_want" and sig in self._done_actions:
+                        # sticky-model guard: same add re-emitted after it was
+                        # already confirmed this call — don't repeat the pitch.
+                        says.append("You're all set on that one.")
+                        continue
+                    self._done_actions.add(sig)
+                    log.info(f"{self._tag} ACTION: {name}({json.dumps(args, default=str)[:150]})")
+                    try:
+                        says.append(await asyncio.to_thread(self._run_action, name, args))
+                        await asyncio.to_thread(self._refresh_ctx)  # keep OPEN REQUESTS (ids) current
+                    except Exception as e:
+                        log.exception(f"{self._tag} action failed: {e}")
+                        says.append("Hit a snag logging that — give me the make and model one more time?")
+                # Combined confirmations: drop mid-sentence "Anything else?" tails
+                says = [s.replace(" Anything else?", "") for s in says[:-1]] + says[-1:] if says else says
+                say = " ".join(s for s in says if s)
+            if say:
+                log.info(f"{self._tag} BOT: {say!r}")
+                self.messages.append({"role": "assistant", "content": say})
+                await self.speak(say)
             return
-        say, action = out.get("say", ""), out.get("action")
-        actions = action if isinstance(action, list) else ([action] if isinstance(action, dict) else [])
-        if actions:
-            says = []
-            for act in actions[:4]:
-                if not isinstance(act, dict):
-                    continue
-                name = str(act.get("name") or "")
-                args = act.get("args") or {}
-                sig = json.dumps([name, args], sort_keys=True, default=str)
-                if name == "add_want" and sig in self._done_actions:
-                    # sticky-model guard: same add re-emitted after it was
-                    # already confirmed this call — don't repeat the pitch.
-                    says.append("You're all set on that one.")
-                    continue
-                self._done_actions.add(sig)
-                log.info(f"{self._tag} ACTION: {name}({json.dumps(args, default=str)[:150]})")
-                try:
-                    says.append(await asyncio.to_thread(self._run_action, name, args))
-                    await asyncio.to_thread(self._refresh_ctx)  # keep OPEN REQUESTS (ids) current
-                except Exception as e:
-                    log.exception(f"{self._tag} action failed: {e}")
-                    says.append("Hit a snag logging that — give me the make and model one more time?")
-            # Combined confirmations: drop mid-sentence "Anything else?" tails
-            says = [s.replace(" Anything else?", "") for s in says[:-1]] + says[-1:] if says else says
-            say = " ".join(s for s in says if s)
-        if say:
-            log.info(f"{self._tag} BOT: {say!r}")
-            self.messages.append({"role": "assistant", "content": say})
-            await self.speak(say)
+        # raw mode only: 3 cycles and the model never produced a spoken reply
+        await self.speak("All set. Anything else?")
+
+    def _run_action_raw(self, name: str, args: dict) -> dict:
+        """RAW mode executor: run the action, return the raw result for the
+        9B to word itself. Guards run LOG-ONLY ([raw-telemetry]) so we can
+        score the model without interfering."""
+        if name == "add_want":
+            pm = args.get("price_max")
+            try:
+                pm_i = int(pm) if pm else None
+            except (TypeError, ValueError):
+                pm_i = None
+            if pm_i and pm_i not in self._heard_numbers and pm_i // 1000 not in self._heard_numbers:
+                log.warning(f"{self._tag} [raw-telemetry] price_max={pm_i} was never said by caller")
+            sig = json.dumps(["add_want", args], sort_keys=True, default=str)
+            if sig in self._done_actions:
+                log.warning(f"{self._tag} [raw-telemetry] duplicate add_want re-emitted")
+            self._done_actions.add(sig)
+            return db_add_want(self.caller_digits,
+                               str(args.get("make") or ""), str(args.get("model") or ""),
+                               args.get("year_min"), args.get("year_max"),
+                               args.get("trim_contains"), pm_i, args.get("label"))
+        if name == "list_wants":
+            return {"open_requests": db_open_wants(self.caller_digits)}
+        if name == "cancel_want":
+            raw = args.get("alert_id")
+            ids = [int(x) for x in (raw if isinstance(raw, list) else [raw]) if x]
+            results = [db_cancel_want(self.caller_digits, i) for i in ids]
+            return {"cancelled": sum(1 for r in results if r.get("ok")),
+                    "requested": len(ids)}
+        return {"error": f"unknown tool {name}"}
 
     def _run_action(self, name: str, args: dict) -> str:
         """Execute a want-list action; return the DETERMINISTIC line Bill
         speaks (Python words the outcome — the 9B never voices data)."""
         if name == "add_want":
+            # ANTI-FABRICATION 2026-07-05: the 9B invented price caps in
+            # read-backs ("under 170k" the caller never said). A price_max the
+            # caller never uttered on this call gets stripped, not stored.
+            pm = args.get("price_max")
+            if pm:
+                try:
+                    pm_i = int(pm)
+                    if pm_i not in self._heard_numbers and pm_i // 1000 not in self._heard_numbers:
+                        log.warning(f"{self._tag} stripping fabricated price_max={pm_i} "
+                                    f"(heard: {sorted(self._heard_numbers)[:12]})")
+                        pm = None
+                except (TypeError, ValueError):
+                    pm = None
             r = db_add_want(self.caller_digits,
                             str(args.get("make") or ""), str(args.get("model") or ""),
                             args.get("year_min"), args.get("year_max"),
-                            args.get("trim_contains"), args.get("price_max"),
+                            args.get("trim_contains"), pm,
                             args.get("label"))
             if r.get("ok") and r.get("note"):
-                return "You're already on the list for that one — still watching. Anything else?"
+                return self._pick("dup", [
+                    "You're already covered on that one — still watching.",
+                    "Already got you down for that one.",
+                ])
             if r.get("ok"):
-                return ("You're on the list. The second a matching car hits our board, "
-                        "you'll get a text at this number. Anything else?")
+                return self._tail(self._pick("add", [
+                    "You're on the list. The second one hits our board, you'll get a text.",
+                    "Got you down. Soon as one lands, I'll text you at this number.",
+                    "On the list. You'll hear from me the minute one shows up.",
+                    "Locked in. I'll text you when one comes through.",
+                ]))
             return "I didn't catch enough to log that — give me the make and model again?"
         if name == "list_wants":
             return _speak_wants(db_open_wants(self.caller_digits))
@@ -455,8 +604,12 @@ class RepCall:
             if done == 0:
                 return "I don't see that on your list. Want me to read back what you've got open?"
             if done == 1:
-                return "Done — dropped it. Anything else?"
-            return f"Done — dropped all {done} of them. Anything else?"
+                return self._tail(self._pick("cancel", [
+                    "Done — dropped it.",
+                    "That one's off the list.",
+                    "Gone. Off the list.",
+                ]))
+            return self._tail(f"Done — cleared all {done} of them.")
         return "Sorry, say that again?"
 
     # ─── TTS ────────────────────────────────────────────────────────────
@@ -515,7 +668,7 @@ class RepCall:
                        lambda m: words(int(m.group(1).replace(",", ""))) + " dollars", text)
         # 90k / 90K -> ninety thousand
         text = _re.sub(r"\b(\d{1,3})[kK]\b",
-                       lambda m: two(int(m.group(1))) + " thousand", text)
+                       lambda m: three(int(m.group(1))) + " thousand", text)
         # year range 2024-2025 / 2024 to 2025
         text = _re.sub(r"\b(19|20)(\d{2})\s*[-–]\s*(19|20)(\d{2})\b",
                        lambda m: year(int(m.group(1) + m.group(2))) + " to "
