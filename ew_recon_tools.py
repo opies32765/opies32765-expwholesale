@@ -259,14 +259,17 @@ def _do_move(unit_id, target_id, from_id):
         c.commit()
 
 
-async def recon_move(query: str = "", to_stage: str = "", stock_no: str = "") -> dict:
-    """EW Recon WRITE: MOVE a vehicle to a different recon/transport stage (advance it through the pipeline).
-    query/stock_no: stock#, VIN, or vehicle. to_stage: the target stage, e.g. 'recon', 'ready', 'ready for
-    pickup', 'picked up', 'arrived at dealer', 'arrived home', 'in transit'. Confirm the car and the target
-    stage with the caller before moving. Returns the from -> to stage."""
+async def recon_move(query: str = "", to_stage: str = "", stock_no: str = "", confirm: bool = False) -> dict:
+    """EW Recon WRITE: MOVE a vehicle to a different recon/transport stage. TWO STEPS — the FIRST call
+    (confirm not set) does NOT move anything; it returns a confirmation prompt you MUST read to the caller
+    and get an explicit yes. Only after they confirm, call again with confirm=true to actually move it.
+    NEVER guess the target stage — if the caller did not clearly name a destination stage, ask them first
+    instead of calling this. to_stage: e.g. 'recon', 'ready for pickup', 'picked up', 'arrived at dealer',
+    'arrived home', 'in transit'. query/stock_no: stock#, VIN, or vehicle."""
     key = (stock_no or query or "").strip()
-    if not key or not to_stage.strip():
-        return {"error": "need a vehicle and a target stage"}
+    if not key or not (to_stage or "").strip():
+        return {"error": "need both a vehicle and a target stage",
+                "_must_say": "Ask the caller which car and which stage — do not move anything until both are clear."}
     rows = await _a.to_thread(_find, key)
     if not rows:
         return {"matches": 0, "_must_say": f"No vehicle in EW Recon matches '{key}'."}
@@ -277,41 +280,58 @@ async def recon_move(query: str = "", to_stage: str = "", stock_no: str = "") ->
     target = await _a.to_thread(_resolve_step, to_stage)
     if not target:
         return {"error": f"unknown stage '{to_stage}'",
-                "_must_say": "Ask the caller to name a valid stage (recon, ready, picked up, arrived at dealer, arrived home, in transit)."}
+                "_must_say": "That's not a valid stage — ask the caller to name one (recon, ready for pickup, picked up, arrived at dealer, arrived home, in transit)."}
     if target["code"] in _STAGING:
         return {"_must_say": f"Moving to a staging step ({target['name']}) needs the board wizard; can't do that by voice."}
     if target["id"] == u.get("current_step_id"):
-        return {"ok": True, "no_change": True, "stock_no": u["stock_no"], "stage": target["name"]}
+        return {"ok": True, "no_change": True, "stock_no": u["stock_no"],
+                "_must_say": f"{u['stock_no']} is already in {target['name']}; nothing to move."}
+    veh = f'{u["year"]} {u["make"]} {u["model"]}'
+    if not confirm:
+        return {"needs_confirmation": True, "stock_no": u["stock_no"], "vehicle": veh,
+                "from_stage": u.get("stage"), "to_stage": target["name"],
+                "_must_say": (f"Ask the caller to confirm, and wait for a yes: move the {veh}, stock "
+                              f"{u['stock_no']}, from {u.get('stage')} to {target['name']}?"),
+                "_hint_not_spoken": "After the caller says yes, call recon_move again with confirm=true."}
     await _a.to_thread(_do_move, u["id"], target["id"], u.get("current_step_id"))
-    return {"ok": True, "stock_no": u["stock_no"], "vehicle": f'{u["year"]} {u["make"]} {u["model"]}',
+    return {"ok": True, "moved": True, "stock_no": u["stock_no"], "vehicle": veh,
             "from_stage": u.get("stage"), "to_stage": target["name"]}
 
 
+_PERIOD_ALIAS = {
+    "this_month": "month", "mtd": "month", "month to date": "month", "month_to_date": "month",
+    "this month": "month", "current month": "month",
+    "last_month": "last_month", "last month": "last_month", "previous month": "last_month", "prior month": "last_month",
+    "ytd": "year", "year to date": "year", "this_year": "year", "this year": "year",
+    "last_year": "last_year", "last year": "last_year", "previous year": "last_year",
+    "this_week": "week", "last_7_days": "week", "last 7 days": "week", "this week": "week",
+    "all_time": "all", "alltime": "all", "all time": "all", "lifetime": "all", "total": "all",
+}
+
+
 async def recon_spend(period: str = "month") -> dict:
-    """EW Recon: total recon and transport SPEND for a period, with average per vehicle. period: week,
-    month, year, or all. Use for 'how much did we spend on recon this month', 'recon spend', transport spend."""
-    p = (period or "month").strip().lower()
-    if p in ("this_month", "mtd", "month to date"):
+    """EW Recon: total recon and transport SPEND for a period, with average per vehicle. period: this
+    month, last month, this year, last year, this week, or all. Use for 'how much did we spend on recon
+    last month', 'recon spend', 'transport spend'."""
+    raw = (period or "month").strip().lower()
+    p = _PERIOD_ALIAS.get(raw, raw)
+    if p not in ("month", "last_month", "year", "last_year", "week", "all"):
         p = "month"
-    elif p in ("ytd", "year to date"):
-        p = "year"
-    elif p in ("this_week", "last_7_days", "week"):
-        p = "week"
-    try:
-        import recon_routes as _rr
-        rep = await _a.to_thread(_rr._recon_report, p)
-        return {"period": p, "report": _round_nums(rep)}
-    except Exception:
-        rows = await _a.to_thread(_rows, """
-            select coalesce(sum(lsl_recon_cost),0) recon, coalesce(sum(lsl_transport_cost),0) transport,
-                   count(*) n
-            from recon_units
-            where (%s='all') or (%s='year'  and date_trunc('year', coalesce(acquired_at,created_at))=date_trunc('year', now()))
-               or (%s='month' and date_trunc('month',coalesce(acquired_at,created_at))=date_trunc('month',now()))
-               or (%s='week'  and coalesce(acquired_at,created_at) >= now()-interval '7 days')
-        """, (p, p, p, p))
-        r = rows[0] if rows else {"recon": 0, "transport": 0, "n": 0}
-        n = r["n"] or 1
-        return {"period": p, "recon_spend": _money(r["recon"]), "transport_spend": _money(r["transport"]),
-                "vehicles": r["n"], "avg_recon_per_vehicle": _money(float(r["recon"]) / n),
-                "avg_transport_per_vehicle": _money(float(r["transport"]) / n)}
+    rows = await _a.to_thread(_rows, """
+        with base as (select coalesce(acquired_at, created_at) t, coalesce(lsl_recon_cost,0) rc,
+                             coalesce(lsl_transport_cost,0) tc from recon_units)
+        select coalesce(sum(rc),0) recon, coalesce(sum(tc),0) transport, count(*) n from base
+        where (%(p)s='all')
+           or (%(p)s='year'       and date_trunc('year',  t) = date_trunc('year',  now()))
+           or (%(p)s='last_year'  and date_trunc('year',  t) = date_trunc('year',  now() - interval '1 year'))
+           or (%(p)s='month'      and date_trunc('month', t) = date_trunc('month', now()))
+           or (%(p)s='last_month' and date_trunc('month', t) = date_trunc('month', now() - interval '1 month'))
+           or (%(p)s='week'       and t >= now() - interval '7 days')
+    """, {"p": p})
+    r = rows[0] if rows else {"recon": 0, "transport": 0, "n": 0}
+    n = r["n"] or 1
+    label = {"month": "this month", "last_month": "last month", "year": "this year",
+             "last_year": "last year", "week": "this week", "all": "all time"}[p]
+    return {"period": label, "recon_spend": _money(r["recon"]), "transport_spend": _money(r["transport"]),
+            "vehicles": r["n"], "avg_recon_per_vehicle": _money(float(r["recon"]) / n),
+            "avg_transport_per_vehicle": _money(float(r["transport"]) / n)}
