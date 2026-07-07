@@ -6098,3 +6098,4 @@ def generate_report_pdf(title: str, body: str, to_number: str = "", to_group: st
     return out
 from ew_recon_tools import recon_status, recon_board, recon_out_for_recon, recon_add_note, recon_ship_out, recon_mark_returned, recon_move, recon_spend  # RECON_VOICE_2026_07_07
 from ew_contact_tools import save_contact, add_to_group, list_groups  # CONTACTS_VOICE_2026_07_07
+from ew_bid_tools import bids_count  # BIDS_VOICE_2026_07_07

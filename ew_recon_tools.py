@@ -121,31 +121,37 @@ async def recon_board() -> dict:
         where u.exited_at is null and not coalesce(u.not_available,false)
         group by d.name, d.sort_order order by d.sort_order nulls last
     """)
-    out_cnt = await _a.to_thread(_rows, "select count(*) n from recon_units where out_for_recon_at is not null and out_for_recon_to is not null")
-    return {"by_stage": {r["stage"]: r["n"] for r in by_stage},
-            "out_for_recon": out_cnt[0]["n"] if out_cnt else 0,
+    stage_map = {r["stage"]: r["n"] for r in by_stage}
+    sublet = await _a.to_thread(_rows, "select count(*) n from recon_units where out_for_recon_at is not null and out_for_recon_to is not null")
+    return {"by_stage": stage_map,
+            "in_recon": stage_map.get("Recon", 0),           # cars in the Recon stage (what "in/out for recon" usually means)
+            "sublet_to_outside_shop": sublet[0]["n"] if sublet else 0,  # subset shipped to an external recon vendor
             "total_active": sum(r["n"] for r in by_stage)}
 
 
 async def recon_out_for_recon() -> dict:
-    """EW Recon: list the vehicles currently OUT for recon (shipped to a recon vendor), with the vendor
-    and how many days they've been out. USE for 'what's out for recon', 'which cars are at the recon shop'."""
+    """EW Recon: list the vehicles currently in RECON (the Recon stage of the pipeline) with how many days
+    they've been in recon; if a car has also been sublet out to an outside shop, that vendor is noted. USE
+    for 'what's in recon', 'which cars are out for recon', 'cars at the recon center', 'how many in recon'."""
     rows = await _a.to_thread(_rows, """
-        select stock_no, year, make, model, out_for_recon_to, out_for_recon_at
-        from recon_units where out_for_recon_at is not null and out_for_recon_to is not null
-        order by out_for_recon_at asc limit 100
+        select u.stock_no, u.year, u.make, u.model, u.entered_recon_at, u.acquired_at,
+               u.out_for_recon_at, u.out_for_recon_to
+        from recon_units u join recon_step_defs d on d.id=u.current_step_id
+        where d.code='recon' order by coalesce(u.entered_recon_at, u.acquired_at) asc limit 200
     """)
     cars = []
     for r in rows:
-        d = None
+        base = r.get("entered_recon_at") or r.get("acquired_at")
+        days = None
         try:
-            d = (_dt.datetime.now(r["out_for_recon_at"].tzinfo) - r["out_for_recon_at"]).days
+            days = (_dt.datetime.now(base.tzinfo) - base).days if base else None
         except Exception:
             pass
-        cars.append({"stock_no": r["stock_no"],
-                     "vehicle": f'{r["year"]} {r["make"]} {r["model"]}',
-                     "vendor": r["out_for_recon_to"], "days_out": d})
-    return {"count": len(cars), "cars": cars}
+        car = {"stock_no": r["stock_no"], "vehicle": f'{r["year"]} {r["make"]} {r["model"]}', "days_in_recon": days}
+        if r.get("out_for_recon_at"):
+            car["sublet_to"] = r.get("out_for_recon_to")
+        cars.append(car)
+    return {"in_recon_count": len(cars), "cars": cars}
 
 
 # ─── WRITE tools ───
