@@ -1,9 +1,9 @@
 {
   "make_name": "LINCOLN",
-  "trained_at": "2026-07-06T08:30:47.999886Z",
-  "n_total": 182,
+  "trained_at": "2026-07-07T08:30:54.875712Z",
+  "n_total": 183,
   "n_train": 174,
-  "n_test": 8,
+  "n_test": 9,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -211,49 +211,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1317.0,
-    "mape_pct": 3.9,
-    "r2": 0.9536,
-    "within_5pct": 75.0,
+    "mae_dollars": 1521.0,
+    "mape_pct": 4.43,
+    "r2": 0.9313,
+    "within_5pct": 66.7,
     "within_10pct": 100.0
   },
   "baseline_metrics": {
-    "mae_dollars": 2111.0,
-    "mape_pct": 6.21,
+    "mae_dollars": 2024.0,
+    "mape_pct": 5.93,
     "ratio": 1.0062
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.46083205938339233
+      "importance": 0.4696791470050812
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.2800728976726532
+      "importance": 0.275412917137146
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.18747776746749878
+      "importance": 0.1827029287815094
     },
     {
       "name": "model_name_Continental Reserve Sedan",
-      "importance": 0.011607722379267216
+      "importance": 0.01273154467344284
     },
     {
       "name": "original_msrp",
-      "importance": 0.009685486555099487
+      "importance": 0.00938689149916172
     },
     {
       "name": "supplier_name_Infiniti Of Coconut Creek",
-      "importance": 0.006283011753112078
+      "importance": 0.006891313008964062
     },
     {
       "name": "supplier_name_Ed Voyles Chrysler Jeep",
-      "importance": 0.004913156386464834
+      "importance": 0.0043122172355651855
     },
     {
       "name": "model_name_MKC Reserve Sport Utility Vehicle",
-      "importance": 0.0034727344755083323
+      "importance": 0.0038089535664767027
     }
   ]
 }

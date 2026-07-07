@@ -1,9 +1,9 @@
 {
   "make_name": "RAM",
-  "trained_at": "2026-07-06T08:30:31.138370Z",
-  "n_total": 746,
+  "trained_at": "2026-07-07T08:30:39.554950Z",
+  "n_total": 747,
   "n_train": 688,
-  "n_test": 58,
+  "n_test": 59,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -217,49 +217,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2993.0,
-    "mape_pct": 7.59,
-    "r2": 0.9565,
-    "within_5pct": 50.0,
-    "within_10pct": 77.6
+    "mae_dollars": 3037.0,
+    "mape_pct": 8.29,
+    "r2": 0.9588,
+    "within_5pct": 40.7,
+    "within_10pct": 69.5
   },
   "baseline_metrics": {
-    "mae_dollars": 3537.0,
-    "mape_pct": 10.24,
+    "mae_dollars": 3601.0,
+    "mape_pct": 10.22,
     "ratio": 1.013
   },
   "top_features": [
     {
       "name": "base_appraised_value",
-      "importance": 0.4122980535030365
+      "importance": 0.3842849135398865
     },
     {
       "name": "market_asking_price",
-      "importance": 0.299024373292923
+      "importance": 0.29302123188972473
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.18719713389873505
+      "importance": 0.21558010578155518
     },
     {
       "name": "supplier_name_Rick Hendrick Chrysler Dodge Jeep Ram Duluth",
-      "importance": 0.007468474097549915
+      "importance": 0.006937249563634396
     },
     {
       "name": "supplier_name_Crown Euro Cars Inc.",
-      "importance": 0.006653944496065378
+      "importance": 0.0057662236504256725
+    },
+    {
+      "name": "model_name_1500 TRX SB Pickup Truck",
+      "importance": 0.004704324062913656
+    },
+    {
+      "name": "mileage_adjustment_value",
+      "importance": 0.003428483149036765
     },
     {
       "name": "supplier_name_Lifted Trucks",
-      "importance": 0.0036750219296664
-    },
-    {
-      "name": "model_name_1500 Rebel Pickup Truck",
-      "importance": 0.00358170410618186
-    },
-    {
-      "name": "model_name_1500 Limited Pickup Truck",
-      "importance": 0.003568046260625124
+      "importance": 0.0033424810972064734
     }
   ]
 }

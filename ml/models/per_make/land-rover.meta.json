@@ -1,9 +1,9 @@
 {
   "make_name": "LAND ROVER",
-  "trained_at": "2026-07-06T08:30:24.732761Z",
-  "n_total": 1195,
+  "trained_at": "2026-07-07T08:30:30.575954Z",
+  "n_total": 1196,
   "n_train": 1091,
-  "n_test": 104,
+  "n_test": 105,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -213,49 +213,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3449.0,
-    "mape_pct": 6.37,
-    "r2": 0.9756,
-    "within_5pct": 57.7,
-    "within_10pct": 83.7
+    "mae_dollars": 3435.0,
+    "mape_pct": 6.57,
+    "r2": 0.9773,
+    "within_5pct": 54.3,
+    "within_10pct": 82.9
   },
   "baseline_metrics": {
-    "mae_dollars": 5368.0,
-    "mape_pct": 9.91,
+    "mae_dollars": 5327.0,
+    "mape_pct": 9.82,
     "ratio": 1.0258
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.4864106774330139
+      "importance": 0.4870554506778717
     },
     {
       "name": "market_asking_price",
-      "importance": 0.23740968108177185
+      "importance": 0.23663848638534546
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.11189989745616913
+      "importance": 0.11025379598140717
     },
     {
       "name": "supplier_name_Marino Performance Motors",
-      "importance": 0.011783226393163204
-    },
-    {
-      "name": "model_name_New Range Rover SE Sport Utility Vehicle",
-      "importance": 0.00918011087924242
+      "importance": 0.011781647801399231
     },
     {
       "name": "supplier_name_Mall Of Georgia Mazda",
-      "importance": 0.00888453796505928
+      "importance": 0.009870598092675209
+    },
+    {
+      "name": "model_name_New Range Rover SE Sport Utility Vehicle",
+      "importance": 0.009045067243278027
     },
     {
       "name": "model_name_Range Rover Sport Utility Vehicle",
-      "importance": 0.00830624345690012
+      "importance": 0.008184054866433144
     },
     {
       "name": "model_name_Range Rover Supercharged Sport Utility Vehicle",
-      "importance": 0.006560856010764837
+      "importance": 0.006831689737737179
     }
   ]
 }

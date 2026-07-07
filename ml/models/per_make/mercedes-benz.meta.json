@@ -1,9 +1,9 @@
 {
   "make_name": "MERCEDES-BENZ",
-  "trained_at": "2026-07-06T08:30:18.844648Z",
-  "n_total": 3774,
+  "trained_at": "2026-07-07T08:30:21.955275Z",
+  "n_total": 3776,
   "n_train": 3596,
-  "n_test": 178,
+  "n_test": 180,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -223,15 +223,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 7883.0,
-    "mape_pct": 9.83,
-    "r2": 0.9353,
-    "within_5pct": 43.8,
-    "within_10pct": 70.8
+    "mae_dollars": 7810.0,
+    "mape_pct": 9.73,
+    "r2": 0.9356,
+    "within_5pct": 44.4,
+    "within_10pct": 71.1
   },
   "baseline_metrics": {
-    "mae_dollars": 6880.0,
-    "mape_pct": 10.41,
+    "mae_dollars": 6854.0,
+    "mape_pct": 10.35,
     "ratio": 1.0341
   },
   "top_features": [
