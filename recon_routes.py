@@ -63,7 +63,7 @@ LSL_DB = os.environ.get('LSL_DB_PATH', '/opt/livesaleslog/crm.db')
 # status dot colors (board + sidebar + car page): red = new/staged,
 # yellow = in transit, green = delivered to the BUYING dealer (not home base).
 DOT_COLORS = {
-    'all': '#e23b3b', 'dealer_to_dealer': '#e23b3b', 'dealer_to_home': '#e23b3b',
+    'all': '#e23b3b', 'dealer_to_buyer': '#e23b3b', 'dealer_to_dealer': '#e23b3b', 'dealer_to_home': '#e23b3b',
     'indiv_to_dealer': '#e23b3b', 'indiv_to_home': '#e23b3b',
     'in_transport': '#eab308', 'in_transit_home': '#eab308', 'in_transit_dealer': '#f59e0b', 'arrived_dealer': '#22c55e',  # RECON_TRANSIT_SPLIT_2026_06_27
     'arrived_home': '#3b82f6', 'recon': '#f97316', 'ready': '#8b5cf6', 'picked_up': '#9ca3af',
@@ -75,7 +75,7 @@ DOT_COLORS = {
 # is picked up from Home Base and only then arrives at the buying dealer.
 RECON_FLOW = [
     ['all'],
-    ['dealer_to_dealer', 'dealer_to_home', 'indiv_to_dealer', 'indiv_to_home'],
+    ['dealer_to_buyer', 'dealer_to_dealer', 'dealer_to_home', 'indiv_to_dealer', 'indiv_to_home'],
     ['in_transit_home', 'in_transit_dealer'],
     ['arrived_home'],
     ['recon'],  # RECON_LANE_2026_06_26 — in-recon at home base
@@ -475,10 +475,12 @@ def _recon_report(period, frm=None, to=None):
 # ── owners' pipeline flow (path-aware next options) ─────────────────────────
 def _next_options(code, path):
     flow = {
-        'all': [('dealer_to_dealer', 'Dealer to Dealer'),
+        'all': [('dealer_to_buyer', 'Dealer → Buyer Picking Up'),
+                ('dealer_to_dealer', 'Dealer to Dealer'),
                 ('dealer_to_home', 'Dealer to Home'),
                 ('indiv_to_dealer', 'Individual to Dealer'),
                 ('indiv_to_home', 'Individual to Home')],
+        'dealer_to_buyer': [('arrived_dealer', 'Mark Picked Up by Buyer')],
         'dealer_to_dealer': [('in_transport', 'Move to In Transit')],
         'dealer_to_home': [('in_transport', 'Move to In Transit')],
         'indiv_to_dealer': [('in_transport', 'Move to In Transit')],
@@ -543,7 +545,7 @@ def _recon_email(cur, unit_id, kind, to_intended, subject, body, dedupe=True):
                 (unit_id, kind, to_intended, to_actual, subj, body, (not live), ok))
 
 
-def _maybe_emails_on_move(cur, u, to_code):
+def _maybe_emails_on_move(cur, u, to_code, from_code=None):
     # Austin's transport emails are MANUAL now (POST /api/recon/<id>/email-austin),
     # so moving a car never auto-spams him. Rose still gets the automatic event
     # notifications (real things that happened).
@@ -558,7 +560,12 @@ def _maybe_emails_on_move(cur, u, to_code):
         _recon_email(cur, u['id'], 'rose_pickup', EMAIL_RECIP['rose'],
                      'Picked up: %s' % ymm, body)
     # delivered to a dealer -> Rose
-    if to_code == 'arrived_dealer':
+    if to_code == 'arrived_dealer' and from_code == 'dealer_to_buyer':
+        # Buyer-pickup lane: intentionally NO Rose email (recon->Rose notifications
+        # are under review 2026-07-07). This guard also stops the generic
+        # rose_delivered note below from firing on the buyer-pickup path.
+        pass
+    elif to_code == 'arrived_dealer':
         body = "%s (VIN %s) has been delivered to %s." % (ymm, vin, sold_to or 'the buying dealer')
         _recon_email(cur, u['id'], 'rose_delivered', EMAIL_RECIP['rose'],
                      'Delivered: %s' % ymm, body)
@@ -912,7 +919,7 @@ def transport_sms_text(ident):
     code = u.get('step_code')
     sold = (u.get('sold_to') or '').strip()
     been_home = bool(u.get('entered_recon_at'))
-    if code in ('dealer_to_dealer', 'dealer_to_home', 'indiv_to_dealer', 'indiv_to_home'):
+    if code in ('dealer_to_dealer', 'dealer_to_home', 'indiv_to_dealer', 'indiv_to_home', 'dealer_to_buyer'):
         state = 'Pending pickup'
     elif code == 'arrived_home':
         state = 'Pending pickup (Home Base → dealer)' if sold else 'At Home Base'
@@ -1684,13 +1691,15 @@ def api_move(unit_id):
             new_path = 'to_dealer'
         elif to_code in ('dealer_to_home', 'indiv_to_home'):
             new_path = 'to_home'
+        elif to_code == 'dealer_to_buyer':
+            new_path = 'to_buyer'
         elif to_code == 'in_transit_dealer':
             new_path = 'to_dealer'
         elif to_code == 'in_transit_home':
             new_path = 'to_home'
         if to_code in ('indiv_to_dealer', 'indiv_to_home'):
             new_bft = 'Individual'
-        elif to_code in ('dealer_to_dealer', 'dealer_to_home'):
+        elif to_code in ('dealer_to_dealer', 'dealer_to_home', 'dealer_to_buyer'):
             new_bft = 'Dealer'
 
         cur.execute("""UPDATE recon_step_events SET exited_at=%s,
@@ -1715,7 +1724,7 @@ def api_move(unit_id):
                     (unit_id, target['id'], ev, now))
         u['path'] = new_path
         u['buying_from_type'] = new_bft
-        _maybe_emails_on_move(cur, u, to_code)
+        _maybe_emails_on_move(cur, u, to_code, from_code=cur_code)
         _audit(cur, unit_id, 'step', target['id'], 'move', actor, {'from': cur_code, 'to': to_code})
         db.commit()
         # push every device on a status change (deep-links to the car in the app)

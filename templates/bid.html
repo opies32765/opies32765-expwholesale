@@ -3236,7 +3236,7 @@ function openLightbox(url) {            // single-image viewer (Carfax/AccuTrade
   ['lb-prev','lb-next','lb-counter','lb-share'].forEach(function(id){var e=document.getElementById(id); if(e) e.style.display='none';});
   document.getElementById('lightbox').classList.add('open');
 }
-function _lbSyncChip(){ var n=(window.BID_PHOTOS||[]).length, bar=document.getElementById('photos-chipbar'), b=document.getElementById('photos-chip-btn'); if(b) b.innerHTML='&#128247; Photos ('+n+')'; if(bar) bar.style.display = n>0 ? 'block' : 'none'; }
+function _lbSyncChip(){ var ph=(window.BID_PHOTOS||[]); var deal=0; for(var i=0;i<ph.length;i++){ if(ph[i].kind==='dealer') deal++; } var cust=ph.length-deal; var label=(deal>0)?(cust+' + '+deal+' dealer'):String(cust); var bar=document.getElementById('photos-chipbar'), b=document.getElementById('photos-chip-btn'); if(b) b.innerHTML='&#128247; Photos ('+label+')'; if(bar) bar.style.display = ph.length>0 ? 'block' : 'none'; }
 function openPhotoCarousel(i){          // PHOTOS_CAROUSEL_2026_06_30: ALL pics (customer + dealer VIN-match)
   var ph = window.BID_PHOTOS || []; if(!ph.length) return;
   _lbCarousel = true; _lbIdx = Math.max(0, Math.min(i, ph.length-1));
@@ -3247,7 +3247,7 @@ function _lbRenderCarousel(){
   var ph = window.BID_PHOTOS || []; if(!ph.length) return;
   if(_lbIdx >= ph.length) _lbIdx = ph.length - 1; if(_lbIdx < 0) _lbIdx = 0;
   var p = ph[_lbIdx], multi = ph.length > 1;
-  document.getElementById('lightbox-img').src = p.url;
+  document.getElementById('lightbox-img').src = (p.kind==='dealer') ? ('/thumb?url='+encodeURIComponent(p.url)+'&size=full') : p.url;
   var prev=document.getElementById('lb-prev'), next=document.getElementById('lb-next');
   if(prev) prev.style.display = multi ? 'flex' : 'none';
   if(next) next.style.display = multi ? 'flex' : 'none';
