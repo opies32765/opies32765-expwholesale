@@ -1,9 +1,9 @@
 {
   "make_name": "GMC",
-  "trained_at": "2026-07-07T08:30:37.840974Z",
-  "n_total": 835,
+  "trained_at": "2026-07-08T08:30:55.415347Z",
+  "n_total": 836,
   "n_train": 727,
-  "n_test": 108,
+  "n_test": 109,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -217,15 +217,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2475.0,
-    "mape_pct": 5.64,
-    "r2": 0.9752,
-    "within_5pct": 56.5,
-    "within_10pct": 89.8
+    "mae_dollars": 2466.0,
+    "mape_pct": 5.62,
+    "r2": 0.9753,
+    "within_5pct": 56.9,
+    "within_10pct": 89.9
   },
   "baseline_metrics": {
-    "mae_dollars": 3386.0,
-    "mape_pct": 7.58,
+    "mae_dollars": 3358.0,
+    "mape_pct": 7.52,
     "ratio": 1.0594
   },
   "top_features": [

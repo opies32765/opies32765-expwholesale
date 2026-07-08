@@ -1,40 +1,38 @@
 #!/usr/bin/env python3
-# EW WEEKLY RECAP - texts the Saturday digest to me/joe/todd/gregg.
-# COMPACT_ASCII_2026_06_25: body is ASCII-only (GSM-7) + tightly formatted so it
-#   stays ~2-3 SMS segments. The old format used Unicode bullets (U+2022) which
-#   forced UCS-2 encoding (70 chars/seg) -> ~12 segments -> Twilio error 30019
-#   (content size exceeds carrier limit) -> 3 of 4 recipients silently undelivered.
-# DELIVERY_CHECK_2026_06_25: send() returns the Twilio message SID; after a short
-#   wait we poll each message's real status so a carrier rejection shows as failed
-#   in the log instead of a false "True" (HTTP 200 = queued, NOT delivered).
-# Self-contained: read-only LSL + direct Twilio.
-#   python3 ew_weekly_recap.py          -> send to ALL 4
-#   python3 ew_weekly_recap.py test     -> send to operator ('me') only + print
-import os, re, sys, time, json, base64, sqlite3, urllib.parse, urllib.request
+# EW WEEKLY RECAP (PDF) - Saturday digest to me/joe/todd/gregg.
+# SAME content + schedule + recipients as the text version; only the PRESENTATION
+# changed from compact GSM-7 text to a hosted PDF (table style). Texts the PDF link
+# (short body -> no 30019 length issue). Backup of text version:
+#   /usr/local/bin/ew_weekly_recap.py.bak.20260708-textversion
+#   python3 ew_weekly_recap.py         -> send to ALL 4 (+ delivery poll)
+#   python3 ew_weekly_recap.py test    -> send to operator ('me') only
+import os, re, sys, time, uuid, sqlite3
+from datetime import datetime
+from twilio.rest import Client
 
 RECIPS = {'me': '+14074309675', 'joe': '+13522099696',
           'todd': '+15613018622', 'gregg': '+15166803500'}
 DB = "file:/opt/livesaleslog/crm.db?mode=ro"
-_MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
-           'July', 'August', 'September', 'October', 'November', 'December']
+_MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July',
+           'August', 'September', 'October', 'November', 'December']
 
 env = {}
-try:
-    for line in open("/etc/systemd/system/expwholesale.service"):
-        m = re.match(r'^Environment=(.*)$', line.strip())
-        if m:
-            raw = m.group(1).strip().strip('"')
-            if '=' in raw:
-                k, v = raw.split('=', 1)
-                env[k] = v
-except Exception:
-    pass
-SID = env.get("TWILIO_ACCOUNT_SID"); TOK = env.get("TWILIO_AUTH_TOKEN"); FROM = env.get("TWILIO_PHONE")
+for line in open("/etc/systemd/system/expwholesale.service"):
+    m = re.match(r'^Environment=(.*)$', line.strip())
+    if m:
+        raw = m.group(1).strip().strip('"')
+        if '=' in raw:
+            k, v = raw.split('=', 1)
+            env[k] = v
+SID = env.get("TWILIO_ACCOUNT_SID")
+TOK = env.get("TWILIO_AUTH_TOKEN")
+FROM = env.get("TWILIO_PHONE")
 
 
 def nice(lo, hi):
     try:
-        ly, lm, ld = lo.split('-'); hy, hm, hd = hi.split('-')
+        ly, lm, ld = lo.split('-')
+        hy, hm, hd = hi.split('-')
         if lm == hm and ly == hy:
             return '%s %d-%d, %s' % (_MONTHS[int(lm)], int(ld), int(hd), ly)
         return '%s %d - %s %d, %s' % (_MONTHS[int(lm)], int(ld), _MONTHS[int(hm)], int(hd), hy)
@@ -42,16 +40,13 @@ def nice(lo, hi):
         return '%s to %s' % (lo, hi)
 
 
-def comma(n):
-    return '{:,}'.format(int(round(n)))
-
-
 def pct(a, b):
-    return (' (%+.0f%%)' % ((a - b) / b * 100.0)) if b else ''
+    return ('%+.0f%%' % ((a - b) / b * 100.0)) if b else 'n/a'
 
 
-def build_body():
-    c = sqlite3.connect(DB, uri=True); cur = c.cursor()
+def gather():
+    c = sqlite3.connect(DB, uri=True)
+    cur = c.cursor()
     cur.execute("SELECT date('now','start of month'), date('now'), "
                 "date('now','start of month','-1 month'), date('now','-1 month'), "
                 "date('now','start of month','-1 year'), date('now','-1 year'), "
@@ -62,73 +57,103 @@ def build_body():
     def st(lo, hi):
         cur.execute("SELECT COUNT(*), COALESCE(SUM(front_value),0) FROM deals "
                     "WHERE substr(sold_at,1,10) BETWEEN ? AND ?", (lo, hi))
-        n, p = cur.fetchone(); n = int(n or 0); p = round(float(p or 0))
+        n, p = cur.fetchone()
+        n = int(n or 0)
+        p = round(float(p or 0))
         return n, p, (round(p / n) if n else 0)
 
-    m = st(mtd_lo, mtd_hi); pm = st(pm_lo, pm_hi); ly = st(ly_lo, ly_hi)
-    tw = st(tw_lo, tw_hi); pw = st(pw_lo, pw_hi)
+    d = dict(tw=st(tw_lo, tw_hi), pw=st(pw_lo, pw_hi), m=st(mtd_lo, mtd_hi),
+             pm=st(pm_lo, pm_hi), ly=st(ly_lo, ly_hi),
+             tw_range=nice(tw_lo, tw_hi), mtd_range=nice(mtd_lo, mtd_hi))
     c.close()
-
-    # COMPACT, ASCII-only (GSM-7). Keep ~2-3 segments.
-    out = []
-    out.append("EW Sales Recap (%s)" % nice(tw_lo, tw_hi))
-    out.append("")
-    out.append("This week: %d units, $%s, PVR $%s%s vs prior wk %d/$%s"
-               % (tw[0], comma(tw[1]), comma(tw[2]), pct(tw[1], pw[1]), pw[0], comma(pw[1])))
-    out.append("")
-    out.append("MTD %s: %d units, $%s, PVR $%s" % (nice(mtd_lo, mtd_hi), m[0], comma(m[1]), comma(m[2])))
-    out.append("- vs last month MTD: %d, $%s%s" % (pm[0], comma(pm[1]), pct(m[1], pm[1])))
-    out.append("- vs last year MTD: %d, $%s%s" % (ly[0], comma(ly[1]), pct(m[1], ly[1])))
-    return "\n".join(out).strip()
+    return d
 
 
-def send(to, text):
-    """Returns the Twilio message SID on a successful API call, else None."""
-    try:
-        data = urllib.parse.urlencode({"To": to, "From": FROM, "Body": text}).encode()
-        req = urllib.request.Request(
-            "https://api.twilio.com/2010-04-01/Accounts/%s/Messages.json" % SID, data=data)
-        req.add_header("Authorization", "Basic " +
-                       base64.b64encode(("%s:%s" % (SID, TOK)).encode()).decode())
-        resp = json.loads(urllib.request.urlopen(req, timeout=25).read())
-        return resp.get("sid")
-    except Exception as e:
-        sys.stderr.write("[weekly-recap] send err %s: %s\n" % (to, e))
-        return None
+def build_pdf(d):
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
+    rid = uuid.uuid4().hex
+    rdir = "/opt/expwholesale/static/uploads/reports"
+    os.makedirs(rdir, exist_ok=True)
+    path = os.path.join(rdir, rid + ".pdf")
 
-def status(sid):
-    """Poll a message's real delivery status (status, error_code)."""
-    try:
-        req = urllib.request.Request(
-            "https://api.twilio.com/2010-04-01/Accounts/%s/Messages/%s.json" % (SID, sid))
-        req.add_header("Authorization", "Basic " +
-                       base64.b64encode(("%s:%s" % (SID, TOK)).encode()).decode())
-        r = json.loads(urllib.request.urlopen(req, timeout=20).read())
-        return r.get("status"), r.get("error_code")
-    except Exception as e:
-        return "status_check_failed", str(e)[:40]
+    styles = getSampleStyleSheet()
+    h1 = ParagraphStyle('h1', parent=styles['Title'], fontSize=20, textColor=colors.HexColor('#1a1a1a'), spaceAfter=6)
+    sub = ParagraphStyle('sub', parent=styles['Normal'], fontSize=10, textColor=colors.HexColor('#666666'), spaceAfter=16)
+    h2 = ParagraphStyle('h2', parent=styles['Heading2'], fontSize=14, textColor=colors.HexColor('#1a1a1a'), spaceBefore=10, spaceAfter=8)
+    cap = ParagraphStyle('cap', parent=styles['Normal'], fontSize=9, textColor=colors.HexColor('#888888'), spaceBefore=4, spaceAfter=14)
+
+    def money(v):
+        return "$%s" % format(v, ',.0f')
+
+    def table(rows):
+        data = [["Period", "Units Sold", "Total Profit", "PVR Avg"]]
+        for label, tup in rows:
+            n, p, pvr = tup
+            data.append([label, str(n), money(p), money(pvr)])
+        t = Table(data, colWidths=[2.3 * inch, 1.1 * inch, 1.4 * inch, 1.1 * inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a1a1a')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 1), (-1, -1), 10),
+            ('ALIGN', (1, 0), (-1, -1), 'RIGHT'),
+            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+            ('TOPPADDING', (0, 0), (-1, -1), 7),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+            ('LEFTPADDING', (0, 0), (-1, -1), 10),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
+            ('LINEBELOW', (0, 0), (-1, 0), 1, colors.HexColor('#1a1a1a')),
+            ('LINEBELOW', (0, -1), (-1, -1), 1, colors.HexColor('#cccccc')),
+        ]))
+        return t
+
+    flow = [
+        Paragraph("Experience Wholesale", h1),
+        Paragraph("Weekly Sales Recap &nbsp;|&nbsp; %s &nbsp;|&nbsp; Generated %s"
+                  % (d['tw_range'], datetime.now().strftime('%B %d, %Y at %-I:%M %p')), sub),
+        Paragraph("This Week vs Prior Week", h2),
+        table([("This Week (%s)" % d['tw_range'], d['tw']), ("Prior Week", d['pw'])]),
+        Paragraph("Week-over-week profit: %s" % pct(d['tw'][1], d['pw'][1]), cap),
+        Paragraph("Month-to-Date &mdash; %s" % d['mtd_range'], h2),
+        table([("This Month MTD", d['m']), ("Last Month (same days)", d['pm']), ("Last Year (same days)", d['ly'])]),
+        Paragraph("Profit vs last month: %s &nbsp;&bull;&nbsp; vs last year: %s"
+                  % (pct(d['m'][1], d['pm'][1]), pct(d['m'][1], d['ly'][1])), cap),
+    ]
+    SimpleDocTemplate(path, pagesize=letter, title="EW Weekly Sales Recap",
+                      topMargin=0.7 * inch, bottomMargin=0.7 * inch).build(flow)
+    return "https://experience-wholesale.net/static/uploads/reports/%s.pdf" % rid, d['tw_range']
 
 
 def main():
     test = len(sys.argv) > 1 and sys.argv[1] == 'test'
-    body = build_body()
-    seg = -(-len(body) // 153)  # GSM-7 concatenated ~153 chars/segment
+    d = gather()
+    url, wk = build_pdf(d)
+    print("PDF:", url)
+    body = "Experience Wholesale — Weekly Sales Recap\n%s\n\n%s" % (wk, url)
     targets = {'me': RECIPS['me']} if test else RECIPS
-    sent = [(nm, num, send(num, body)) for nm, num in targets.items()]
-    time.sleep(15)  # let carriers report delivery / 30019-type rejections
-    results = []
-    for nm, num, sid in sent:
-        if not sid:
-            results.append((nm, 'api_error', None)); continue
-        stt, ec = status(sid)
-        results.append((nm, stt, ec))
-    good = {'delivered', 'sent', 'queued', 'accepted'}
-    bad = [r for r in results if r[1] not in good]
-    print("[weekly-recap] %s segments=%d results=%s" % ("TEST" if test else "LIVE", seg, results))
-    if bad:
-        print("[weekly-recap] WARNING -- undelivered/failed: %s" % bad)
-    print(body)
+    client = Client(SID, TOK)
+    sids = {}
+    for who, num in targets.items():
+        try:
+            msg = client.messages.create(to=num, from_=FROM, body=body)
+            sids[who] = msg.sid
+            print("sent %s %s: %s" % (who, num, msg.sid))
+        except Exception as e:
+            print("FAILED %s %s: %s" % (who, num, e))
+    time.sleep(12)
+    for who, sid in sids.items():
+        try:
+            print("status %s: %s" % (who, client.messages(sid).fetch().status))
+        except Exception as e:
+            print("status %s: check-failed %s" % (who, e))
 
 
 if __name__ == "__main__":

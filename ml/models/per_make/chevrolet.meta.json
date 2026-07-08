@@ -1,9 +1,9 @@
 {
   "make_name": "CHEVROLET",
-  "trained_at": "2026-07-07T08:30:24.098094Z",
-  "n_total": 2333,
+  "trained_at": "2026-07-08T08:30:38.445315Z",
+  "n_total": 2337,
   "n_train": 2123,
-  "n_test": 210,
+  "n_test": 214,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -227,15 +227,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2863.0,
-    "mape_pct": 6.07,
-    "r2": 0.9517,
-    "within_5pct": 53.8,
-    "within_10pct": 80.5
+    "mae_dollars": 3457.0,
+    "mape_pct": 6.42,
+    "r2": 0.8421,
+    "within_5pct": 53.7,
+    "within_10pct": 79.9
   },
   "baseline_metrics": {
-    "mae_dollars": 3157.0,
-    "mape_pct": 7.28,
+    "mae_dollars": 3736.0,
+    "mape_pct": 7.67,
     "ratio": 1.048
   },
   "top_features": [
