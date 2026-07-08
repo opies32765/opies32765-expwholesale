@@ -325,9 +325,13 @@ _BID_ALERT_GATE = {"ts": 0.0, "digits": set()}
 
 
 def _bid_alert_gate_digits():
-    # Test-gate: only these numbers actually receive alert SMS. Defaults to the
-    # operator cell; widen via BID_ALERT_GATE_DIGITS env (comma/space separated).
-    raw = os.environ.get("BID_ALERT_GATE_DIGITS", "4074309675")
+    # OPENGATE_2026_07_07: open to every caller by default (operator sign-off
+    # 2026-07-07 — "if its gated open it for everyone and anyone"). Set
+    # BID_ALERT_GATE_DIGITS to a comma/space list to lock it back down to
+    # specific numbers for testing; leave unset/"*" for open access.
+    raw = os.environ.get("BID_ALERT_GATE_DIGITS", "*").strip()
+    if raw == "*" or raw == "":
+        return None  # None = allow all
     out = set()
     for tok in raw.replace(",", " ").split():
         d = "".join(ch for ch in tok if ch.isdigit())
@@ -454,7 +458,7 @@ def _scan_bid_alerts():
             hit_id = _claim_alert_hit(a["id"], bid["id"], body)
             if not hit_id:
                 continue
-            if a.get("phone_digits") not in gate:
+            if gate is not None and a.get("phone_digits") not in gate:
                 _mark_alert(a["id"], bid["id"], False, "gated_off")
                 log.info("  BID_ALERT gated_off alert=%s bid=%s phone=%s" % (a["id"], bid["id"], a.get("notify_phone")))
                 continue

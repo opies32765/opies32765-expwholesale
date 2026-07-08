@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bill Want-List Monitor — Experience Wholesale</title>
+<style>
+  :root { --ink:#0A0E1A; --muted:#5b6472; --line:#e6e8ee; --blue:#0B5FFF; --bg:#FAFAFB; --green:#0a7a3d; --red:#b3261e; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.5 -apple-system, "Segoe UI", Inter, Roboto, sans-serif; }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 24px 16px 80px; }
+  h1 { font-size: 22px; margin: 6px 0 2px; }
+  h2 { font-size: 16px; margin: 28px 0 10px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+  .card { background:#fff; border:1px solid var(--line); border-radius: 12px;
+          padding: 14px 16px; margin-bottom: 12px; }
+  .card .top { display:flex; justify-content:space-between; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .phone { font-size: 16px; font-weight: 700; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .cars { margin: 10px 0 0; padding: 0; list-style:none; display:flex; flex-wrap:wrap; gap:8px; }
+  .car { border:1px solid var(--line); border-radius: 999px; padding: 5px 12px; font-size: 13px;
+         background:#f7f9ff; display:flex; align-items:center; gap:8px; }
+  .car .m { font-size: 11px; color: var(--green); font-weight:600; }
+  .nowants { color: var(--muted); font-style: italic; font-size: 13px; margin-top: 8px; }
+  .cx { font-size: 11px; color: var(--muted); }
+  table { width:100%; border-collapse: collapse; background:#fff; border:1px solid var(--line); border-radius: 10px; overflow:hidden; }
+  th, td { text-align:left; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  th { background:#f2f3f6; color: var(--muted); font-weight:600; }
+  tr:last-child td { border-bottom: none; }
+  .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight:600; }
+  .pill.sent { background:#e6f4ea; color: var(--green); }
+  .pill.gated { background:#fdecea; color: var(--red); }
+  .pill.waiting { background:#fff4e5; color:#8a5a00; }
+  .empty { color: var(--muted); padding: 20px; text-align:center; }
+  .refresh { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Bill Want-List Monitor</h1>
+  <div class="sub">Everyone who called the main line (754-247-1123) and asked Bill to watch for a car. One card per caller, showing only their current (active) wants. <span class="refresh" id="ts"></span></div>
+
+  <div id="callers"></div>
+
+  <h2>Recent matches &amp; alerts</h2>
+  <table id="hits-table">
+    <thead><tr>
+      <th>Caller</th><th>Wanted</th><th>Matched bid</th><th>Miles</th>
+      <th>Price</th><th>SMS</th><th>Matched at</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<script>
+function fmtPhone(d) {
+  if (!d || d.length !== 10) return d || '';
+  return '(' + d.slice(0,3) + ') ' + d.slice(3,6) + '-' + d.slice(6);
+}
+function fmtDate(iso) { if (!iso) return ''; return new Date(iso).toLocaleString(); }
+function fmtMoney(n) { if (n === null || n === undefined) return ''; return '$' + Number(n).toLocaleString(); }
+function carLabel(w) {
+  const yr = (w.year_min && w.year_max && w.year_min === w.year_max) ? w.year_min
+           : [w.year_min, w.year_max].filter(Boolean).join('–');
+  return [yr, w.make, w.model, w.trim_contains].filter(Boolean).join(' ');
+}
+async function load() {
+  const res = await fetch('/api/rep-voice/wants');
+  if (res.status === 401) {
+    document.body.innerHTML = '<div class="wrap"><p>Session expired — <a href="/login">log in</a> and reopen this page.</p></div>';
+    return;
+  }
+  const data = await res.json();
+  const wrap = document.getElementById('callers');
+  wrap.innerHTML = '';
+
+  if (!data.callers || !data.callers.length) {
+    wrap.innerHTML = '<div class="empty">No one has called Bill yet.</div>';
+  } else {
+    for (const c of data.callers) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      let carsHtml;
+      if (c.wants.length) {
+        carsHtml = '<ul class="cars">' + c.wants.map(w => {
+          const m = w.match_count ? `<span class="m">${w.match_count} match${w.match_count>1?'es':''}</span>` : '';
+          return `<li class="car">${carLabel(w)} ${m}</li>`;
+        }).join('') + '</ul>';
+      } else {
+        carsHtml = '<div class="nowants">No active wants (all cancelled).</div>';
+      }
+      const cx = c.cancelled_count ? `<span class="cx"> · ${c.cancelled_count} cancelled</span>` : '';
+      card.innerHTML = `
+        <div class="top">
+          <div class="phone">${fmtPhone(c.phone_digits)}</div>
+          <div class="meta">${c.wants.length} active want${c.wants.length===1?'':'s'}${cx} · last activity ${fmtDate(c.last_activity)}</div>
+        </div>
+        ${carsHtml}`;
+      wrap.appendChild(card);
+    }
+  }
+
+  const hitsBody = document.querySelector('#hits-table tbody');
+  hitsBody.innerHTML = '';
+  if (!data.hits || !data.hits.length) {
+    hitsBody.innerHTML = '<tr><td colspan="7" class="empty">No matches yet.</td></tr>';
+  } else {
+    for (const h of data.hits) {
+      const smsPill = h.sent
+        ? '<span class="pill sent">sent</span>'
+        : (h.skip_reason === 'gated_off'
+            ? '<span class="pill gated">blocked (gate)</span>'
+            : '<span class="pill waiting">' + (h.skip_reason || 'pending') + '</span>');
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${fmtPhone(h.phone_digits)}</td>
+        <td>${h.want}</td>
+        <td>${h.bid_vehicle || ('#' + h.bid_id)}</td>
+        <td>${h.mileage ? Number(h.mileage).toLocaleString() : ''}</td>
+        <td>${h.asking_price ? fmtMoney(h.asking_price) : ''}</td>
+        <td>${smsPill}</td>
+        <td>${fmtDate(h.matched_at)}</td>`;
+      hitsBody.appendChild(tr);
+    }
+  }
+  document.getElementById('ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+load();
+setInterval(load, 20000);
+</script>
+</body>
+</html>

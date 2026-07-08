@@ -12056,6 +12056,107 @@ def _cleanup_invalid_thalist_bids(min_age_minutes=10) -> dict:
         except Exception: pass
 
 
+@app.route('/bill-monitor')
+def rep_voice_monitor_page():
+    """Dashboard page (normal session login) showing who has used the
+    'call Bill' want-list line and what they registered — 2026-07-07.
+    NOTE: path is deliberately NOT under /rep-voice/ — that prefix is
+    proxied by nginx to the FastAPI voice server on :5211, so a page there
+    would 404 (FastAPI {"detail":"Not Found"}). /bill-monitor hits Flask."""
+    return render_template('rep_voice_monitor.html')
+
+
+@app.route('/api/rep-voice/wants', methods=['GET'])
+def api_rep_voice_wants():
+    """Read-only data for the Bill want-list monitor page. No separate
+    auth — protected by the same dashboard session login as every other
+    /api/ route not in _PUBLIC_PREFIXES."""
+    db = get_db()
+    cur = db.cursor()
+    # Collapse by phone: one caller per group, only their ACTIVE wants shown;
+    # cancelled ones are counted but not listed (kept in DB for history).
+    cur.execute("""
+        SELECT id, created_by, notify_phone, phone_digits, make, model,
+               trim_contains, year_min, year_max, price_max, label, active,
+               match_count, last_matched_at, created_at, updated_at
+          FROM bid_alerts
+         ORDER BY created_at DESC
+         LIMIT 1000
+    """)
+    callers = {}
+    for r in cur.fetchall():
+        pd = r['phone_digits']
+        g = callers.get(pd)
+        if g is None:
+            g = callers[pd] = {
+                'phone_digits': pd,
+                'notify_phone': r['notify_phone'],
+                'wants': [],
+                'cancelled_count': 0,
+                'last_activity': None,
+            }
+        # track most recent activity (created or last match) across all rows
+        for ts in (r['created_at'], r['last_matched_at']):
+            if ts is not None:
+                iso = ts.isoformat()
+                if g['last_activity'] is None or iso > g['last_activity']:
+                    g['last_activity'] = iso
+        if not r['active']:
+            g['cancelled_count'] += 1
+            continue
+        g['wants'].append({
+            'id': r['id'],
+            'make': r['make'],
+            'model': r['model'],
+            'trim_contains': r['trim_contains'],
+            'year_min': r['year_min'],
+            'year_max': r['year_max'],
+            'price_max': r['price_max'],
+            'match_count': r['match_count'],
+            'last_matched_at': r['last_matched_at'].isoformat() if r['last_matched_at'] else None,
+            'created_at': r['created_at'].isoformat() if r['created_at'] else None,
+        })
+    # newest-active-first callers; those with active wants before those with none
+    callers_list = sorted(
+        callers.values(),
+        key=lambda c: (len(c['wants']) > 0, c['last_activity'] or ''),
+        reverse=True,
+    )
+    cur.execute("""
+        SELECT h.id, h.alert_id, h.bid_id, h.matched_at, h.notified_at,
+               h.notify_via, h.skip_reason, a.notify_phone, a.phone_digits,
+               a.make AS want_make, a.model AS want_model,
+               b.year AS bid_year, b.make AS bid_make, b.model AS bid_model,
+               b.mileage, b.asking_price
+          FROM bid_alert_hits h
+          JOIN bid_alerts a ON a.id = h.alert_id
+          LEFT JOIN bids b ON b.id = h.bid_id
+         ORDER BY h.matched_at DESC
+         LIMIT 100
+    """)
+    hits = []
+    for r in cur.fetchall():
+        hits.append({
+            'id': r['id'],
+            'alert_id': r['alert_id'],
+            'bid_id': r['bid_id'],
+            'notify_phone': r['notify_phone'],
+            'phone_digits': r['phone_digits'],
+            'want': f"{r['want_make'] or ''} {r['want_model'] or ''}".strip(),
+            'bid_vehicle': f"{r['bid_year'] or ''} {r['bid_make'] or ''} {r['bid_model'] or ''}".strip(),
+            'mileage': r['mileage'],
+            'asking_price': r['asking_price'],
+            'matched_at': r['matched_at'].isoformat() if r['matched_at'] else None,
+            'notified_at': r['notified_at'].isoformat() if r['notified_at'] else None,
+            'notify_via': r['notify_via'],
+            'skip_reason': r['skip_reason'],
+            'sent': r['notified_at'] is not None,
+        })
+    cur.close()
+    db.close()
+    return jsonify({'ok': True, 'callers': callers_list, 'hits': hits})
+
+
 @app.route('/api/thalist/cleanup', methods=['POST'])
 def api_thalist_cleanup():
     """Sweep junk thalist bids. Auth: same X-Auth shared secret as

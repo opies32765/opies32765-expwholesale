@@ -178,6 +178,7 @@
 try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.parentNode.removeChild(_s);}catch(e){}</script>
 </head>
 <body class="{% if show_austin_col %}show-austin{% endif %}">
+{% if damage_count %}<div style="background:#e23b3b;color:#fff;padding:9px 14px;font-weight:700;font-size:14px;text-align:center" onclick="try{document.querySelectorAll('tr[data-damage]').forEach(function(t){if(t.getAttribute('data-damage')!=='1')t.style.display='none'});}catch(e){}">🚩 {{ damage_count }} vehicle(s) flagged for unaccounted damage — tap to show only these</div>{% endif %}<!--DAMAGE_BANNER_2026_07_07-->
 <div class="topbar">
   <a href="/recon" class="brand"><span class="r">EW</span>RECON</a>
   <a href="/" style="margin-left:22px;color:#cbd5e1;border:1px solid #4b5056;padding:6px 13px;border-radius:6px;font-size:13px;text-decoration:none">&larr; Back to Dashboard</a>
@@ -247,10 +248,10 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
       </tr></thead>
       <tbody>
         {% for u in rows %}
-        <tr data-search="{{ (u.vin ~ ' ' ~ (u.stock_no or '') ~ ' ' ~ (u.make or '') ~ ' ' ~ (u.model or '') ~ ' ' ~ (u.year|string if u.year else ''))|lower }}" data-dot="{{ u.dot }}" onclick="location.href='/recon/u/{{ u.vin }}{% if sel %}?from={{ sel }}{% endif %}'">
+        <tr data-search="{{ (u.vin ~ ' ' ~ (u.stock_no or '') ~ ' ' ~ (u.make or '') ~ ' ' ~ (u.model or '') ~ ' ' ~ (u.year|string if u.year else ''))|lower }}" data-dot="{{ u.dot }}" data-damage="{{ '1' if u.damage_flagged else '0' }}" onclick="location.href='/recon/u/{{ u.vin }}{% if sel %}?from={{ sel }}{% endif %}'">
           <td class="step-cell"><span class="hash">#{{ stepnum.get(u.step_code, '') }}</span> {{ u.step_name or '—' }}</td>
           <td class="stock">{{ u.stock_no or '—' }}<span class="vin">{{ u.vin }}</span></td>
-          <td class="veh"><b>{{ u.make or '' }} {{ u.model or '' }}</b>{% if u.needs_photos %} <span title="Needs photos on arrival">📷</span>{% endif %}<div class="sub">{{ u.year or '' }} {{ u.exterior_color or '' }}<span class="fromto">{% if u.bought_from %} · from {{ u.bought_from }}{% endif %}{% if u.sold_to %} · → {{ u.sold_to }}{% endif %}</span></div></td>
+          <td class="veh"><b>{{ u.make or '' }} {{ u.model or '' }}</b>{% if u.needs_photos %} <span title="Needs photos on arrival">📷</span>{% endif %}{% if u.damage_flagged %} <span title="Unaccounted damage{% if u.damage_note %}: {{ u.damage_note }}{% endif %}" style="cursor:help">🚩</span>{% endif %}<!--DAMAGE_BADGE_2026_07_07--><div class="sub">{{ u.year or '' }} {{ u.exterior_color or '' }}<span class="fromto">{% if u.bought_from %} · from {{ u.bought_from }}{% endif %}{% if u.sold_to %} · → {{ u.sold_to }}{% endif %}</span></div></td>
           <td class="status-cell" data-label="Status:"><span class="dot" style="background:{{ u.dot }}" title="{{ u.step_name }}"></span><select class="qstat" data-sold="{{ u.sold_to or '' }}" data-cur="{{ u.step_code }}" data-veh="{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }}" onclick="event.stopPropagation()" onchange="quickMove({{ u.id }}, this.value, this)">{% for s in steps %}<option value="{{ s.code }}"{% if s.code==u.step_code %} selected{% endif %}>{{ s.name }}</option>{% endfor %}</select></td>
           <td class="austincol" data-label="Shipping:">{% if u.ship.arranged %}<span class="achk" title="{{ u.ship.tip }}">✓</span><span class="shipwho">{{ u.ship.who }}</span>{% else %}<span class="ax" title="Shipping not arranged yet">✕</span>{% endif %}</td>
           <td class="num" data-label="In step:"><span class="daybox {{ u.sla_state }}">{{ u.d_step if u.d_step is not none else 0 }}</span></td>
@@ -550,5 +551,24 @@ async function poll(){
 }
 setInterval(poll, 5000); poll();
 </script>
+<!-- EW_HIDE_BACKTODASH_2026_07_07: hide the "Back to Dashboard" link INSIDE THE APP ONLY. -->
+<script>
+(function () {
+  if (!document.getElementById("ew-app-simplify")) return;   // app-only marker (injected by the EW app on every page)
+  function hide() {
+    try {
+      var a = document.querySelectorAll('a[href="/"]');
+      for (var i = 0; i < a.length; i++) {
+        if (/back to dashboard/i.test(a[i].textContent || "")) a[i].style.display = "none";
+      }
+    } catch (e) {}
+  }
+  hide();
+  document.addEventListener("DOMContentLoaded", hide);
+  setTimeout(hide, 300);
+  setTimeout(hide, 1000);
+})();
+</script>
+
 </body>
 </html>

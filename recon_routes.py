@@ -25,7 +25,7 @@ import json
 import secrets
 from datetime import datetime, timezone, timedelta
 
-from flask import (Blueprint, render_template, request, jsonify, abort, session)
+from flask import (Blueprint, render_template, request, jsonify, abort, session, make_response)
 
 bp = Blueprint('recon', __name__)
 
@@ -796,10 +796,13 @@ def board():
     # 4 staging lanes + In Transit + Home Base + Ready + Picked Up + At Dealer
     # all surface it (those are where transport / Austin is actually in play).
     show_austin_col = bool(sel and sel != 'all')
-    return render_template('recon/dashboard.html', steps=steps, rows=rows,
+    damage_count = sum(1 for u in units if u.get('damage_flagged'))
+    _resp = make_response(render_template('recon/dashboard.html', steps=steps, rows=rows,
                            counts=counts, stepnum=stepnum, total=len(units),
                            sel=sel, show_austin_col=show_austin_col, now=now,
-                           dot_colors=DOT_COLORS, flow_groups=flow_groups)
+                           dot_colors=DOT_COLORS, flow_groups=flow_groups, damage_count=damage_count))
+    _resp.headers['Cache-Control'] = 'no-store, must-revalidate'
+    return _resp
 
 
 @bp.route('/recon/reports')
@@ -2610,3 +2613,40 @@ def api_checkin_scan():
     label = ('%s %s %s' % (u.get('year') or '', u.get('make') or '', u.get('model') or '')).strip()
     return jsonify({'ok': True, 'vin': vin, 'unit_id': u['id'], 'stock_no': u.get('stock_no'),
                     'label': label, 'current_step': cur_name})
+
+
+# ── unaccounted-damage flag (DAMAGE_FLAG_2026_07_07) ──
+@bp.route('/api/recon/<int:unit_id>/flag-damage', methods=['POST'])
+def api_flag_damage(unit_id):
+    data = request.get_json(silent=True) or request.form
+    note = (data.get('note') or '').strip()
+    db = _db(); cur = db.cursor()
+    try:
+        cur.execute("UPDATE recon_units SET damage_flagged=true, damage_flagged_at=now(), "
+                    "damage_flagged_by=%s, damage_note=%s, updated_at=now() WHERE id=%s RETURNING id",
+                    (_actor(), note, unit_id))
+        if not cur.fetchone():
+            return jsonify({'error': 'unit not found'}), 404
+        _audit(cur, unit_id, 'unit', unit_id, 'flag_damage', _actor(), {'note': note})
+        db.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        db.rollback(); return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+@bp.route('/api/recon/<int:unit_id>/unflag-damage', methods=['POST'])
+def api_unflag_damage(unit_id):
+    db = _db(); cur = db.cursor()
+    try:
+        cur.execute("UPDATE recon_units SET damage_flagged=false, updated_at=now() WHERE id=%s RETURNING id", (unit_id,))
+        if not cur.fetchone():
+            return jsonify({'error': 'unit not found'}), 404
+        _audit(cur, unit_id, 'unit', unit_id, 'unflag_damage', _actor(), {})
+        db.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        db.rollback(); return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()

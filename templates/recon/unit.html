@@ -238,6 +238,18 @@
           </div>
         {% endif %}
       </div>
+      <!-- DAMAGE_FLAG_UI_2026_07_07 -->
+      <div class="dmgflag" style="margin-top:10px">
+        {% if u.damage_flagged %}
+          <div style="background:#fde8e8;border:1px solid #e23b3b;border-radius:8px;padding:10px;color:#a11">
+            🚩 <b>Unaccounted damage flagged</b>{% if u.damage_note %} — {{ u.damage_note }}{% endif %}
+            {% if u.damage_flagged_at %}<div style="font-size:12px;color:#933">flagged {{ u.damage_flagged_at.strftime('%b %-d %-I:%M%p') }}{% if u.damage_flagged_by %} by {{ u.damage_flagged_by }}{% endif %}</div>{% endif %}
+            <button class="btn gray" style="margin-top:6px" onclick="unflagDamage()">Clear damage flag</button>
+          </div>
+        {% else %}
+          <button class="btn" style="background:#e23b3b;color:#fff" onclick="flagDamage()">🚩 Flag unaccounted damage</button>
+        {% endif %}
+      </div>
       <div class="rnotes-h">Recon notes</div>
       <div class="row"><input id="rnoteInput" class="grow" placeholder="Add a recon note…" autocomplete="off" onkeydown="if(event.key==='Enter'){event.preventDefault();addReconNote();}"><button class="btn" onclick="addReconNote()">Add</button></div>
       <div id="rnoteErr" class="err"></div>
@@ -440,6 +452,15 @@ async function addReconNote(){
 async function reconOut(){
   const vEl=document.getElementById('reconVendor'); const vendor=vEl?vEl.value.trim():'';
   try{const j=await api('/recon-out',{out:true,vendor:vendor}); if(j.ok){location.reload();}else{alert(j.error||'failed');}}catch(e){alert('network error');}
+}
+async function flagDamage(){
+  const note=prompt('Describe the unaccounted damage (what and where):','');
+  if(note===null) return;
+  try{const j=await api('/flag-damage',{note:note}); if(j.ok){location.reload();}else{alert(j.error||'failed');}}catch(e){alert('network error');}
+}
+async function unflagDamage(){
+  if(!confirm('Clear the unaccounted-damage flag on this car?')) return;
+  try{const j=await api('/unflag-damage',{}); if(j.ok){location.reload();}else{alert(j.error||'failed');}}catch(e){alert('network error');}
 }
 async function reconBack(){
   if(!confirm('Mark this car returned from recon?')) return;

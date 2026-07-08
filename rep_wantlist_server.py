@@ -17,7 +17,7 @@ webhook, app.py, or the running voice services.
 """
 from __future__ import annotations
 
-import asyncio, base64, json, logging, os, random, time, audioop, io, wave
+import asyncio, base64, json, logging, os, random, re, time, audioop, io, wave, threading, queue
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -79,6 +79,63 @@ except Exception as e:
 _eleven = AsyncElevenLabs(api_key=ELEVENLABS_API_KEY)
 
 
+def _first_balanced_obj(s: str):
+    """Return the first balanced {...} JSON object in s, tolerant of trailing
+    junk (e.g. the extra closing brace the 9B loves to add). None if no
+    complete object is present."""
+    start = s.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for k in range(start, len(s)):
+        ch = s[k]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start:k + 1]
+    return None
+
+
+def _scan_json_string_value(s, key):
+    """Pull a JSON string value for `key` out of possibly-malformed text
+    without regex (avoids escaping traps). Returns the decoded str or None."""
+    kpos = s.find(chr(34) + key + chr(34))
+    if kpos == -1:
+        return None
+    q = s.find(chr(34), kpos + len(key) + 2)
+    if q == -1:
+        return None
+    out = []
+    esc = False
+    for k in range(q + 1, len(s)):
+        ch = s[k]
+        if esc:
+            out.append(ch); esc = False
+        elif ch == chr(92):
+            out.append(ch); esc = True
+        elif ch == chr(34):
+            raw = "".join(out)
+            try:
+                return json.loads(chr(34) + raw + chr(34))
+            except Exception:
+                return raw
+    return None
+
+
 async def brain_chat(system: str, history: list[dict], tag: str) -> dict:
     """One 9B turn. Returns the parsed {"say":..., "action":...} dict.
     temp 0, thinking OFF (ew-brain never emits JSON with thinking on),
@@ -114,16 +171,35 @@ async def brain_chat(system: str, history: list[dict], tag: str) -> dict:
         clean = " ".join(t.split())[:400]
         log.warning(f"{tag} brain returned non-JSON, speaking prose: {text[:200]!r}")
         return {"say": clean or "Sorry, say that again?", "action": None}
-    i, j = t.find("{"), t.rfind("}")
-    if i == -1 or j <= i:
-        return _prose_fallback()
-    try:
-        out = json.loads(t[i:j + 1])
-        if not isinstance(out, dict):
-            raise ValueError("not a dict")
-        return {"say": str(out.get("say") or ""), "action": out.get("action")}
-    except Exception:
-        return _prose_fallback()
+    # The 9B often emits an extra trailing brace ({"say":..,"action":{..}}}).
+    # The old rfind("}") swallowed the whole malformed string -> json.loads
+    # failed -> we SPOKE the raw JSON and DROPPED the action (operator
+    # 2026-07-07: rough call, the Porsche cancel never took). Scan for the
+    # first BALANCED object so a trailing brace is simply ignored.
+    obj = _first_balanced_obj(t)
+    if obj is not None:
+        try:
+            out = json.loads(obj)
+            if isinstance(out, dict):
+                return {"say": str(out.get("say") or ""), "action": out.get("action")}
+        except Exception:
+            pass
+    # Last resort: salvage the "say" (and any action) so we NEVER read JSON
+    # scaffolding aloud and don't silently drop the caller's request.
+    say = _scan_json_string_value(t, "say")
+    if say is not None:
+        act = None
+        ap = t.find(chr(34) + "action" + chr(34))
+        if ap != -1:
+            ao = _first_balanced_obj(t[ap:])
+            if ao is not None:
+                try:
+                    act = json.loads(ao)
+                except Exception:
+                    act = None
+        log.warning(f"{tag} salvaged say/action from malformed JSON: {text[:160]!r}")
+        return {"say": say, "action": act}
+    return _prose_fallback()
 
 
 def _mulaw_to_wav16k(ulaw: bytes) -> bytes:
@@ -134,6 +210,67 @@ def _mulaw_to_wav16k(ulaw: bytes) -> bytes:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
         w.writeframes(pcm16)
     return buf.getvalue()
+
+
+class _StreamingSTT:
+    """Eager per-utterance Google streaming recognizer: audio is transcribed
+    WHILE the caller is still talking, so the transcript is ready at
+    end-of-utterance instead of a batch pass afterward (SPEED 2026-07-07,
+    option 1). Any failure -> ok()=False and the caller uses batch STT."""
+
+    def __init__(self, tag: str):
+        self.tag = tag
+        self._q = queue.Queue()
+        self._final = []
+        self._closed = False
+        self._ok = _gstt is not None
+        self._thread = None
+        if self._ok:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+
+    def _requests(self):
+        while True:
+            chunk = self._q.get()
+            if chunk is None:
+                return
+            yield speech_v1.StreamingRecognizeRequest(audio_content=chunk)
+
+    def _run(self):
+        try:
+            scfg = speech_v1.StreamingRecognitionConfig(
+                config=_gstt_config, interim_results=False, single_utterance=False)
+            for resp in _gstt.streaming_recognize(scfg, self._requests()):
+                for result in resp.results:
+                    if result.is_final and result.alternatives:
+                        self._final.append(result.alternatives[0].transcript)
+        except Exception as e:
+            self._ok = False
+            log.warning(f"{self.tag} streaming STT err: {e}")
+
+    def feed(self, ulaw_chunk: bytes):
+        if self._ok and not self._closed:
+            try:
+                self._q.put_nowait(bytes(ulaw_chunk))
+            except Exception:
+                pass
+
+    def abort(self):
+        if not self._closed:
+            self._closed = True
+            try:
+                self._q.put_nowait(None)
+            except Exception:
+                pass
+
+    def finish(self, timeout: float = 1.5) -> str:
+        self.abort()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+        return " ".join(self._final).strip()
+
+    def ok(self) -> bool:
+        return self._ok
 
 
 async def stt_transcribe(ulaw: bytes, tag: str) -> str:
@@ -222,6 +359,92 @@ def db_cancel_want(phone_digits: str, alert_id: int) -> dict:
             **({} if row else {"error": "no active request with that id for this caller"})}
 
 
+
+# Manufacturer tokens — make de-dup robust to the 9B storing the same car
+# with the make on the model ("corvette"/"Grand Sport") one call and properly
+# ("chevrolet"/"Corvette"/"Grand Sport") the next (operator 2026-07-07).
+_MFR_TOKENS = {
+    "chevrolet", "chevy", "ford", "toyota", "honda", "nissan", "mercedes",
+    "benz", "bmw", "audi", "porsche", "ferrari", "lamborghini", "cadillac",
+    "gmc", "dodge", "ram", "jeep", "chrysler", "lexus", "acura", "infiniti",
+    "mazda", "subaru", "volkswagen", "vw", "volvo", "tesla", "land", "rover",
+    "jaguar", "bentley", "rolls", "royce", "aston", "martin", "maserati",
+    "alfa", "romeo", "mini", "buick", "lincoln", "hyundai", "kia", "genesis",
+    "mitsubishi", "fiat", "mclaren", "bugatti", "hummer", "pontiac", "saturn",
+    "mercury", "scion", "smart", "polestar", "rivian", "lucid",
+}
+
+
+def _dedup_vehicle_key(w: dict):
+    """Token bag of make+model+trim, lowercased, MINUS manufacturer tokens, so
+    the same car survives inconsistent make/model extraction. Empty = not
+    enough to key on (never de-duped)."""
+    toks = set()
+    for p in (w.get("make"), w.get("model"), w.get("trim_contains")):
+        for t in re.findall(r"[a-z0-9]+", str(p or "").lower()):
+            toks.add(t)
+    return frozenset(toks - _MFR_TOKENS)
+
+
+def _has_mfr_make(w: dict) -> bool:
+    m = str(w.get("make") or "").lower()
+    return any(tok in _MFR_TOKENS for tok in re.findall(r"[a-z0-9]+", m))
+
+
+def db_dedupe_wants(phone_digits: str) -> list:
+    """DETERMINISTIC de-dup: collapse ACTIVE wants describing the same car
+    (same year range + same manufacturer-stripped token bag) down to ONE,
+    keeping the best-formed row (real manufacturer make, else lowest id) and
+    soft-cancelling the rest. The 9B never decides this (operator 2026-07-07:
+    9B cancelled BOTH Corvette rows when asked to drop a duplicate). Returns
+    cancelled ids."""
+    import psycopg2.extras
+    with _db() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT id, make, model, trim_contains, year_min, year_max"
+            " FROM bid_alerts WHERE phone_digits=%s AND active=TRUE ORDER BY id",
+            (phone_digits,))
+        rows = [dict(r) for r in cur.fetchall()]
+    groups = {}
+    for r in rows:
+        key = _dedup_vehicle_key(r)
+        if not key:
+            continue
+        groups.setdefault(((r.get("year_min"), r.get("year_max")), key), []).append(r)
+    cancel = []
+    for grp in groups.values():
+        if len(grp) < 2:
+            continue
+        grp.sort(key=lambda r: (0 if _has_mfr_make(r) else 1, r["id"]))
+        cancel.extend(r["id"] for r in grp[1:])  # keep grp[0], drop the rest
+    if cancel:
+        with _db() as c, c.cursor() as cur:
+            cur.execute(
+                "UPDATE bid_alerts SET active=FALSE, updated_at=NOW()"
+                " WHERE phone_digits=%s AND id = ANY(%s) AND active=TRUE",
+                (phone_digits, cancel))
+        log.info(f"[dedupe] phone={phone_digits} cancelled dup ids={cancel}")
+    return sorted(cancel)
+
+
+def _is_list_question(text: str) -> bool:
+    """True when the caller is just ASKING what's on their list (not adding or
+    dropping) — those get answered deterministically from the DB, never via
+    the 9B (which stalls with "let me check" / under-reads the list)."""
+    t = (text or "").lower()
+    if any(w in t for w in ("add ", "drop", "cancel", "remove", "take off",
+                            "get rid")):
+        return False
+    phrases = (
+        "on my list", "my list", "what else do i have", "what else is on",
+        "what else you", "what do i have", "what have i", "what am i watching",
+        "what are you watching", "watching for me", "how many",
+        "read back", "read me", "read my", "what's on", "whats on",
+        "what is on", "what cars", "which cars", "anything else on",
+    )
+    return any(p in t for p in phrases)
+
+
 def _speak_wants(wants: list[dict]) -> str:
     """Deterministic natural-language summary of open requests."""
     if not wants:
@@ -254,12 +477,14 @@ class RepCall:
         self.bot_speaking = False
         self.cancel_speech = asyncio.Event()
         self.pcm_buffer = bytearray()
+        self._stt = None            # per-utterance streaming recognizer
+        self._stt_fed_trigger = False
         self.silence_ms = 0
         self.last_voiced_ts = time.monotonic()
         self.utterance_active = False
         # QA-call tuning 2026-07-04: 300ms chopped sentences in half and Bill
         # felt "touchy" — a natural mid-sentence pause is ~400-600ms on PSTN.
-        self.SILENCE_END_MS = 700
+        self.SILENCE_END_MS = 550   # SPEED 2026-07-07: 700->550 (snappier reply; still > the 300ms that chopped sentences)
         self.MIN_UTTER_MS = 350
         self.utter_start_ts = 0.0
         self._tag = "?"
@@ -324,6 +549,11 @@ class RepCall:
             ulaw = base64.b64decode(msg["media"]["payload"])
             self.pcm_buffer.extend(ulaw)
             self._vad_step(audioop.ulaw2lin(ulaw, 2))
+            if self.utterance_active and self._stt is not None:
+                if self._stt_fed_trigger:
+                    self._stt_fed_trigger = False  # pre-roll already had this frame
+                else:
+                    self._stt.feed(ulaw)
         elif evt == "stop":
             log.info(f"{self._tag} twilio stop")
             try:
@@ -348,6 +578,9 @@ class RepCall:
                     self.cancel_speech.set()
                 if len(self.pcm_buffer) > 1600:
                     del self.pcm_buffer[:-1600]
+                self._stt = _StreamingSTT(self._tag)
+                self._stt.feed(bytes(self.pcm_buffer))  # pre-roll
+                self._stt_fed_trigger = True
             self.last_voiced_ts = now
         else:
             if self.utterance_active:
@@ -358,13 +591,26 @@ class RepCall:
                         asyncio.create_task(self._finalize_utterance())
                     else:
                         self.pcm_buffer.clear()
+                        if self._stt is not None:
+                            self._stt.abort()
+                            self._stt = None
+                            self._stt_fed_trigger = False
 
     async def _finalize_utterance(self):
-        if not self.pcm_buffer:
-            return
+        stt = self._stt
+        self._stt = None
+        self._stt_fed_trigger = False
         audio = bytes(self.pcm_buffer)
         self.pcm_buffer.clear()
-        text = await stt_transcribe(audio, self._tag)
+        if not audio:
+            if stt is not None:
+                stt.abort()
+            return
+        text = ""
+        if stt is not None and stt.ok():
+            text = await asyncio.to_thread(stt.finish)
+        if not text:  # streaming empty/failed -> batch fallback (never breaks)
+            text = await stt_transcribe(audio, self._tag)
         if not text:
             return
         now = time.monotonic()
@@ -383,13 +629,25 @@ class RepCall:
 
     async def _debounced_turn(self):
         try:
-            await asyncio.sleep(0.7)
+            await asyncio.sleep(0.3)   # SPEED 2026-07-07: 0.7->0.3s per-turn debounce
         except asyncio.CancelledError:
             return
         async with self._turn_lock:
             # If a queued earlier turn already answered everything (last word
             # is Bill's and no new user text since), don't answer again.
             if self.messages and self.messages[-1]["role"] == "assistant":
+                return
+            # Deterministic list-back: answer "what's on my list" instantly
+            # from the DB. Never let the 9B stall ("let me check") or narrate
+            # (operator 2026-07-07 call: Bill stalled + under-read the list).
+            last_user = next((m["content"] for m in reversed(self.messages)
+                              if m["role"] == "user"), "")
+            if self.caller_digits and _is_list_question(last_user):
+                line = await asyncio.to_thread(
+                    lambda: _speak_wants(db_open_wants(self.caller_digits)))
+                log.info(f"{self._tag} BOT(list/shortcircuit): {line!r}")
+                self.messages.append({"role": "assistant", "content": line})
+                await self.speak(line)
                 return
             await self.run_llm_turn()
 
@@ -419,6 +677,8 @@ class RepCall:
         return wants
 
     async def start_call(self):
+        if self.caller_digits:
+            await asyncio.to_thread(db_dedupe_wants, self.caller_digits)
         wants = await asyncio.to_thread(self._refresh_ctx)
         # Deterministic opener — Python picks it, not the LLM. Varied per
         # call so repeat callers don't hear the same script every time.
@@ -438,19 +698,20 @@ class RepCall:
                 f"Bill here — that {d} is still on my radar. What can I do for you?",
                 f"Hey, it's Bill at Experience Wholesale. Haven't forgotten the {d}. What do you need?",
             ])
-        elif len(wants) == 2:
-            d1, d2 = _desc(wants[0]), _desc(wants[1])
-            opener = self._pick("open2", [
-                f"Hey, it's Bill. Still on the hunt for the {d1} and the {d2} for you. What's up?",
-                f"Bill here — got you covered on the {d1} and the {d2}. What else you got?",
-            ])
         else:
-            d1 = _desc(wants[0])
-            n = SMALL[len(wants) - 1] if len(wants) - 1 < len(SMALL) else str(len(wants) - 1)
-            opener = (f"Hey, it's Bill. Still watching the {d1} and {n} others for you. "
-                      "What can I do for you?")
-        if RAW_MODE:
-            # raw mode: the 9B words its own greeting (pool opener = fallback)
+            # Enumerate EVERY want deterministically — the small 9B drops
+            # cars when it narrates a list (operator 2026-07-07: "had to
+            # press him for the second car"). Never let the model word this.
+            descs = [_desc(w) for w in wants]
+            if len(descs) == 2:
+                listed = f"the {descs[0]} and the {descs[1]}"
+            else:
+                listed = ", ".join(f"the {d}" for d in descs[:-1]) + f", and the {descs[-1]}"
+            opener = f"Hey, it's Bill. Still watching {listed} for you. What else you got?"
+        if RAW_MODE and not wants:
+            # raw mode: let the 9B word its own greeting ONLY when there are no
+            # open wants. With wants present, KEEP the deterministic
+            # enumerating opener above so no car is ever dropped.
             self.messages.append({"role": "user",
                                   "content": "[call_connected] The caller just dialed in. Greet them."})
             try:
@@ -477,6 +738,14 @@ class RepCall:
             say, action = out.get("say", ""), out.get("action")
             actions = action if isinstance(action, list) else ([action] if isinstance(action, dict) else [])
             if actions and RAW_MODE:
+                # Reading the caller's list back must be DETERMINISTIC — the
+                # 9B drops wants when it narrates them. Bypass the model.
+                if any(isinstance(a, dict) and str(a.get("name")) == "list_wants" for a in actions):
+                    line = _speak_wants(db_open_wants(self.caller_digits))
+                    log.info(f"{self._tag} BOT(list/deterministic): {line!r}")
+                    self.messages.append({"role": "assistant", "content": line})
+                    await self.speak(line)
+                    return
                 results = []
                 for act in actions[:4]:
                     if not isinstance(act, dict):
@@ -543,10 +812,13 @@ class RepCall:
             if sig in self._done_actions:
                 log.warning(f"{self._tag} [raw-telemetry] duplicate add_want re-emitted")
             self._done_actions.add(sig)
-            return db_add_want(self.caller_digits,
-                               str(args.get("make") or ""), str(args.get("model") or ""),
-                               args.get("year_min"), args.get("year_max"),
-                               args.get("trim_contains"), pm_i, args.get("label"))
+            r = db_add_want(self.caller_digits,
+                            str(args.get("make") or ""), str(args.get("model") or ""),
+                            args.get("year_min"), args.get("year_max"),
+                            args.get("trim_contains"), pm_i, args.get("label"))
+            if r.get("ok"):
+                db_dedupe_wants(self.caller_digits)
+            return r
         if name == "list_wants":
             return {"open_requests": db_open_wants(self.caller_digits)}
         if name == "cancel_want":
@@ -579,6 +851,8 @@ class RepCall:
                             args.get("year_min"), args.get("year_max"),
                             args.get("trim_contains"), pm,
                             args.get("label"))
+            if r.get("ok"):
+                db_dedupe_wants(self.caller_digits)
             if r.get("ok") and r.get("note"):
                 return self._pick("dup", [
                     "You're already covered on that one — still watching.",
@@ -792,6 +1066,12 @@ async def rep_stream(ws: WebSocket):
         log.info("websocket disconnected")
     except Exception as e:
         log.exception(f"stream loop err: {e}")
+    finally:
+        try:
+            if getattr(session, "_stt", None) is not None:
+                session._stt.abort()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
