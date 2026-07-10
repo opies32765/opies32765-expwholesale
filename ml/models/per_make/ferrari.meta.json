@@ -1,9 +1,9 @@
 {
   "make_name": "FERRARI",
-  "trained_at": "2026-07-08T08:31:23.336586Z",
-  "n_total": 309,
+  "trained_at": "2026-07-09T08:30:12.861873Z",
+  "n_total": 313,
   "n_train": 264,
-  "n_test": 45,
+  "n_test": 49,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -217,49 +217,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 21716.0,
-    "mape_pct": 9.36,
-    "r2": 0.9076,
-    "within_5pct": 53.3,
-    "within_10pct": 71.1
+    "mae_dollars": 33024.0,
+    "mape_pct": 11.34,
+    "r2": 0.667,
+    "within_5pct": 49.0,
+    "within_10pct": 67.3
   },
   "baseline_metrics": {
-    "mae_dollars": 24715.0,
-    "mape_pct": 12.6,
+    "mae_dollars": 36761.0,
+    "mape_pct": 14.59,
     "ratio": 1.0371
   },
   "top_features": [
     {
       "name": "base_appraised_value",
-      "importance": 0.3272836208343506
+      "importance": 0.32626429200172424
     },
     {
       "name": "market_asking_price",
-      "importance": 0.26539936661720276
+      "importance": 0.26589345932006836
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.2168504297733307
+      "importance": 0.2174755334854126
     },
     {
       "name": "model_name_488 Coupe",
-      "importance": 0.04752776771783829
+      "importance": 0.047379739582538605
     },
     {
       "name": "model_name_458 Spider Convertible",
-      "importance": 0.021743906661868095
+      "importance": 0.021676184609532356
     },
     {
       "name": "model_name_California_DELETED",
-      "importance": 0.013302094303071499
+      "importance": 0.01326066441833973
     },
     {
       "name": "model_name_Testarossa Coupe",
-      "importance": 0.012685861438512802
+      "importance": 0.012646351009607315
     },
     {
       "name": "body_type_Sedan",
-      "importance": 0.00929009448736906
+      "importance": 0.009261161088943481
     }
   ]
 }
