@@ -1,9 +1,9 @@
 {
   "make_name": "KIA",
-  "trained_at": "2026-07-09T08:30:11.616556Z",
-  "n_total": 390,
+  "trained_at": "2026-07-10T08:30:10.858645Z",
+  "n_total": 391,
   "n_train": 374,
-  "n_test": 16,
+  "n_test": 17,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -221,49 +221,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1671.0,
-    "mape_pct": 10.55,
-    "r2": 0.9421,
-    "within_5pct": 25.0,
-    "within_10pct": 50.0
+    "mae_dollars": 1598.0,
+    "mape_pct": 10.0,
+    "r2": 0.9475,
+    "within_5pct": 29.4,
+    "within_10pct": 52.9
   },
   "baseline_metrics": {
-    "mae_dollars": 2082.0,
-    "mape_pct": 13.25,
+    "mae_dollars": 2087.0,
+    "mape_pct": 12.87,
     "ratio": 1.0335
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.5413622260093689
+      "importance": 0.542523980140686
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.25556308031082153
+      "importance": 0.26458632946014404
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.10229219496250153
+      "importance": 0.09495091438293457
     },
     {
       "name": "supplier_name_Toyota Of Vero Beach",
-      "importance": 0.013637188822031021
+      "importance": 0.013282385654747486
     },
     {
       "name": "supplier_name_Land Rover Orlando",
-      "importance": 0.006515223998576403
+      "importance": 0.0060369158163666725
     },
     {
       "name": "supplier_name_Gwinnett Place Honda",
-      "importance": 0.00510628754273057
+      "importance": 0.005840223748236895
     },
     {
       "name": "model_name_Stinger GT1 Sedan",
-      "importance": 0.004773914348334074
+      "importance": 0.004390662536025047
     },
     {
       "name": "model_name_Stinger GT-Line Sedan",
-      "importance": 0.003565014572814107
+      "importance": 0.00407742103561759
     }
   ]
 }
