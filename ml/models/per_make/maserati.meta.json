@@ -1,9 +1,9 @@
 {
   "make_name": "MASERATI",
-  "trained_at": "2026-07-10T08:30:10.423334Z",
-  "n_total": 490,
+  "trained_at": "2026-07-11T08:30:10.998152Z",
+  "n_total": 492,
   "n_train": 469,
-  "n_test": 21,
+  "n_test": 23,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,49 +215,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 4123.0,
-    "mape_pct": 12.1,
-    "r2": 0.9869,
-    "within_5pct": 38.1,
-    "within_10pct": 52.4
+    "mae_dollars": 5007.0,
+    "mape_pct": 12.82,
+    "r2": 0.976,
+    "within_5pct": 30.4,
+    "within_10pct": 52.2
   },
   "baseline_metrics": {
-    "mae_dollars": 6006.0,
-    "mape_pct": 15.05,
+    "mae_dollars": 7539.0,
+    "mape_pct": 15.97,
     "ratio": 0.9868
   },
   "top_features": [
     {
       "name": "original_msrp",
-      "importance": 0.26664409041404724
+      "importance": 0.3263709545135498
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.24856947362422943
+      "importance": 0.24456551671028137
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.2182888239622116
+      "importance": 0.1801011860370636
     },
     {
       "name": "market_asking_price",
-      "importance": 0.15908406674861908
-    },
-    {
-      "name": "model_name_Levante",
-      "importance": 0.0049750725738704205
+      "importance": 0.1449810266494751
     },
     {
       "name": "odometer",
-      "importance": 0.004144630860537291
+      "importance": 0.004787599667906761
     },
     {
-      "name": "body_type_SUV",
-      "importance": 0.003955161664634943
+      "name": "model_name_Levante",
+      "importance": 0.004655078984797001
     },
     {
       "name": "supplier_name_Mall Of Georgia Mazda",
-      "importance": 0.0037878314033150673
+      "importance": 0.004256710410118103
+    },
+    {
+      "name": "body_type_SUV",
+      "importance": 0.004241935443133116
     }
   ]
 }

@@ -95,19 +95,45 @@ def canonicalize_bid_vin(bid_id: int, conn,
         except Exception as _e:
             log.warning('bid %d clear vin_invalid_reason failed: %s', bid_id, _e)
     if not v_check['valid']:
+        _reason = v_check['reason']
         try:
             cur.execute(
                 'UPDATE bids SET vin_invalid_reason = %s WHERE id = %s',
-                (v_check['reason'], bid_id))
+                (_reason, bid_id))
             # Release any in-flight claim so the worker pool moves on.
             cur.execute(
                 'UPDATE bids SET vauto_claimed_at = NULL, vauto_claimed_by = NULL '
                 'WHERE id = %s', (bid_id,))
         except Exception as _e:
             log.warning('bid %d set vin_invalid_reason failed: %s', bid_id, _e)
-        out['reason'] = f'invalid_vin:{v_check["reason"]}'
-        out['vin_invalid_reason'] = v_check['reason']
-        return out
+        # CHECK_DIGIT_SURFACE_2026_07_11: a failed check digit is nearly always
+        # a single transcription typo, yet NHTSA still returns a correct YMM.
+        # OLD behavior returned terminal here -> the bid was frozen (the claim
+        # gate excludes any vin_invalid_reason) AND carried no needs_verify
+        # badge, so it was invisible and never priced (11 stranded / 30d,
+        # observed 2026-07-11). NEW: for check_digit specifically, raise the
+        # needs-verify badge so the bid SURFACES on the dashboard, and FALL
+        # THROUGH to decode + write canon_* (the WMI guard below still validates
+        # make against VIN positions 1-3) so the listing shows the actual car
+        # and one operator confirm prices it. It stays worker-gated (the
+        # vin_invalid_reason is left set) until the operator confirms the VIN.
+        # Harder structural failures (bad length / illegal chars) stay terminal.
+        if _reason == 'check_digit':
+            try:
+                cur.execute(
+                    "UPDATE bids SET "
+                    "  needs_verification_at = COALESCE(needs_verification_at, NOW()), "
+                    "  needs_verification_reason = COALESCE(needs_verification_reason, 'vin_check_digit') "
+                    "WHERE id = %s AND needs_verification_cleared_at IS NULL",
+                    (bid_id,))
+            except Exception as _e:
+                log.warning('bid %d check_digit badge set failed: %s', bid_id, _e)
+            out['vin_invalid_reason'] = _reason
+            # fall through -> decode + write canon_* (shows the car on the listing)
+        else:
+            out['reason'] = f'invalid_vin:{_reason}'
+            out['vin_invalid_reason'] = _reason
+            return out
 
     # Idempotency: don't overwrite a high-confidence canon (e.g. overseer
     # already wrote canon_trim='GT3' from accutrade_overseer source). Only
