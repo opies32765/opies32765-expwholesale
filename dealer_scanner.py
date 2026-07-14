@@ -889,7 +889,60 @@ def _normalize_dealercom_getinv(it, base_url):
     }
 
 
-def fetch_dealercom_getinventory(base_url, sess, cfg):
+# DDC_SRP_VIN_2026_07_14: Dealer.com's ws-inv-data getInventory API stopped
+# returning `vin` (~2026-07; silently broke #92 Lifted Trucks -> 0 vehicles and
+# blocks any NEW dealer.com onboard because the EW pipeline requires a VIN). The
+# VIN is still embedded per-vehicle in the SRP page's DDC data layer as adjacent
+# `"uuid":"...","vin":"..."` JSON. Paginate the SRP (?start=N, 24/page, CF-gated
+# so it rides the dealer's tier via module fetch()), build a uuid->vin map, and
+# hand it to fetch_dealercom_getinventory for backfill. ~ceil(total/24) fetches
+# (Ford 246 -> ~11) vs the old ~246-VDP crawl. Gated by scrape_config flag
+# dealercom_getinventory.srp_vin_map so only configured dealers pay for it.
+_DDC_SRP_UUID_VIN = re.compile(r'"uuid":"([0-9a-f]{32})","vin":"([A-HJ-NPR-Z0-9]{17})"')
+
+
+def _dealercom_srp_vin_map(base_url, sess, list_path='/used-inventory/index.htm',
+                           page_size=24, max_pages=40):
+    """Return {uuid: vin} scraped from the dealer.com SRP data layer."""
+    _u = urlparse(base_url)
+    root = f'{_u.scheme}://{_u.netloc}'
+    vmap = {}
+    empties = 0
+    for pi in range(max_pages):
+        start = pi * page_size
+        sep = '&' if '?' in list_path else '?'
+        url = f'{root}{list_path}{sep}start={start}'
+        # Retry each page: FlareSolverr against a CF-fronted SRP intermittently
+        # returns a pre-hydration partial with no data-layer -> zero pairs. A
+        # single such miss must NOT be read as end-of-inventory (that silently
+        # truncated Ford 246->105). Retry until pairs appear or 3 tries.
+        found = []
+        for _try in range(3):
+            body = None
+            try:
+                code, _f, body = fetch(url, sess)
+            except Exception:
+                body = None
+            if body:
+                found = _DDC_SRP_UUID_VIN.findall(body)
+                if found:
+                    break
+        before = len(vmap)
+        for uu, vin in found:
+            vmap.setdefault(uu, vin)
+        if len(vmap) == before:
+            # No NEW vehicles (genuine end, or a persistently-empty page).
+            # Only conclude end-of-inventory after 2 consecutive empty pages
+            # so one stubborn page can't truncate the map.
+            empties += 1
+            if empties >= 2 and start > 0:
+                break
+        else:
+            empties = 0
+    return vmap
+
+
+def fetch_dealercom_getinventory(base_url, sess, cfg, vin_map=None):
     """Dealer.com getInventory JSON-API fetch. cfg = {'body': <POST template>,
     'account_filter': <accountId or None>}. Returns a list of normalized used/cpo
     vehicle dicts (rooftop-scoped if account_filter set), or None on hard failure
@@ -926,6 +979,15 @@ def fetch_dealercom_getinventory(base_url, sess, cfg):
         for it in inv:
             if acct and it.get('accountId') != acct:
                 continue
+            # DDC_SRP_VIN_2026_07_14: getInventory no longer returns `vin`
+            # (DDC dropped it ~2026-07 -> silently broke #92, blocks new
+            # dealer.com onboards since our pipeline requires a VIN). Backfill
+            # from the SRP data-layer uuid->vin map so the row survives the
+            # vin-required normalize instead of being dropped.
+            if vin_map and not it.get('vin'):
+                _mv = vin_map.get(it.get('uuid'))
+                if _mv:
+                    it['vin'] = _mv
             v = _normalize_dealercom_getinv(it, base_url)
             if v:
                 out.append(v)
@@ -3490,9 +3552,19 @@ class DealerScanner:
             # only fires for dealers explicitly configured with a captured body.
             if self.dealer.get('platform') == 'dealer.com' \
                     and (self.dealer.get('scrape_config') or {}).get('dealercom_getinventory'):
+                _dc_cfg = self.dealer['scrape_config']['dealercom_getinventory']
+                # DDC_SRP_VIN_2026_07_14: current DDC getInventory omits VIN;
+                # build a uuid->vin map from the SRP so rows aren't all dropped.
+                # Gated by srp_vin_map so only configured dealers pay the SRP
+                # fetches.
+                _vin_map = None
+                if _dc_cfg.get('srp_vin_map'):
+                    _vin_map = _dealercom_srp_vin_map(
+                        self.base_url, self.sess,
+                        list_path=_dc_cfg.get('srp_list_path', '/used-inventory/index.htm'))
+                    print(f'  dealer.com SRP vin-map: {len(_vin_map)} uuid->vin pairs', flush=True)
                 dc = fetch_dealercom_getinventory(
-                    self.base_url, self.sess,
-                    self.dealer['scrape_config']['dealercom_getinventory'])
+                    self.base_url, self.sess, _dc_cfg, vin_map=_vin_map)
                 if dc is not None:
                     if not dc:
                         prior = self._zero_vehicle_abort_check()
