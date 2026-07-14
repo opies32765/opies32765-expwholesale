@@ -15117,7 +15117,7 @@ def api_admin_ai_accuracy_data():
                    ai_assessed_at, actual_purchase_cost, actual_purchased_at,
                    delta, delta_pct, abs_delta_pct, in_confidence_range,
                    lsl_deal_code
-            FROM ai_accuracy
+            FROM (SELECT DISTINCT ON (COALESCE(lsl_deal_id::text, vin)) * FROM ai_accuracy WHERE delta_pct IS NOT NULL AND bid_id > 0 ORDER BY COALESCE(lsl_deal_id::text, vin), ai_assessed_at DESC) ai_accuracy
             WHERE COALESCE(actual_purchased_at, ai_assessed_at)::date BETWEEN %s::date AND %s::date
               AND delta_pct IS NOT NULL AND bid_id > 0
             ORDER BY actual_purchased_at DESC NULLS LAST, ai_assessed_at DESC
@@ -15177,7 +15177,7 @@ def api_admin_ai_accuracy_data():
                    ROUND(AVG(abs_delta_pct), 2) AS mean_abs_pct,
                    ROUND(AVG(delta_pct), 2) AS mean_signed_pct,
                    SUM(CASE WHEN in_confidence_range THEN 1 ELSE 0 END) AS in_range_n
-            FROM ai_accuracy
+            FROM (SELECT DISTINCT ON (COALESCE(lsl_deal_id::text, vin)) * FROM ai_accuracy WHERE delta_pct IS NOT NULL AND bid_id > 0 ORDER BY COALESCE(lsl_deal_id::text, vin), ai_assessed_at DESC) ai_accuracy
             WHERE COALESCE(actual_purchased_at, ai_assessed_at)::date BETWEEN %s::date AND %s::date
               AND make IS NOT NULL
               AND delta_pct IS NOT NULL AND bid_id > 0
@@ -15207,7 +15207,7 @@ def api_admin_ai_accuracy_data():
             WITH per_day AS (
                 SELECT date_trunc('day', actual_purchased_at)::date AS day,
                        abs_delta_pct
-                FROM ai_accuracy
+                FROM (SELECT DISTINCT ON (COALESCE(lsl_deal_id::text, vin)) * FROM ai_accuracy WHERE delta_pct IS NOT NULL AND bid_id > 0 ORDER BY COALESCE(lsl_deal_id::text, vin), ai_assessed_at DESC) ai_accuracy
                 WHERE actual_purchased_at IS NOT NULL
                   AND actual_purchased_at::date BETWEEN %s::date AND %s::date
                   AND delta_pct IS NOT NULL AND bid_id > 0

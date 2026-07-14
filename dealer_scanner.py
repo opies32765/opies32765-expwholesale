@@ -299,6 +299,13 @@ def detect_platform(html):
         return ('vinsolutions', 'jsonld')
     if 'data-class="vehicle"' in h:
         return ('jsonvehicle', 'json_script')
+    # AutoZNetwork / DealerMe (Nuxt SSR; also fronts Fullpath/AutoLeadStar).
+    # Homepage is usually Cloudflare-gated so this rarely fires on a live fetch
+    # -- onboard by pinning platform='autoznetwork' + the same-origin proxy
+    # config. AUTOZNETWORK_2026_07_14.
+    if 'autoznetwork' in h or 'dealerme' in h or '/api/autoznetwork/' in h \
+            or 'autoleadstar' in h:
+        return ('autoznetwork', 'autoznetwork-api')
     return ('custom', 'sitemap+jsonld')
 
 
@@ -1135,6 +1142,113 @@ def fetch_carscommerce_inventory(cfg):
             if v:
                 out.append(v)
         if page * 100 >= (total or 0):
+            break
+        page += 1
+    return out
+
+
+# AUTOZNETWORK_2026_07_14: dealers on AutoZNetwork (a.k.a. DealerMe; also fronts
+# Fullpath/AutoLeadStar) are Nuxt SSR sites, hard Cloudflare-gated to datacenter
+# IPs -- BUT the site exposes its own SAME-ORIGIN proxy {base}/api/autoznetwork/*
+# that is NOT behind Cloudflare and needs NO token: a plain GET from C1 works.
+# List: GET {base}/api/autoznetwork/inventory?filter[location_id]=<rooftop>&page=N
+# with header x-autoznetwork-organization-id: <org>. Laravel pagination, 25/page.
+# Rooftop map: {base}/api/autoznetwork/locations. Recovered Lifted Trucks Hurst
+# (#92) after its Dealer.com->AutoZNetwork migration. Stateless -> plain nightly
+# curl, no browser/worker ever.
+def _normalize_autoznetwork(it, base_url):
+    if not isinstance(it, dict) or it.get('sold'):
+        return None
+    t = (it.get('type') or '').strip().upper()
+    if t and t not in ('USED', 'CPO', 'CERTIFIED', 'PRE-OWNED', 'CERTIFIED PRE-OWNED'):
+        return None  # EW sources pre-owned + certified only, never NEW
+    vin = (it.get('vin') or '').strip().upper()
+    if not vin:
+        return None
+    cond = 'cpo' if it.get('certified') else 'used'
+    pr = it.get('price') or {}
+    price = None
+    for k in ('internet', 'computed_selling_aftermarket', 'selling', 'retail', 'msrp'):
+        val = pr.get(k) if isinstance(pr, dict) else None
+        if val:
+            try:
+                price = int(val); break
+            except (ValueError, TypeError):
+                pass
+    miles = it.get('miles')
+    if miles is None:
+        od = it.get('odometer')
+        miles = od.get('value') if isinstance(od, dict) else od
+    try:
+        miles = int(miles) if miles is not None else None
+    except (ValueError, TypeError):
+        miles = None
+    year = it.get('year')
+    try:
+        year = int(year)
+    except (ValueError, TypeError):
+        year = None
+    imgs = [i for i in (it.get('images') or []) if isinstance(i, str)]
+    slug = it.get('slug')
+    url = it.get('website_url') or (
+        base_url.rstrip('/') + '/for-sale/' + slug if slug else None)
+    ext = it.get('exterior') or {}
+    color = ext.get('color') if isinstance(ext, dict) else None
+    return {
+        'vin': vin, 'year': year,
+        'make': (it.get('make') or '').strip() or None,
+        'model': (it.get('model') or '').strip() or None,
+        'trim': (it.get('trim') or '').strip() or None,
+        'body_style': (it.get('body_style') or None),
+        'mileage': miles, 'price': price, 'condition': cond,
+        'stock_number': (it.get('stock') or '').strip() or None,
+        'url': url,
+        'photo_url': (imgs[0] if imgs else None), 'photos': imgs,
+        'ext_color': (color or '').strip() or None,
+        'exterior_color': (color or '').strip() or None,
+        'source_added_at': None,
+        '_aan_sold': False, '_aan_pending': False, '_aan_coming_soon': False,
+    }
+
+
+def fetch_autoznetwork_inventory(cfg):
+    # cfg = {base_url, organization_id, location_id(optional rooftop filter)}.
+    # Returns list of normalized used/cpo dicts, or None on hard failure.
+    base = (cfg or {}).get('base_url')
+    org = (cfg or {}).get('organization_id')
+    loc = (cfg or {}).get('location_id')
+    if not (base and org):
+        return None
+    url = base.rstrip('/') + '/api/autoznetwork/inventory'
+    headers = {'x-autoznetwork-organization-id': str(org),
+               'Accept': 'application/json',
+               'User-Agent': ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                              'AppleWebKit/537.36 (KHTML, like Gecko) '
+                              'Chrome/124.0.0.0 Safari/537.36'),
+               'Referer': base.rstrip('/') + '/'}
+    out, page, last = [], 1, None
+    for _ in range(120):  # hard cap 3000 vehicles
+        params = {'page': page}
+        if loc:
+            params['filter[location_id]'] = str(loc)
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=30)
+            if r.status_code != 200:
+                return None if not out else out
+            data = r.json()
+        except Exception:
+            return None if not out else out
+        rows = data.get('data') or []
+        meta = data.get('meta') or {}
+        if last is None:
+            last = meta.get('last_page') or 1
+        if not rows:
+            break
+        for it in rows:
+            v = _normalize_autoznetwork(it, base)
+            if v:
+                out.append(v)
+        if page >= (last or 1):
             break
         page += 1
     return out
@@ -3232,6 +3346,33 @@ class DealerScanner:
                         stats, started)
                     return stats
                 platform, method = detect_platform(body or '')
+
+            # AutoZNetwork same-origin-proxy fast-path (AUTOZNETWORK_2026_07_14).
+            # Token-free JSON from {base}/api/autoznetwork/inventory; not CF-gated.
+            if self.dealer.get('platform') == 'autoznetwork' \
+                    and (self.dealer.get('scrape_config') or {}).get('autoznetwork'):
+                stats['platform_detected'] = 'autoznetwork'
+                az = fetch_autoznetwork_inventory(self.dealer['scrape_config']['autoznetwork'])
+                if az is not None:
+                    if not az:
+                        prior = self._zero_vehicle_abort_check()
+                        if prior:
+                            stats['status'] = 'blocked'
+                            stats['error'] = ('autoznetwork returned 0 but '
+                                              f'{prior} active -- org/location may be '
+                                              'stale, scan aborted, inventory preserved')
+                            self._update_dealer('autoznetwork', 'autoznetwork-api', scan_id,
+                                                stats['error'][:200], stats['tier'])
+                            self._finalize(scan_id, stats, started)
+                            return stats
+                    print(f'  autoznetwork returned {len(az)} vehicles', flush=True)
+                    self._process_aan(scan_id, az, stats)
+                    stats['colors_detected'] = self._detect_colors()
+                    self._update_dealer('autoznetwork', 'autoznetwork-api', scan_id, 'ok', stats['tier'])
+                    stats['status'] = 'ok'
+                    self._finalize(scan_id, stats, started)
+                    return stats
+                print('  autoznetwork path failed -- falling through', flush=True)
 
             # Cars Commerce listings fast-path (CARSCOMMERCE_2026_05_29).
             # Runs BEFORE the Algolia path: on newer DealerInspire/group sites
