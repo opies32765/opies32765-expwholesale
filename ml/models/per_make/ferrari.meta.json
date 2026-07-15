@@ -1,9 +1,9 @@
 {
   "make_name": "FERRARI",
-  "trained_at": "2026-07-14T08:30:15.177955Z",
-  "n_total": 317,
+  "trained_at": "2026-07-15T08:30:15.293966Z",
+  "n_total": 318,
   "n_train": 264,
-  "n_test": 53,
+  "n_test": 54,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -217,15 +217,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 34284.0,
-    "mape_pct": 11.28,
-    "r2": 0.6901,
-    "within_5pct": 45.3,
-    "within_10pct": 67.9
+    "mae_dollars": 42006.0,
+    "mape_pct": 11.97,
+    "r2": 0.6478,
+    "within_5pct": 44.4,
+    "within_10pct": 66.7
   },
   "baseline_metrics": {
-    "mae_dollars": 36805.0,
-    "mape_pct": 14.07,
+    "mae_dollars": 44626.0,
+    "mape_pct": 14.72,
     "ratio": 1.0371
   },
   "top_features": [

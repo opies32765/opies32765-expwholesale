@@ -1,9 +1,9 @@
 {
   "make_name": "JAGUAR",
-  "trained_at": "2026-07-14T08:30:15.655999Z",
-  "n_total": 278,
+  "trained_at": "2026-07-15T08:30:15.717552Z",
+  "n_total": 279,
   "n_train": 270,
-  "n_test": 8,
+  "n_test": 9,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2773.0,
-    "mape_pct": 15.04,
-    "r2": 0.9479,
-    "within_5pct": 37.5,
-    "within_10pct": 50.0
+    "mae_dollars": 2872.0,
+    "mape_pct": 14.74,
+    "r2": 0.9418,
+    "within_5pct": 33.3,
+    "within_10pct": 44.4
   },
   "baseline_metrics": {
-    "mae_dollars": 3153.0,
-    "mape_pct": 15.59,
+    "mae_dollars": 3619.0,
+    "mape_pct": 16.37,
     "ratio": 1.0578
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.3678337037563324
+      "importance": 0.3558759093284607
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.12870797514915466
+      "importance": 0.13097813725471497
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.09010870009660721
+      "importance": 0.10492758452892303
     },
     {
       "name": "model_name_F-TYPE",
-      "importance": 0.05996087193489075
+      "importance": 0.058068785816431046
     },
     {
       "name": "supplier_name_Daxs Deals",
-      "importance": 0.030567355453968048
+      "importance": 0.02715389057993889
     },
     {
       "name": "model_name_XK-Series XKR Convertible",
-      "importance": 0.029570654034614563
+      "importance": 0.0262684915214777
     },
     {
       "name": "supplier_name_Toyota Of Vero Beach",
-      "importance": 0.028009627014398575
+      "importance": 0.02488178387284279
     },
     {
-      "name": "supplier_name_Orange County Motorsports Llc D/b/a Jumboluxurycars.com",
-      "importance": 0.021848132833838463
+      "name": "original_msrp",
+      "importance": 0.01979372650384903
     }
   ]
 }
