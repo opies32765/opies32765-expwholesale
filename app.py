@@ -166,6 +166,7 @@ EW_DEMO_PASSWORD = os.environ.get('EW_DEMO_PASSWORD', 'EWdemo2026!')
 # Paths that don't require login
 _PUBLIC_PREFIXES = (
     '/api/market_check/',  # fleet market_check worker (X-Auth gated in handler)
+    '/api/intake/',  # LONE_PIC_HOLD photo-hold sweep (X-Auth gated in handler)
     '/login', '/mobile', '/webhook/', '/static/', '/thumb', '/p/',
     '/vauto_reports/', '/service-worker', '/privacy', '/terms',
     '/api/mobile-submit', '/api/rep-bids', '/api/register-rep',
@@ -2734,6 +2735,74 @@ def _upsert_bidder_contact(cur, phone, name):
                last_bid_at = NOW(),
                bid_count = bidder_contacts.bid_count + 1
     """, (phone, name))
+
+
+def _promote_photo_hold(bid_id):
+    """LONE_PIC_HOLD_2026_07_15: promote a held lone-pic bid to a live bid the
+    instant it has a VIN or miles (from OCR, window-merge, or reclaim). Sends the
+    single ack + owner push suppressed at intake. Idempotent (only acts while
+    status='photo_hold' with vin/miles present). Never raises."""
+    db = None
+    try:
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("SELECT phone, vin, mileage, status FROM bids WHERE id=%s", (bid_id,))
+        row = cur.fetchone()
+        if not row or row.get('status') != 'photo_hold':
+            db.close(); return False
+        if not (row.get('vin') or row.get('mileage')):
+            db.close(); return False
+        cur.execute("UPDATE bids SET status='new', photo_hold_at=NULL, updated_at=NOW() "
+                    "WHERE id=%s AND status='photo_hold'", (bid_id,))
+        promoted = cur.rowcount > 0
+        db.commit()
+        phone = row.get('phone')
+        db.close(); db = None
+        if promoted:
+            if phone and not phone.startswith('field:'):
+                try:
+                    send_sms(phone, f"Bid #{bid_id} Received. Give us a bit. If you "
+                                    f"need to contact us please text Joe, Todd or Gregg "
+                                    f"with your Bid #{bid_id}.")
+                except Exception as _e:
+                    print(f'[photo-hold-promote] ack err bid={bid_id}: {_e}', flush=True)
+            try:
+                _fire_owner_new_bid(bid_id)
+            except Exception as _e:
+                print(f'[photo-hold-promote] owner-push err bid={bid_id}: {_e}', flush=True)
+            print(f'[photo-hold-promote] bid={bid_id} promoted to new', flush=True)
+        return promoted
+    except Exception as _e:
+        print(f'[photo-hold-promote] err bid={bid_id}: {_e}', flush=True)
+        try:
+            if db:
+                db.close()
+        except Exception:
+            pass
+        return False
+
+
+@app.route('/api/intake/photo-hold-sweep', methods=['POST'])
+def api_photo_hold_sweep():
+    """LONE_PIC_HOLD_2026_07_15: promote held pics that gained a VIN/miles, then
+    discard held pics >60s old that never did. Auth: X-Auth == EW_MARKET_CHECK_SECRET."""
+    import os as _os
+    _exp = (_os.environ.get('EW_MARKET_CHECK_SECRET') or 'ew-mc-2026').strip()
+    if (request.headers.get('X-Auth') or '').strip() != _exp:
+        return jsonify({'error': 'bad auth'}), 401
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT id FROM bids WHERE status='photo_hold' AND (vin IS NOT NULL OR mileage IS NOT NULL)")
+    _promote_ids = [r['id'] for r in (cur.fetchall() or [])]
+    cur.execute("UPDATE bids SET status='discarded', updated_at=NOW() "
+                "WHERE status='photo_hold' AND photo_hold_at < NOW() - INTERVAL '60 seconds' "
+                "AND vin IS NULL AND mileage IS NULL RETURNING id")
+    _discarded = [r['id'] for r in (cur.fetchall() or [])]
+    db.commit()
+    db.close()
+    for _bid in _promote_ids:
+        _promote_photo_hold(_bid)
+    return jsonify({'promoted': _promote_ids, 'discarded': _discarded})
 
 
 # ── ROLLING_PORTAL_2026_06_02 helpers ──────────────────────────────────────
@@ -5869,6 +5938,10 @@ def twilio_webhook():
             db.commit()
             db.close()
             print('[window-merge] phone=%s -> bid #%s: %s' % (from_phone, _wb, _w_applied), flush=True)
+            try:
+                _promote_photo_hold(_wb)
+            except Exception:
+                pass
             return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                     200, {'Content-Type': 'text/xml'})
     # ── end ONE_BID_PER_WINDOW front door ─────────────────────────
@@ -6385,19 +6458,28 @@ def twilio_webhook():
     # Create bid record. Unknown senders land in 'awaiting_name' so the
     # dashboard's main lane (filters on status='new'/'pending'/etc.) hides
     # them until the name lands. Known senders go straight to 'new'.
-    initial_status = 'awaiting_name' if is_unknown else 'new'
+    # LONE_PIC_HOLD_2026_07_15 (operator): a text that is JUST a pic -- no typed
+    # VIN, no miles, no vehicle text -- must NOT immediately open a visible bid or
+    # fire the ack. Hold as 'photo_hold' (hidden, no ack, no owner push) while OCR
+    # runs; _promote_photo_hold() flips it to 'new' + acks the instant a VIN (incl.
+    # photo OCR) or miles lands; the 60s cron sweep discards holds that never did.
+    _veh_text = bool(text_ai and (text_ai.get('year') or text_ai.get('make') or text_ai.get('model')))
+    _lone_pic_hold = (num_media >= 1 and not vin and not miles
+                      and not _bare_miles and not _veh_text)
+    initial_status = 'awaiting_name' if is_unknown else ('photo_hold' if _lone_pic_hold else 'new')
     cur.execute("""
         INSERT INTO bids (contact_id, phone, vin, mileage, raw_message, status,
                           driver_token, driver_phone,
                           bidder_name, partner_dealer_id,
-                          awaiting_name, name_asked_at)
+                          awaiting_name, name_asked_at, photo_hold_at)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s,
+                CASE WHEN %s THEN NOW() ELSE NULL END,
                 CASE WHEN %s THEN NOW() ELSE NULL END) RETURNING id
     """, (contact_id, from_phone, vin, miles, body, initial_status,
           driver_token, from_phone,
           bidder['name'], bidder['partner_dealer_id'],
-          is_unknown, is_unknown))
+          is_unknown, is_unknown, _lone_pic_hold))
     bid_id = cur.fetchone()['id']
 
     # Direct API kick removed 2026-05-08: was firing here with stale
@@ -6579,6 +6661,18 @@ def twilio_webhook():
     # CLEAN_SLATE_2026_06_17 (operator): identical instant ack for EVERY
     # sender — no full-broker / phase-3 / partner-name tiers. The same
     # per-car bid card follows for everyone via _notify_driver_combined().
+    # LONE_PIC_HOLD_2026_07_15: held lone pic -- suppress ack + owner push here.
+    # OCR still runs (thread below); _promote_photo_hold fires the ack when a
+    # VIN/miles lands, else the 60s sweep discards it.
+    if _lone_pic_hold:
+        db.close()
+        print(f'[photo-hold] bid={bid_id} held (lone pic; awaiting VIN/miles or 60s discard)', flush=True)
+        if photo_files:
+            threading.Thread(target=_process_carfax_async,
+                             args=(bid_id, photo_files), daemon=True).start()
+        return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                200, {'Content-Type': 'text/xml'})
+
     print(f'[bid-ack] entering for bid={bid_id} phone={from_phone!r} '
           f'kind={bidder["kind"]}', flush=True)
     if from_phone and not from_phone.startswith('field:'):
@@ -6728,6 +6822,13 @@ def _process_carfax_async(bid_id, photo_files):
 
         db.commit()
         db.close()
+
+        # LONE_PIC_HOLD_2026_07_15: OCR gave this bid a VIN/miles -> if it was a
+        # held lone pic, promote it now (fires the suppressed ack + owner push).
+        try:
+            _promote_photo_hold(bid_id)
+        except Exception as _phe:
+            print(f'[photo-hold] promote-from-ocr err bid={bid_id}: {_phe}', flush=True)
 
         if final_vin:
             try:
