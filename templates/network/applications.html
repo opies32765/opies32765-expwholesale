@@ -23,16 +23,20 @@
   .chip.on{background:#111827;color:#fff;border-color:#111827}
   .chip .n{opacity:.7;margin-left:5px;font-weight:700}
   table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.06)}
-  th,td{padding:9px 11px;text-align:left;border-bottom:1px solid #f0f1f3;white-space:nowrap}
+  th,td{padding:10px 11px;text-align:left;border-bottom:1px solid #f0f1f3;white-space:nowrap;vertical-align:top}
   th{background:#f8fafc;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#6b7280}
+  td.num{text-align:right}th.num{text-align:right}
   tr:hover td{background:#fafbfc}
-  td.dealer{white-space:normal;font-weight:700;max-width:260px}
-  .badge{display:inline-block;border-radius:6px;padding:2px 7px;font-size:11px;font-weight:700}
-  .b-existing{background:#dbeafe;color:#1e40af}
-  .b-known{background:#dcfce7;color:#166534}
+  td.dealer{white-space:normal;max-width:300px}
+  .dname{font-weight:700;font-size:13px}
+  .dtags{display:flex;gap:6px;flex-wrap:wrap;margin-top:5px}
+  .badge{display:inline-block;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:600}
   .b-new{background:#fef3c7;color:#92400e}
   .b-partner{background:#dbeafe;color:#1e40af}
+  .b-prev{background:#ede9fe;color:#5b21b6}
   .b-lsl{background:#0b1220;color:#e2e8f0}
+  .b-roster{background:#eef2f7;color:#475569}
+  .contact .cname{font-weight:600}
   .st{font-weight:700;text-transform:capitalize}
   .st-pending{color:#b45309}.st-approved{color:#15803d}.st-rejected{color:#b91c1c}.st-needs_info{color:#6d28d9}
   .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
@@ -63,27 +67,30 @@
     {% if rows %}
     <table id="apps">
       <thead><tr>
-        <th>#</th><th>Received</th><th>Dealership</th><th>Type</th><th>Units/mo</th>
+        <th class="num">#</th><th>Received</th><th>Dealership</th><th>Type</th><th>Units/mo</th>
         <th>Avg inv</th><th>Credit line</th><th>License #</th><th>Contact</th><th>Status</th><th></th>
       </tr></thead>
       <tbody>
         {% for a in rows %}
         <tr data-status="{{ a.status }}">
-          <td class="muted">{{ a.id }}</td>
+          <td class="num muted">{{ a.id }}</td>
           <td>{{ a.created_at.strftime('%m/%d %H:%M') if a.created_at else '' }}</td>
           <td class="dealer">
-            {{ a.dealership_name or '—' }}
-            {% if a.classification == 'new_applicant' %}<span class="badge b-new">New Applicant</span>
-            {% elif a.classification %}<span class="badge b-partner">{{ class_labels.get(a.classification, a.classification) }}</span>{% endif %}
-            {% if a.name_match and a.name_match.matched %}<span class="badge b-known" title="Matched LSL roster: {{ a.name_match.name }}">✓ on roster</span>{% endif %}
-            {% if a.lsl_history and a.lsl_history.matched %}<span class="badge b-lsl" title="Real EW deal history (LSL)">📊 {{ a.lsl_history.total_deals }} deals</span>{% endif %}
+            <div class="dname">{{ a.dealership_name or '—' }}</div>
+            <div class="dtags">
+              {% if a.classification == 'new_applicant' %}<span class="badge b-new">New applicant</span>
+              {% elif a.classification == 'previous_partner' %}<span class="badge b-prev">{{ class_labels.get(a.classification, 'Previous partner') }}</span>
+              {% elif a.classification %}<span class="badge b-partner">{{ class_labels.get(a.classification, 'Current partner') }}</span>{% endif %}
+              {% if a.tx_count %}<span class="badge b-lsl" title="Real EW history (LSL): cars we bought from them + cars we sold to them">📊 {{ a.tx_count }} deal{{ '' if a.tx_count == 1 else 's' }}</span>
+              {% elif a.name_match and a.name_match.matched %}<span class="badge b-roster" title="In your LSL system as {{ a.name_match.name }} — but no completed transactions yet">on file · no deals</span>{% endif %}
+            </div>
           </td>
           <td>{{ a.dealer_types or '—' }}</td>
           <td>{{ a.units_per_month if a.units_per_month is not none else '—' }}</td>
           <td>{{ a.avg_investment_band or '—' }}</td>
           <td>{% if a.credit_line %}${{ '{:,.0f}'.format(a.credit_line) }}{% else %}—{% endif %}</td>
           <td class="muted">{{ a.license_number or '—' }}</td>
-          <td>{{ a.contact_name or '' }}<br><span class="muted">{{ a.contact_email or a.contact_phone or '' }}</span></td>
+          <td class="contact"><span class="cname">{{ a.contact_name or '' }}</span><br><span class="muted">{{ a.contact_email or a.contact_phone or '' }}</span></td>
           <td><span class="st st-{{ a.status }}"><span class="dot d-{{ a.status }}"></span>{{ a.status.replace('_',' ') }}</span></td>
           <td><a class="review" href="/network/application/{{ a.id }}">Review →</a></td>
         </tr>

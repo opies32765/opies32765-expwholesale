@@ -22,7 +22,7 @@
   .b-class-new_applicant{background:#fef3c7;color:#92400e}
   .classify{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px}
   .classify .clabel{font-size:12px;color:#6b7280;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
-  .cbtn{border:1px solid #d1d5db;background:#fff;border-radius:999px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer}
+  .cbtn{border:1px solid #d1d5db;background:#fff;color:#111827;border-radius:999px;padding:6px 13px;font-size:12px;font-weight:700;cursor:pointer}
   .cbtn.on{background:#111827;color:#fff;border-color:#111827}
   .lsl-card{background:#0b1220;color:#e2e8f0;border-radius:12px;padding:16px 18px;margin-bottom:16px}
   .lsl-head{font-size:13px;font-weight:700;letter-spacing:.3px;margin-bottom:12px;display:flex;align-items:center;gap:10px}
@@ -30,6 +30,8 @@
   .lsl-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:12px}
   .lsl-stat b{display:block;font-size:19px;font-weight:800;color:#fff;line-height:1.1}
   .lsl-stat span{font-size:11px;color:#94a3b8}
+  .lsl-sub{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:#7dd3fc;margin:14px 0 8px}
+  .lsl-sub:first-of-type{margin-top:0}
   .lsl-names{margin-top:12px;font-size:11px;color:#64748b}
   .lsl-none{background:#fff7ed;color:#9a3412;border:1px solid #fed7aa}
   .sub{color:#6b7280;font-size:12px;margin-bottom:16px}
@@ -41,6 +43,25 @@
   .full{grid-column:1 / -1}
   .match{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:9px 12px;font-size:12px;color:#166534;margin-bottom:14px}
   .nomatch{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412}
+  .matchvia{color:#92400e;font-weight:500}
+  .vet{margin-top:7px;padding-top:7px;border-top:1px solid #bbf7d0;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .vchip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;line-height:1.6}
+  .vok{background:#dcfce7;color:#166534;border:1px solid #86efac}
+  .vmiss{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}
+  .vneutral{background:#f1f5f9;color:#334155;border:1px solid #cbd5e1}
+  .vblock{background:#7f1d1d;color:#fff}
+  details.fold{background:#fff;border:1px solid #e5e7eb;border-radius:10px;margin-bottom:16px;padding:0 14px}
+  details.fold summary{cursor:pointer;padding:12px 2px;font-weight:700;font-size:13px;color:#334155;list-style:none}
+  details.fold summary::-webkit-details-marker{display:none}
+  details.fold summary::before{content:'▸  ';color:#94a3b8}
+  details.fold[open] summary::before{content:'▾  '}
+  details.fold[open]{padding-bottom:14px}
+  .cars-tbl{width:100%;border-collapse:collapse;font-size:12px}
+  .cars-tbl th{text-align:left;color:#6b7280;font-weight:600;padding:5px 8px;border-bottom:1px solid #eef1f4}
+  .cars-tbl td{padding:5px 8px;border-bottom:1px solid #f5f6f8}
+  .cars-tbl .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px}
+  .cars-tbl .cnote{color:#94a3b8}
+  .cars-tbl .buy{color:#166534;font-weight:600}
   .docs{display:flex;gap:14px;flex-wrap:wrap}
   .doc{flex:1;min-width:240px}
   .doc img{width:100%;max-height:280px;object-fit:contain;border:1px solid #e5e7eb;border-radius:8px;background:#fafafa}
@@ -64,15 +85,27 @@
       <h1>{{ a.dealership_name or 'Application' }}</h1>
       <span class="badge b-{{ a.status }}">{{ a.status.replace('_',' ')|upper }}</span>
       {% if a.classification %}<span class="badge b-class-{{ a.classification }}">{{ class_labels.get(a.classification, a.classification)|upper }}</span>{% endif %}
-      {% if a.name_match and a.name_match.matched %}<span class="badge b-known">✓ ON LSL ROSTER</span>{% endif %}
     </div>
     <div class="sub">Application #{{ a.id }} · received {{ a.created_at.strftime('%b %-d, %Y %-I:%M %p') if a.created_at else '' }}{% if a.reviewer %} · last action by {{ a.reviewer }}{% endif %}</div>
 
     {% if a.name_match and a.name_match.matched %}
       <div class="match">✓ Dealership matches an existing LSL counterparty: <b>{{ a.name_match.name }}</b>
-        ({{ a.name_match.source }}){% if a.name_match.city %} — {{ a.name_match.city }}, {{ a.name_match.state }}{% endif %}{% if a.name_match.phone %} · {{ a.name_match.phone }}{% endif %}. Likely safe to fast-track.</div>
+        ({{ a.name_match.source }}){% if a.name_match.city %} — {{ a.name_match.city }}, {{ a.name_match.state }}{% endif %}{% if a.name_match.phone %} · {{ a.name_match.phone }}{% endif %}.{% if not a.name_match.is_blocked %} Likely safe to fast-track.{% endif %}
+        {% if a.name_match.matched_via == 'phone' %}<br><span class="matchvia">⚠ matched by phone number, not name — the dealership name on file differs from what they typed; double-check it's really them before fast-tracking.</span>{% endif %}
+        {% if a.name_match.source == 'suppliers' %}
+        <div class="vet">
+          {% if a.name_match.is_blocked %}<span class="vchip vblock">⛔ BLOCKED in LSL</span>{% endif %}
+          {% if a.name_match.onboarded %}<span class="vchip vneutral">On file since {{ a.name_match.onboarded }}</span>{% endif %}
+          {% if a.name_match.status %}<span class="vchip {{ 'vok' if a.name_match.status|lower == 'active' else 'vneutral' }}">{{ a.name_match.status }}</span>{% endif %}
+          <span class="vchip {{ 'vok' if a.name_match.has_license else 'vmiss' }}">License {{ '✓' if a.name_match.has_license else '✗' }}{% if a.name_match.has_license and a.name_match.license_exp %} · exp {{ a.name_match.license_exp }}{% endif %}</span>
+          <span class="vchip {{ 'vok' if a.name_match.has_tax_cert else 'vmiss' }}">Tax cert {{ '✓' if a.name_match.has_tax_cert else '✗' }}</span>
+          {% if a.name_match.has_w9 %}<span class="vchip vok">W-9 ✓</span>{% endif %}
+          {% if a.name_match.verified %}<span class="vchip vok">LSL-verified</span>{% endif %}
+          {% if a.name_match.trusted %}<span class="vchip vok">Trusted</span>{% endif %}
+        </div>
+        {% endif %}</div>
     {% else %}
-      <div class="match nomatch">No LSL roster match on the dealership name — vet fully.</div>
+      <div class="match nomatch">No LSL roster match on the dealership name{% if a.contact_phone %} or phone{% endif %} — vet fully.</div>
     {% endif %}
 
     <form method="post" action="/network/application/{{ a.id }}/classify" class="classify">
@@ -82,21 +115,45 @@
       {% endfor %}
     </form>
 
-    {% if lsl_hist and lsl_hist.matched %}
+    {% if lsl_hist and lsl_hist.matched and lsl_hist.tx_count %}
       <div class="lsl-card">
-        <div class="lsl-head">📊 Real history with EW (from LSL) <span class="lsl-verdict">Established partner</span></div>
+        <div class="lsl-head">📊 Verified history with EW (from LSL) <span class="lsl-verdict">Established partner</span></div>
+        <div class="lsl-sub">Cars EW has bought from them</div>
         <div class="lsl-stats">
-          <div class="lsl-stat"><b>{{ lsl_hist.total_deals }}</b><span>total deals</span></div>
-          {% if lsl_hist.source_deals %}<div class="lsl-stat"><b>{{ lsl_hist.source_deals }}</b><span>sold to EW · ${{ '{:,.0f}'.format(lsl_hist.source_paid) }}</span></div>{% endif %}
-          {% if lsl_hist.buyer_deals %}<div class="lsl-stat"><b>{{ lsl_hist.buyer_deals }}</b><span>bought from EW · ${{ '{:,.0f}'.format(lsl_hist.buyer_spent) }}</span></div>{% endif %}
-          {% if lsl_hist.source_gross %}<div class="lsl-stat"><b>${{ '{:,.0f}'.format(lsl_hist.source_gross) }}</b><span>gross EW made</span></div>{% endif %}
-          <div class="lsl-stat"><b>{{ lsl_hist.first_deal or '—' }}</b><span>first deal</span></div>
-          <div class="lsl-stat"><b>{{ lsl_hist.last_deal or '—' }}</b><span>last deal</span></div>
+          <div class="lsl-stat"><b>{{ lsl_hist.bought_cars }}</b><span>cars EW bought</span></div>
+          {% if lsl_hist.pay_first %}<div class="lsl-stat"><b>{{ lsl_hist.pay_first }}</b><span>first purchase</span></div>{% endif %}
+          {% if lsl_hist.pay_last %}<div class="lsl-stat"><b>{{ lsl_hist.pay_last }}</b><span>most recent</span></div>{% endif %}
+          {% if lsl_hist.resold_cars %}<div class="lsl-stat"><b>{{ lsl_hist.resold_cars }}</b><span>of these resold · ${{ '{:,.0f}'.format(lsl_hist.resold_gross) }} gross EW made</span></div>{% endif %}
         </div>
-        {% if lsl_hist.names %}<div class="lsl-names">Matched in LSL as: {{ lsl_hist.names|join(', ') }}</div>{% endif %}
+        {% if lsl_hist.sold_cars %}
+        <div class="lsl-sub">Cars EW sold to them</div>
+        <div class="lsl-stats"><div class="lsl-stat"><b>{{ lsl_hist.sold_cars }}</b><span>cars sold to them</span></div></div>
+        {% endif %}
       </div>
+    {% elif a.name_match and a.name_match.matched %}
+      <div class="lsl-card lsl-none">📊 <b>On your roster, but no completed deals in the ledger.</b>
+        <b>{{ a.name_match.name }}</b> is a known EW contact/supplier{% if a.name_match.city %} ({{ a.name_match.city }}, {{ a.name_match.state }}){% endif %}, but LSL shows no bought/sold transactions on record{% if a.is_existing %} — even though they applied as a returning dealer{% endif %}. Could be off-ledger or pre-dating your LSL data. Verify with the license/docs + the answers below before fast-tracking.</div>
     {% else %}
       <div class="lsl-card lsl-none">📊 <b>No prior history with EW</b> on this name — a genuinely new dealer (or a store name that doesn&apos;t match your ledger). Lean on the license/docs + the answers below.</div>
+    {% endif %}
+
+    {% if lsl_hist and lsl_hist.cars %}
+    <details class="fold">
+      <summary>🚗 All {{ lsl_hist.cars|length }} cars EW bought from them — VIN detail</summary>
+      <table class="cars-tbl">
+        <thead><tr><th>Stock #</th><th>Vehicle</th><th>VIN</th><th>EW paid</th><th>Date</th><th></th></tr></thead>
+        <tbody>
+        {% for car in lsl_hist.cars %}
+          <tr><td class="mono">{{ car.order or '—' }}</td>
+            <td>{{ car.vehicle or '—' }}</td>
+            <td class="mono">{{ car.vin or '—' }}</td>
+            <td class="buy">${{ '{:,.0f}'.format(car.amount) }}</td>
+            <td>{{ car.date or '—' }}</td>
+            <td class="cnote">{{ car.kind }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </details>
     {% endif %}
 
     {% if member %}
@@ -129,6 +186,8 @@
       </div>
     {% endif %}
 
+    <details class="fold">
+      <summary>📋 Application form details {% if not a.units_per_month and not a.license_number and not a.credit_line %}(short-form existing dealer — mostly blank){% endif %}</summary>
     <div class="grid">
       <div class="card"><h3>Identity</h3><div class="kv">
         <div class="k">Dealership</div><div class="v">{{ a.dealership_name or '—' }}</div>
@@ -191,6 +250,7 @@
         </div>
       </div>
     </div>
+    </details>
 
     {% if a.review_notes %}<div class="card full" style="margin-top:14px"><h3>Reviewer notes</h3><div class="v">{{ a.review_notes }}</div></div>{% endif %}
 

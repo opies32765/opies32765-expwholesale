@@ -1,9 +1,9 @@
 {
   "make_name": "LEXUS",
-  "trained_at": "2026-07-16T08:30:08.853627Z",
-  "n_total": 1186,
+  "trained_at": "2026-07-17T08:30:07.847329Z",
+  "n_total": 1187,
   "n_train": 1092,
-  "n_test": 94,
+  "n_test": 95,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,15 +219,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3698.0,
-    "mape_pct": 7.22,
-    "r2": 0.9605,
-    "within_5pct": 36.2,
-    "within_10pct": 76.6
+    "mae_dollars": 3674.0,
+    "mape_pct": 7.19,
+    "r2": 0.9607,
+    "within_5pct": 36.8,
+    "within_10pct": 76.8
   },
   "baseline_metrics": {
-    "mae_dollars": 4208.0,
-    "mape_pct": 9.66,
+    "mae_dollars": 4195.0,
+    "mape_pct": 9.64,
     "ratio": 1.1085
   },
   "top_features": [

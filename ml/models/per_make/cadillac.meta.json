@@ -1,9 +1,9 @@
 {
   "make_name": "CADILLAC",
-  "trained_at": "2026-07-16T08:30:09.805089Z",
-  "n_total": 846,
+  "trained_at": "2026-07-17T08:30:08.814789Z",
+  "n_total": 848,
   "n_train": 782,
-  "n_test": 64,
+  "n_test": 66,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,15 +219,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 5652.0,
-    "mape_pct": 9.09,
-    "r2": 0.9618,
-    "within_5pct": 45.3,
-    "within_10pct": 76.6
+    "mae_dollars": 5595.0,
+    "mape_pct": 8.92,
+    "r2": 0.9622,
+    "within_5pct": 47.0,
+    "within_10pct": 77.3
   },
   "baseline_metrics": {
-    "mae_dollars": 6248.0,
-    "mape_pct": 9.88,
+    "mae_dollars": 6165.0,
+    "mape_pct": 9.68,
     "ratio": 1.0289
   },
   "top_features": [

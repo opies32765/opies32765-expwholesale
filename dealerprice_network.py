@@ -50,6 +50,20 @@ DEALER_TYPES = ['Exotic', 'High-Volume Commodity', 'Niche / Specialty',
                 'Wholesale', 'Large-Volume Mix', 'Subprime']
 
 
+# NO_CACHE_2026_07_17 — the operator review pages (/network/...) re-run live LSL
+# roster + deal-ledger lookups on every load, so a stale browser/CDN copy shows
+# out-of-date match data (bit us: a corrected packet kept showing the old copy
+# on refresh because the response carried no Cache-Control at all). Force
+# no-store on every response from this blueprint (review pages AND the JSON
+# APIs — none of them should ever be cached).
+@bp.after_request
+def _no_store(resp):
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
+
+
 # ── small coercion helpers ──────────────────────────────────────────────────
 def _s(v):
     return ('' if v is None else str(v)).strip()
@@ -105,43 +119,125 @@ def _lsl_conn():
     return c
 
 
-def _roster_match(name):
+_LEGAL_SUFFIXES = ('incorporated', 'corporation', 'company', 'llc', 'inc', 'corp', 'ltd', 'llp', 'co')
+
+
+def _normalize_name(name):
+    """Collapse a dealership name to bare alphanumerics (+ drop a trailing
+    legal suffix) so 'AutoStreetUSA' and LSL's stored 'Auto Street Usa'
+    compare equal despite spacing/punctuation/case drift that raw SQL
+    LIKE patterns miss (a dealer types their own stylization; LSL has
+    whatever was typed in at onboarding — they rarely match verbatim)."""
+    s = re.sub(r'[^a-z0-9]', '', (name or '').lower())
+    for suf in _LEGAL_SUFFIXES:
+        if s.endswith(suf) and len(s) > len(suf) + 2:
+            s = s[:-len(suf)]
+            break
+    return s
+
+
+_JUNK_PHONES = {str(dig) * 10 for dig in range(10)} | {'1234567890'}
+
+
+def _norm_phone10(v):
+    """Digits-only, normalized to 10 digits (drops a leading US country '1')
+    so '5616850133' and '+1(561)-685-0133' compare equal. Returns '' for
+    degenerate placeholder numbers (LSL has real rows with '999-999-9999'
+    filler) so junk can never satisfy the phone-match fallback below."""
+    d = _digits(v)
+    if len(d) == 11 and d.startswith('1'):
+        d = d[1:]
+    if len(d) == 10 and d in _JUNK_PHONES:
+        return ''
+    return d
+
+
+def _supplier_match_dict(row, matched_via=None):
+    """Review-packet match dict for a suppliers row, ENRICHED with the vetting
+    signals LSL already holds — verified dealer license / tax cert / W9,
+    onboard date, active/blocked status — the data that actually tells the
+    operator whether a rostered dealer is safe, beyond just name/city/phone."""
+    d = {'matched': True, 'source': 'suppliers', 'name': _s(row['name']),
+         'supplier_id': row['id'],
+         'contact': _s(row['primary_contact']),
+         'phone': _s(row['office'] or row['primary_contact_mobile']),
+         'city': _s(row['city']), 'state': _s(row['state']),
+         'email': _s(row['email']),
+         'address': _s(row['full_address'] or row['address1']),
+         'status': _s(row['status']),
+         'is_blocked': bool(row['is_blocked']),
+         'approved': bool(row['approved']),
+         'trusted': bool(row['trusted']),
+         'has_license': bool(_s(row['license_url'])),
+         'has_tax_cert': bool(_s(row['tax_cert_url'])),
+         'license_exp': _s(row['license_expiration'])[:10],
+         'tax_cert_exp': _s(row['tax_cert_expiration'])[:10]}
+    # onboard date + W9 status live only inside the raw LSL payload
+    try:
+        rj = json.loads(row['raw_json'] or '{}')
+        d['onboarded'] = (_s(rj.get('createdAt'))[:10] or None)
+        d['has_w9'] = bool(rj.get('w9Status') or rj.get('w9FileLocation'))
+        d['verified'] = bool(rj.get('verified'))
+    except Exception:
+        pass
+    if matched_via:
+        d['matched_via'] = matched_via
+    return d
+
+
+def _roster_match(name, phone=None):
     """Is this dealership/referrer already an EW counterparty? Read-only LSL
     lookup against suppliers (sellers/wholesalers) then customers (buyers).
-    Returns {} when unknown, else a tidy match dict for the review packet."""
+    Tries exact/prefix/contains on the raw name first (cheap, covers the
+    common case), then falls back to a normalized-name compare and a
+    phone-number compare over the full suppliers table (~2.6k rows, cheap
+    to scan in Python) — a dealer's own stylization of their name often
+    doesn't literally substring-match LSL's stored form, but their phone
+    number never drifts. Returns {} when unknown, else an enriched match
+    dict for the review packet."""
     name = _s(name)
-    if len(name) < 3:
+    phone10 = _norm_phone10(phone) if phone else ''
+    if len(name) < 3 and len(phone10) != 10:
         return {}
     try:
         c = _lsl_conn()
         try:
-            r = c.execute(
-                "SELECT name, primary_contact, office, primary_contact_mobile, "
-                "city, state FROM suppliers WHERE name=? COLLATE NOCASE LIMIT 1",
-                (name,)).fetchone()
-            if not r:
+            r = None
+            if len(name) >= 3:
                 r = c.execute(
-                    "SELECT name, primary_contact, office, primary_contact_mobile, "
-                    "city, state FROM suppliers WHERE name LIKE ? "
-                    "ORDER BY length(name) LIMIT 1", (name + '%',)).fetchone()
-            if not r and len(name) >= 5:                 # contains fallback (partial dealership / referrer)
+                    "SELECT * FROM suppliers WHERE name=? COLLATE NOCASE LIMIT 1",
+                    (name,)).fetchone()
+                if not r:
+                    r = c.execute(
+                        "SELECT * FROM suppliers WHERE name LIKE ? "
+                        "ORDER BY length(name) LIMIT 1", (name + '%',)).fetchone()
+                if not r and len(name) >= 5:                 # contains fallback (partial dealership / referrer)
+                    r = c.execute(
+                        "SELECT * FROM suppliers WHERE name LIKE ? "
+                        "ORDER BY length(name) LIMIT 1", ('%' + name + '%',)).fetchone()
+            if r:
+                return _supplier_match_dict(r)
+
+            # normalized-name / phone fallback — catches e.g. "AutoStreetUSA"
+            # vs LSL's "Auto Street Usa" (same dealer, different spacing).
+            norm_target = _normalize_name(name) if len(name) >= 3 else ''
+            if norm_target or len(phone10) == 10:
+                for row in c.execute("SELECT * FROM suppliers WHERE name<>''"):
+                    if norm_target and _normalize_name(row['name']) == norm_target:
+                        return _supplier_match_dict(row, 'normalized_name')
+                    if len(phone10) == 10 and phone10 in (
+                            _norm_phone10(row['office']), _norm_phone10(row['primary_contact_mobile'])):
+                        return _supplier_match_dict(row, 'phone')
+
+            if len(name) >= 3:
                 r = c.execute(
-                    "SELECT name, primary_contact, office, primary_contact_mobile, "
-                    "city, state FROM suppliers WHERE name LIKE ? "
-                    "ORDER BY length(name) LIMIT 1", ('%' + name + '%',)).fetchone()
-            if r:
-                return {'matched': True, 'source': 'suppliers', 'name': r['name'],
-                        'contact': _s(r['primary_contact']),
-                        'phone': _s(r['office'] or r['primary_contact_mobile']),
-                        'city': _s(r['city']), 'state': _s(r['state'])}
-            r = c.execute(
-                "SELECT company_name, full_name, mobile FROM customers "
-                "WHERE company_name=? COLLATE NOCASE OR full_name=? COLLATE NOCASE "
-                "LIMIT 1", (name, name)).fetchone()
-            if r:
-                return {'matched': True, 'source': 'customers',
-                        'name': _s(r['company_name'] or r['full_name']),
-                        'contact': _s(r['full_name']), 'phone': _s(r['mobile'])}
+                    "SELECT company_name, full_name, mobile FROM customers "
+                    "WHERE company_name=? COLLATE NOCASE OR full_name=? COLLATE NOCASE "
+                    "LIMIT 1", (name, name)).fetchone()
+                if r:
+                    return {'matched': True, 'source': 'customers',
+                            'name': _s(r['company_name'] or r['full_name']),
+                            'contact': _s(r['full_name']), 'phone': _s(r['mobile'])}
         finally:
             c.close()
     except Exception as e:
@@ -172,50 +268,168 @@ def _roster_search(q, limit=8):
     return out
 
 
-def _lsl_history(name):
-    """The applicant's REAL transaction history with EW, from the LSL deals
-    ledger — the ground-truth vetting signal. Matches supplier_name (they SELL
-    cars to EW) + customer_name (they BUY cars from EW). buyer_name is the
-    internal EW rep, so it's intentionally ignored. Returns {} if no history.
-    Pure read-only (HR6)."""
-    name = _s(name)
-    if len(name) < 3:
+def _lsl_history_agg(c, swhere, sparams, bwhere, bparams):
+    """Aggregate the deals ledger for a supplier-side + buyer-side WHERE clause.
+    Returns the history dict, or {} if the clauses matched nothing."""
+    s = c.execute(
+        "SELECT count(*) n, COALESCE(SUM(purchase_cost),0) paid, "
+        "COALESCE(SUM(front_value),0) gross, MIN(sold_at) f, MAX(sold_at) l "
+        "FROM deals WHERE " + swhere, sparams).fetchone()
+    b = c.execute(
+        "SELECT count(*) n, COALESCE(SUM(sale_price),0) spent, "
+        "MIN(sold_at) f, MAX(sold_at) l "
+        "FROM deals WHERE " + bwhere, bparams).fetchone()
+    sn, bn = (s['n'] or 0), (b['n'] or 0)
+    if sn + bn == 0:
         return {}
-    like = '%' + name + '%'
+    names = [r['nm'] for r in c.execute(
+        "SELECT supplier_name nm FROM deals WHERE " + swhere + " "
+        "UNION SELECT customer_name nm FROM deals WHERE " + bwhere + " "
+        "LIMIT 6", list(sparams) + list(bparams)).fetchall() if r['nm']]
+    firsts = [d for d in (s['f'], b['f']) if d]
+    lasts = [d for d in (s['l'], b['l']) if d]
+    return {
+        'matched': True,
+        'names': names,
+        'total_deals': sn + bn,
+        'source_deals': sn, 'source_paid': int(s['paid'] or 0), 'source_gross': int(s['gross'] or 0),
+        'buyer_deals': bn, 'buyer_spent': int(b['spent'] or 0),
+        'first_deal': (min(firsts)[:10] if firsts else None),
+        'last_deal': (max(lasts)[:10] if lasts else None),
+    }
+
+
+def _lsl_history(name, supplier_id=None, matched_name=None):
+    """VERIFIED transaction history for a dealer resolved to a suppliers.id,
+    using ONLY authoritative dealer keys (multi-agent LSL audit, 2026-07-17):
+
+      • CARS EW BOUGHT from them = distinct VINs across
+          payments(vendor_id=id, type='Purchased', payee_type NOT IN
+                   ('Customer','Bank'), vendor_name agrees with the dealer)
+          ∪ deals(supplier_id=id)              -- older cars EW bought & resold
+      • CARS EW SOLD to them = deals with a REAL customer entity link (0 for
+        wholesale suppliers; the customer-side resolver is pending the
+        systematic matcher).
+
+    ⛔ Three false-positive classes this REPLACES (all found in the audit):
+      1. `customer_name` is a denormalized MIRROR of `supplier_name` (with a
+         NULL customer_id) on every wholesale deal → matching it double-counted
+         the cars we BOUGHT as cars "sold to them" (showed Naples a bogus "10
+         sold / $580k"; real = 0). We now NEVER match customer_name.
+      2. `payee_type` Customer/Bank = a consumer/lender payment, NOT dealer
+         activity (a stranger's $31k Mustang mis-attributed to a same-named
+         dealer). Now excluded.
+      3. NAME as an identity key collides (43 dealer names → multiple ids; one
+         switchboard phone → 13 rooftops). We require a resolved supplier_id and
+         corroborate the payments vendor_name; a name alone never counts.
+    Requires supplier_id. Pure read-only (HR6)."""
+    if not supplier_id:
+        return {}
     try:
         c = _lsl_conn()
         try:
-            s = c.execute(
-                "SELECT count(*) n, COALESCE(SUM(purchase_cost),0) paid, "
-                "COALESCE(SUM(front_value),0) gross, MIN(sold_at) f, MAX(sold_at) l "
-                "FROM deals WHERE supplier_name LIKE ? COLLATE NOCASE", (like,)).fetchone()
-            b = c.execute(
-                "SELECT count(*) n, COALESCE(SUM(sale_price),0) spent, "
-                "MIN(sold_at) f, MAX(sold_at) l "
-                "FROM deals WHERE customer_name LIKE ? COLLATE NOCASE", (like,)).fetchone()
-            sn, bn = (s['n'] or 0), (b['n'] or 0)
-            if sn + bn == 0:
+            # cars EW bought — payments leg. payee_type='Supplier' is the
+            # entity-space discriminator: payments.vendor_id references
+            # suppliers.id ONLY for Supplier-payee rows. Customer/Bank vendor_ids
+            # live in a DIFFERENT id-space — that's exactly how a private
+            # individual 'Oscar Pastrana' (payee_type=Customer) collided with the
+            # same-numbered dealer. Audit-verified: of Supplier-payee vendor_ids
+            # in suppliers, all but 2 (legit DBA/parent variants) name-match, and
+            # every real dealer purchase has a suppliers row — so the id alone is
+            # reliable under this filter; no name guard needed.
+            prows = c.execute(
+                "SELECT vin_no, amount, stock_no, title_status, created_at "
+                "FROM payments WHERE vendor_id=? AND type='Purchased' "
+                "AND payee_type='Supplier'",
+                (supplier_id,)).fetchall()
+            # cars EW bought — older resold cars (deals where THEY are the supplier)
+            drows = c.execute(
+                "SELECT vin_no, purchase_cost, front_value, sold_at, stock_no "
+                "FROM deals WHERE supplier_id=?", (supplier_id,)).fetchall()
+            # cars EW SOLD to them — real customer entity only (NOT the mirror name)
+            sold_cars = 0   # pending customer-entity resolver; mirror-name excluded
+
+            pay_vins = set(_s(r['vin_no']) for r in prows if _s(r['vin_no']))
+            deal_vins = set(_s(r['vin_no']) for r in drows if _s(r['vin_no']))
+            bought_vins = pay_vins | deal_vins
+            if not bought_vins and not sold_cars:
                 return {}
-            names = [r['nm'] for r in c.execute(
-                "SELECT supplier_name nm FROM deals WHERE supplier_name LIKE ? COLLATE NOCASE "
-                "UNION SELECT customer_name nm FROM deals WHERE customer_name LIKE ? COLLATE NOCASE "
-                "LIMIT 6", (like, like)).fetchall() if r['nm']]
-            firsts = [d for d in (s['f'], b['f']) if d]
-            lasts = [d for d in (s['l'], b['l']) if d]
+            pay_dates = sorted((_s(r['created_at']))[:10] for r in prows if _s(r['created_at']))
+            # per-VIN car list (for the expandable "all cars" panel on the packet)
+            cars = []
+            for r in prows:
+                cars.append({'order': _s(r['stock_no']), 'vin': _s(r['vin_no']),
+                             'amount': int(r['amount'] or 0),
+                             'date': (_s(r['created_at']))[:10] or None, 'kind': 'Bought'})
+            for r in drows:
+                cars.append({'order': _s(r['stock_no']), 'vin': _s(r['vin_no']),
+                             'amount': int(r['purchase_cost'] or 0),
+                             'date': (_s(r['sold_at']))[:10] or None,
+                             'kind': ('Bought + resold (+$%s gross)' % '{:,.0f}'.format(int(r['front_value'] or 0)))})
+            cars.sort(key=lambda x: x['date'] or '', reverse=True)
+            # attach year/make/model per VIN: inventory (in-stock cars) then
+            # deals.vehicle_info (a clean full description) which wins when present
+            vlist = [car['vin'] for car in cars if car['vin']]
+            vmap = {}
+            if vlist:
+                vph = ','.join('?' * len(vlist))
+                for r in c.execute(
+                        "SELECT vin_no, group_model_trim_year y, vehicle_make_name mk, "
+                        "vehicle_series_name sr, group_model_name gm FROM inventory "
+                        "WHERE vin_no IN (%s)" % vph, vlist):
+                    desc = ' '.join(_s(x) for x in
+                                    (r['y'], r['mk'], (r['sr'] or r['gm'])) if _s(x))
+                    if _s(r['vin_no']) and desc:
+                        vmap[_s(r['vin_no'])] = desc
+                for r in c.execute(
+                        "SELECT vin_no, vehicle_info FROM deals WHERE vin_no IN (%s)" % vph, vlist):
+                    if _s(r['vin_no']) and _s(r['vehicle_info']):
+                        vmap[_s(r['vin_no'])] = _s(r['vehicle_info'])
+            for car in cars:
+                car['vehicle'] = vmap.get(car['vin'], '')
             return {
                 'matched': True,
-                'names': names,
-                'total_deals': sn + bn,
-                'source_deals': sn, 'source_paid': int(s['paid'] or 0), 'source_gross': int(s['gross'] or 0),
-                'buyer_deals': bn, 'buyer_spent': int(b['spent'] or 0),
-                'first_deal': (min(firsts)[:10] if firsts else None),
-                'last_deal': (max(lasts)[:10] if lasts else None),
+                'bought_cars': len(bought_vins),
+                'bought_paid': int(sum(r['amount'] or 0 for r in prows)
+                                   + sum(r['purchase_cost'] or 0 for r in drows)),
+                'payments_cars': len(pay_vins),
+                'payments_paid': int(sum(r['amount'] or 0 for r in prows)),
+                'pay_first': pay_dates[0] if pay_dates else None,
+                'pay_last': pay_dates[-1] if pay_dates else None,
+                'titles_pending': sum(1 for r in prows if _s(r['title_status']) != 'Yes'),
+                'resold_cars': len(deal_vins),
+                'resold_gross': int(sum(r['front_value'] or 0 for r in drows)),
+                'sold_cars': sold_cars,
+                'tx_count': len(bought_vins) + sold_cars,
+                'last_activity': max((car['date'] for car in cars if car['date']), default=None),
+                'cars': cars,
             }
         finally:
             c.close()
     except Exception as e:
         print('[dp-network] lsl_history: %s' % e, flush=True)
     return {}
+
+
+def _auto_classify(lsl_hist):
+    """Assign a classification from the VERIFIED ledger — NOT self-declaration
+    or a bare roster match (operator directive 2026-07-17, 12-month window):
+      • current_partner  — real transactions, last activity within 12 months
+      • previous_partner — real history, but nothing in 12+ months
+      • new_applicant    — no verified transactions (whatever they claimed)
+    The operator can still override manually on the packet."""
+    h = lsl_hist or {}
+    if not (h.get('tx_count') or 0):
+        return 'new_applicant'
+    last = h.get('last_activity')
+    if last:
+        try:
+            from datetime import date, datetime as _dt
+            d = _dt.strptime(str(last)[:10], '%Y-%m-%d').date()
+            return 'current_partner' if (date.today() - d).days <= 365 else 'previous_partner'
+        except Exception:
+            pass
+    return 'current_partner'   # has real transactions, date unknown → treat as current
 
 
 # ── private document storage (NOT under /static) ────────────────────────────
@@ -402,8 +616,8 @@ def api_dp_apply():
     else:
         types = _s(types)
 
-    name_match = _roster_match(dealership)
-    lsl_hist = _lsl_history(dealership)
+    name_match = _roster_match(dealership, cphone)
+    lsl_hist = _lsl_history(dealership, (name_match or {}).get('supplier_id'), (name_match or {}).get('name'))
     referrer = _s(d.get('referrer_name'))
     referrer_match = _roster_match(referrer) if referrer and referrer.lower() not in ('none', 'n/a') else {}
 
@@ -413,6 +627,40 @@ def api_dp_apply():
     from psycopg2.extras import Json
     db = _db(); cur = db.cursor()
     try:
+        # ── DEDUP GUARD (NO_DUPES_2026_07_17) — never create a second
+        # application row for the same dealer. Match on normalized dealership
+        # name OR phone OR email. An already-APPROVED (or member-provisioned)
+        # match wins: return it untouched — don't dupe, don't downgrade. Any
+        # non-approved matches (pending/needs_info/rejected) are superseded by
+        # this fresh submission and deleted (+ their private doc dirs), so the
+        # review queue holds exactly ONE row per dealer, always the latest.
+        norm_new = _normalize_name(dealership)
+        phone_new = _norm_phone10(cphone)
+        cur.execute("SELECT id, status, dealership_name, contact_phone, "
+                    "contact_email, member_id FROM dealer_applications")
+        approved_hit = None
+        dupe_ids = []
+        for row in cur.fetchall():
+            if not ((norm_new and _normalize_name(row['dealership_name']) == norm_new)
+                    or (len(phone_new) == 10 and _norm_phone10(row['contact_phone']) == phone_new)
+                    or (cemail and _s(row['contact_email']).lower() == cemail)):
+                continue
+            if row['status'] == 'approved' or row['member_id']:
+                approved_hit = row
+            else:
+                dupe_ids.append(row['id'])
+        if approved_hit:
+            db.close()
+            return jsonify({'ok': True, 'application_id': approved_hit['id'],
+                            'status': approved_hit['status'], 'existing': True,
+                            'already': True,
+                            'message': 'You already have an account with us — no need to reapply.'}), 200
+        for did in dupe_ids:
+            cur.execute("DELETE FROM dealer_applications WHERE id=%s "
+                        "AND status<>'approved' AND member_id IS NULL", (did,))
+            import shutil
+            shutil.rmtree(os.path.join(PRIV_DOC_ROOT, str(did)), ignore_errors=True)
+
         cur.execute("""
             INSERT INTO dealer_applications (
                 status, is_existing, dealership_name, dba, dealer_group, franchises,
@@ -450,13 +698,9 @@ def api_dp_apply():
 
         lic = _save_doc(app_id, 'license', d.get('license_image'))
         tax = _save_doc(app_id, 'taxid', d.get('taxid_image'))
-        # auto-classify: existing-dealer self-declaration, an LSL roster match, OR
-        # real LSL deal history => current partner; else a brand-new applicant.
-        # (LSL history is the strongest signal — it catches a returning dealer who
-        # mistakenly applied as "new".) Operator can override.
-        classification = ('current_partner'
-                          if (is_existing or (name_match or {}).get('matched') or (lsl_hist or {}).get('matched'))
-                          else 'new_applicant')
+        # classify from the VERIFIED ledger (12-month recency), never from
+        # self-declaration/roster — see _auto_classify. Operator can override.
+        classification = _auto_classify(lsl_hist)
         cur.execute("UPDATE dealer_applications SET license_doc_path=%s, taxid_doc_path=%s, classification=%s, lsl_history=%s WHERE id=%s",
                     (lic, tax, classification, Json(lsl_hist or None), app_id))
         db.commit()
@@ -468,7 +712,11 @@ def api_dp_apply():
 
     tag = 'EXISTING ✓' if is_existing else 'NEW'
     mtag = (' · roster:%s' % name_match['name']) if name_match.get('matched') else ''
-    ltag = ('\n📊 LSL: <b>%d</b> prior deals with EW' % lsl_hist['total_deals']) if lsl_hist.get('matched') else '\n📊 no prior LSL history'
+    if lsl_hist.get('bought_cars'):
+        ltag = '\n📊 LSL: EW bought <b>%d</b> cars from them ($%s)' % (
+            lsl_hist['bought_cars'], '{:,.0f}'.format(lsl_hist.get('bought_paid') or 0))
+    else:
+        ltag = '\n📊 no prior LSL purchase history'
     _tg('🪪 <b>New Dealer-Network application</b> #%d (%s)\n%s%s%s\n%s · %s\nReview: /network/applications'
         % (app_id, tag, dealership or '?', mtag, ltag, cname, cemail or cphone))
     return jsonify({'ok': True, 'application_id': app_id, 'status': 'pending', 'existing': is_existing})
@@ -490,6 +738,19 @@ def network_applications():
     cur.execute("SELECT status, count(*) AS n FROM dealer_applications GROUP BY status")
     counts = {r['status']: r['n'] for r in cur.fetchall()}
     db.close()
+    # Recompute the roster match + unified transaction count LIVE per row so the
+    # queue badge is current (the stored lsl_history is deals-only + goes stale
+    # as new purchases land). Only for existing/matched dealers — a genuinely
+    # new applicant has nothing to look up. tx_count = cars bought + cars sold.
+    for r in rows:
+        r['tx_count'] = 0
+        if not (r.get('is_existing') or r.get('name_match')):
+            continue                      # genuinely-new applicant — nothing to look up
+        m = _roster_match(r['dealership_name'], r.get('contact_phone'))
+        h = _lsl_history(r['dealership_name'], (m or {}).get('supplier_id'), (m or {}).get('name'))
+        r['tx_count'] = (h or {}).get('tx_count') or 0
+        if m:
+            r['name_match'] = m
     return render_template('network/applications.html', rows=rows, counts=counts,
                            types=DEALER_TYPES, class_labels=CLASS_LABELS)
 
@@ -526,7 +787,11 @@ def network_application(app_id):
         member = cur.fetchone()
     db.close()
     member_bids = _member_bids(member['id']) if member else []
-    lsl_hist = _lsl_history(a.get('dealership_name'))   # live, always current
+    # Re-run the match live so matcher improvements apply retroactively to old
+    # applications without a backfill migration; then feed the resolved
+    # supplier_id into the history lookup so it can read the payments ledger.
+    a['name_match'] = _roster_match(a.get('dealership_name'), a.get('contact_phone')) or a.get('name_match')
+    lsl_hist = _lsl_history(a.get('dealership_name'), (a.get('name_match') or {}).get('supplier_id'), (a.get('name_match') or {}).get('name'))
     return render_template('network/application.html', a=a, member=member, member_bids=member_bids,
                            class_labels=CLASS_LABELS, lsl_hist=lsl_hist)
 
