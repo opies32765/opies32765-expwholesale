@@ -121,10 +121,21 @@
         <div class="lsl-sub">Cars EW has bought from them</div>
         <div class="lsl-stats">
           <div class="lsl-stat"><b>{{ lsl_hist.bought_cars }}</b><span>cars EW bought</span></div>
-          {% if lsl_hist.pay_first %}<div class="lsl-stat"><b>{{ lsl_hist.pay_first }}</b><span>first purchase</span></div>{% endif %}
-          {% if lsl_hist.pay_last %}<div class="lsl-stat"><b>{{ lsl_hist.pay_last }}</b><span>most recent</span></div>{% endif %}
+          {% if lsl_hist.first_activity or lsl_hist.pay_first %}<div class="lsl-stat"><b>{{ lsl_hist.first_activity or lsl_hist.pay_first }}</b><span>first purchase</span></div>{% endif %}
+          {% if lsl_hist.last_activity or lsl_hist.pay_last %}<div class="lsl-stat"><b>{{ lsl_hist.last_activity or lsl_hist.pay_last }}</b><span>most recent</span></div>{% endif %}
           {% if lsl_hist.resold_cars %}<div class="lsl-stat"><b>{{ lsl_hist.resold_cars }}</b><span>of these resold · ${{ '{:,.0f}'.format(lsl_hist.resold_gross) }} gross EW made</span></div>{% endif %}
         </div>
+        {% if lsl_hist.merged_store_count and lsl_hist.merged_store_count > 1 %}
+        <div style="margin-top:10px;font-size:13px;color:#2b3444;line-height:1.9">🔗 <b>Merged across {{ lsl_hist.merged_store_count }} rooftops this person has worked at</b> (matched by name{% if lsl_hist.stores|selectattr('tier','equalto','confirmed')|list %} + phone{% endif %}):
+          {% for s in lsl_hist.stores %}<span style="display:inline-block;background:#eef2f9;border:1px solid #dbe3ef;border-radius:999px;padding:3px 11px;margin:2px 4px 2px 0;font-size:12px;white-space:nowrap">{{ s.name }} · {{ s.bought }} car{{ 's' if s.bought != 1 else '' }}{% if s.first %} · since {{ s.first }}{% endif %}{% if s.tier and s.tier != 'primary' %} <em style="color:#5a6b8c">({{ s.tier }})</em>{% endif %}</span>{% endfor %}
+        </div>
+        {% endif %}
+        {% if lsl_hist.review %}
+        <div style="margin-top:10px;font-size:13px;color:#8a4b00;line-height:1.9">⚠ <b>Possibly the same person — confirm before trusting as merged:</b>
+          {% for x in lsl_hist.review %}<span style="display:inline-block;background:#fff4e5;border:1px solid #ffd9a8;border-radius:999px;padding:3px 11px;margin:2px 4px 2px 0;font-size:12px;white-space:nowrap">{{ x.contact }} @ {{ x.name }}{% if x.state %}, {{ x.state }}{% endif %} — {{ x.reason }}</span>{% endfor %}
+        </div>
+        {% endif %}
+
         {% if lsl_hist.sold_cars %}
         <div class="lsl-sub">Cars EW sold to them</div>
         <div class="lsl-stats"><div class="lsl-stat"><b>{{ lsl_hist.sold_cars }}</b><span>cars sold to them</span></div></div>

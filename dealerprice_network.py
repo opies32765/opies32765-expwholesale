@@ -411,6 +411,249 @@ def _lsl_history(name, supplier_id=None, matched_name=None):
     return {}
 
 
+# ── PERSON-LEVEL HISTORY MERGE (PERSON_MERGE_2026_07_21) ─────────────────────
+# Bug management flagged (Sam Beatty / The Naples Source): dealer history was
+# scoped to ONE suppliers row, so an individual who worked at multiple rooftops
+# showed a fragmented, wrong picture ("on file since 2025-05-09" but "first
+# purchase 2026-03-08"). Two fixes:
+#   1) first_activity = earliest across BOTH legs (deals sold_at + payments
+#      created_at), not payments-only (payments.paid_at is NULL so its created_at
+#      is a data-entry date, later than the real first deal).
+#   2) merge the same INDIVIDUAL across stores, keyed on contact NAME + PHONE:
+#        CONFIRMED  exact full name + matching phone   -> auto-merge
+#        STRONG     exact full name + same state       -> auto-merge
+#        REVIEW     typo / first-initial-only / diff-state / diff-phone -> ask
+#      The first-name guard means family (Sam vs Dave/Adam Beatty) is NEVER
+#      auto-merged. Additive: wraps the audited single-store _lsl_history.
+# Chosen by operator 2026-07-21 ("confirm weak matches", "name + phone").
+
+def _person_tokens(nm):
+    """Lowercase alpha tokens of a person name: 'Sam  Beatty' -> ['sam','beatty']."""
+    import re as _re
+    return [t for t in _re.sub(r'[^a-z ]', ' ', _s(nm).lower()).split() if t]
+
+
+def _editdist(a, b, cap=2):
+    """Bounded Levenshtein (returns cap+1 once it exceeds cap). Cheap for names."""
+    la, lb = len(a), len(b)
+    if abs(la - lb) > cap:
+        return cap + 1
+    prev = list(range(lb + 1))
+    for i in range(1, la + 1):
+        cur = [i] + [0] * lb
+        best = cur[0]
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if cur[j] < best:
+                best = cur[j]
+        if best > cap:
+            return cap + 1
+        prev = cur
+    return prev[lb]
+
+
+def _same_person_name(a_tokens, b_name):
+    """Compare applicant contact-name tokens to a store's primary_contact.
+    Returns 'exact' | 'fuzzy' (last name typo) | 'initial' (last = initial) | ''.
+    FIRST names must agree — this is the family guard (Sam != Dave/Adam)."""
+    b = _person_tokens(b_name)
+    if len(a_tokens) < 2 or len(b) < 1:
+        return ''
+    af, al = a_tokens[0], a_tokens[-1]
+    if b[0] != af:                       # different first name -> not this person
+        return ''
+    if len(b) < 2:                       # store contact is just a first name
+        return ''
+    bl = b[-1]
+    if bl == al:
+        return 'exact'
+    if len(bl) <= 2 and bl[:1] == al[:1]:
+        return 'initial'                 # 'Sam B' vs 'Sam Beatty'
+    if len(al) >= 4 and len(bl) >= 4 and _editdist(al, bl) <= 2:
+        return 'fuzzy'                    # 'Beatty' vs 'Beety'
+    return ''
+
+
+_US_STATES = {
+    'alabama': 'AL', 'alaska': 'AK', 'arizona': 'AZ', 'arkansas': 'AR',
+    'california': 'CA', 'colorado': 'CO', 'connecticut': 'CT', 'delaware': 'DE',
+    'florida': 'FL', 'georgia': 'GA', 'hawaii': 'HI', 'idaho': 'ID',
+    'illinois': 'IL', 'indiana': 'IN', 'iowa': 'IA', 'kansas': 'KS',
+    'kentucky': 'KY', 'louisiana': 'LA', 'maine': 'ME', 'maryland': 'MD',
+    'massachusetts': 'MA', 'michigan': 'MI', 'minnesota': 'MN', 'mississippi': 'MS',
+    'missouri': 'MO', 'montana': 'MT', 'nebraska': 'NE', 'nevada': 'NV',
+    'new hampshire': 'NH', 'new jersey': 'NJ', 'new mexico': 'NM', 'new york': 'NY',
+    'north carolina': 'NC', 'north dakota': 'ND', 'ohio': 'OH', 'oklahoma': 'OK',
+    'oregon': 'OR', 'pennsylvania': 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
+    'south dakota': 'SD', 'tennessee': 'TN', 'texas': 'TX', 'utah': 'UT',
+    'vermont': 'VT', 'virginia': 'VA', 'washington': 'WA', 'west virginia': 'WV',
+    'wisconsin': 'WI', 'wyoming': 'WY', 'district of columbia': 'DC'}
+
+
+def _norm_state(s):
+    """FL / Florida / florida -> 'FL' so state comparison survives LSL's mixed
+    storage of full names vs abbreviations."""
+    s = _s(s).strip().lower()
+    if not s:
+        return ''
+    if len(s) == 2:
+        return s.upper()
+    return _US_STATES.get(s, s[:2].upper())
+
+
+def _person_phone(c, norm_name):
+    """Best known phone for a person, from dealer_profile (person-level agg)."""
+    try:
+        r = c.execute("SELECT best_phone FROM dealer_profile WHERE norm_name=? "
+                      "AND best_phone IS NOT NULL AND best_phone<>'' LIMIT 1",
+                      (norm_name,)).fetchone()
+        return _norm_phone10(r['best_phone']) if r else ''
+    except Exception:
+        return ''
+
+
+def _resolve_person_stores(c, contact_name, contact_phone, primary_sid, primary_state):
+    """Other suppliers rows that are the SAME INDIVIDUAL as the applicant contact.
+    Returns (merge:list[dict], review:list[dict]) — merge = auto-include
+    (CONFIRMED/STRONG), review = operator-confirm (weak). Read-only."""
+    atoks = _person_tokens(contact_name)
+    aphone = _norm_phone10(contact_phone)
+    merge, review = [], []
+    if len(atoks) < 2:
+        return merge, review
+    seen = set()
+    for row in c.execute(
+            "SELECT id, name, primary_contact, city, state, office, "
+            "primary_contact_mobile FROM suppliers "
+            "WHERE primary_contact IS NOT NULL AND primary_contact<>''"):
+        sid = row['id']
+        if sid == primary_sid or sid in seen:
+            continue
+        kind = _same_person_name(atoks, row['primary_contact'])
+        if not kind:
+            continue
+        seen.add(sid)
+        sphone = (_norm_phone10(row['office']) or _norm_phone10(row['primary_contact_mobile'])
+                  or _person_phone(c, _normalize_name(row['primary_contact'])))
+        # phone is an UPGRADE signal only — a match confirms; a mismatch does NOT
+        # veto (the same person legitimately has different lines office vs cell at
+        # different rooftops, and family is already separated by the first-name
+        # guard above). States are normalized (FL == Florida) before comparing.
+        phone_ok = bool(aphone) and bool(sphone) and aphone == sphone
+        sn, ps = _norm_state(row['state']), _norm_state(primary_state)
+        states_differ = bool(sn) and bool(ps) and sn != ps
+        item = {'id': sid, 'name': _s(row['name']), 'contact': _s(row['primary_contact']),
+                'city': _s(row['city']), 'state': _s(row['state'])}
+        if kind == 'exact' and phone_ok:
+            item['tier'] = 'confirmed'
+            merge.append(item)
+        elif kind == 'exact' and not states_differ:
+            item['tier'] = 'strong'
+            merge.append(item)
+        elif kind == 'exact':
+            item['tier'] = 'review'
+            item['reason'] = 'different state'
+            review.append(item)
+        else:
+            item['tier'] = 'review'
+            item['reason'] = ('name typo' if kind == 'fuzzy' else 'first-initial only')
+            review.append(item)
+    return merge, review
+
+
+def _lsl_history_person(name, name_match, contact_name=None, contact_phone=None):
+    """Person-level VERIFIED history: the matched store's ledger UNIONED with the
+    other rooftops the SAME individual (contact name + phone) has worked at, so a
+    dealer who moved stores shows ONE true history. Wraps the audited single-store
+    _lsl_history per rooftop and merges; adds first_activity (earliest across BOTH
+    legs), a per-store breakdown, and a review list of weak matches to confirm.
+    Read-only (HR6)."""
+    nm = name_match or {}
+    base_sid = nm.get('supplier_id')
+    if not base_sid:
+        return _lsl_history(name, None)
+    merge, review = [], []
+    try:
+        c = _lsl_conn()
+        try:
+            merge, review = _resolve_person_stores(
+                c, contact_name or nm.get('contact'), contact_phone,
+                base_sid, nm.get('state'))
+        finally:
+            c.close()
+    except Exception as e:
+        print('[dp-network] person_stores: %s' % e, flush=True)
+
+    order = [{'id': base_sid, 'name': nm.get('name'), 'contact': nm.get('contact'),
+              'state': nm.get('state'), 'tier': 'primary'}] + merge
+    hists = []
+    for st in order:
+        h = _lsl_history(name, st['id'])
+        if h and h.get('matched') and h.get('tx_count'):
+            h['_store'] = st
+            hists.append(h)
+
+    if not hists:
+        base = _lsl_history(name, base_sid) or {}
+        if review:
+            base['review'] = review
+        return base
+
+    # union car rows across rooftops, dedupe by VIN (keep the earliest date)
+    byvin, misc = {}, []
+    for h in hists:
+        for car in h.get('cars', []):
+            v = _s(car.get('vin'))
+            if not v:
+                misc.append(car)
+                continue
+            if v not in byvin or (car.get('date') or '~') < (byvin[v].get('date') or '~'):
+                byvin[v] = car
+    mcars = list(byvin.values()) + misc
+    mcars.sort(key=lambda x: x.get('date') or '', reverse=True)
+    dates = sorted(car['date'] for car in mcars if car.get('date'))
+
+    def _sfirst(h):
+        ds = [c['date'] for c in h.get('cars', []) if c.get('date')]
+        return min(ds) if ds else None
+    stores = [{'id': h['_store']['id'], 'name': _s(h['_store'].get('name')),
+               'contact': _s(h['_store'].get('contact')),
+               'bought': h.get('bought_cars', 0), 'first': _sfirst(h),
+               'tier': h['_store'].get('tier')} for h in hists]
+
+    # single rooftop, no weak matches: return it as-is but with both-leg dates
+    if len(hists) == 1 and not review:
+        h = dict(hists[0])
+        h['first_activity'] = dates[0] if dates else h.get('pay_first')
+        h['last_activity'] = dates[-1] if dates else h.get('pay_last')
+        h.pop('_store', None)
+        return h
+
+    n_cars = len(byvin) + len(misc)
+    return {
+        'matched': True,
+        'bought_cars': n_cars,
+        'bought_paid': sum(int(car.get('amount') or 0) for car in mcars),
+        'payments_cars': sum(h.get('payments_cars', 0) for h in hists),
+        'payments_paid': sum(h.get('payments_paid', 0) for h in hists),
+        'pay_first': dates[0] if dates else None,
+        'pay_last': dates[-1] if dates else None,
+        'first_activity': dates[0] if dates else None,
+        'last_activity': dates[-1] if dates else None,
+        'titles_pending': sum(h.get('titles_pending', 0) for h in hists),
+        'resold_cars': sum(h.get('resold_cars', 0) for h in hists),
+        'resold_gross': sum(h.get('resold_gross', 0) for h in hists),
+        'sold_cars': 0,
+        'tx_count': n_cars,
+        'cars': mcars,
+        'merged_store_count': len(hists),
+        'stores': stores,
+        'review': review,
+    }
+# ── end PERSON_MERGE_2026_07_21 ──────────────────────────────────────────────
+
+
 def _auto_classify(lsl_hist):
     """Assign a classification from the VERIFIED ledger — NOT self-declaration
     or a bare roster match (operator directive 2026-07-17, 12-month window):
@@ -617,7 +860,7 @@ def api_dp_apply():
         types = _s(types)
 
     name_match = _roster_match(dealership, cphone)
-    lsl_hist = _lsl_history(dealership, (name_match or {}).get('supplier_id'), (name_match or {}).get('name'))
+    lsl_hist = _lsl_history_person(dealership, name_match, _s(d.get('contact_name')), cphone)
     referrer = _s(d.get('referrer_name'))
     referrer_match = _roster_match(referrer) if referrer and referrer.lower() not in ('none', 'n/a') else {}
 
@@ -747,7 +990,7 @@ def network_applications():
         if not (r.get('is_existing') or r.get('name_match')):
             continue                      # genuinely-new applicant — nothing to look up
         m = _roster_match(r['dealership_name'], r.get('contact_phone'))
-        h = _lsl_history(r['dealership_name'], (m or {}).get('supplier_id'), (m or {}).get('name'))
+        h = _lsl_history_person(r['dealership_name'], m, r.get('contact_name'), r.get('contact_phone'))
         r['tx_count'] = (h or {}).get('tx_count') or 0
         if m:
             r['name_match'] = m
@@ -791,7 +1034,7 @@ def network_application(app_id):
     # applications without a backfill migration; then feed the resolved
     # supplier_id into the history lookup so it can read the payments ledger.
     a['name_match'] = _roster_match(a.get('dealership_name'), a.get('contact_phone')) or a.get('name_match')
-    lsl_hist = _lsl_history(a.get('dealership_name'), (a.get('name_match') or {}).get('supplier_id'), (a.get('name_match') or {}).get('name'))
+    lsl_hist = _lsl_history_person(a.get('dealership_name'), a.get('name_match'), a.get('contact_name'), a.get('contact_phone'))
     return render_template('network/application.html', a=a, member=member, member_bids=member_bids,
                            class_labels=CLASS_LABELS, lsl_hist=lsl_hist)
 

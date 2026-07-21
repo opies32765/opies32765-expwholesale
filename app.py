@@ -175,6 +175,7 @@ _PUBLIC_PREFIXES = (
     '/api/enrichment/',  # rbook/manheim enrichment workers (oscar VMs)
     '/api/thalist/',     # thalist.com scraper -> EW (shared-secret auth)
     '/api/dealerprice/',  # dealerprice.net public lead-gen -> EW (shared-secret auth)
+    '/api/carworth/',    # carworth.net consumer assistant -> EW (shared-secret auth)
     '/api/comp_msrp/',   # VM 121 comp_msrp worker (claim, submit, jwt, status)
     "/api/internal/",  # internal worker -> SMS bridge (X-Auth gated inside handler)
     '/api/worker/',  # progress, session_lost — worker-facing, no login
@@ -12839,6 +12840,205 @@ def api_dealerprice_bid():
 
     return jsonify({'ok': True, 'status': 'new', 'bid_id': bid_id, 'vin': vin})
 
+
+
+
+# ============================================================================
+# CARWORTH_BRIDGE_2026_07_21 — carworth.net consumer assistant -> EW.
+# The CarWorth assistant (api.carworth.net, box .248) finishes a consumer
+# intake and POSTs it here; it lands as a normal EW bid
+# (creation_source='carworth') and runs the SAME enrichment every bid runs.
+# The desk works the queue at /carworth and texts the offer via the
+# assistant's admin API (the customer gets it FROM the 754 line with a
+# carworth.net/offer/<token> link). Consumer phone is REAL and stored in
+# bids.phone. asking_price stays NULL (consumers don't set an ask).
+# ============================================================================
+CARWORTH_SECRET = (os.environ.get('EW_CARWORTH_SECRET') or '').strip()
+CARWORTH_API = (os.environ.get('CARWORTH_API') or 'https://api.carworth.net').rstrip('/')
+CARWORTH_ADMIN_KEY = (os.environ.get('CARWORTH_ADMIN_KEY') or '').strip()
+
+
+@app.route('/api/carworth/lead', methods=['POST'])
+def api_carworth_lead():
+    auth = (request.headers.get('X-Auth') or '').strip()
+    if not CARWORTH_SECRET or auth != CARWORTH_SECRET:
+        return jsonify({'error': 'bad auth'}), 401
+    data = request.get_json(silent=True) or {}
+    vin = (data.get('vin') or '').strip().upper()
+    if len(vin) != 17:
+        return jsonify({'error': 'valid 17-char VIN required'}), 400
+    try:
+        mileage = int(re.sub(r'[^0-9]', '', str(data.get('mileage') or '')))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'mileage required'}), 400
+    name = (data.get('name') or '').strip() or 'Consumer'
+    zipc = re.sub(r'[^0-9]', '', str(data.get('zip') or ''))[:5]
+    sid = re.sub(r'[^A-Za-z0-9_-]', '', str(data.get('sid') or ''))[:24]
+    intake = data.get('intake') if isinstance(data.get('intake'), dict) else {}
+    phone_digits = re.sub(r'[^0-9]', '', str(data.get('mobile') or ''))
+    if len(phone_digits) == 11 and phone_digits.startswith('1'):
+        phone_digits = phone_digits[1:]
+    if len(phone_digits) != 10:
+        return jsonify({'error': 'valid mobile required'}), 400
+
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("""SELECT id FROM bids WHERE vin=%s AND phone=%s
+                       AND COALESCE(status,'') NOT IN ('cancelled','rejected')
+                       ORDER BY id DESC LIMIT 1""", (vin, phone_digits))
+        dupe = cur.fetchone()
+        if dupe:
+            db.close()
+            return jsonify({'ok': True, 'status': 'dupe', 'bid_id': dupe['id'], 'vin': vin})
+
+        cur.execute("""INSERT INTO contacts (phone, name, company)
+                       VALUES (%s, %s, 'CarWorth')
+                       ON CONFLICT (phone) DO UPDATE
+                         SET name = COALESCE(EXCLUDED.name, contacts.name)
+                       RETURNING id""", (phone_digits, name))
+        contact_id = cur.fetchone()['id']
+
+        rm = ['[CARWORTH]', name, f'VIN: {vin}', f'{mileage:,} mi']
+        if zipc:
+            rm.append(f'ZIP {zipc}')
+        raw_message = ' | '.join(rm)
+
+        nb = [f'[CarWorth] {name} · {phone_digits}' + (f' · ZIP {zipc}' if zipc else '')]
+        if sid:
+            nb.append(f'sid:{sid}')
+        for k in ('title_status', 'loan_payoff', 'accidents', 'mechanical',
+                  'warning_lights', 'cosmetic', 'keys', 'smoked', 'mods'):
+            v = intake.get(k)
+            if v not in (None, '', []):
+                nb.append(f'{k}: {v}')
+        notes_text = '\n'.join(nb)
+
+        cur.execute("""INSERT INTO bids (contact_id, phone, vin, mileage, raw_message,
+                                         asking_price, notes, status, creation_source,
+                                         vauto_priority)
+                       VALUES (%s,%s,%s,%s,%s,NULL,%s,'new','carworth',TRUE)
+                       RETURNING id""",
+                    (contact_id, phone_digits, vin, mileage, raw_message, notes_text))
+        bid_id = cur.fetchone()['id']
+
+        inbound = f'CarWorth consumer intake - {name}'
+        if zipc:
+            inbound += f' · ZIP {zipc}'
+        cond_bits = [f"{k}={intake.get(k)}" for k in ('accidents', 'mechanical', 'cosmetic')
+                     if intake.get(k)]
+        if cond_bits:
+            inbound += '\n' + ' · '.join(str(b) for b in cond_bits)
+        cur.execute("""INSERT INTO bid_messages (bid_id, direction, message, from_phone)
+                       VALUES (%s, 'inbound', %s, %s)""", (bid_id, inbound, phone_digits))
+        cur.execute("UPDATE bids SET has_unread=TRUE WHERE id=%s", (bid_id,))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        try:
+            db.close()
+        except Exception:
+            pass
+        return jsonify({'error': f'{type(e).__name__}: {e}'}), 500
+
+    try:
+        _tg_worker_alert(
+            f'\U0001f7e9 <b>New CarWorth lead</b> \u2192 bid #<b>{bid_id}</b>\n'
+            f'VIN: <code>{vin}</code>\n'
+            f'{mileage:,} mi · ZIP {zipc or "?"}\n'
+            f'{name} · {phone_digits}')
+    except Exception as e:
+        print(f'[carworth] alert error: {e}', flush=True)
+    try:
+        trigger_market_check(bid_id, vin)
+    except Exception as e:
+        print(f'[carworth] market_check kick failed: {e}', flush=True)
+    return jsonify({'ok': True, 'status': 'new', 'bid_id': bid_id, 'vin': vin})
+
+
+@app.route('/carworth')
+def carworth_queue():
+    """CarWorth desk queue — consumer leads from the assistant (session-gated
+    by the global require_login)."""
+    db = get_db(); cur = db.cursor()
+    cur.execute("""SELECT id, vin, mileage, phone, status, ai_price, created_at,
+                          raw_message, notes
+                   FROM bids WHERE creation_source='carworth'
+                   ORDER BY id DESC LIMIT 100""")
+    rows = cur.fetchall(); db.close()
+    body = []
+    for r in rows:
+        sid_m = re.search(r'sid:([A-Za-z0-9_-]+)', r.get('notes') or '')
+        offered = 'offer_sent' in (r.get('notes') or '')
+        ai = f"${r['ai_price']:,.0f}" if r.get('ai_price') else '—'
+        notes_html = (r.get('notes') or '').replace('<', '&lt;').replace('\n', '<br>')
+        act = ('<span style="color:#34d399;font-weight:700">offer sent</span>' if offered else (
+               f'<form method="post" action="/carworth/send_offer" style="display:flex;gap:6px">'
+               f'<input type="hidden" name="bid_id" value="{r["id"]}">'
+               f'<input name="amount" placeholder="$ amount" required pattern="[0-9,]+" '
+               f'style="width:90px;background:#0f172a;border:1px solid #334155;color:#fff;'
+               f'border-radius:6px;padding:6px 8px">'
+               f'<button style="background:#f59e0b;color:#111;border:0;border-radius:6px;'
+               f'padding:6px 12px;font-weight:700;cursor:pointer">Text offer</button></form>'
+               if sid_m else '<span style="color:#64748b">no sid</span>'))
+        body.append(
+            f'<tr style="border-top:1px solid #1e293b">'
+            f'<td style="padding:10px 8px"><a href="/bid/{r["id"]}" style="color:#60a5fa">#{r["id"]}</a></td>'
+            f'<td style="padding:10px 8px">{(r.get("raw_message") or "").replace("<","&lt;")[:120]}</td>'
+            f'<td style="padding:10px 8px">{r.get("status") or ""}</td>'
+            f'<td style="padding:10px 8px">{ai}</td>'
+            f'<td style="padding:10px 8px;font-size:11px;color:#94a3b8" title="intake">'
+            f'<details><summary style="cursor:pointer">intake</summary>'
+            f'<div style="max-width:420px">{notes_html}</div></details></td>'
+            f'<td style="padding:10px 8px">{act}</td></tr>')
+    html = ('<html><head><title>CarWorth Queue</title></head>'
+            '<body style="background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif;padding:26px">'
+            '<div style="display:flex;align-items:center;gap:14px;margin-bottom:6px">'
+            '<h2 style="margin:0">CarWorth — consumer leads</h2>'
+            '<a href="/" style="color:#60a5fa;font-size:13px">&larr; dashboard</a></div>'
+            '<div style="color:#94a3b8;font-size:13px;margin-bottom:18px">'
+            'Assistant intakes from carworth.net. Price the bid as usual, then '
+            '<b>Text offer</b> sends the number from the (754) line with the private offer link.</div>'
+            '<table style="border-collapse:collapse;width:100%;font-size:14px">'
+            '<tr style="color:#94a3b8;text-align:left"><th style="padding:8px">Bid</th>'
+            '<th style="padding:8px">Lead</th><th style="padding:8px">Status</th>'
+            '<th style="padding:8px">AI</th><th style="padding:8px">Intake</th>'
+            '<th style="padding:8px">Offer</th></tr>'
+            + ''.join(body) +
+            '</table>' + ('' if rows else '<p style="color:#64748b">No CarWorth leads yet.</p>')
+            + '</body></html>')
+    return html
+
+
+@app.route('/carworth/send_offer', methods=['POST'])
+def carworth_send_offer():
+    bid_id = int(request.form.get('bid_id') or 0)
+    amount = int(re.sub(r'[^0-9]', '', request.form.get('amount') or '0') or 0)
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT notes FROM bids WHERE id=%s AND creation_source='carworth'", (bid_id,))
+    row = cur.fetchone()
+    if not row or amount < 100:
+        db.close()
+        return 'bad request', 400
+    m = re.search(r'sid:([A-Za-z0-9_-]+)', row.get('notes') or '')
+    if not m:
+        db.close()
+        return 'no assistant sid on this bid', 400
+    try:
+        resp = requests.post(f'{CARWORTH_API}/api/admin/send_offer', timeout=25,
+                             json={'key': CARWORTH_ADMIN_KEY, 'sid': m.group(1),
+                                   'amount': amount, 'valid_days': 5})
+        j = resp.json()
+    except Exception as e:
+        db.close()
+        return f'send failed: {e}', 502
+    if j.get('ok'):
+        cur.execute("UPDATE bids SET notes = notes || %s WHERE id=%s",
+                    (f"\noffer_sent ${amount:,} {time.strftime('%Y-%m-%d %H:%M')} {j.get('link','')}", bid_id))
+        db.commit()
+    db.close()
+    return ('<meta http-equiv="refresh" content="0;url=/carworth">'
+            + ('sent' if j.get('ok') else f'error: {j}'))
+# ======================== end CARWORTH_BRIDGE_2026_07_21 ====================
 
 @app.route('/api/thalist/member_bid', methods=['POST'])
 def api_thalist_member_bid():
