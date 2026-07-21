@@ -1,9 +1,9 @@
 {
   "make_name": "BMW",
-  "trained_at": "2026-07-20T08:30:08.220691Z",
-  "n_total": 1698,
+  "trained_at": "2026-07-21T08:30:07.472223Z",
+  "n_total": 1699,
   "n_train": 1558,
-  "n_test": 140,
+  "n_test": 141,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -221,49 +221,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3418.0,
-    "mape_pct": 8.74,
-    "r2": 0.9712,
-    "within_5pct": 45.7,
-    "within_10pct": 77.9
+    "mae_dollars": 3700.0,
+    "mape_pct": 8.77,
+    "r2": 0.9569,
+    "within_5pct": 46.8,
+    "within_10pct": 78.0
   },
   "baseline_metrics": {
-    "mae_dollars": 3692.0,
-    "mape_pct": 9.37,
+    "mae_dollars": 3762.0,
+    "mape_pct": 9.38,
     "ratio": 1.0233
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.39038968086242676
+      "importance": 0.3867434859275818
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.31592586636543274
+      "importance": 0.316425621509552
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.14669351279735565
+      "importance": 0.15030282735824585
     },
     {
       "name": "body_type_Coupe",
-      "importance": 0.007188876159489155
-    },
-    {
-      "name": "model_name_M4 Competition Coupe",
-      "importance": 0.006928924936801195
+      "importance": 0.0068428609520196915
     },
     {
       "name": "supplier_name_Ultimo Warrenville",
-      "importance": 0.006363797467201948
+      "importance": 0.006520375609397888
     },
     {
-      "name": "original_msrp",
-      "importance": 0.005515542812645435
+      "name": "model_name_M4 Competition Coupe",
+      "importance": 0.005578828509896994
     },
     {
       "name": "odometer",
-      "importance": 0.005430078599601984
+      "importance": 0.0052630165591835976
+    },
+    {
+      "name": "original_msrp",
+      "importance": 0.00523047661408782
     }
   ]
 }
