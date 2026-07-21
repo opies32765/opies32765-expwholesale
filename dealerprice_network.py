@@ -562,13 +562,35 @@ def _resolve_person_stores(c, contact_name, contact_phone, primary_sid, primary_
     return merge, review
 
 
+def _load_person_links(base_sid):
+    """Operator's persisted decisions on weak person-matches for this applicant's
+    primary rooftop: {linked_sid: 'confirmed'|'rejected'}. Lets a one-click
+    'same person' / 'not them' STICK across views (table dealerprice_person_links,
+    PG :5433). Empty on any error (feature degrades to display-only)."""
+    out = {}
+    if not base_sid:
+        return out
+    try:
+        db = _db(); cur = db.cursor()
+        try:
+            cur.execute("SELECT linked_sid, decision FROM dealerprice_person_links "
+                        "WHERE primary_sid=%s", (base_sid,))
+            for r in cur.fetchall():
+                out[int(r['linked_sid'])] = _s(r['decision'])
+        finally:
+            db.close()
+    except Exception as e:
+        print('[dp-network] person_links load: %s' % e, flush=True)
+    return out
+
+
 def _lsl_history_person(name, name_match, contact_name=None, contact_phone=None):
     """Person-level VERIFIED history: the matched store's ledger UNIONED with the
     other rooftops the SAME individual (contact name + phone) has worked at, so a
     dealer who moved stores shows ONE true history. Wraps the audited single-store
     _lsl_history per rooftop and merges; adds first_activity (earliest across BOTH
-    legs), a per-store breakdown, and a review list of weak matches to confirm.
-    Read-only (HR6)."""
+    legs), a per-store breakdown, a review list of weak matches to confirm, and
+    applies the operator's persisted confirm/reject decisions. Read-only (HR6)."""
     nm = name_match or {}
     base_sid = nm.get('supplier_id')
     if not base_sid:
@@ -584,6 +606,32 @@ def _lsl_history_person(name, name_match, contact_name=None, contact_phone=None)
             c.close()
     except Exception as e:
         print('[dp-network] person_stores: %s' % e, flush=True)
+
+    # apply the operator's persisted one-click decisions:
+    #   confirmed -> promote a weak match into the auto-merge
+    #   rejected  -> drop it (from review, or override an auto-merge)
+    links = _load_person_links(base_sid)
+    decided = []
+    if links:
+        keep = []
+        for m in merge:
+            if links.get(m['id']) == 'rejected':
+                decided.append({'id': m['id'], 'name': m['name'], 'decision': 'rejected'})
+            else:
+                keep.append(m)
+        merge = keep
+        newrev = []
+        for it in review:
+            dec = links.get(it['id'])
+            if dec == 'confirmed':
+                it2 = dict(it); it2['tier'] = 'confirmed'; it2['manual'] = True
+                merge.append(it2)
+                decided.append({'id': it['id'], 'name': it['name'], 'decision': 'confirmed'})
+            elif dec == 'rejected':
+                decided.append({'id': it['id'], 'name': it['name'], 'decision': 'rejected'})
+            else:
+                newrev.append(it)
+        review = newrev
 
     order = [{'id': base_sid, 'name': nm.get('name'), 'contact': nm.get('contact'),
               'state': nm.get('state'), 'tier': 'primary'}] + merge
@@ -620,13 +668,15 @@ def _lsl_history_person(name, name_match, contact_name=None, contact_phone=None)
     stores = [{'id': h['_store']['id'], 'name': _s(h['_store'].get('name')),
                'contact': _s(h['_store'].get('contact')),
                'bought': h.get('bought_cars', 0), 'first': _sfirst(h),
-               'tier': h['_store'].get('tier')} for h in hists]
+               'tier': h['_store'].get('tier'),
+               'manual': bool(h['_store'].get('manual'))} for h in hists]
 
     # single rooftop, no weak matches: return it as-is but with both-leg dates
-    if len(hists) == 1 and not review:
+    if len(hists) == 1 and not review and not decided:
         h = dict(hists[0])
         h['first_activity'] = dates[0] if dates else h.get('pay_first')
         h['last_activity'] = dates[-1] if dates else h.get('pay_last')
+        h['primary_sid'] = base_sid
         h.pop('_store', None)
         return h
 
@@ -650,6 +700,8 @@ def _lsl_history_person(name, name_match, contact_name=None, contact_phone=None)
         'merged_store_count': len(hists),
         'stores': stores,
         'review': review,
+        'primary_sid': base_sid,
+        'manual_links': decided,
     }
 # ── end PERSON_MERGE_2026_07_21 ──────────────────────────────────────────────
 
@@ -1128,6 +1180,44 @@ def network_application_classify(app_id):
     db = _db(); cur = db.cursor()
     cur.execute("UPDATE dealer_applications SET classification=%s WHERE id=%s", (c, app_id))
     db.commit(); db.close()
+    return redirect(url_for('dealerprice_network.network_application', app_id=app_id))
+
+
+
+@bp.route('/network/application/<int:app_id>/person-link', methods=['POST'])
+def network_application_person_link(app_id):
+    """One-click confirm / reject of a weak person-match so the merge decision
+    STICKS across views (PERSON_MERGE_2026_07_21). decision = confirmed | rejected
+    | reset. Session-gated with the rest of /network/. Read-write on EW PG only —
+    never touches LSL."""
+    try:
+        primary_sid = int(request.form.get('primary_sid') or 0)
+        linked_sid = int(request.form.get('linked_sid') or 0)
+    except (TypeError, ValueError):
+        primary_sid = linked_sid = 0
+    decision = _s(request.form.get('decision'))
+    if primary_sid and linked_sid and decision in ('confirmed', 'rejected', 'reset'):
+        db = _db(); cur = db.cursor()
+        try:
+            if decision == 'reset':
+                cur.execute("DELETE FROM dealerprice_person_links "
+                            "WHERE primary_sid=%s AND linked_sid=%s",
+                            (primary_sid, linked_sid))
+            else:
+                cur.execute(
+                    "INSERT INTO dealerprice_person_links "
+                    "(primary_sid, linked_sid, decision, linked_name, decided_by) "
+                    "VALUES (%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (primary_sid, linked_sid) DO UPDATE SET "
+                    "decision=EXCLUDED.decision, decided_by=EXCLUDED.decided_by, "
+                    "decided_at=now()",
+                    (primary_sid, linked_sid, decision,
+                     _s(request.form.get('linked_name')), _reviewer()))
+            db.commit()
+        except Exception as e:
+            print('[dp-network] person_link: %s' % e, flush=True)
+        finally:
+            db.close()
     return redirect(url_for('dealerprice_network.network_application', app_id=app_id))
 
 
