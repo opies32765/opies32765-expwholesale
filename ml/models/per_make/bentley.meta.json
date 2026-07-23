@@ -1,9 +1,9 @@
 {
   "make_name": "BENTLEY",
-  "trained_at": "2026-07-21T08:30:12.844096Z",
-  "n_total": 339,
+  "trained_at": "2026-07-22T08:30:15.332174Z",
+  "n_total": 342,
   "n_train": 293,
-  "n_test": 46,
+  "n_test": 49,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,15 +215,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 14114.0,
-    "mape_pct": 12.83,
-    "r2": 0.9244,
-    "within_5pct": 32.6,
-    "within_10pct": 56.5
+    "mae_dollars": 14138.0,
+    "mape_pct": 13.25,
+    "r2": 0.9246,
+    "within_5pct": 30.6,
+    "within_10pct": 53.1
   },
   "baseline_metrics": {
-    "mae_dollars": 25638.0,
-    "mape_pct": 25.05,
+    "mae_dollars": 25041.0,
+    "mape_pct": 25.03,
     "ratio": 1.1871
   },
   "top_features": [

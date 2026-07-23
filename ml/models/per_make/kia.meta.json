@@ -1,9 +1,9 @@
 {
   "make_name": "KIA",
-  "trained_at": "2026-07-21T08:30:12.004626Z",
-  "n_total": 392,
+  "trained_at": "2026-07-22T08:30:14.505833Z",
+  "n_total": 394,
   "n_train": 374,
-  "n_test": 18,
+  "n_test": 20,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -221,49 +221,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1587.0,
-    "mape_pct": 9.77,
-    "r2": 0.9462,
-    "within_5pct": 27.8,
-    "within_10pct": 55.6
+    "mae_dollars": 2028.0,
+    "mape_pct": 11.62,
+    "r2": 0.8594,
+    "within_5pct": 30.0,
+    "within_10pct": 55.0
   },
   "baseline_metrics": {
-    "mae_dollars": 2014.0,
-    "mape_pct": 12.36,
+    "mae_dollars": 2058.0,
+    "mape_pct": 12.12,
     "ratio": 1.0335
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.5487281680107117
+      "importance": 0.5129948258399963
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.25869059562683105
+      "importance": 0.23038268089294434
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.09550031274557114
+      "importance": 0.12491406500339508
     },
     {
       "name": "supplier_name_Toyota Of Vero Beach",
-      "importance": 0.013095200061798096
-    },
-    {
-      "name": "supplier_name_Land Rover Orlando",
-      "importance": 0.006168032065033913
-    },
-    {
-      "name": "supplier_name_Gwinnett Place Honda",
-      "importance": 0.0055132582783699036
+      "importance": 0.013678327202796936
     },
     {
       "name": "model_name_Stinger GT1 Sedan",
-      "importance": 0.004144851118326187
+      "importance": 0.013630601577460766
     },
     {
-      "name": "model_name_Stinger GT-Line Sedan",
-      "importance": 0.0038491461891680956
+      "name": "supplier_name_Land Rover Orlando",
+      "importance": 0.007570925634354353
+    },
+    {
+      "name": "original_msrp",
+      "importance": 0.004504623357206583
+    },
+    {
+      "name": "model_name_K5 GT Sedan",
+      "importance": 0.003860699711367488
     }
   ]
 }

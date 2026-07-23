@@ -1,9 +1,9 @@
 {
   "make_name": "VOLKSWAGEN",
-  "trained_at": "2026-07-21T08:30:12.512361Z",
-  "n_total": 347,
+  "trained_at": "2026-07-22T08:30:15.041988Z",
+  "n_total": 348,
   "n_train": 323,
-  "n_test": 24,
+  "n_test": 25,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,15 +219,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1188.0,
-    "mape_pct": 9.22,
-    "r2": 0.9131,
-    "within_5pct": 54.2,
-    "within_10pct": 75.0
+    "mae_dollars": 1298.0,
+    "mape_pct": 9.54,
+    "r2": 0.8974,
+    "within_5pct": 52.0,
+    "within_10pct": 72.0
   },
   "baseline_metrics": {
-    "mae_dollars": 1860.0,
-    "mape_pct": 11.27,
+    "mae_dollars": 1954.0,
+    "mape_pct": 11.55,
     "ratio": 1.0176
   },
   "top_features": [
