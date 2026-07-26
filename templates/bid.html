@@ -720,11 +720,23 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
               <span style="font-size:11px;font-weight:700;color:#c084fc;text-transform:uppercase;letter-spacing:.5px">Recommended Buy</span>
               <span style="font-size:22px;font-weight:800;color:#c084fc;font-family:monospace">${{ '{:,}'.format(ai_log.final_price) }}</span>
             </div>
-            {% if ai_log.confidence_low and ai_log.confidence_high %}
-            <div style="text-align:right;font-size:11px;color:#64748b;font-family:monospace;margin-top:-2px">
-              range ${{ '{:,}'.format(ai_log.confidence_low) }} – ${{ '{:,}'.format(ai_log.confidence_high) }}
-            </div>
             {% endif %}
+
+            {# ── SCREENER_BADGE_2026_07_26: is this bid worth making? ─ #}
+            {% if screener %}
+            <div style="padding:10px 0 4px;margin-top:8px;border-top:1px dashed #1e293b">
+              <div style="display:flex;justify-content:space-between;align-items:baseline">
+                <span style="font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px">
+                  Deal Screen
+                  <span style="font-size:9px;color:#64748b;font-weight:500;text-transform:none;letter-spacing:0">· {{ screener.note }}{% if screener.n_comparable %} · n={{ screener.n_comparable }}{% endif %}</span>
+                </span>
+                <span style="font-size:18px;font-weight:800;font-family:monospace;color:{{ screener.color }}">{{ screener.recommendation }}</span>
+              </div>
+              <div style="text-align:right;font-size:11px;color:#64748b;font-family:monospace;margin-top:2px">
+                exp gross ${{ '{:,}'.format(screener.expected_gross_dollars) }} · {{ screener.why }}{% if screener.risk_flag %}
+                <div style="color:#f97316;font-weight:700;margin-top:2px">⚠ {{ screener.risk_flag }}</div>{% endif %}
+              </div>
+            </div>
             {% endif %}
 
             {# ── ML model second opinion (per-make XGBoost) ────────── #}

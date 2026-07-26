@@ -4743,6 +4743,24 @@ def bid_detail(bid_id):
         vextras_level = 2 if (_vx_url and _vx_rb and _vx_mh) else (1 if _vx_url else 0)
     except Exception:
         vextras_level = 0
+    # SCREENER_BADGE_2026_07_26: deal screener verdict (BUY / THIN / PASS).
+    # v3 prices within ~3% of MMR on every car, so it says what a car is worth but never
+    # whether the bid is worth making. This adds that. Fitted on 20,171 LSL deals; on 8,645
+    # strictly-later ones BUY realised 7.9% gross vs 3.7% for PASS, and PASS lost money 32%
+    # of the time vs 6% for BUY.
+    # Pure arithmetic on already-loaded values; any failure -> None -> badge simply absent.
+    # It must never gate or delay the listing (LISTING_NEVER_WAITS_ON_ASSESSMENT_2026_06_18).
+    _screener = None
+    try:
+        import ew_screener_lib as _scr
+        _s_mmr = (vauto_data or {}).get('mmr')
+        _s_bid = (ai_log or {}).get('final_price') or bid.get('ai_price')
+        if _s_mmr and _s_bid:
+            _screener = _scr.score_bid(mmr=_s_mmr, bid_price=_s_bid,
+                                       year=bid.get('year'), mileage=bid.get('mileage'))
+    except Exception as _se:
+        print(f'[screener] bid={bid_id} skipped: {_se}', flush=True)
+
     _rendered = render_template('bid.html', bid=bid, photos=photos, show_sources=show_sources,
                                 messages=messages, valuations=valuations,
                                 vauto_data=vauto_data,
@@ -4762,7 +4780,8 @@ def bid_detail(bid_id):
                                 found_at=found_at,
                                 match_detail=match_detail,
                                 no_model_in_network=no_model_in_network,
-                                time_ago=time_ago)
+                                time_ago=time_ago,
+                                screener=_screener)
     _total_ms = int((_perf_t.perf_counter() - _perf_start) * 1000)
     _render_ms = _total_ms - _handler_ms
     # PHASE_TIMERS_2026_05_20: deltas between marks so we can see which

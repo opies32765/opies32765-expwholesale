@@ -191,9 +191,26 @@ def _market_stack(market_intel: dict | None, dealer_intel: dict | None,
             out.append(f"    #{i} {miles:,} mi ({sign}{delta:,}) · {price_str} · "
                        f"{dol_str}{msrp_str} · {dealer} {city_state}{tag}")
     if all_rows and len(all_rows) > 3:
-        out.append(f"\n  ALL rBOOK COMPS ({len(all_rows)} rows — miles, asking price, days on lot):")
-        # Compact list: just miles/price/DOL per row, sorted by miles
+        # RBOOK_COMP_CAP_2026_07_26: this dump was 87% of the longest prompts (up to 486 rows,
+        # driving prompts to 124k tokens against a 32k served context). Sample EVENLY across
+        # the mileage-sorted list — a head slice would bias to low-mileage cars and wreck the
+        # mileage/price curve. Default 0 = uncapped = pre-existing behaviour.
+        import os as _os
+        _cap = int(_os.environ.get('EW_RBOOK_COMP_CAP', '0') or 0)
         rows_sorted = sorted(all_rows, key=lambda r: r.get('mileage') or 0)
+        _omitted = 0
+        if _cap and len(rows_sorted) > _cap:
+            _step = len(rows_sorted) / float(_cap)
+            _idx = sorted({min(len(rows_sorted) - 1, int(i * _step)) for i in range(_cap)}
+                          | {0, len(rows_sorted) - 1})
+            _kept = [rows_sorted[i] for i in _idx]
+            _omitted = len(rows_sorted) - len(_kept)
+            rows_sorted = _kept
+        _hdr = f"\n  ALL rBOOK COMPS ({len(all_rows)} rows — miles, asking price, days on lot)"
+        if _omitted:
+            _hdr += (f" — showing {len(rows_sorted)} sampled evenly across the mileage range; "
+                     f"{_omitted} similar rows omitted")
+        out.append(_hdr + ":")
         for r in rows_sorted:
             m = r.get('mileage') or 0
             p = r.get('price') or 0
