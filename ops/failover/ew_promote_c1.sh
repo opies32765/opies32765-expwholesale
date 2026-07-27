@@ -35,8 +35,9 @@ fi
 
 # 2. Re-enable EW crons (un-comment the DISABLED lines)
 log 're-enabling EW crons'
-crontab -l | sed -E 's|^# DISABLED [0-9]{4}-[0-9]{2}-[0-9]{2} fail[a-z]+-state[^:]*: ||' | crontab -
-
+crontab -l | sed -E 's|^# DISABLED [0-9]{4}-[0-9]{2}-[0-9]{2} fail[a-z]+-state[^:]*: ||' \
+    | sed -E 's|^([^#].*run_sourcing_cron\.sh.*)$|# DISABLED_PERMANENTLY sourcing bot (operator directive): \1|' \
+    | crontab -
 # 3. Re-enable thalist timer
 log 'enabling thalist-scrape.timer + dealer-completion.service'
 systemctl enable --now thalist-scrape.timer dealer-completion.service

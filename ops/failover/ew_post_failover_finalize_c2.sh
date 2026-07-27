@@ -188,7 +188,9 @@ fi
 # ── Step 6: enable EW crons on C2 ────────────────────────────────────────
 log "--- Step 6: ensure EW crons enabled on C2 (un-comment any DISABLED) ---"
 if [[ "$MODE" = execute ]]; then
-    crontab -l | sed -E 's|^# DISABLED 2026-05-13 failover-state \(C1 owns this now\): ||' | crontab -
+    crontab -l | sed -E 's|^# DISABLED 2026-05-13 failover-state \(C1 owns this now\): ||' \
+        | sed -E 's|^([^#].*run_sourcing_cron\.sh.*)$|# DISABLED_PERMANENTLY sourcing bot (operator directive): \1|' \
+        | crontab -
     log "✓ C2 EW crons un-commented (idempotent if already active)"
 else
     log "DRY: would un-comment EW crons on C2"
