@@ -7,7 +7,7 @@
 #
 #   1. git commit + push any dirty /opt/expwholesale tree to GitHub
 #   2. Run ew_remote_snapshot.sh synchronously (full tar of code+DB+ops
-#      to DO droplet at 147.182.230.160)
+#      to C3 at 147.93.176.207 (DO droplet retired 2026-07-26))
 #
 # Plus a health summary of every other propagation path that runs
 # automatically (so the operator can see at a glance that nothing has
@@ -107,16 +107,16 @@ if ! sudo -u postgres psql -p 5433 -tAc 'SELECT 1 FROM pg_stat_replication LIMIT
     echo "      PG stream → no replicas connected ⚠"
 fi
 
-# 3b. DO snapshot freshness
+# 3b. C3 snapshot freshness (was the DO droplet until it was retired 2026-07-26)
 DO_INFO=$(ssh -i /root/.ssh/id_ed25519_failover \
     -o ConnectTimeout=5 -o BatchMode=yes \
-    root@147.182.230.160 \
+    root@147.93.176.207 \
     'cd /var/backups/ew_snapshots 2>/dev/null && ls -t *.tar 2>/dev/null | head -1 | xargs -I{} stat -c "%y %s" {} 2>/dev/null' \
     2>/dev/null)
 if [[ -n "$DO_INFO" ]]; then
-    echo "      DO snapshot →   $DO_INFO"
+    echo "      C3 snapshot →   $DO_INFO"
 else
-    echo "      DO snapshot →   (unreachable or empty)"
+    echo "      C3 snapshot →   (unreachable or empty)"
 fi
 
 # 3c. C2 file rsync freshness — pick a recently-edited file
