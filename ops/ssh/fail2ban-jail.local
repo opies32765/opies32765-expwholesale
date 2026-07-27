@@ -1,0 +1,23 @@
+[DEFAULT]
+# ignoreip: never ban these.
+#   108.64.163.112  home / workstation / home LXC (Home@DESKTOP-91CRPUR, lxc-pull)
+#   84.46.244.0     C2  (c2-failover)
+#   147.93.176.207  C3  (c3-to-c1-ollama-tunnel, failover watchdog)
+#   155.117.46.160  OpsWatch monitor (opswatch-vps) - 28,964 logins/7d, our single
+#                   biggest source of SSH connections. Banning this blinds monitoring.
+#   69.30.204.35    dp-sync (DealerPrice export, command-restricted key)
+#   143.59.232.45   ours, low volume, zero failures
+#   147.182.230.160 retired DO droplet (kept in case it is powered back on)
+#   38.247.189.248  the .248 GPU box
+ignoreip = 127.0.0.1/8 ::1 192.168.1.0/24 108.64.163.112 84.46.244.0 147.93.176.207 155.117.46.160 69.30.204.35 143.59.232.45 147.182.230.160 38.247.189.248
+
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+backend  = systemd
+
+[sshd]
+enabled = true
+port    = ssh
+maxretry = 4
+bantime  = 2h
