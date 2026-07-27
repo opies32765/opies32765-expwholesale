@@ -34,11 +34,11 @@ fi
 
 # 2. Re-enable any disabled crons (idempotent — only acts if there are disabled lines)
 log 're-enabling any disabled EW crons (best-effort)'
-crontab -l | sed -E 's|^# DISABLED 2026-05-13 failover-state[^:]*: ||' | crontab -
+crontab -l | sed -E 's|^# DISABLED [0-9]{4}-[0-9]{2}-[0-9]{2} fail[a-z]+-state[^:]*: ||' | crontab -
 
 # 3. Re-enable thalist timer
-log 'enabling thalist-scrape.timer'
-systemctl enable --now thalist-scrape.timer
+log 'enabling thalist-scrape.timer + dealer-completion.service'
+systemctl enable --now thalist-scrape.timer dealer-completion.service
 
 # Install + enable cookie-bridge timer. Source-of-truth lives in
 # ops/services/; copy into /etc/systemd/system/ then enable. Idempotent.

@@ -59,26 +59,43 @@ CODE_SIZE=$(stat -c %s "$WORK/code_${TS}.tar.gz")
 
 # 3. Operational files
 log 'tar operational files...'
-tar -czf "$WORK/ops_${TS}.tar.gz" \
-    /etc/systemd/system/expwholesale.service \
-    /etc/systemd/system/expwholesale.service.d \
-    /etc/systemd/system/ew-bouncer-killer.service \
-    /etc/systemd/system/thalist-scrape.service \
-    /etc/systemd/system/thalist-scrape.timer \
-    /etc/lsyncd/lsyncd.conf.lua \
-    /usr/local/bin/ew_pg_backup.sh \
-    /usr/local/bin/ew_github_nightly.sh \
-    /usr/local/bin/warm_bids_cache.sh \
-    /usr/local/bin/ew-bouncer-killer.sh \
-    /usr/local/bin/ew_promote_c1.sh \
-    /usr/local/bin/ew_promote_c2.sh \
-    /usr/local/bin/ew_post_failover_finalize_c1.sh \
-    /usr/local/bin/ew_post_failover_finalize_c2.sh \
-    /usr/local/bin/ew_remote_snapshot.sh \
-    /etc/postgresql/16/ewreplica/postgresql.conf \
-    /etc/postgresql/16/ewreplica/pg_hba.conf \
-    /root/replicator_password_20260508.txt \
-    2>>"$LOG" || log '(some operational files missing — non-fatal)'
+# Only tar paths that exist on THIS host. Each host carries its own failover scripts
+# (C1 has *_c1.sh, C2 has *_c2.sh), so a hardcoded list always failed on the other host's
+# pair -- which meant the "missing files" warning fired every run and signalled nothing.
+OPS_PATHS=(
+    /etc/systemd/system/expwholesale.service
+    /etc/systemd/system/expwholesale.service.d
+    /etc/systemd/system/ew-bouncer-killer.service
+    /etc/systemd/system/thalist-scrape.service
+    /etc/systemd/system/thalist-scrape.timer
+    /etc/lsyncd/lsyncd.conf.lua
+    /usr/local/bin/ew_pg_backup.sh
+    /usr/local/bin/ew_github_nightly.sh
+    /usr/local/bin/warm_bids_cache.sh
+    /usr/local/bin/ew-bouncer-killer.sh
+    /usr/local/bin/ew_promote_c1.sh
+    /usr/local/bin/ew_promote_c2.sh
+    /usr/local/bin/ew_post_failover_finalize_c1.sh
+    /usr/local/bin/ew_post_failover_finalize_c2.sh
+    /usr/local/bin/ew_remote_snapshot.sh
+    /usr/local/bin/ew_save.sh
+    /etc/postgresql/16/ewreplica/postgresql.conf
+    /etc/postgresql/16/ewreplica/pg_hba.conf
+    /root/replicator_password_20260508.txt
+)
+OPS_PRESENT=(); OPS_ABSENT=()
+for _p in "${OPS_PATHS[@]}"; do
+    if [[ -e "$_p" ]]; then OPS_PRESENT+=("$_p"); else OPS_ABSENT+=("$_p"); fi
+done
+# Expected absences: the OTHER host's failover pair. Anything else is worth shouting about.
+for _p in "${OPS_ABSENT[@]}"; do
+    case "$_p" in
+        */ew_promote_c[12].sh|*/ew_post_failover_finalize_c[12].sh) : ;;
+        *) log "WARNING: expected ops file is MISSING: $_p" ;;
+    esac
+done
+tar -czf "$WORK/ops_${TS}.tar.gz" "${OPS_PRESENT[@]}" \
+    2>>"$LOG" || log '(tar of operational files reported an error)'
 OPS_SIZE=$(stat -c %s "$WORK/ops_${TS}.tar.gz" 2>/dev/null || echo 0)
 
 # 4. Manifest

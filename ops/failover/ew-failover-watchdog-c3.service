@@ -1,0 +1,15 @@
+[Unit]
+Description=EW failover watchdog (C1 liveness + C2 replication health)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/ew-failover-watchdog.sh
+Restart=always
+RestartSec=15
+StandardOutput=append:/var/log/ew-failover-watchdog.log
+StandardError=append:/var/log/ew-failover-watchdog.log
+
+[Install]
+WantedBy=multi-user.target
