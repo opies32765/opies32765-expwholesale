@@ -12806,6 +12806,30 @@ def api_dealerprice_bid():
         except Exception as _e:
             print('[dealerprice] member tag: %s' % _e, flush=True)
 
+        # DP_NOTIFY_PARITY_2026_07_28 (operator): a dealer who submits through
+        # their private link must get the same text-back as one who texted the
+        # car in. That notification is _notify_driver_combined(), which keys off
+        # driver_phone + driver_token -- and this bridge had never set either, so
+        # link submissions were silently getting NO text at all (verified: 0 of 3
+        # dealerprice bids had them). Stamp both so the normal Phase-2 notify
+        # fires when enrichment lands.
+        #   NOTE: what they actually receive is decided by the enrichment gate
+        #   (ENRICHMENT_SMS_DENY_BY_DEFAULT_2026_07_28) -- a non-granted dealer
+        #   gets the plain 'Joe, Todd or Gregg will reach out' receipt, never the
+        #   valuation card. Setting driver_phone does NOT grant anything.
+        try:
+            import secrets as _secrets   # module-level import does not exist; the
+                                         # other call sites all import it locally
+            if contact_phone and not str(contact_phone).startswith('dp:'):
+                cur.execute("UPDATE bids SET driver_phone=%s, driver_token=%s "
+                            "WHERE id=%s AND driver_phone IS NULL",
+                            (contact_phone, _secrets.token_urlsafe(8)[:12], bid_id))
+                print('[dealerprice] notify wired bid=%s phone=%s' % (bid_id, contact_phone), flush=True)
+            else:
+                print('[dealerprice] no usable mobile for bid=%s - no text-back' % bid_id, flush=True)
+        except Exception as _e:
+            print('[dealerprice] driver notify wire failed bid=%s: %s' % (bid_id, _e), flush=True)
+
         os.makedirs(UPLOAD_DIR, exist_ok=True)
         for photo in (data.get('photos') or [])[:6]:
             try:
@@ -23144,6 +23168,51 @@ def sender_portal(token):
     return render_template('portal.html', owner=owner, cars=cars, token=token)
 
 
+# ══ HARD RULE — ENRICHMENT_SMS_DENY_BY_DEFAULT_2026_07_28 ═══════════════════
+# OPERATOR DIRECTIVE, EMPHATIC. EW's valuation/enrichment data (MMR, rBook,
+# AccuTrade, book values, comps, AI reasoning — everything behind /m/<token>/full)
+# is EW's edge. It must NEVER be texted to a submitter unless that submitter has
+# been EXPLICITLY GRANTED access.
+#
+#   DEFAULT = DENY. An empty allowlist means NOBODY gets it. That is correct.
+#
+# This REVERSES CLEAN_SLATE_2026_06_17 ("every sender gets the same per-car bid
+# card"), which handed the enrichment link to every phone that texted in.
+# Non-granted senders get a plain receipt instead — no numbers, no link.
+#
+# Grant access by adding the phone to EITHER:
+#   • env  EW_ENRICHMENT_SMS_ALLOW="9545551234,3055556789"   (needs a restart)
+#   • table enrichment_sms_grants(phone)                      (live, no restart)
+# ⛔ Do NOT "temporarily" default this to allow. Do not add a bypass flag.
+def _enrichment_sms_allowed(phone):
+    """True ONLY if this phone is explicitly granted the enrichment bid card.
+    Fails CLOSED on any error — a lookup problem must never leak the data."""
+    try:
+        d = re.sub(r'\D', '', str(phone or ''))
+        if not d:
+            return False
+        d10 = d[-10:]
+        if len(d10) < 10:
+            return False
+        allow = os.environ.get('EW_ENRICHMENT_SMS_ALLOW', '')
+        for tok in allow.split(','):
+            t = re.sub(r'\D', '', tok)
+            if t and t[-10:] == d10:
+                return True
+        db = get_db()
+        try:
+            cur = db.cursor()
+            cur.execute("SELECT 1 FROM enrichment_sms_grants "
+                        "WHERE right(regexp_replace(phone,'[^0-9]','','g'),10)=%s "
+                        "AND COALESCE(revoked,FALSE)=FALSE LIMIT 1", (d10,))
+            return cur.fetchone() is not None
+        finally:
+            db.close()
+    except Exception as _e:
+        print('[enrichment-gate] DENY (lookup error): %s' % _e, flush=True)
+        return False
+
+
 def _notify_driver_combined(bid_id):
     """COMBINED_SMS_2026_05_20: the ONE customer SMS, fired when Phase 2
     enrichment lands (rbook + manheim + accu + ipkt all complete). NOT
@@ -23173,7 +23242,7 @@ def _notify_driver_combined(bid_id):
                 SELECT id, driver_token, driver_phone,
                        driver_notified_at, phase2_notified_at,
                        year, make, model, trim, mileage, vin,
-                       bidder_name,
+                       bidder_name, dp_member_id,
                        needs_verification_at, needs_verification_cleared_at,
                        needs_verification_reason
                   FROM bids WHERE id = %s
@@ -23227,7 +23296,33 @@ def _notify_driver_combined(bid_id):
         _bn = (bid.get('bidder_name') or '').strip()
         _first = _bn.split()[0] if _bn else ''
         _greet = f"Hi {_first}, " if _first else ""
-        body = f"{_greet}Bid #{bid['id']} {ymm_full} {link}"
+        # ══ HARD RULE gate — ENRICHMENT_SMS_DENY_BY_DEFAULT_2026_07_28 ══
+        # Only explicitly-granted phones receive the enrichment bid card (the
+        # /m/<token>/full link exposes MMR, book values, comps, AI reasoning).
+        # EVERYONE ELSE gets a plain receipt. Default DENY — see the helper.
+        if _enrichment_sms_allowed(bid['driver_phone']):
+            body = f"{_greet}Bid #{bid['id']} {ymm_full} {link}"
+            print(f'[enrichment-gate] ALLOW bid={bid_id} -> {bid["driver_phone"]}', flush=True)
+        else:
+            # Greet by DEALERSHIP name for network members (operator wording),
+            # falling back to the captured bidder first name.
+            _who = (_first or '').strip()
+            if bid.get('dp_member_id'):
+                try:
+                    cur.execute("SELECT dealership_name FROM dealerprice_members "
+                                "WHERE id=%s", (bid['dp_member_id'],))
+                    _mrow = cur.fetchone()
+                    if _mrow and (_mrow.get('dealership_name') or '').strip():
+                        _who = _mrow['dealership_name'].strip()
+                except Exception as _dn_e:
+                    print(f'[combined-sms] dealership name lookup: {_dn_e}', flush=True)
+            body = (f"Hi {_who}, Bid #{bid['id']} received. Give us a bit — "
+                    f"Joe, Todd or Gregg will reach out shortly."
+                    if _who else
+                    f"Bid #{bid['id']} received. Give us a bit — "
+                    f"Joe, Todd or Gregg will reach out shortly.")
+            print(f'[enrichment-gate] WITHHELD bid={bid_id} -> {bid["driver_phone"]} '
+                  f'(not granted; plain receipt sent)', flush=True)
 
         sent = send_sms(bid['driver_phone'], body)
         if sent:

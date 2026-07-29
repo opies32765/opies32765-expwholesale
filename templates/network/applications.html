@@ -81,7 +81,7 @@
               {% if a.classification == 'new_applicant' %}<span class="badge b-new">New applicant</span>
               {% elif a.classification == 'previous_partner' %}<span class="badge b-prev">{{ class_labels.get(a.classification, 'Previous partner') }}</span>
               {% elif a.classification %}<span class="badge b-partner">{{ class_labels.get(a.classification, 'Current partner') }}</span>{% endif %}
-              {% if a.tx_count %}<span class="badge b-lsl" title="Real EW history (LSL): cars we bought from them + cars we sold to them">📊 {{ a.tx_count }} deal{{ '' if a.tx_count == 1 else 's' }}</span>
+              {% if a.tx_count %}<span class="badge b-lsl" title="Verified EW history (LSL), split by direction — {{ a.bought_cars }} bought from them, {{ a.sold_cars }} sold to them">📊 {{ a.bought_cars }} bought · {{ a.sold_cars }} sold</span>{% if a.total_gross %}<span class="badge" style="background:#dcfce7;color:#14532d" title="Total gross EW has made with this dealer — front value on cars sold to them, plus front value on resale of cars bought from them">💵 ${{ '{:,.0f}'.format(a.total_gross) }} gross</span>{% endif %}
               {% elif a.name_match and a.name_match.matched %}<span class="badge b-roster" title="In your LSL system as {{ a.name_match.name }} — but no completed transactions yet">on file · no deals</span>{% endif %}
             </div>
           </td>

@@ -1,9 +1,9 @@
 {
   "make_name": "INFINITI",
-  "trained_at": "2026-07-27T08:30:33.816814Z",
-  "n_total": 166,
+  "trained_at": "2026-07-28T08:30:42.174761Z",
+  "n_total": 167,
   "n_train": 156,
-  "n_test": 10,
+  "n_test": 11,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -217,49 +217,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3540.0,
-    "mape_pct": 46.32,
-    "r2": 0.8094,
-    "within_5pct": 40.0,
-    "within_10pct": 60.0
+    "mae_dollars": 3670.0,
+    "mape_pct": 52.27,
+    "r2": 0.862,
+    "within_5pct": 36.4,
+    "within_10pct": 54.5
   },
   "baseline_metrics": {
-    "mae_dollars": 5512.0,
-    "mape_pct": 53.29,
+    "mae_dollars": 5644.0,
+    "mape_pct": 69.54,
     "ratio": 1.0457
   },
   "top_features": [
     {
       "name": "base_appraised_value",
-      "importance": 0.36998265981674194
+      "importance": 0.35901135206222534
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.31398454308509827
+      "importance": 0.31707578897476196
     },
     {
       "name": "market_asking_price",
-      "importance": 0.1262533813714981
+      "importance": 0.13504204154014587
     },
     {
       "name": "supplier_name_Infiniti Of Orange Park",
-      "importance": 0.015726802870631218
+      "importance": 0.017966261133551598
     },
     {
       "name": "supplier_name_Beck Nissan",
-      "importance": 0.012421637773513794
-    },
-    {
-      "name": "model_name_QX80",
-      "importance": 0.011634806171059608
-    },
-    {
-      "name": "odometer",
-      "importance": 0.01138992328196764
+      "importance": 0.014190448448061943
     },
     {
       "name": "supplier_name_Mall Of Georgia Mazda",
-      "importance": 0.010422303341329098
+      "importance": 0.011906413361430168
+    },
+    {
+      "name": "body_type_OTHER",
+      "importance": 0.011326774954795837
+    },
+    {
+      "name": "odometer",
+      "importance": 0.009984061121940613
     }
   ]
 }

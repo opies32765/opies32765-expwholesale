@@ -49,6 +49,227 @@ DP_PUBLIC_BASE = os.environ.get('DP_PUBLIC_BASE', 'https://dealerprice.net')
 DEALER_TYPES = ['Exotic', 'High-Volume Commodity', 'Niche / Specialty',
                 'Wholesale', 'Large-Volume Mix', 'Subprime']
 
+# ── DP_EMAIL_IDENTITY_2026_07_28 ─────────────────────────────────────────────
+# Dealer-facing mail had been borrowing recon's sender, so an approved dealer's
+# welcome arrived from recon@ (the reconditioning address). DealerPrice now has
+# its own identity. info@experience-wholesale.net is on the Resend-VERIFIED
+# experience-wholesale.net domain (DKIM resend._domainkey + send. return-path
+# already live), so this needs no new DNS.
+#
+# ⚠ info@experience-wholesale.net is send-only today — Cloudflare Email Routing
+#   has no route for it (probed: 550 5.1.1 Address does not exist). Replies are
+#   carried entirely by the Reply-To list below. If you want the from-address
+#   itself to receive, add a CF Email Routing rule for info@.
+DP_EMAIL_FROM = os.environ.get('DP_EMAIL_FROM',
+                               'Experience Wholesale <info@experience-wholesale.net>')
+
+# Everyone who should see a dealer's reply, once testing is over.
+DP_REPLY_TO_ALL = [a.strip() for a in os.environ.get(
+    'DP_REPLY_TO_ALL',
+    'oscar@experience-wholesale.com,joe@experience-wholesale.com,'
+    'todd@experience-wholesale.com,gregg@doubleclutch.com').split(',') if a.strip()]
+
+# TESTING GATE (operator, 2026-07-28): while testing, only the first recipient
+# gets replies — joe/todd/gregg are held back so test traffic doesn't hit them.
+#   gate ABSENT  = testing  -> oscar only
+#   gate PRESENT = live     -> all four
+# ⛔ REMINDER: `touch /opt/expwholesale/DP_REPLY_ALL_LIVE` when testing is done.
+DP_REPLY_ALL_GATE = os.environ.get('DP_REPLY_ALL_GATE',
+                                   '/opt/expwholesale/DP_REPLY_ALL_LIVE')
+
+
+def _dp_reply_to():
+    """The Reply-To list, narrowed to the first address while the gate is off."""
+    if not DP_REPLY_TO_ALL:
+        return []
+    return DP_REPLY_TO_ALL if os.path.exists(DP_REPLY_ALL_GATE) else DP_REPLY_TO_ALL[:1]
+
+
+# ── DP_ONBOARD_TESTING_2026_07_28 ────────────────────────────────────────────
+# While testing the new welcome email/SMS, EVERY approval goes to the operator
+# instead of the real dealer — a wrong-looking welcome must never reach a dealer.
+#   gate ABSENT  = TEST -> email+SMS redirected to the operator, subject prefixed
+#   gate PRESENT = LIVE -> the actual dealer is contacted
+# ⛔ REMINDER: `touch /opt/expwholesale/DP_ONBOARD_LIVE` when the wording is signed off.
+DP_ONBOARD_GATE = os.environ.get('DP_ONBOARD_GATE', '/opt/expwholesale/DP_ONBOARD_LIVE')
+DP_TEST_EMAIL = os.environ.get('DP_TEST_EMAIL', 'opies32765@gmail.com')
+DP_TEST_PHONE = os.environ.get('DP_TEST_PHONE',
+                               os.environ.get('EW_TEST_USER_PHONE', '')).strip()
+EW_SMS_NUMBER = os.environ.get('EW_SMS_NUMBER', '(754) 247-1123')
+
+
+def _dp_onboard_live():
+    return os.path.exists(DP_ONBOARD_GATE)
+
+
+# ── DP_APPLY_ALERT_2026_07_28 ────────────────────────────────────────────────
+# The three partners (+ the operator) want a TEXT the moment a dealer applies,
+# so a packet doesn't sit unreviewed. Same gate pattern as the onboarding mail:
+#   gate ABSENT  = testing -> only the FIRST number in the list (the operator)
+#   gate PRESENT = live    -> everyone in the list
+# ⛔ REMINDER: fill in the three partner mobiles, then
+#    `touch /opt/expwholesale/DP_APPLY_ALERT_LIVE`.
+# Deliberately seeded with ONLY the operator's verified number — texting a
+# guessed number would page a stranger.
+DP_APPLY_ALERT_PHONES = [p.strip() for p in os.environ.get(
+    'DP_APPLY_ALERT_PHONES', '4074309675').split(',') if p.strip()]
+DP_APPLY_ALERT_GATE = os.environ.get('DP_APPLY_ALERT_GATE',
+                                     '/opt/expwholesale/DP_APPLY_ALERT_LIVE')
+
+
+def _dp_apply_alert_phones():
+    """Who gets the new-application text; first entry only until the gate is on."""
+    if not DP_APPLY_ALERT_PHONES:
+        return []
+    return (DP_APPLY_ALERT_PHONES if os.path.exists(DP_APPLY_ALERT_GATE)
+            else DP_APPLY_ALERT_PHONES[:1])
+
+
+def _dp_apply_alert_sms(app_id, dealership, contact, hist, is_existing):
+    """Text the partners that a new dealer applied. Best-effort; never raises
+    into the apply path (an alert must not fail a dealer's application).
+
+    NOTE: this goes to EW's OWN partners, not to a submitter, so the ledger
+    figures are fine here — ENRICHMENT_SMS_DENY_BY_DEFAULT_2026_07_28 governs
+    what we text to DEALERS, which is a different audience entirely.
+    """
+    h = hist or {}
+    if h.get('tx_count'):
+        who = ('Known EW dealer: %d bought / %d sold, $%s gross with us.'
+               % (h.get('bought_cars') or 0, h.get('sold_cars') or 0,
+                  '{:,.0f}'.format(h.get('total_gross') or 0)))
+    elif is_existing:
+        who = 'Says they are an existing dealer, but no transactions on our ledger.'
+    else:
+        who = 'New applicant - no history with us.'
+    body = ('New DealerPrice application #%d\n%s%s\n%s\nReview: %s/network/application/%d'
+            % (app_id, dealership or '(no name)',
+               (' - %s' % contact) if contact else '',
+               who,
+               os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net'),
+               app_id))
+    live = os.path.exists(DP_APPLY_ALERT_GATE)
+    if not live:
+        body = '[TEST - partners not yet added] ' + body
+    for ph in _dp_apply_alert_phones():
+        digits = _digits(ph)
+        if len(digits) != 10:
+            print('[dp-network] apply-alert skip bad phone %r' % ph, flush=True)
+            continue
+        try:
+            from app import send_sms
+            send_sms('+1' + digits, body)
+            print('[dp-network] apply-alert -> %s (live=%s)' % (digits, live), flush=True)
+        except Exception as e:
+            print('[dp-network] apply-alert %s failed: %s' % (digits, e), flush=True)
+
+
+def _invite_html(name, link):
+    """The dealer welcome email. Table-based + inline CSS (Outlook/Gmail safe),
+    600px, logo served from the Resend-verified experience-wholesale.net so it
+    loads without auth. DP_WELCOME_V2_2026_07_28."""
+    logo = 'https://experience-wholesale.net/static/ew-logo-email.png'
+    return """\
+<!--[if mso]><style>body,table,td{font-family:Arial,sans-serif !important}</style><![endif]-->
+<div style="background:#f4f5f7;padding:28px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%" style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb">
+
+  <tr><td align="center" style="padding:30px 30px 20px 30px;border-bottom:1px solid #eef0f3">
+    <img src="%(logo)s" width="240" alt="Experience Wholesale"
+         style="display:block;width:240px;max-width:70%%;height:auto;border:0">
+  </td></tr>
+
+  <tr><td style="padding:30px 34px 6px 34px">
+    <div style="display:inline-block;background:#e7f7ee;color:#15803d;border-radius:999px;padding:5px 13px;font-size:12px;font-weight:700;letter-spacing:.3px">APPROVED</div>
+    <h1 style="margin:15px 0 8px 0;font-size:23px;line-height:1.28;color:#0f172a;font-weight:800">Welcome to the network, %(name)s.</h1>
+    <p style="margin:0;font-size:15px;line-height:1.62;color:#475569">
+      You&rsquo;re cleared to submit vehicles to Experience Wholesale for a bid.
+      There are <b>two ways</b> to send us a car &mdash; use whichever is faster for you.
+    </p>
+  </td></tr>
+
+  <tr><td style="padding:22px 34px 0 34px">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%"
+           style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #b91c2c;border-radius:10px">
+      <tr><td style="padding:17px 19px">
+        <div style="font-size:12px;font-weight:800;color:#b91c2c;letter-spacing:.5px">OPTION 1 &mdash; TEXT US</div>
+        <div style="font-size:21px;font-weight:800;color:#0f172a;margin:5px 0 9px 0">%(sms)s</div>
+        <p style="margin:0 0 10px 0;font-size:14px;line-height:1.6;color:#475569">Text the car straight from your phone. Any of these work:</p>
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%" style="font-size:14px;line-height:1.6;color:#334155">
+          <tr><td style="padding:3px 0" valign="top" width="22">&bull;</td><td style="padding:3px 0">Type the <b>VIN and mileage</b></td></tr>
+          <tr><td style="padding:3px 0" valign="top">&bull;</td><td style="padding:3px 0">Or just <b>photograph the VIN plate and the odometer</b> &mdash; we read them automatically</td></tr>
+          <tr><td style="padding:3px 0" valign="top">&bull;</td><td style="padding:3px 0">Add as many <b>photos of the car</b> as you want</td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <tr><td style="padding:13px 34px 0 34px">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%"
+           style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px">
+      <tr><td style="padding:15px 18px;font-size:14px;line-height:1.62;color:#78350f">
+        <b>&#9201; Send everything for one car within 60 seconds.</b><br>
+        Every message you send within <b>60 seconds</b> of your first one is treated as the
+        <b>same vehicle</b> &mdash; the VIN, the mileage and all photos land on one bid.
+        Wait longer than that and the next message starts a <b>new car</b>. So snap your
+        pictures first, then send them together.
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <tr><td style="padding:13px 34px 0 34px">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%"
+           style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #1e3a8a;border-radius:10px">
+      <tr><td style="padding:17px 19px">
+        <div style="font-size:12px;font-weight:800;color:#1e3a8a;letter-spacing:.5px">OPTION 2 &mdash; YOUR PRIVATE LINK</div>
+        <p style="margin:7px 0 13px 0;font-size:14px;line-height:1.6;color:#475569">
+          Your own submission page &mdash; no time limit, take as long as you like.
+          Bookmark it; it&rsquo;s yours and it doesn&rsquo;t expire.
+        </p>
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+          <td align="center" style="background:#b91c2c;border-radius:8px">
+            <a href="%(link)s" style="display:inline-block;padding:13px 27px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none">Submit a vehicle &rarr;</a>
+          </td></tr>
+        </table>
+        <p style="margin:12px 0 0 0;font-size:12px;line-height:1.5;color:#94a3b8;word-break:break-all">%(link)s</p>
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <tr><td style="padding:24px 34px 0 34px">
+    <div style="font-size:12px;font-weight:800;color:#0f172a;letter-spacing:.5px;padding-bottom:4px">WHAT HAPPENS NEXT</div>
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%" style="font-size:14px;line-height:1.58;color:#475569">
+      <tr>
+        <td width="30" valign="top" style="padding:9px 0"><div style="width:22px;height:22px;border-radius:50%%;background:#0f172a;color:#fff;font-size:12px;font-weight:700;text-align:center;line-height:22px">1</div></td>
+        <td style="padding:9px 0">However you send it, you&rsquo;ll get a <b>text back confirming your bid number</b>. Hang on to that number.</td>
+      </tr>
+      <tr>
+        <td width="30" valign="top" style="padding:9px 0;border-top:1px solid #eef0f3"><div style="width:22px;height:22px;border-radius:50%%;background:#0f172a;color:#fff;font-size:12px;font-weight:700;text-align:center;line-height:22px">2</div></td>
+        <td style="padding:9px 0;border-top:1px solid #eef0f3">We work the car on our end &mdash; history, condition, market.</td>
+      </tr>
+      <tr>
+        <td width="30" valign="top" style="padding:9px 0;border-top:1px solid #eef0f3"><div style="width:22px;height:22px;border-radius:50%%;background:#b91c2c;color:#fff;font-size:12px;font-weight:700;text-align:center;line-height:22px">3</div></td>
+        <td style="padding:9px 0;border-top:1px solid #eef0f3"><b>Joe, Todd or Gregg reaches out to you directly</b> with where we are on it. A real person, not an automated number.</td>
+      </tr>
+    </table>
+  </td></tr>
+
+  <tr><td style="padding:22px 34px 30px 34px">
+    <p style="margin:0;font-size:14px;line-height:1.62;color:#475569">
+      Questions on a car or a number? <b>Just reply to this email</b> &mdash; it goes straight to our buying desk.
+    </p>
+    <p style="margin:15px 0 0 0;font-size:14px;color:#0f172a"><b>Experience Wholesale</b></p>
+  </td></tr>
+
+  <tr><td style="padding:15px 34px 22px 34px;background:#f8fafc;border-top:1px solid #eef0f3">
+    <p style="margin:0;font-size:11.5px;line-height:1.55;color:#94a3b8">
+      You received this because your dealership was approved for the Experience Wholesale
+      dealer network. Your submission link is private &mdash; don&rsquo;t forward it.
+    </p>
+  </td></tr>
+
+</table></div>""" % {'logo': logo, 'name': name, 'link': link, 'sms': EW_SMS_NUMBER}
+
 
 # NO_CACHE_2026_07_17 — the operator review pages (/network/...) re-run live LSL
 # roster + deal-ledger lookups on every load, so a stale browser/CDN copy shows
@@ -269,7 +490,14 @@ def _roster_search(q, limit=8):
 
 
 def _lsl_history_agg(c, swhere, sparams, bwhere, bparams):
-    """Aggregate the deals ledger for a supplier-side + buyer-side WHERE clause.
+    """DEAD CODE — no caller. ⛔ DO NOT RESURRECT AS-IS (DIRECTION_SPLIT_2026_07_28).
+    It treats a `deals.supplier_*` clause as the cars EW BOUGHT and a
+    `customer_name` clause as the cars EW SOLD. Both are inverted: on a wholesale
+    deal row `supplier_id` is the dealer EW SOLD TO, and `customer_name` is a
+    mirror of that same buyer (verified 29,182/29,182). Using this would report
+    every sale as a purchase and then double-count it. See _lsl_history.
+
+    Aggregate the deals ledger for a supplier-side + buyer-side WHERE clause.
     Returns the history dict, or {} if the clauses matched nothing."""
     s = c.execute(
         "SELECT count(*) n, COALESCE(SUM(purchase_cost),0) paid, "
@@ -300,29 +528,42 @@ def _lsl_history_agg(c, swhere, sparams, bwhere, bparams):
 
 
 def _lsl_history(name, supplier_id=None, matched_name=None):
-    """VERIFIED transaction history for a dealer resolved to a suppliers.id,
-    using ONLY authoritative dealer keys (multi-agent LSL audit, 2026-07-17):
+    """VERIFIED two-sided transaction history for a dealer resolved to a
+    suppliers.id. Requires supplier_id. Pure read-only (HR6).
 
-      • CARS EW BOUGHT from them = distinct VINs across
-          payments(vendor_id=id, type='Purchased', payee_type NOT IN
-                   ('Customer','Bank'), vendor_name agrees with the dealer)
-          ∪ deals(supplier_id=id)              -- older cars EW bought & resold
-      • CARS EW SOLD to them = deals with a REAL customer entity link (0 for
-        wholesale suppliers; the customer-side resolver is pending the
-        systematic matcher).
+    ══ DIRECTION_SPLIT_2026_07_28 ═══════════════════════════════════════════
+    The previous version unioned two OPPOSITE-direction legs into a single
+    "cars EW bought from them" number, because it read `deals.supplier_id` as
+    "the dealer EW bought from". It is not. Verified by joining deals→inventory
+    on VIN across 31,139 wholesale rows:
 
-    ⛔ Three false-positive classes this REPLACES (all found in the audit):
-      1. `customer_name` is a denormalized MIRROR of `supplier_name` (with a
-         NULL customer_id) on every wholesale deal → matching it double-counted
-         the cars we BOUGHT as cars "sold to them" (showed Naples a bogus "10
-         sold / $580k"; real = 0). We now NEVER match customer_name.
+        deals.supplier_name == inventory.customer_name (the BUYER)   90.9%
+        deals.source_name   == inventory.source        (the SELLER)  94.1%
+        deals.supplier_name == inventory.source        (the SELLER)   2.7%
+
+    So on a wholesale deal row, `supplier_id` identifies the dealer EW SOLD the
+    car TO. The dealer EW bought it FROM lives in `source_name` /
+    inventory.purchased_from_id. Corroboration: the two legs are DISJOINT
+    (Maroun 503504 → 61 payments VINs vs 82 deals VINs, overlap 0), and every
+    payments-leg VIN carries inventory.purchased_from_id == that same
+    supplier_id while its inventory.customer_name is a different dealer.
+
+      • CARS EW BOUGHT FROM them = payments(vendor_id=id, type='Purchased',
+        payee_type='Supplier')  — EW paid them; money out.
+      • CARS EW SOLD TO them    = deals(supplier_id=id) — EW invoiced them;
+        front_value = gross EW made on that sale.
+
+    ⛔ Audit rules (2026-07-17) that still hold, one with a corrected reason:
+      1. NEVER match `customer_name` — it is a mirror, but of the BUYER, not of
+         the supplier. Matching it would double-count each sale against the
+         dealer we sold to. (The original note had the direction inverted.)
       2. `payee_type` Customer/Bank = a consumer/lender payment, NOT dealer
          activity (a stranger's $31k Mustang mis-attributed to a same-named
-         dealer). Now excluded.
+         dealer). Still excluded.
       3. NAME as an identity key collides (43 dealer names → multiple ids; one
-         switchboard phone → 13 rooftops). We require a resolved supplier_id and
-         corroborate the payments vendor_name; a name alone never counts.
-    Requires supplier_id. Pure read-only (HR6)."""
+         switchboard phone → 13 rooftops). supplier_id only; a name never
+         counts on its own.
+    """
     if not supplier_id:
         return {}
     try:
@@ -342,30 +583,66 @@ def _lsl_history(name, supplier_id=None, matched_name=None):
                 "FROM payments WHERE vendor_id=? AND type='Purchased' "
                 "AND payee_type='Supplier'",
                 (supplier_id,)).fetchall()
-            # cars EW bought — older resold cars (deals where THEY are the supplier)
-            drows = c.execute(
-                "SELECT vin_no, purchase_cost, front_value, sold_at, stock_no "
+            # cars EW SOLD TO them — deals.supplier_id is the BUYER (see docstring)
+            srows = c.execute(
+                "SELECT vin_no, purchase_cost, sale_price, front_value, sold_at, stock_no "
                 "FROM deals WHERE supplier_id=?", (supplier_id,)).fetchall()
-            # cars EW SOLD to them — real customer entity only (NOT the mirror name)
-            sold_cars = 0   # pending customer-entity resolver; mirror-name excluded
 
             pay_vins = set(_s(r['vin_no']) for r in prows if _s(r['vin_no']))
-            deal_vins = set(_s(r['vin_no']) for r in drows if _s(r['vin_no']))
-            bought_vins = pay_vins | deal_vins
-            if not bought_vins and not sold_cars:
+            sold_vins = set(_s(r['vin_no']) for r in srows if _s(r['vin_no']))
+            bought_vins = pay_vins
+            if not bought_vins and not sold_vins:
                 return {}
             pay_dates = sorted((_s(r['created_at']))[:10] for r in prows if _s(r['created_at']))
+            sell_dates = sorted((_s(r['sold_at']))[:10] for r in srows if _s(r['sold_at']))
+
+            # ── what EW made on this relationship ────────────────────────────
+            # sell side: front_value on the deals we invoiced THEM for. Dedupe by
+            # VIN first — a VIN can carry >1 deal row and summing raw double-counts.
+            sell_by_vin = {}
+            sell_novin = []
+            for r in srows:
+                v = _s(r['vin_no'])
+                if not v:
+                    sell_novin.append(r)
+                elif v not in sell_by_vin or (_s(r['sold_at']) or '') > (_s(sell_by_vin[v]['sold_at']) or ''):
+                    sell_by_vin[v] = r
+            sell_rows = list(sell_by_vin.values()) + sell_novin
+            sold_gross = int(sum(r['front_value'] or 0 for r in sell_rows))
+            sold_revenue = int(sum(r['sale_price'] or 0 for r in sell_rows))
+
+            # buy side: the cars EW bought FROM them and then resold to someone
+            # else — EW's gross is the front_value on THAT resale deal. Exclude
+            # any VIN already counted on the sell leg so a buy-back can't
+            # double-count the same front_value.
+            resale_vins = [v for v in bought_vins if v not in sold_vins]
+            buy_resale_gross, buy_resale_cars = 0, 0
+            if resale_vins:
+                rby = {}
+                rph = ','.join('?' * len(resale_vins))
+                for r in c.execute(
+                        "SELECT vin_no, front_value, sold_at FROM deals "
+                        "WHERE vin_no IN (%s)" % rph, resale_vins):
+                    v = _s(r['vin_no'])
+                    if v and (v not in rby or (_s(r['sold_at']) or '') > (_s(rby[v]['sold_at']) or '')):
+                        rby[v] = r
+                buy_resale_cars = len(rby)
+                buy_resale_gross = int(sum(r['front_value'] or 0 for r in rby.values()))
+            total_gross = sold_gross + buy_resale_gross
+
             # per-VIN car list (for the expandable "all cars" panel on the packet)
             cars = []
             for r in prows:
                 cars.append({'order': _s(r['stock_no']), 'vin': _s(r['vin_no']),
                              'amount': int(r['amount'] or 0),
-                             'date': (_s(r['created_at']))[:10] or None, 'kind': 'Bought'})
-            for r in drows:
+                             'date': (_s(r['created_at']))[:10] or None,
+                             'dir': 'buy', 'gross': 0, 'kind': 'EW bought from them'})
+            for r in sell_rows:
                 cars.append({'order': _s(r['stock_no']), 'vin': _s(r['vin_no']),
-                             'amount': int(r['purchase_cost'] or 0),
+                             'amount': int(r['sale_price'] or 0),
                              'date': (_s(r['sold_at']))[:10] or None,
-                             'kind': ('Bought + resold (+$%s gross)' % '{:,.0f}'.format(int(r['front_value'] or 0)))})
+                             'dir': 'sell', 'gross': int(r['front_value'] or 0),
+                             'kind': 'EW sold to them'})
             cars.sort(key=lambda x: x['date'] or '', reverse=True)
             # attach year/make/model per VIN: inventory (in-stock cars) then
             # deals.vehicle_info (a clean full description) which wins when present
@@ -387,22 +664,34 @@ def _lsl_history(name, supplier_id=None, matched_name=None):
                         vmap[_s(r['vin_no'])] = _s(r['vehicle_info'])
             for car in cars:
                 car['vehicle'] = vmap.get(car['vin'], '')
+            all_dates = [car['date'] for car in cars if car['date']]
             return {
                 'matched': True,
+                # ── EW BOUGHT FROM them ──
                 'bought_cars': len(bought_vins),
-                'bought_paid': int(sum(r['amount'] or 0 for r in prows)
-                                   + sum(r['purchase_cost'] or 0 for r in drows)),
+                'bought_paid': int(sum(r['amount'] or 0 for r in prows)),
+                'buy_first': pay_dates[0] if pay_dates else None,
+                'buy_last': pay_dates[-1] if pay_dates else None,
+                'titles_pending': sum(1 for r in prows if _s(r['title_status']) != 'Yes'),
+                # ── EW SOLD TO them ──
+                'sold_cars': len(sell_rows),
+                'sold_revenue': sold_revenue,
+                'sold_gross': sold_gross,
+                'sell_first': sell_dates[0] if sell_dates else None,
+                'sell_last': sell_dates[-1] if sell_dates else None,
+                # ── what EW made on the whole relationship ──
+                'buy_resale_cars': buy_resale_cars,
+                'buy_resale_gross': buy_resale_gross,
+                'total_gross': total_gross,
+                'tx_count': len(bought_vins) + len(sell_rows),
+                'first_activity': min(all_dates) if all_dates else None,
+                'last_activity': max(all_dates) if all_dates else None,
+                'cars': cars,
+                # legacy aliases — older callers/templates still read these
                 'payments_cars': len(pay_vins),
                 'payments_paid': int(sum(r['amount'] or 0 for r in prows)),
                 'pay_first': pay_dates[0] if pay_dates else None,
                 'pay_last': pay_dates[-1] if pay_dates else None,
-                'titles_pending': sum(1 for r in prows if _s(r['title_status']) != 'Yes'),
-                'resold_cars': len(deal_vins),
-                'resold_gross': int(sum(r['front_value'] or 0 for r in drows)),
-                'sold_cars': sold_cars,
-                'tx_count': len(bought_vins) + sold_cars,
-                'last_activity': max((car['date'] for car in cars if car['date']), default=None),
-                'cars': cars,
             }
         finally:
             c.close()
@@ -648,7 +937,9 @@ def _lsl_history_person(name, name_match, contact_name=None, contact_phone=None)
             base['review'] = review
         return base
 
-    # union car rows across rooftops, dedupe by VIN (keep the earliest date)
+    # union car rows across rooftops, dedupe by VIN *within each direction*
+    # (DIRECTION_SPLIT_2026_07_28 — the same VIN can legitimately appear once as
+    # a buy and once as a sell; collapsing them would erase one leg)
     byvin, misc = {}, []
     for h in hists:
         for car in h.get('cars', []):
@@ -656,18 +947,22 @@ def _lsl_history_person(name, name_match, contact_name=None, contact_phone=None)
             if not v:
                 misc.append(car)
                 continue
-            if v not in byvin or (car.get('date') or '~') < (byvin[v].get('date') or '~'):
-                byvin[v] = car
+            k = (car.get('dir') or 'buy', v)
+            if k not in byvin or (car.get('date') or '~') < (byvin[k].get('date') or '~'):
+                byvin[k] = car
     mcars = list(byvin.values()) + misc
     mcars.sort(key=lambda x: x.get('date') or '', reverse=True)
     dates = sorted(car['date'] for car in mcars if car.get('date'))
+    buy_cars = [c for c in mcars if c.get('dir') != 'sell']
+    sell_cars = [c for c in mcars if c.get('dir') == 'sell']
 
     def _sfirst(h):
         ds = [c['date'] for c in h.get('cars', []) if c.get('date')]
         return min(ds) if ds else None
     stores = [{'id': h['_store']['id'], 'name': _s(h['_store'].get('name')),
                'contact': _s(h['_store'].get('contact')),
-               'bought': h.get('bought_cars', 0), 'first': _sfirst(h),
+               'bought': h.get('bought_cars', 0), 'sold': h.get('sold_cars', 0),
+               'gross': h.get('total_gross', 0), 'first': _sfirst(h),
                'tier': h['_store'].get('tier'),
                'manual': bool(h['_store'].get('manual'))} for h in hists]
 
@@ -680,28 +975,42 @@ def _lsl_history_person(name, name_match, contact_name=None, contact_phone=None)
         h.pop('_store', None)
         return h
 
-    n_cars = len(byvin) + len(misc)
+    buy_dates = sorted(c['date'] for c in buy_cars if c.get('date'))
+    sell_dates = sorted(c['date'] for c in sell_cars if c.get('date'))
+    sold_gross = sum(int(c.get('gross') or 0) for c in sell_cars)
+    buy_resale_gross = sum(h.get('buy_resale_gross', 0) for h in hists)
     return {
         'matched': True,
-        'bought_cars': n_cars,
-        'bought_paid': sum(int(car.get('amount') or 0) for car in mcars),
-        'payments_cars': sum(h.get('payments_cars', 0) for h in hists),
-        'payments_paid': sum(h.get('payments_paid', 0) for h in hists),
-        'pay_first': dates[0] if dates else None,
-        'pay_last': dates[-1] if dates else None,
+        # ── EW BOUGHT FROM them ──
+        'bought_cars': len(buy_cars),
+        'bought_paid': sum(int(c.get('amount') or 0) for c in buy_cars),
+        'buy_first': buy_dates[0] if buy_dates else None,
+        'buy_last': buy_dates[-1] if buy_dates else None,
+        'titles_pending': sum(h.get('titles_pending', 0) for h in hists),
+        # ── EW SOLD TO them ──
+        'sold_cars': len(sell_cars),
+        'sold_revenue': sum(int(c.get('amount') or 0) for c in sell_cars),
+        'sold_gross': sold_gross,
+        'sell_first': sell_dates[0] if sell_dates else None,
+        'sell_last': sell_dates[-1] if sell_dates else None,
+        # ── what EW made on the whole relationship ──
+        'buy_resale_cars': sum(h.get('buy_resale_cars', 0) for h in hists),
+        'buy_resale_gross': buy_resale_gross,
+        'total_gross': sold_gross + buy_resale_gross,
+        'tx_count': len(buy_cars) + len(sell_cars),
         'first_activity': dates[0] if dates else None,
         'last_activity': dates[-1] if dates else None,
-        'titles_pending': sum(h.get('titles_pending', 0) for h in hists),
-        'resold_cars': sum(h.get('resold_cars', 0) for h in hists),
-        'resold_gross': sum(h.get('resold_gross', 0) for h in hists),
-        'sold_cars': 0,
-        'tx_count': n_cars,
         'cars': mcars,
         'merged_store_count': len(hists),
         'stores': stores,
         'review': review,
         'primary_sid': base_sid,
         'manual_links': decided,
+        # legacy aliases
+        'payments_cars': sum(h.get('payments_cars', 0) for h in hists),
+        'payments_paid': sum(h.get('payments_paid', 0) for h in hists),
+        'pay_first': dates[0] if dates else None,
+        'pay_last': dates[-1] if dates else None,
     }
 # ── end PERSON_MERGE_2026_07_21 ──────────────────────────────────────────────
 
@@ -782,37 +1091,86 @@ def _tg(msg):
 
 
 def _email(to_addr, subject, html):
-    """Best-effort email via the Resend path recon already uses."""
+    """Send dealer-facing mail under DealerPrice's OWN identity via Resend
+    (DP_EMAIL_IDENTITY_2026_07_28). Previously this borrowed recon's sender, so
+    dealers got mail from recon@. Reply-To carries the whole team (gated during
+    testing — see _dp_reply_to). Best-effort: never raises into the caller."""
     if not to_addr:
-        return
+        return False
+    key = os.environ.get('RESEND_API_KEY', '')
+    if not key:
+        print('[dp-network:STUB] to=%s subj=%s' % (to_addr, subject), flush=True)
+        return False
     try:
-        from recon_routes import _recon_send_raw
-        _recon_send_raw(to_addr, subject, html)
+        import resend
+        resend.api_key = key
+        payload = {'from': DP_EMAIL_FROM, 'to': to_addr,
+                   'subject': subject, 'html': html}
+        rt = _dp_reply_to()
+        if rt:
+            payload['reply_to'] = rt
+        resend.Emails.send(payload)
+        gated = '' if os.path.exists(DP_REPLY_ALL_GATE) else ' [reply-to GATED]'
+        print('[dp-network:EMAIL] to=%s reply_to=%s%s' % (to_addr, ','.join(rt), gated), flush=True)
+        return True
     except Exception as e:
-        print('[dp-network] email: %s' % e, flush=True)
+        print('[dp-network:EMAIL-FAIL] %s: %s' % (type(e).__name__, e), flush=True)
+        return False
 
 
 def _invite_member(m):
     """Text + email an approved dealer their private portal link (hex token =
-    SMS-safe; /d/<token> = encrypted-looking + bookmarkable)."""
+    SMS-safe; /d/<token> = encrypted-looking + bookmarkable).
+
+    DP_WELCOME_V2_2026_07_28 — both messages now teach the TWO submission paths
+    (text the 754 line, or the private link) and the 60-second same-car window.
+    While DP_ONBOARD_GATE is absent everything is redirected to the operator so a
+    draft welcome can never reach a real dealer."""
     link = '%s/d/%s' % (DP_PUBLIC_BASE.rstrip('/'), m['token'])
     name = _s(m.get('dealership_name')) or 'there'
+    live = _dp_onboard_live()
+
+    # ── SMS ──
     phone = _digits(m.get('contact_phone'))
-    if len(phone) == 10:
+    to_phone = ('+1' + phone) if len(phone) == 10 else None
+    if not live:
+        to_phone = DP_TEST_PHONE or None      # TEST: operator only
+    # ⚠ WORDING IS CONSTRAINED by NO_DATA_REQUEST_2026_06_12 (operator): app.py's
+    # send_sms() silently DROPS any message matching
+    #   (send|text|reply|provide|verify|confirm)[^.!?]{0,40}(vin|mileage|miles|odometer)
+    # so a dealer is never texted asking for VIN/miles. This onboarding text is
+    # instructional, not a request, but the guard can't tell — so keep a sentence
+    # break (. ! ?) between any of those verbs and the words VIN/miles/odometer.
+    # The guard is correct; do NOT weaken it to make copy fit. Re-test wording
+    # against that regex before changing this string.
+    sms_body = (
+        "Hi %s - you're approved for the Experience Wholesale dealer network.\n\n"
+        % name +
+        "Two ways to get us a car.\n"
+        "1) Just text this number. Type the VIN and mileage, or snap a photo of "
+        "the VIN plate and the odometer - we read them for you. Add as many car "
+        "photos as you like. Everything for ONE car must land within 60 seconds; "
+        "after that, the next message starts a new car.\n"
+        "2) Your private page, no time limit: %s" % link)
+    if not live:
+        sms_body = '[TEST->%s] %s' % (_s(m.get('contact_phone')) or 'no-phone', sms_body)
+    if to_phone:
         try:
             from app import send_sms
-            send_sms('+1' + phone,
-                     "You're approved for the Experience Wholesale dealer "
-                     "network. Submit vehicles for a bid here: %s" % link)
+            send_sms(to_phone, sms_body)
+            print('[dp-network] invite sms -> %s (live=%s)' % (to_phone, live), flush=True)
         except Exception as e:
             print('[dp-network] invite sms: %s' % e, flush=True)
-    _email(_s(m.get('contact_email')),
-           'Approved — Experience Wholesale Dealer Network',
-           "<p>Welcome to the network, %s.</p>"
-           "<p>You're approved to submit vehicles for a wholesale bid. "
-           "Use your private link any time:</p>"
-           "<p><a href='%s'>%s</a></p>"
-           "<p>— Experience Wholesale</p>" % (name, link, link))
+    else:
+        print('[dp-network] invite sms SKIPPED (live=%s, no destination)' % live, flush=True)
+
+    # ── email ──
+    to_email = _s(m.get('contact_email'))
+    subject = 'Approved — Experience Wholesale Dealer Network'
+    if not live:
+        subject = '[TEST→%s] %s' % (to_email or 'no-email', subject)
+        to_email = DP_TEST_EMAIL              # TEST: operator only
+    _email(to_email, subject, _invite_html(name, link))
 
 
 # ── auth ────────────────────────────────────────────────────────────────────
@@ -1007,13 +1365,20 @@ def api_dp_apply():
 
     tag = 'EXISTING ✓' if is_existing else 'NEW'
     mtag = (' · roster:%s' % name_match['name']) if name_match.get('matched') else ''
-    if lsl_hist.get('bought_cars'):
-        ltag = '\n📊 LSL: EW bought <b>%d</b> cars from them ($%s)' % (
-            lsl_hist['bought_cars'], '{:,.0f}'.format(lsl_hist.get('bought_paid') or 0))
+    if lsl_hist.get('tx_count'):
+        ltag = '\n📊 LSL: EW bought <b>%d</b> / sold <b>%d</b> · EW gross <b>$%s</b>' % (
+            lsl_hist.get('bought_cars') or 0, lsl_hist.get('sold_cars') or 0,
+            '{:,.0f}'.format(lsl_hist.get('total_gross') or 0))
     else:
-        ltag = '\n📊 no prior LSL purchase history'
+        ltag = '\n📊 no prior LSL transaction history'
     _tg('🪪 <b>New Dealer-Network application</b> #%d (%s)\n%s%s%s\n%s · %s\nReview: /network/applications'
         % (app_id, tag, dealership or '?', mtag, ltag, cname, cemail or cphone))
+    # DP_APPLY_ALERT_2026_07_28 — text the partners too. Wrapped so a failed
+    # alert can never turn a dealer's successful application into an error.
+    try:
+        _dp_apply_alert_sms(app_id, dealership, cname, lsl_hist, is_existing)
+    except Exception as e:
+        print('[dp-network] apply-alert fanout: %s' % e, flush=True)
     return jsonify({'ok': True, 'application_id': app_id, 'status': 'pending', 'existing': is_existing})
 
 
@@ -1038,12 +1403,16 @@ def network_applications():
     # as new purchases land). Only for existing/matched dealers — a genuinely
     # new applicant has nothing to look up. tx_count = cars bought + cars sold.
     for r in rows:
-        r['tx_count'] = 0
+        r['tx_count'] = r['bought_cars'] = r['sold_cars'] = r['total_gross'] = 0
         if not (r.get('is_existing') or r.get('name_match')):
             continue                      # genuinely-new applicant — nothing to look up
         m = _roster_match(r['dealership_name'], r.get('contact_phone'))
-        h = _lsl_history_person(r['dealership_name'], m, r.get('contact_name'), r.get('contact_phone'))
-        r['tx_count'] = (h or {}).get('tx_count') or 0
+        h = _lsl_history_person(r['dealership_name'], m, r.get('contact_name'), r.get('contact_phone')) or {}
+        # DIRECTION_SPLIT_2026_07_28 — the queue shows both legs + what EW made
+        r['tx_count'] = h.get('tx_count') or 0
+        r['bought_cars'] = h.get('bought_cars') or 0
+        r['sold_cars'] = h.get('sold_cars') or 0
+        r['total_gross'] = h.get('total_gross') or 0
         if m:
             r['name_match'] = m
     return render_template('network/applications.html', rows=rows, counts=counts,
@@ -1169,6 +1538,90 @@ def network_application_needs_info(app_id):
                 (_reviewer(), _s(request.form.get('review_notes')) or None, app_id))
     db.commit(); db.close()
     return redirect(url_for('dealerprice_network.network_application', app_id=app_id))
+
+
+@bp.route('/network/application/<int:app_id>/delete', methods=['POST'])
+def network_application_delete(app_id):
+    """Hard-delete an application from the review queue (operator ask 2026-07-28).
+
+    Safety rules this deliberately follows:
+      • If the application had been approved and provisioned a member, the
+        MEMBER ROW IS NOT DELETED. bids carry bids.dp_member_id, and dropping
+        the member would orphan that tagging on live bids (HR1 — never reach
+        into the bid path). Instead the member is REVOKED: status='revoked' and
+        the token is replaced with a dead tombstone, so their magic link stops
+        working immediately while historical bid attribution survives intact.
+      • The private license / Tax-ID images are removed from disk — they are
+        PII and there is no reason to keep them once the record is gone.
+      • Deletion is irreversible, so it is announced to Telegram for the audit
+        trail. dealerprice_person_links is left alone: it is keyed on supplier
+        ids and is shared by every application for that dealer.
+    """
+    db = _db(); cur = db.cursor()
+    cur.execute("""SELECT id, dealership_name, contact_name, status, member_id,
+                          license_doc_path, taxid_doc_path
+                     FROM dealer_applications WHERE id=%s""", (app_id,))
+    a = cur.fetchone()
+    if not a:
+        db.close(); abort(404)
+
+    # Members provisioned from this application. Look them up by application_id
+    # — that FK (dealerprice_members_application_id_fkey, ON DELETE NO ACTION)
+    # is what blocks the DELETE, and a member can reference the application even
+    # when dealer_applications.member_id was never written back. Union both
+    # directions so neither an orphan nor a back-pointer is missed.
+    cur.execute("SELECT id FROM dealerprice_members WHERE application_id=%s", (app_id,))
+    mids = set(r['id'] for r in cur.fetchall())
+    if a.get('member_id'):
+        mids.add(a['member_id'])
+
+    revoked = []
+    try:
+        for mid in sorted(mids):
+            # Revoke, and clear application_id so the FK stops blocking the
+            # DELETE. The member ROW survives: bids.dp_member_id points at it and
+            # dropping it would orphan bid attribution (HR1 — stay out of bids).
+            cur.execute("""UPDATE dealerprice_members
+                              SET status='revoked',
+                                  token=%s,
+                                  application_id=NULL
+                            WHERE id=%s""",
+                        ('revoked-%d-%s' % (mid, secrets.token_urlsafe(8)), mid))
+            if cur.rowcount:
+                revoked.append(mid)
+        cur.execute("DELETE FROM dealer_applications WHERE id=%s", (app_id,))
+        db.commit()
+    except Exception as e:
+        db.rollback(); db.close()
+        print('[dp-network] delete app %s failed: %s' % (app_id, e), flush=True)
+        return ("Could not delete application #%d — %s. Nothing was changed."
+                % (app_id, e), 500)
+    db.close()
+
+    # private docs (PII) — remove the per-application directory
+    for p in (a.get('license_doc_path'), a.get('taxid_doc_path')):
+        try:
+            if p and os.path.isfile(p):
+                os.remove(p)
+        except Exception as e:
+            print('[dp-network] delete: doc unlink %s: %s' % (p, e), flush=True)
+    try:
+        d = os.path.join(PRIV_DOC_ROOT, str(app_id))
+        if os.path.isdir(d) and not os.listdir(d):
+            os.rmdir(d)
+    except Exception as e:
+        print('[dp-network] delete: docdir %s' % e, flush=True)
+
+    try:
+        _tg('🗑 <b>Dealer-Network application DELETED</b> #%d — %s (%s)\nwas: %s%s\nby %s'
+            % (app_id, _s(a.get('dealership_name')) or '?', _s(a.get('contact_name')) or '?',
+               _s(a.get('status')) or '?',
+               (' · member #%s REVOKED' % ', #'.join(str(m) for m in revoked)) if revoked else '',
+               _reviewer()))
+    except Exception as e:
+        # the delete already succeeded — a failed alert must not 500 the operator
+        print('[dp-network] delete: tg alert failed: %s' % e, flush=True)
+    return redirect(url_for('dealerprice_network.network_applications'))
 
 
 @bp.route('/network/application/<int:app_id>/classify', methods=['POST'])

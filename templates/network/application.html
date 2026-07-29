@@ -34,6 +34,42 @@
   .lsl-sub:first-of-type{margin-top:0}
   .lsl-names{margin-top:12px;font-size:11px;color:#64748b}
   .lsl-none{background:#fff7ed;color:#9a3412;border:1px solid #fed7aa}
+  /* DIRECTION_SPLIT_2026_07_28 — management read: money first, then the two legs */
+  .lsl-hero{background:linear-gradient(135deg,#0f2f24,#12241c);border:1px solid #1f5f45;border-radius:11px;padding:14px 16px;margin-bottom:14px}
+  .lsl-hero .hl{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;color:#6ee7b7}
+  .lsl-hero .hv{font-size:31px;font-weight:800;color:#4ade80;line-height:1.15;margin:2px 0}
+  .lsl-hero .hs{font-size:12px;color:#a7c4b5}
+  .lsl-two{display:grid;grid-template-columns:repeat(auto-fit,minmax(228px,1fr));gap:12px}
+  .lsl-leg{background:#111a2c;border:1px solid #1e293b;border-radius:10px;padding:12px 14px}
+  .lsl-leg.buy{border-left:3px solid #38bdf8}
+  .lsl-leg.sell{border-left:3px solid #4ade80}
+  .lsl-leg .lg{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:9px}
+  .lsl-leg.buy .lg{color:#7dd3fc}
+  .lsl-leg.sell .lg{color:#86efac}
+  .lsl-leg .n{font-size:23px;font-weight:800;color:#fff;line-height:1.1}
+  .lsl-leg .n small{font-size:12px;font-weight:600;color:#94a3b8;margin-left:5px}
+  .lsl-row{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:4px 0;border-top:1px solid #1c2739;margin-top:7px}
+  .lsl-row:first-of-type{border-top:none;margin-top:9px}
+  .lsl-row span{color:#8fa3bd}
+  .lsl-row b{color:#e2e8f0;font-weight:700}
+  .lsl-row b.g{color:#4ade80}
+  .cars-tbl .sell{color:#166534;font-weight:600}
+  .dchip{display:inline-block;border-radius:999px;padding:1px 8px;font-size:10.5px;font-weight:700;white-space:nowrap}
+  .dchip.b{background:#e0f2fe;color:#075985}
+  .dchip.s{background:#dcfce7;color:#14532d}
+  details.mergefold{margin-top:12px}
+  details.mergefold summary{cursor:pointer;font-size:11px;color:#5b6b82;list-style:none;letter-spacing:.3px}
+  details.mergefold summary::-webkit-details-marker{display:none}
+  details.mergefold summary::before{content:'▸ ';color:#475569}
+  details.mergefold[open] summary::before{content:'▾ '}
+  details.mergefold summary:hover{color:#94a3b8}
+  .mfchip{display:inline-flex;align-items:center;background:#111a2c;border:1px solid #1e293b;border-radius:999px;padding:3px 11px;margin:2px 4px 2px 0;font-size:11.5px;color:#94a3b8;white-space:nowrap}
+  .danger{background:#fff;border:1px solid #f3d4d0;border-left:3px solid #dc2626;border-radius:10px;padding:13px 16px;margin-top:22px}
+  .dz{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .dz b{font-size:13px;color:#991b1b}
+  .dzs{font-size:12px;color:#6b7280;margin-top:3px;max-width:640px;line-height:1.55}
+  button.del{background:#fff;color:#b42318;border:1px solid #e9b4ae;border-radius:8px;padding:8px 15px;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap}
+  button.del:hover{background:#dc2626;color:#fff;border-color:#dc2626}
   .sub{color:#6b7280;font-size:12px;margin-bottom:16px}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   .card{background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
@@ -118,18 +154,32 @@
     {% if lsl_hist and lsl_hist.matched and lsl_hist.tx_count %}
       <div class="lsl-card">
         <div class="lsl-head">📊 Verified history with EW (from LSL) <span class="lsl-verdict">Established partner</span></div>
-        <div class="lsl-sub">Cars EW has bought from them</div>
-        <div class="lsl-stats">
-          <div class="lsl-stat"><b>{{ lsl_hist.bought_cars }}</b><span>cars EW bought</span></div>
-          {% if lsl_hist.first_activity or lsl_hist.pay_first %}<div class="lsl-stat"><b>{{ lsl_hist.first_activity or lsl_hist.pay_first }}</b><span>first purchase</span></div>{% endif %}
-          {% if lsl_hist.last_activity or lsl_hist.pay_last %}<div class="lsl-stat"><b>{{ lsl_hist.last_activity or lsl_hist.pay_last }}</b><span>most recent</span></div>{% endif %}
-          {% if lsl_hist.resold_cars %}<div class="lsl-stat"><b>{{ lsl_hist.resold_cars }}</b><span>of these resold · ${{ '{:,.0f}'.format(lsl_hist.resold_gross) }} gross EW made</span></div>{% endif %}
+
+        {# ── the number management actually asks for ── #}
+        <div class="lsl-hero">
+          <div class="hl">Total gross EW has made with this partner</div>
+          <div class="hv">${{ '{:,.0f}'.format(lsl_hist.total_gross or 0) }}</div>
+          <div class="hs">across {{ lsl_hist.tx_count }} car{{ 's' if lsl_hist.tx_count != 1 else '' }} both directions{% if lsl_hist.first_activity %} · {{ lsl_hist.first_activity }} → {{ lsl_hist.last_activity }}{% endif %}</div>
         </div>
-        {% if lsl_hist.merged_store_count and lsl_hist.merged_store_count > 1 %}
-        <div style="margin-top:10px;font-size:13px;color:#2b3444;line-height:1.9">🔗 <b>Merged across {{ lsl_hist.merged_store_count }} rooftops this person has worked at</b> (matched by name{% if lsl_hist.stores|selectattr('tier','equalto','confirmed')|list %} + phone{% endif %}):
-          {% for s in lsl_hist.stores %}<span style="display:inline-block;background:#eef2f9;border:1px solid #dbe3ef;border-radius:999px;padding:3px 11px;margin:2px 4px 2px 0;font-size:12px;white-space:nowrap">{{ s.name }} · {{ s.bought }} car{{ 's' if s.bought != 1 else '' }}{% if s.first %} · since {{ s.first }}{% endif %}{% if s.tier and s.tier != 'primary' %} <em style="color:#5a6b8c">({{ s.tier }}{% if s.manual %}, you confirmed{% endif %})</em>{% endif %}</span>{% endfor %}
+
+        {# ── the two legs, never merged (DIRECTION_SPLIT_2026_07_28) ── #}
+        <div class="lsl-two">
+          <div class="lsl-leg buy">
+            <div class="lg">↙ EW bought from them</div>
+            <div class="n">{{ lsl_hist.bought_cars or 0 }}<small>car{{ 's' if (lsl_hist.bought_cars or 0) != 1 else '' }}</small></div>
+            <div class="lsl-row"><span>EW paid out</span><b>${{ '{:,.0f}'.format(lsl_hist.bought_paid or 0) }}</b></div>
+            {% if lsl_hist.buy_resale_gross %}<div class="lsl-row"><span>gross on resale</span><b class="g">${{ '{:,.0f}'.format(lsl_hist.buy_resale_gross) }}</b></div>{% endif %}
+            {% if lsl_hist.buy_first %}<div class="lsl-row"><span>first → last</span><b>{{ lsl_hist.buy_first }} → {{ lsl_hist.buy_last }}</b></div>{% endif %}
+            {% if lsl_hist.titles_pending %}<div class="lsl-row" title="LSL payments.title_status is not 'Yes' on these. NOTE: 81% of ALL EW purchase payments sit at 'Pending' (623 vs 146 'Yes') — this field looks rarely updated, so treat it as a prompt to check, not as a confirmed count of missing titles."><span>title not marked received <em style="color:#64748b;font-style:normal">ⓘ</em></span><b style="color:#94a3b8">{{ lsl_hist.titles_pending }}</b></div>{% endif %}
+          </div>
+          <div class="lsl-leg sell">
+            <div class="lg">↗ EW sold to them</div>
+            <div class="n">{{ lsl_hist.sold_cars or 0 }}<small>car{{ 's' if (lsl_hist.sold_cars or 0) != 1 else '' }}</small></div>
+            <div class="lsl-row"><span>they paid EW</span><b>${{ '{:,.0f}'.format(lsl_hist.sold_revenue or 0) }}</b></div>
+            {% if lsl_hist.sold_gross %}<div class="lsl-row"><span>gross on sale</span><b class="g">${{ '{:,.0f}'.format(lsl_hist.sold_gross) }}</b></div>{% endif %}
+            {% if lsl_hist.sell_first %}<div class="lsl-row"><span>first → last</span><b>{{ lsl_hist.sell_first }} → {{ lsl_hist.sell_last }}</b></div>{% endif %}
+          </div>
         </div>
-        {% endif %}
         {% if lsl_hist.review %}
         <div style="margin-top:12px">
           <div style="font-size:13px;color:#8a4b00;font-weight:700;margin-bottom:6px">⚠ Possibly the same person — confirm to merge their history in:</div>
@@ -152,16 +202,25 @@
           {% endfor %}
         </div>
         {% endif %}
-        {% if lsl_hist.manual_links %}
-        <div style="margin-top:8px;font-size:12px;color:#5a6472">You decided:
-          {% for m in lsl_hist.manual_links %}<span style="display:inline-flex;align-items:center;gap:6px;background:#f1f4f9;border:1px solid #dde3ec;border-radius:999px;padding:2px 6px 2px 11px;margin:2px 4px 2px 0">{{ m.name }} — {% if m.decision == 'confirmed' %}<b style="color:#15803d">merged&nbsp;✓</b>{% else %}<b style="color:#b42318">hidden&nbsp;✕</b>{% endif %}<form method="post" action="/network/application/{{ a.id }}/person-link" style="margin:0"><input type="hidden" name="primary_sid" value="{{ lsl_hist.primary_sid }}"><input type="hidden" name="linked_sid" value="{{ m.id }}"><button name="decision" value="reset" title="undo this decision" style="background:#e7ebf1;color:#556;border:none;border-radius:999px;padding:2px 8px;font-size:11px;cursor:pointer">undo</button></form></span>{% endfor %}
-        </div>
+        {# Rooftop breakdown + merge decisions are plumbing, not a management
+           read — operator asked for them off the card (2026-07-28). Kept behind
+           a collapsed line ONLY so the undo control stays reachable. #}
+        {% if (lsl_hist.merged_store_count and lsl_hist.merged_store_count > 1) or lsl_hist.manual_links %}
+        <details class="mergefold">
+          <summary>merge detail{% if lsl_hist.merged_store_count and lsl_hist.merged_store_count > 1 %} · {{ lsl_hist.merged_store_count }} rooftops{% endif %}{% if lsl_hist.manual_links %} · {{ lsl_hist.manual_links|length }} manual decision{{ 's' if lsl_hist.manual_links|length != 1 else '' }}{% endif %}</summary>
+          {% if lsl_hist.merged_store_count and lsl_hist.merged_store_count > 1 %}
+          <div style="margin-top:8px">
+            {% for s in lsl_hist.stores %}<span class="mfchip">{{ s.name }} · bought {{ s.bought }} / sold {{ s.sold }} · <b style="color:#4ade80">${{ '{:,.0f}'.format(s.gross or 0) }}</b> gross{% if s.first %} · since {{ s.first }}{% endif %}{% if s.tier and s.tier != 'primary' %} <em style="color:#7c8ba1">({{ s.tier }}{% if s.manual %}, you confirmed{% endif %})</em>{% endif %}</span>{% endfor %}
+          </div>
+          {% endif %}
+          {% if lsl_hist.manual_links %}
+          <div style="margin-top:8px">
+            {% for m in lsl_hist.manual_links %}<span class="mfchip">{{ m.name }} — {% if m.decision == 'confirmed' %}<b style="color:#4ade80">merged&nbsp;✓</b>{% else %}<b style="color:#f87171">hidden&nbsp;✕</b>{% endif %}<form method="post" action="/network/application/{{ a.id }}/person-link" style="margin:0;display:inline"><input type="hidden" name="primary_sid" value="{{ lsl_hist.primary_sid }}"><input type="hidden" name="linked_sid" value="{{ m.id }}"><button name="decision" value="reset" title="undo this decision" style="background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:999px;padding:1px 8px;font-size:10.5px;cursor:pointer;margin-left:6px">undo</button></form></span>{% endfor %}
+          </div>
+          {% endif %}
+        </details>
         {% endif %}
 
-        {% if lsl_hist.sold_cars %}
-        <div class="lsl-sub">Cars EW sold to them</div>
-        <div class="lsl-stats"><div class="lsl-stat"><b>{{ lsl_hist.sold_cars }}</b><span>cars sold to them</span></div></div>
-        {% endif %}
       </div>
     {% elif a.name_match and a.name_match.matched %}
       <div class="lsl-card lsl-none">📊 <b>On your roster, but no completed deals in the ledger.</b>
@@ -172,17 +231,18 @@
 
     {% if lsl_hist and lsl_hist.cars %}
     <details class="fold">
-      <summary>🚗 All {{ lsl_hist.cars|length }} cars EW bought from them — VIN detail</summary>
+      <summary>🚗 All {{ lsl_hist.cars|length }} cars with this dealer — {{ lsl_hist.bought_cars or 0 }} bought, {{ lsl_hist.sold_cars or 0 }} sold — VIN detail</summary>
       <table class="cars-tbl">
-        <thead><tr><th>Stock #</th><th>Vehicle</th><th>VIN</th><th>EW paid</th><th>Date</th><th></th></tr></thead>
+        <thead><tr><th>Direction</th><th>Stock #</th><th>Vehicle</th><th>VIN</th><th>Amount</th><th>EW gross</th><th>Date</th></tr></thead>
         <tbody>
         {% for car in lsl_hist.cars %}
-          <tr><td class="mono">{{ car.order or '—' }}</td>
+          <tr><td>{% if car.dir == 'sell' %}<span class="dchip s">↗ sold to them</span>{% else %}<span class="dchip b">↙ bought from</span>{% endif %}</td>
+            <td class="mono">{{ car.order or '—' }}</td>
             <td>{{ car.vehicle or '—' }}</td>
             <td class="mono">{{ car.vin or '—' }}</td>
-            <td class="buy">${{ '{:,.0f}'.format(car.amount) }}</td>
-            <td>{{ car.date or '—' }}</td>
-            <td class="cnote">{{ car.kind }}</td></tr>
+            <td class="{{ 'sell' if car.dir == 'sell' else 'buy' }}">${{ '{:,.0f}'.format(car.amount) }}</td>
+            <td class="cnote">{% if car.gross %}${{ '{:,.0f}'.format(car.gross) }}{% else %}—{% endif %}</td>
+            <td>{{ car.date or '—' }}</td></tr>
         {% endfor %}
         </tbody>
       </table>
@@ -302,6 +362,22 @@
       </div>
     </div>
     {% endif %}
+
+    {# Destructive + irreversible, so it lives apart from the normal decisions
+       and never sits next to Approve. Available for approved applicants too —
+       deleting one revokes their access token (bids keep their attribution). #}
+    <div class="danger">
+      <div class="dz">
+        <div>
+          <b>Delete this application</b>
+          <div class="dzs">Removes application #{{ a.id }} and its uploaded license / Tax-ID images permanently.{% if member %} <b>Member #{{ member.id }}&apos;s access link will be revoked</b> — their {{ member.submit_count }} submitted bid{{ 's' if member.submit_count != 1 else '' }} stay on file.{% endif %} This cannot be undone.</div>
+        </div>
+        <form method="post" action="/network/application/{{ a.id }}/delete" style="margin:0"
+              onsubmit="return confirm('Permanently delete application #{{ a.id }} — ' + {{ (a.dealership_name or '(no name)')|tojson }} + '?{% if member %}\n\nThis also REVOKES member #{{ member.id }} access link.{% endif %}\n\nThis cannot be undone.');">
+          <button class="del" type="submit">🗑 Delete applicant</button>
+        </form>
+      </div>
+    </div>
   </div>
 </body>
 </html>
