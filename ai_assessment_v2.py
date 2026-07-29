@@ -194,9 +194,19 @@ def _market_stack(market_intel: dict | None, dealer_intel: dict | None,
         # RBOOK_COMP_CAP_2026_07_26: this dump was 87% of the longest prompts (up to 486 rows,
         # driving prompts to 124k tokens against a 32k served context). Sample EVENLY across
         # the mileage-sorted list — a head slice would bias to low-mileage cars and wreck the
-        # mileage/price curve. Default 0 = uncapped = pre-existing behaviour.
+        # mileage/price curve.
+        # CAP_DEFAULT_400_2026_07_29: default was 0 (uncapped). Measured on July's
+        # 202 reconciled bids: uncapped, 20/202 (9.9%) breached the window and were
+        # silently answered by Gemini instead of the 9B — worst prompt 75,795 tokens
+        # (bid 4430 carried 2,994 comp rows). At 400 the worst drops to 15,937 and
+        # the 9B serves 20/20. Accuracy-neutral: on the 20 affected cars the model
+        # returned an IDENTICAL price on 17, mean |err| 3.00% -> 2.99%. This is NOT
+        # the aggressive compaction rejected 2026-07-26 (that squeezed maxes to
+        # 6,358 and cost 4.65% -> 5.31%); 400 only trims tables above 400 rows.
+        # The default lives here, in git, so a C1 rebuild cannot silently lose it;
+        # EW_RBOOK_COMP_CAP still overrides.
         import os as _os
-        _cap = int(_os.environ.get('EW_RBOOK_COMP_CAP', '0') or 0)
+        _cap = int(_os.environ.get('EW_RBOOK_COMP_CAP', '400') or 400)
         rows_sorted = sorted(all_rows, key=lambda r: r.get('mileage') or 0)
         _omitted = 0
         if _cap and len(rows_sorted) > _cap:
