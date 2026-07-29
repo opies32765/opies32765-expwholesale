@@ -20,6 +20,14 @@ app = Flask(__name__)
 
 @app.errorhandler(Exception)
 def _global_exception_handler(e):
+    # HTTP_STATUS_PASSTHROUGH_2026_07_29: this handler caught EVERYTHING, including
+    # werkzeug HTTPExceptions, so every abort(404)/abort(403) anywhere in the app
+    # rendered as "Internal Server Error". A missing record looked like a crash --
+    # operator hit exactly this clicking an application link for a bid that did not
+    # exist. Let real HTTP statuses through; only genuine crashes become a 500.
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
     import traceback
     print("[FLASK-EXCEPTION] type=" + type(e).__name__ + " msg=" + str(e), flush=True)
     traceback.print_exc()
@@ -168,6 +176,10 @@ _PUBLIC_PREFIXES = (
     '/api/market_check/',  # fleet market_check worker (X-Auth gated in handler)
     '/api/intake/',  # LONE_PIC_HOLD photo-hold sweep (X-Auth gated in handler)
     '/login', '/mobile', '/webhook/', '/static/', '/thumb', '/p/',
+    '/a/',  # DP partner-alert short link: serves ONLY link-preview tags +
+            # a redirect. Carries no dealer data; the packet it points at
+            # is still login-gated. Public so iMessage/WhatsApp can read the
+            # preview instead of showing the login page's title.
     '/vauto_reports/', '/service-worker', '/privacy', '/terms',
     '/api/mobile-submit', '/api/rep-bids', '/api/register-rep',
     '/api/vauto/', '/api/accutrade/', '/accutrade_reports/',
@@ -2763,7 +2775,7 @@ def _promote_photo_hold(bid_id):
             if phone and not phone.startswith('field:'):
                 try:
                     send_sms(phone, f"Bid #{bid_id} Received. Give us a bit. If you "
-                                    f"need to contact us please text Joe, Todd or Gregg "
+                                    f"need to contact us please text us "
                                     f"with your Bid #{bid_id}.")
                 except Exception as _e:
                     print(f'[photo-hold-promote] ack err bid={bid_id}: {_e}', flush=True)
@@ -4043,7 +4055,14 @@ def dashboard():
     except Exception as _poc_err:
         print(f'[index] partner_offer_counts err: {_poc_err}', flush=True)
 
+    # DP_VETTED_ON_BIDS_2026_07_29: badge rows whose sender is an approved
+    # DealerPrice dealer. ONE bulk lookup keyed on the last 10 digits of the
+    # phone - a per-row query would be ~50 round trips on a full dashboard, and
+    # this page is already cached for 10s. Fails soft: no badge, never no page.
+    dp_vetted_phones = _dp_vetted_bulk(bids)
+
     _dhtml = render_template('index.html', bids=bids, stats=stats,
+                           dp_vetted_phones=dp_vetted_phones,
                            status_filter=status_filter, rep_filter=rep_filter,
                            reps=reps, photo_counts=photo_counts,
                            first_photos=first_photos,
@@ -4089,6 +4108,108 @@ def shadow_bid_detail(bid_id):
     except Exception:
         pass
     return resp
+
+
+# ---- DP_VETTED_ON_BIDS_2026_07_29 -----------------------------------------
+# Operator/Joe: when an APPROVED DealerPrice dealer sends a car in, Joe, Todd and
+# Gregg need to know instantly who it is and how to reach them - without leaving
+# the bid.
+#
+# Two ways a bid ties back to a vetted dealer:
+#   1. dp_member_id - set when they submit through their private link.
+#   2. their PHONE  - a dealer who just TEXTS the car in carries no token, so we
+#      decode the number back to the member on the last 10 digits. This is the
+#      case Joe actually cares about, because texting is the common path.
+#
+# Best-effort and fails soft: if this lookup breaks, the bid still renders. It is
+# decoration on top of the bid, never a gate in front of it.
+def _dp_vetted_bulk(bids):
+    """Map {last-10-phone: vetted dealer} for a page of bids.
+
+    ONE bulk query - a per-row lookup would be ~50 round trips on a full
+    dashboard. Shared by the dashboard render AND /api/bids on purpose: when
+    only the HTML path had it, the 15s poll rebuilt rows in JS without the
+    badge, so it flickered in and out every cycle (reported 2026-07-29).
+    Fails soft - no badge, never no page.
+    """
+    out = {}
+    try:
+        want = {re.sub(r'\D', '', str(b.get('phone') or ''))[-10:] for b in (bids or [])}
+        want = {p for p in want if len(p) == 10}
+        if not want:
+            return out
+        db = get_db()
+        try:
+            c = db.cursor()
+            c.execute(
+                "SELECT right(regexp_replace(contact_phone,'[^0-9]','','g'),10) AS p10,"
+                "       dealership_name, contact_name, application_id, intent, sales_rep "
+                "  FROM dealerprice_members "
+                " WHERE status='active' "
+                "   AND right(regexp_replace(contact_phone,'[^0-9]','','g'),10) = ANY(%s)",
+                (list(want),))
+            for r in c.fetchall():
+                out[r['p10']] = {
+                    'name': r.get('dealership_name'),
+                    'contact': r.get('contact_name'),
+                    'application_id': r.get('application_id'),
+                    'intent': r.get('intent'),
+                    'rep': r.get('sales_rep'),
+                }
+        finally:
+            db.close()
+    except Exception as e:
+        print('[dp-vetted] bulk lookup failed: %s' % e, flush=True)
+    return out
+
+
+def _dp_vetted_dealer(bid):
+    """Resolve a bid to its vetted DealerPrice dealer, or None."""
+    if not bid:
+        return None
+    try:
+        mid = bid.get('dp_member_id')
+        phone = re.sub(r'\D', '', str(bid.get('phone') or ''))[-10:]
+        if not mid and len(phone) != 10:
+            return None
+        db = get_db()
+        try:
+            cur = db.cursor()
+            if mid:
+                cur.execute("SELECT * FROM dealerprice_members WHERE id=%s", (mid,))
+            else:
+                cur.execute(
+                    "SELECT * FROM dealerprice_members "
+                    "WHERE right(regexp_replace(contact_phone,'[^0-9]','','g'),10)=%s "
+                    "  AND status='active' "
+                    "ORDER BY approved_at DESC LIMIT 1", (phone,))
+            m = cur.fetchone()
+            if not m:
+                return None
+            out = {
+                'member_id': m['id'],
+                'dealership_name': m.get('dealership_name'),
+                'contact_name': m.get('contact_name'),
+                'contact_email': m.get('contact_email'),
+                'contact_phone': m.get('contact_phone'),
+                'intent': m.get('intent'),
+                'application_id': m.get('application_id'),
+                'scanner_dealer_id': m.get('scanner_dealer_id'),
+                'submit_count': m.get('submit_count'),
+                'approved_at': m.get('approved_at'),
+                'sales_rep': m.get('sales_rep'),
+                'sales_rep_assigned_at': m.get('sales_rep_assigned_at'),
+                'matched_by': 'token' if mid else 'phone',
+            }
+            # The vetting packet is the "who are they" page - link straight to it.
+            if out['application_id']:
+                out['packet_url'] = '/network/application/%s' % out['application_id']
+            return out
+        finally:
+            db.close()
+    except Exception as _e:
+        print('[dp-vetted] lookup failed bid=%s: %s' % (bid.get('id'), _e), flush=True)
+        return None
 
 
 @app.route('/bid/<int:bid_id>')
@@ -4761,7 +4882,10 @@ def bid_detail(bid_id):
     except Exception as _se:
         print(f'[screener] bid={bid_id} skipped: {_se}', flush=True)
 
+    # DP_VETTED_ON_BIDS_2026_07_29 - who is this dealer, for Joe/Todd/Gregg.
+    dp_vetted = _dp_vetted_dealer(bid)
     _rendered = render_template('bid.html', bid=bid, photos=photos, show_sources=show_sources,
+                                dp_vetted=dp_vetted,
                                 messages=messages, valuations=valuations,
                                 vauto_data=vauto_data,
                                 accutrade_data=accutrade_data,
@@ -6700,7 +6824,7 @@ def twilio_webhook():
             _ack_result = send_sms(
                 from_phone,
                 f"Bid #{bid_id} Received. Give us a bit. If you need to "
-                f"contact us please text Joe, Todd or Gregg with your Bid #{bid_id}.")
+                f"contact us please text us with your Bid #{bid_id}.")
             print(f'[bid-ack] sent bid={bid_id} result={_ack_result}', flush=True)
         except Exception as _ack_e:
             print(f'[bid-ack] error bid={bid_id}: {_ack_e}', flush=True)
@@ -10163,6 +10287,9 @@ def api_bids():
                     'first_photos': first_photos,
                     'vauto_done': list(vauto_done),
                     'active_workers': active_workers,
+                    # Same map the HTML render uses. Without it the poll rebuilt
+                    # rows in JS with no badge, so it blinked every 15s.
+                    'dp_vetted': _dp_vetted_bulk(bids),
                     'partner_offer_counts': partner_offer_counts})
 
 
@@ -12815,7 +12942,7 @@ def api_dealerprice_bid():
         # fires when enrichment lands.
         #   NOTE: what they actually receive is decided by the enrichment gate
         #   (ENRICHMENT_SMS_DENY_BY_DEFAULT_2026_07_28) -- a non-granted dealer
-        #   gets the plain 'Joe, Todd or Gregg will reach out' receipt, never the
+        #   gets the plain 'a team member will get back to you' receipt, never the
         #   valuation card. Setting driver_phone does NOT grant anything.
         try:
             import secrets as _secrets   # module-level import does not exist; the
@@ -15048,6 +15175,21 @@ def _watchdog_loop():
     while True:
         try:
             _watchdog_evaluate_once()
+        except Exception:
+            traceback.print_exc()
+        # CLAIM_REAPER_2026_07_29: bid 5087 sat claimed by vm-worker-13 for 45
+        # minutes with ai_price already set — the vAuto close never ran, so
+        # vauto_priority stayed TRUE and the worker kept re-attaching. Nothing
+        # noticed, because _watchdog_evaluate_once has been a `return 0` stub
+        # since 2026-05-01. This is deliberately NOT that watchdog: it never
+        # judges how long a worker should take, it only releases claims whose
+        # work has demonstrably finished (or that are 60x older than any real
+        # job), and it texts the operator when it fires. Self-throttled to
+        # REAPER_INTERVAL internally and atomic across gunicorn workers via
+        # FOR UPDATE SKIP LOCKED, so this 15s tick is cheap and cannot spam.
+        try:
+            import claim_reaper as _reaper
+            _reaper.reap(get_db, send_sms=send_sms)
         except Exception:
             traceback.print_exc()
         time.sleep(15)
@@ -17664,10 +17806,16 @@ def api_carfax_api_enrich():
         try:
             _dbj = get_db(); _cj = _dbj.cursor()
             _cj.execute("UPDATE bids SET vauto_priority=FALSE, vauto_claimed_by=NULL, vauto_claimed_at=NULL WHERE id=%s", (bid_id,))
+            # VAUTO_JOBCLOSE_SCOPE_2026_07_29: scope by job_type (was bid_id only)
             _cj.execute("UPDATE worker_jobs SET completed_at=NOW(), status='ok_api_mode', "
                         "duration_ms=EXTRACT(EPOCH FROM (NOW()-claimed_at))::int*1000 "
-                        "WHERE id=(SELECT id FROM worker_jobs WHERE bid_id=%s AND completed_at IS NULL "
+                        "WHERE id=(SELECT id FROM worker_jobs WHERE bid_id=%s "
+                        "AND job_type='vauto' AND completed_at IS NULL "
                         "ORDER BY claimed_at DESC LIMIT 1)", (bid_id,))
+            _cj.execute("UPDATE worker_jobs SET completed_at=NOW(), status='superseded', "
+                        "duration_ms=EXTRACT(EPOCH FROM (NOW()-claimed_at))::int*1000 "
+                        "WHERE bid_id=%s AND job_type='vauto' AND completed_at IS NULL",
+                        (bid_id,))
             _dbj.commit(); _dbj.close()
             print('[api-mode-enrich] worker_job closed + claim released bid=%s' % bid_id, flush=True)
         except Exception as _je:
@@ -17819,6 +17967,11 @@ def api_vauto_submit():
     # Mark the worker_jobs row complete (the most recent in_progress entry
     # for this bid). Duration = wall-clock from claim to submit. Only
     # touches the most recent open row in case of resubmits.
+    # VAUTO_JOBCLOSE_SCOPE_2026_07_29: this matched on bid_id ONLY, so it closed
+    # whichever leg's row was newest — and on a stale-claim re-claim it stamped
+    # the re-claimer's row and orphaned the original forever (bid 5088:
+    # worker-7 claimed 10:46:53 and leaked, worker-1 claimed 10:51:54 and got
+    # the 'ok'). Scope to job_type, then close any leftovers explicitly.
     cur.execute("""
         UPDATE worker_jobs
            SET completed_at = NOW(),
@@ -17826,9 +17979,16 @@ def api_vauto_submit():
                duration_ms  = EXTRACT(EPOCH FROM (NOW() - claimed_at))::int * 1000
          WHERE id = (
              SELECT id FROM worker_jobs
-             WHERE bid_id = %s AND completed_at IS NULL
+             WHERE bid_id = %s AND job_type = 'vauto' AND completed_at IS NULL
              ORDER BY claimed_at DESC LIMIT 1
          )
+    """, (bid_id,))
+    cur.execute("""
+        UPDATE worker_jobs
+           SET completed_at = NOW(),
+               status       = 'superseded',
+               duration_ms  = EXTRACT(EPOCH FROM (NOW() - claimed_at))::int * 1000
+         WHERE bid_id = %s AND job_type = 'vauto' AND completed_at IS NULL
     """, (bid_id,))
 
     db.commit()
@@ -19414,9 +19574,22 @@ def api_accutrade_submit():
                     '"target_auction":null,"target_retail":null,"manheim":null,'
                     '"average":null}. Return only the JSON.'
                 )
+                # ACCU_VISION_TIMING_2026_07_29: measure this call. It sits in the
+                # critical path of vauto->accutrade, which runs 54-56s on Land
+                # Rover/Mercedes/Lexus/Audi/Acura vs ~35s on Chevrolet/GMC/Ford
+                # despite those makes having perfectly good iPacket data. If the
+                # split shows up here it is the vision read; if not, look at the
+                # DOM scrape. Log only — no behaviour change.
+                _adv_t0 = time.time()
                 _adv_txt = gemini_call(_adv_prompt, image_bytes=_adv_bytes, mime=_adv_mime,
                                        model='gemini-2.5-flash', max_tokens=200,
                                        temperature=0.0, disable_thinking=True)
+                try:
+                    print('[accu-vision] bid=%s make=%s bytes=%s took=%.1fs' % (
+                        bid_id, (data.get('make') or '?'), len(_adv_bytes or b''),
+                        time.time() - _adv_t0), flush=True)
+                except Exception:
+                    pass
                 if _adv_txt:
                     _adv_s = _adv_txt.strip()
                     if _adv_s.startswith('```'):
@@ -19670,6 +19843,41 @@ def api_accutrade_submit():
         _mkdb.close()
     except Exception as _mke:
         print(f'[accu-retry-clear] bid={bid_id} err: {_mke}', flush=True)
+
+    # ACCU_JOBCLOSE_2026_07_29: /api/accutrade/submit never closed its
+    # worker_jobs row, so every successful AccuTrade lookup leaked an
+    # in_progress claim forever — measured 329 of 331 rows (99.4%), the bulk of
+    # a 590-row backlog dating to 2026-06-09. The only closes that existed were
+    # exceptional paths (released_verify_clear, released_accu_autoretry).
+    # Scoped to job_type='accutrade' so it can never stamp another leg's row.
+    # Bookkeeping only: re-claim is gated by accutrade_retry_at /
+    # accutrade_retry_claimed_at on bids, NOT by worker_jobs, so this cannot
+    # block an AccuTrade re-claim.
+    try:
+        _ajc = db.cursor()
+        _ajc.execute("""
+            UPDATE worker_jobs
+               SET completed_at = NOW(),
+                   status       = 'ok',
+                   duration_ms  = EXTRACT(EPOCH FROM (NOW() - claimed_at))::int * 1000
+             WHERE id = (
+                 SELECT id FROM worker_jobs
+                 WHERE bid_id = %s AND job_type = 'accutrade'
+                   AND completed_at IS NULL
+                 ORDER BY claimed_at DESC LIMIT 1
+             )
+        """, (bid_id,))
+        _ajc.execute("""
+            UPDATE worker_jobs
+               SET completed_at = NOW(),
+                   status       = 'superseded',
+                   duration_ms  = EXTRACT(EPOCH FROM (NOW() - claimed_at))::int * 1000
+             WHERE bid_id = %s AND job_type = 'accutrade'
+               AND completed_at IS NULL
+        """, (bid_id,))
+        db.commit()
+    except Exception as _ajce:
+        print(f'[accu-jobclose] bid={bid_id} err: {_ajce}', flush=True)
 
     db.close()
     _accu_fired = _maybe_fire_assessment(bid_id, require_all=True, source='accutrade')
@@ -23317,10 +23525,10 @@ def _notify_driver_combined(bid_id):
                 except Exception as _dn_e:
                     print(f'[combined-sms] dealership name lookup: {_dn_e}', flush=True)
             body = (f"Hi {_who}, Bid #{bid['id']} received. Give us a bit — "
-                    f"Joe, Todd or Gregg will reach out shortly."
+                    f"an Experience Wholesale team member will get back to you."
                     if _who else
                     f"Bid #{bid['id']} received. Give us a bit — "
-                    f"Joe, Todd or Gregg will reach out shortly.")
+                    f"an Experience Wholesale team member will get back to you.")
             print(f'[enrichment-gate] WITHHELD bid={bid_id} -> {bid["driver_phone"]} '
                   f'(not granted; plain receipt sent)', flush=True)
 

@@ -125,6 +125,139 @@ def _dp_apply_alert_phones():
             else DP_APPLY_ALERT_PHONES[:1])
 
 
+# Logo for the partner MMS. Served from the Resend-verified .net host, publicly
+# reachable with no login - Twilio has to be able to fetch it.
+DP_ALERT_LOGO = os.environ.get(
+    'DP_ALERT_LOGO', 'https://experience-wholesale.net/static/ew-logo-sms.png')
+# ew-logo-sms.png is the SMALL variant (390x128, 15KB) - the email one is
+# 1170px and rendered huge in the message bubble.
+
+
+def _possessive(name):
+    """Turner Motors -> Turner Motors'  |  Bozard -> Bozard's
+    (Currently unused - kept for copy that needs a possessive.)"""
+    n = (name or '').strip()
+    return n + ("'" if n.endswith('s') else "'s")
+
+
+def _dp_alert_send(to_e164, body):
+    """Send the partner alert as an MMS with the EW car logo, falling back to a
+    plain SMS if Twilio rejects the media (bad URL, carrier, size...). The alert
+    matters more than the picture, so a media failure must never lose the message.
+
+    NOTE: this talks to Twilio directly rather than via app.send_sms, so it also
+    re-applies NO_DATA_REQUEST_2026_06_12 here - going around send_sms would
+    otherwise silently go around that operator rule too.
+    """
+    import re as _re
+    if body and _re.search(
+            r'(send|text|reply|provide|verify|confirm)[^.!?]{0,40}'
+            r'(vin|mileage|miles|odometer)', body, _re.I):
+        print('[dp-alert] suppressed by NO_DATA_REQUEST: %r' % body[:80], flush=True)
+        return False
+    sid = os.environ.get('TWILIO_ACCOUNT_SID')
+    tok = os.environ.get('TWILIO_AUTH_TOKEN')
+    frm = os.environ.get('TWILIO_PHONE')
+    if not (sid and tok and frm):
+        from app import send_sms
+        return send_sms(to_e164, body)
+    try:
+        from twilio.rest import Client
+        kw = dict(to=to_e164, from_=frm, body=body)
+        # Off by default: an attached image becomes a SECOND bubble. The logo
+        # still shows, via og:image on the /a/<id> link-preview card.
+        if os.environ.get('DP_ALERT_MMS', '').strip().lower() in ('1', 'true', 'yes'):
+            kw['media_url'] = [DP_ALERT_LOGO]
+        Client(sid, tok).messages.create(**kw)
+        return True
+    except Exception as e:
+        print('[dp-alert] MMS failed (%s) - falling back to plain SMS' % e, flush=True)
+        try:
+            from app import send_sms
+            return send_sms(to_e164, body)
+        except Exception as e2:
+            print('[dp-alert] SMS fallback failed: %s' % e2, flush=True)
+            return False
+
+
+# DP_APPLY_RECEIPT_2026_07_29 — the applicant hears back the moment they
+# apply, by text AND email, and both say the same thing the success screen on
+# the site says: a decision will arrive by email. Three channels, one promise.
+#
+# Under DP_REHEARSAL these go to the team (or the operator alone in solo mode)
+# instead of the applicant, exactly like the approval and decline mail, so a
+# rehearsal never contacts a real dealer.
+
+
+def _dp_receipt_html(first, dealership):
+    logo = 'https://experience-wholesale.net/static/ew-logo-email.png'
+    greet = ('Hi %s,' % first) if first else 'Hello,'
+    return """\
+<!--[if mso]><style>body,table,td{font-family:Arial,sans-serif !important}</style><![endif]-->
+<div style="background:#f4f5f7;padding:28px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%" style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb">
+
+  <tr><td align="center" style="padding:30px 30px 20px 30px;border-bottom:1px solid #eef0f3">
+    <img src="%(logo)s" width="240" alt="Experience Wholesale"
+         style="display:block;width:240px;max-width:70%%;height:auto;border:0">
+  </td></tr>
+
+  <tr><td style="padding:30px 34px 34px 34px">
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.62;color:#0f172a">%(greet)s</p>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.62;color:#475569">
+      We&rsquo;ve received your application to the Experience Wholesale dealer network
+      for <b style="color:#0f172a">%(dealership)s</b>.
+    </p>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.62;color:#0f172a">
+      Our team will review it and <b>you&rsquo;ll receive an email with our decision</b>.
+    </p>
+    <p style="margin:0;font-size:15px;line-height:1.62;color:#475569">
+      Nothing else is needed from you right now.
+    </p>
+    <p style="margin:26px 0 0 0;font-size:15px;line-height:1.62;color:#0f172a">
+      &mdash; The Experience Wholesale Team
+    </p>
+  </td></tr>
+
+</table></div>""" % {'logo': logo, 'greet': greet, 'dealership': dealership}
+
+
+def _dp_apply_receipt(app_id, dealership, contact_name, email, phone):
+    """Text + email the applicant that we have their application. Best-effort:
+    a delivery problem must never fail the submission itself."""
+    first = (_s(contact_name) or '').split(' ')[0]
+    dealership = _s(dealership) or 'your dealership'
+
+    to_email = _s(email)
+    digits = _digits(phone)
+    to_phone = ('+1' + digits) if len(digits) == 10 else None
+    if _dp_rehearsing():
+        to_email = _dp_rehearsal_email()
+        rp = [_digits(p) for p in _dp_rehearsal_phones()]
+        to_phone = ('+1' + rp[0]) if rp and len(rp[0]) == 10 else None
+
+    # No VIN/mileage wording here on purpose - NO_DATA_REQUEST_2026_06_12 blocks
+    # any outbound text that looks like it is asking a dealer for car data.
+    body = ('Thanks%s - Experience Wholesale received your dealer application for %s. '
+            'We will email you with our decision.'
+            % ((' ' + first) if first else '', dealership))
+    if to_phone:
+        try:
+            from app import send_sms
+            send_sms(to_phone, body)
+            print('[dp-network] apply receipt sms -> %s (rehearsal=%s)'
+                  % (to_phone, _dp_rehearsing()), flush=True)
+        except Exception as e:
+            print('[dp-network] apply receipt sms: %s' % e, flush=True)
+
+    if to_email:
+        try:
+            _email(to_email, 'We received your application - Experience Wholesale',
+                   _dp_receipt_html(first, dealership))
+        except Exception as e:
+            print('[dp-network] apply receipt email: %s' % e, flush=True)
+
+
 def _dp_apply_alert_sms(app_id, dealership, contact, hist, is_existing):
     """Text the partners that a new dealer applied. Best-effort; never raises
     into the apply path (an alert must not fail a dealer's application).
@@ -138,27 +271,36 @@ def _dp_apply_alert_sms(app_id, dealership, contact, hist, is_existing):
         who = ('Known EW dealer: %d bought / %d sold, $%s gross with us.'
                % (h.get('bought_cars') or 0, h.get('sold_cars') or 0,
                   '{:,.0f}'.format(h.get('total_gross') or 0)))
+        # For a RETURNING dealer the most useful fact is how long it has been -
+        # a warm relationship and a cold one read very differently.
+        last = _s(h.get('last_activity'))
+        if last:
+            who += ' Last deal %s.' % last[:7]
     elif is_existing:
         who = 'Says they are an existing dealer, but no transactions on our ledger.'
     else:
         who = 'New applicant - no history with us.'
-    body = ('New DealerPrice application #%d\n%s%s\n%s\nReview: %s/network/application/%d'
-            % (app_id, dealership or '(no name)',
+    # No application number in the copy: it is internal plumbing, means nothing to
+    # a partner, and the link already carries it.
+    #
+    # The link sits in the MIDDLE on purpose. iOS renders a separate link-preview
+    # bubble when a URL is the last thing in a message, which made every alert
+    # arrive as two bubbles. Putting the ledger line after the link fixes that
+    # without padding the copy with filler. Do not move the URL to the end.
+    body = ('New dealer application - DealerPrice\n%s%s\n%s/a/%d\n%s'
+            % (dealership or '(no name)',
                (' - %s' % contact) if contact else '',
-               who,
                os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net'),
-               app_id))
+               app_id,
+               who))
     live = os.path.exists(DP_APPLY_ALERT_GATE)
-    if not live:
-        body = '[TEST - partners not yet added] ' + body
     for ph in _dp_apply_alert_phones():
         digits = _digits(ph)
         if len(digits) != 10:
             print('[dp-network] apply-alert skip bad phone %r' % ph, flush=True)
             continue
         try:
-            from app import send_sms
-            send_sms('+1' + digits, body)
+            _dp_alert_send('+1' + digits, body)
             print('[dp-network] apply-alert -> %s (live=%s)' % (digits, live), flush=True)
         except Exception as e:
             print('[dp-network] apply-alert %s failed: %s' % (digits, e), flush=True)
@@ -249,7 +391,7 @@ def _invite_html(name, link):
       </tr>
       <tr>
         <td width="30" valign="top" style="padding:9px 0;border-top:1px solid #eef0f3"><div style="width:22px;height:22px;border-radius:50%%;background:#b91c2c;color:#fff;font-size:12px;font-weight:700;text-align:center;line-height:22px">3</div></td>
-        <td style="padding:9px 0;border-top:1px solid #eef0f3"><b>Joe, Todd or Gregg reaches out to you directly</b> with where we are on it. A real person, not an automated number.</td>
+        <td style="padding:9px 0;border-top:1px solid #eef0f3"><b>An Experience Wholesale team member will get back to you</b> with where we are on it. A real person, not an automated number.</td>
       </tr>
     </table>
   </td></tr>
@@ -1104,7 +1246,11 @@ def _email(to_addr, subject, html):
     try:
         import resend
         resend.api_key = key
-        payload = {'from': DP_EMAIL_FROM, 'to': to_addr,
+        # Resend wants a LIST for multiple recipients; a single comma-joined
+        # string is silently one bad address. Accept either form from callers.
+        to_list = ([a.strip() for a in to_addr.split(',') if a.strip()]
+                   if isinstance(to_addr, str) else list(to_addr))
+        payload = {'from': DP_EMAIL_FROM, 'to': to_list,
                    'subject': subject, 'html': html}
         rt = _dp_reply_to()
         if rt:
@@ -1116,6 +1262,158 @@ def _email(to_addr, subject, html):
     except Exception as e:
         print('[dp-network:EMAIL-FAIL] %s: %s' % (type(e).__name__, e), flush=True)
         return False
+
+
+# -- DP_INTENT_2026_07_29 ----------------------------------------------------
+# Joe's ask: capture WHAT the dealer wants from EW up front, so intent can be
+# categorised and a BUYER can be handed to the existing dealer-scanner fleet
+# automatically once vetting passes.
+INTENT_LABELS = {
+    'sell': 'Submit & sell cars',
+    'buy':  'Buy cars from EW',
+    'both': 'Buy & sell',
+}
+
+
+def _dp_intent(v):
+    """Normalise whatever the site posts to sell/buy/both, else None."""
+    v = (_s(v) or '').strip().lower()
+    return v if v in INTENT_LABELS else None
+
+
+# Gate, same pattern as the other DealerPrice rollouts. While ABSENT the approve
+# step only LOGS what it would have registered - it never touches the scanner
+# fleet. REMINDER: `touch /opt/expwholesale/DP_AUTOSCAN_LIVE` after testing.
+DP_AUTOSCAN_GATE = os.environ.get('DP_AUTOSCAN_GATE',
+                                  '/opt/expwholesale/DP_AUTOSCAN_LIVE')
+
+
+def _dp_register_scanner(app_id, a, member_id=None):
+    """After vetting, put a BUYER into the dealer-scanner DB so their lot starts
+    being scanned. Returns a short human note for the packet; never raises.
+
+    A website is deliberately NOT required - plenty of applicants are wholesalers
+    with no site at all, and that is a perfectly good dealer. No site simply means
+    there is nothing to scan, which we record rather than treat as a failure.
+    """
+    intent = _dp_intent(a.get('intent'))
+    if intent not in ('buy', 'both'):
+        return None                      # sellers have no lot for us to scan
+    # CONSENT IS REQUIRED. The dealer has to have ticked "monitor my inventory"
+    # on the intent step; we do not read anyone's site on the strength of them
+    # merely wanting to buy cars. No tick, no scan - recorded, not an error.
+    if not a.get('monitor_consent'):
+        return 'dealer did not opt in to inventory monitoring - not scanning'
+    site = _s(a.get('website'))
+    if not site:
+        return 'opted in but gave no website - nothing to scan (normal for a wholesaler)'
+    if not site.startswith('http'):
+        site = 'https://' + site
+
+    live = os.path.exists(DP_AUTOSCAN_GATE)
+    db = _db(); cur = db.cursor()
+    try:
+        # Already known to the scanner? Link, never duplicate. dealers.url is
+        # unique, but matching first also lets the packet say "already dealer #N".
+        cur.execute("SELECT id, name FROM dealers WHERE url=%s LIMIT 1", (site,))
+        row = cur.fetchone()
+        if row:
+            note = 'already in scanner as dealer #%s (%s)' % (row['id'], row['name'])
+            cur.execute("""UPDATE dealer_applications
+                              SET scanner_dealer_id=%s, scanner_registered_at=now(),
+                                  scanner_note=%s WHERE id=%s""",
+                        (row['id'], note, app_id))
+            if member_id:
+                cur.execute("UPDATE dealerprice_members SET scanner_dealer_id=%s WHERE id=%s",
+                            (row['id'], member_id))
+            db.commit()
+            return note
+
+        if not live:
+            note = 'WOULD register %s for scanning (gate off)' % site
+            cur.execute("UPDATE dealer_applications SET scanner_note=%s WHERE id=%s",
+                        (note, app_id))
+            db.commit()
+            print('[dp-autoscan] %s app=%s' % (note, app_id), flush=True)
+            return note
+
+        cur.execute("""INSERT INTO dealers (name, url, notes, phone)
+                       VALUES (%s,%s,%s,%s)
+                       ON CONFLICT (url) DO UPDATE SET name=EXCLUDED.name
+                       RETURNING id""",
+                    (_s(a.get('dealership_name')) or site, site,
+                     'Auto-added from DealerPrice application #%s (intent=%s)' % (app_id, intent),
+                     _s(a.get('contact_phone'))))
+        did = cur.fetchone()['id']
+        note = 'registered for scanning as dealer #%s' % did
+        cur.execute("""UPDATE dealer_applications
+                          SET scanner_dealer_id=%s, scanner_registered_at=now(),
+                              scanner_note=%s WHERE id=%s""", (did, note, app_id))
+        if member_id:
+            cur.execute("UPDATE dealerprice_members SET scanner_dealer_id=%s WHERE id=%s",
+                        (did, member_id))
+        db.commit()
+        print('[dp-autoscan] app=%s -> dealer #%s (%s)' % (app_id, did, site), flush=True)
+        return note
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print('[dp-autoscan] app=%s FAILED: %s' % (app_id, e), flush=True)
+        return 'scanner registration failed: %s' % e
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+# DP_REHEARSAL_2026_07_29 — while this gate file exists, an approval sends the
+# dealer welcome to the PARTNERS instead of the dealer, so the team can see
+# exactly what a dealer receives without a real dealer being contacted. This is
+# a walkthrough aid, NOT the onboarding gate: remove the file when finished.
+#   /opt/expwholesale/DP_REHEARSAL   present -> partners   absent -> real dealer
+DP_REHEARSAL_GATE = os.environ.get('DP_REHEARSAL_GATE',
+                                   '/opt/expwholesale/DP_REHEARSAL')
+# Approval mail goes to the partners INDIVIDUALLY, not to info@ - info@ fans out
+# to all four including the operator, and he is out of the approval loop.
+DP_REHEARSAL_EMAIL = os.environ.get(
+    'DP_REHEARSAL_EMAIL',
+    'joe@experience-wholesale.com,todd@experience-wholesale.com,gregg@doubleclutch.com')
+
+# Who sees an APPROVAL. Kept separate from DP_APPLY_ALERT_PHONES on purpose: the
+# operator still wants to hear that a dealer APPLIED, but not to sit in the
+# approval loop, so the two lists are allowed to differ.
+DP_APPROVAL_PHONES = [p.strip() for p in os.environ.get(
+    'DP_APPROVAL_PHONES', '3522099696,5613018622,5166803500').split(',') if p.strip()]
+
+# DP_SOLO_TEST_2026_07_29 — while this gate file exists, EVERY rehearsal
+# notification (approval text + email, decline letter) goes to the operator and
+# nobody else. For dry-running the flow end to end without three other phones
+# lighting up. Sits INSIDE rehearsal: applicants are still never contacted.
+#   /opt/expwholesale/DP_SOLO_TEST   present -> operator only
+DP_SOLO_GATE = os.environ.get('DP_SOLO_GATE', '/opt/expwholesale/DP_SOLO_TEST')
+DP_OPERATOR_PHONE = os.environ.get('DP_OPERATOR_PHONE', '4074309675').strip()
+DP_OPERATOR_EMAIL = os.environ.get('DP_OPERATOR_EMAIL', 'opies32765@gmail.com').strip()
+
+
+def _dp_solo():
+    return os.path.exists(DP_SOLO_GATE)
+
+
+def _dp_rehearsal_phones():
+    """Who hears about an approval during a rehearsal."""
+    return [DP_OPERATOR_PHONE] if _dp_solo() else DP_APPROVAL_PHONES
+
+
+def _dp_rehearsal_email():
+    """Who reads a rehearsal email (approval welcome / decline letter)."""
+    return DP_OPERATOR_EMAIL if _dp_solo() else DP_REHEARSAL_EMAIL
+
+
+def _dp_rehearsing():
+    return os.path.exists(DP_REHEARSAL_GATE)
 
 
 def _invite_member(m):
@@ -1135,6 +1433,12 @@ def _invite_member(m):
     to_phone = ('+1' + phone) if len(phone) == 10 else None
     if not live:
         to_phone = DP_TEST_PHONE or None      # TEST: operator only
+    # Rehearsal: the whole team sees the dealer-facing text, the dealer gets nothing.
+    rehearse_to = []
+    if _dp_rehearsing():
+        rehearse_to = ['+1' + _digits(p) for p in _dp_rehearsal_phones()
+                       if len(_digits(p)) == 10]
+        to_phone = None
     # ⚠ WORDING IS CONSTRAINED by NO_DATA_REQUEST_2026_06_12 (operator): app.py's
     # send_sms() silently DROPS any message matching
     #   (send|text|reply|provide|verify|confirm)[^.!?]{0,40}(vin|mileage|miles|odometer)
@@ -1154,19 +1458,22 @@ def _invite_member(m):
         "2) Your private page, no time limit: %s" % link)
     if not live:
         sms_body = '[TEST->%s] %s' % (_s(m.get('contact_phone')) or 'no-phone', sms_body)
-    if to_phone:
+    for _t in (rehearse_to or ([to_phone] if to_phone else [])):
         try:
             from app import send_sms
-            send_sms(to_phone, sms_body)
-            print('[dp-network] invite sms -> %s (live=%s)' % (to_phone, live), flush=True)
+            send_sms(_t, sms_body)
+            print('[dp-network] invite sms -> %s (live=%s rehearsal=%s)'
+                  % (_t, live, bool(rehearse_to)), flush=True)
         except Exception as e:
-            print('[dp-network] invite sms: %s' % e, flush=True)
-    else:
+            print('[dp-network] invite sms %s: %s' % (_t, e), flush=True)
+    if not (rehearse_to or to_phone):
         print('[dp-network] invite sms SKIPPED (live=%s, no destination)' % live, flush=True)
 
     # ── email ──
     to_email = _s(m.get('contact_email'))
     subject = 'Approved — Experience Wholesale Dealer Network'
+    if _dp_rehearsing():
+        to_email = _dp_rehearsal_email()       # team, or operator alone in solo
     if not live:
         subject = '[TEST→%s] %s' % (to_email or 'no-email', subject)
         to_email = DP_TEST_EMAIL              # TEST: operator only
@@ -1183,7 +1490,24 @@ def _bad_secret():
     return None
 
 
+# DP_APPROVER_2026_07_29 — the dashboard has ONE shared login, so the session
+# cannot tell Joe from Todd from Gregg. Rather than build auth, the Approve form
+# asks who is clicking and we stamp that. Falls back to the session/user or
+# 'operator' for any other action.
+# Operator is deliberately NOT on this list (2026-07-29): approving a dealer is
+# the partners' call, not his.
+DP_APPROVERS = [a.strip() for a in os.environ.get(
+    'DP_APPROVERS', 'Joe,Todd,Gregg').split(',') if a.strip()]
+
+
 def _reviewer():
+    # An explicit "approving as" beats the shared login every time.
+    try:
+        who = (request.form.get('approved_by') or '').strip()
+        if who and who in DP_APPROVERS:
+            return who
+    except Exception:
+        pass
     return (session.get('user') or session.get('username')
             or session.get('reviewer') or 'operator')
 
@@ -1246,11 +1570,14 @@ def api_dp_apply():
     cemail = _s(d.get('contact_email')).lower()
     cphone = _digits(d.get('contact_phone'))
 
-    # base requirements for everyone
+    # base requirements for everyone. Lot address joined this list 2026-07-29:
+    # it is how a dealer gets verified against the license and how anyone finds
+    # them, so an application without one cannot really be vetted.
     miss = [lbl for k, lbl in (('dealership_name', 'Dealership name'),
                                ('contact_name', 'Your name'),
                                ('contact_email', 'Email'),
-                               ('contact_phone', 'Mobile')) if not _s(d.get(k))]
+                               ('contact_phone', 'Mobile'),
+                               ('lot_address', 'Lot address')) if not _s(d.get(k))]
     if miss:
         return jsonify({'ok': False, 'error': '%s required.' % ', '.join(miss)}), 400
 
@@ -1325,10 +1652,10 @@ def api_dp_apply():
                 reputation_url, auction_access, payment_ready, bank_reference,
                 trade_reference, referrer_name, contact_name, contact_email,
                 contact_phone, attestation, tcpa_consent, notes, name_match,
-                referrer_match, raw_payload)
+                referrer_match, raw_payload, intent, monitor_consent)
             VALUES ('pending',%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s,%s,
                     %s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s,%s,
-                    %s,%s,%s,%s, %s,%s,%s)
+                    %s,%s,%s,%s, %s,%s,%s,%s,%s)
             RETURNING id
         """, (
             is_existing, dealership, _s(d.get('dba')), _s(d.get('dealer_group')),
@@ -1346,6 +1673,7 @@ def api_dp_apply():
             _s(d.get('trade_reference')), referrer, cname, cemail, cphone,
             _b(d.get('attestation')), _b(d.get('tcpa_consent')), _s(d.get('notes')),
             Json(name_match or None), Json(referrer_match or None), Json(audit),
+            _dp_intent(d.get('intent')), _b(d.get('monitor_consent')),
         ))
         app_id = cur.fetchone()['id']
 
@@ -1362,6 +1690,13 @@ def api_dp_apply():
         print('[dp-network] apply insert: %s' % e, flush=True)
         return jsonify({'ok': False, 'error': 'Could not submit your application — please try again.'}), 500
     db.close()
+
+    # Tell the applicant we have it (text + email). Wrapped: a receipt problem
+    # must never turn a successful submission into an error for the dealer.
+    try:
+        _dp_apply_receipt(app_id, dealership, cname, cemail, cphone)
+    except Exception as _e_r:
+        print('[dp-network] apply receipt: %s' % _e_r, flush=True)
 
     tag = 'EXISTING ✓' if is_existing else 'NEW'
     mtag = (' · roster:%s' % name_match['name']) if name_match.get('matched') else ''
@@ -1385,6 +1720,43 @@ def api_dp_apply():
 # ════════════════════════════════════════════════════════════════════════════
 # OPERATOR REVIEW  (behind app-level require_login; NOT under /api/)
 # ════════════════════════════════════════════════════════════════════════════
+@bp.route('/a/<int:app_id>')
+def dp_short_application(app_id):
+    """Short link for the partner alert.
+
+    Why this is a PAGE and not a 302: a bare redirect sent the link-preview
+    crawler (iMessage/WhatsApp) to the login screen, so the message rendered a
+    grey card that just said "Login" - useless, and it looked broken. This
+    returns proper OpenGraph tags so the preview reads as a dealer application,
+    then forwards a real visitor on to the packet.
+
+    Deliberately carries NO dealer data - the applicant's name is not in the
+    preview, because anything here is visible to the carrier's crawler and to
+    anyone the text is forwarded to. The packet itself stays login-gated.
+    """
+    target = url_for('dealerprice_network.network_application', app_id=app_id)
+    html = """<!doctype html><html><head><meta charset="utf-8">
+<title>New dealer application &middot; Experience Wholesale</title>
+<meta name="description" content="A dealer has applied to the DealerPrice network. Sign in to review the vetting packet.">
+<meta property="og:site_name" content="Experience Wholesale">
+<meta property="og:title" content="New dealer application">
+<meta property="og:description" content="A dealer has applied to the DealerPrice network. Tap to review the vetting packet.">
+<meta property="og:image" content="https://experience-wholesale.net/static/ew-logo-sms.png">
+<meta name="twitter:card" content="summary">
+<meta name="robots" content="noindex,nofollow">
+<meta http-equiv="refresh" content="0;url=%s">
+<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:#0b0f19;color:#e2e8f0;display:grid;place-items:center;height:100vh;margin:0}
+a{color:#7dd3fc}</style></head>
+<body><div style="text-align:center">
+<p>Opening the dealer application&hellip;</p>
+<p><a href="%s">Continue</a></p>
+</div><script>location.replace(%s);</script></body></html>""" % (
+        target, target, __import__('json').dumps(target))
+    return html, 200, {'Content-Type': 'text/html; charset=utf-8',
+                       'Cache-Control': 'no-store'}
+
+
 @bp.route('/network/applications')
 def network_applications():
     db = _db(); cur = db.cursor()
@@ -1446,9 +1818,19 @@ def network_application(app_id):
     if not a:
         db.close(); abort(404)
     member = None
+    rep_history = []
     if a.get('member_id'):
         cur.execute("SELECT * FROM dealerprice_members WHERE id=%s", (a['member_id'],))
         member = cur.fetchone()
+        if member:
+            try:
+                cur.execute("""SELECT rep, prev_rep, assigned_by, assigned_at
+                                 FROM dealerprice_rep_assignments
+                                WHERE member_id=%s ORDER BY id DESC LIMIT 6""",
+                            (member['id'],))
+                rep_history = [dict(r) for r in cur.fetchall()]
+            except Exception as e:
+                print('[dp-network] rep history: %s' % e, flush=True)
     db.close()
     member_bids = _member_bids(member['id']) if member else []
     # Re-run the match live so matcher improvements apply retroactively to old
@@ -1457,6 +1839,11 @@ def network_application(app_id):
     a['name_match'] = _roster_match(a.get('dealership_name'), a.get('contact_phone')) or a.get('name_match')
     lsl_hist = _lsl_history_person(a.get('dealership_name'), a.get('name_match'), a.get('contact_name'), a.get('contact_phone'))
     return render_template('network/application.html', a=a, member=member, member_bids=member_bids,
+                           approvers=DP_APPROVERS,
+                           approve_err=request.args.get('err'),
+                           decline_live=os.path.exists(DP_DECLINE_GATE),
+                           sales_reps=DP_SALES_REPS,
+                           rep_history=rep_history,
                            class_labels=CLASS_LABELS, lsl_hist=lsl_hist)
 
 
@@ -1484,21 +1871,46 @@ def network_application_approve(app_id):
     a = cur.fetchone()
     if not a:
         db.close(); abort(404)
-    if a.get('member_id'):
+    # Already decided either way? The Decision card is hidden once a decision
+    # exists, but the endpoint has to enforce it too - a stale tab is still a
+    # live form. Reversing a decline is deliberately not self-serve.
+    if a.get('member_id') or a.get('status') == 'rejected':
         db.close()
         return redirect(url_for('dealerprice_network.network_application', app_id=app_id))
+    # DP_APPROVER_2026_07_29: an approval MUST say who made it. The browser also
+    # blocks this, but client-side validation is a courtesy, not a control - a
+    # stale tab or a disabled-JS browser would otherwise get silently recorded
+    # as 'operator', which is exactly the ambiguity the picker exists to remove.
+    who = (request.form.get('approved_by') or '').strip()
+    if who not in DP_APPROVERS:
+        db.close()
+        return redirect(url_for('dealerprice_network.network_application',
+                                app_id=app_id, err='pick'))
+    # Optional owner chosen on the approve row. Silently ignored if it is not a
+    # known rep - a bad value must not block the approval itself.
+    rep = (request.form.get('sales_rep') or '').strip()
+    if rep not in DP_SALES_REPS:
+        rep = None
     from psycopg2.extras import Json
     # hex token (no -/_): survives SMS auto-linkifiers + looks like a secure key
     token = secrets.token_hex(16)
     try:
         cur.execute("""INSERT INTO dealerprice_members
                          (application_id, dealership_name, contact_name, contact_email,
-                          contact_phone, token, is_existing, lsl_match, approved_by)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                          contact_phone, token, is_existing, lsl_match, approved_by, intent,
+                          sales_rep, sales_rep_assigned_by, sales_rep_assigned_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                               CASE WHEN %s IS NULL THEN NULL ELSE now() END)
+                       RETURNING id""",
                     (app_id, a['dealership_name'], a['contact_name'], a['contact_email'],
                      a['contact_phone'], token, a['is_existing'],
-                     Json(a.get('name_match') or None), _reviewer()))
+                     Json(a.get('name_match') or None), _reviewer(),
+                     a.get('intent'), rep, (who if rep else None), rep))
         member_id = cur.fetchone()['id']
+        if rep:
+            cur.execute("""INSERT INTO dealerprice_rep_assignments
+                             (member_id, rep, prev_rep, assigned_by)
+                           VALUES (%s,%s,NULL,%s)""", (member_id, rep, who))
         cur.execute("""UPDATE dealer_applications SET status='approved', member_id=%s,
                           reviewer=%s, reviewed_at=now(),
                           review_notes=COALESCE(%s, review_notes) WHERE id=%s""",
@@ -1513,19 +1925,181 @@ def network_application_approve(app_id):
     db.close()
     try:
         _invite_member(m)
+    except Exception as _e_inv:
+        print('[dp-network] invite: %s' % _e_inv, flush=True)
+    # DP_INTENT_2026_07_29: a BUYER goes into the scanner fleet once vetted.
+    # Wrapped so a scanner problem can never fail an approval.
+    try:
+        _dp_register_scanner(app_id, a, m['id'])
     except Exception as e:
         print('[dp-network] approve invite: %s' % e, flush=True)
     return redirect(url_for('dealerprice_network.network_application', app_id=app_id))
 
 
+# DP_DECLINE_2026_07_29 — the decline letter goes to the DEALER. Gated OFF by
+# default because it is outbound to a real business: while DP_DECLINE_LIVE is
+# absent the decline still records normally and the letter is only logged, so
+# the copy can be reviewed before anything leaves the building.
+#   /opt/expwholesale/DP_DECLINE_LIVE   present -> letter sends
+# Under DP_REHEARSAL the letter goes to the partners instead of the dealer, so
+# the team can read exactly what an applicant receives.
+DP_DECLINE_GATE = os.environ.get('DP_DECLINE_GATE',
+                                 '/opt/expwholesale/DP_DECLINE_LIVE')
+
+
+def _dp_decline_letter(a):
+    """The applicant's decline letter. Same shell as the welcome email
+    (table-based, inline CSS, 600px, logo off the Resend-verified host) so both
+    read as the same company.
+
+    Deliberately gives NO reason. The internal review note is internal: it is
+    the team's shorthand, it invites an argument nobody wants to have, and on a
+    credit-adjacent decision a stated reason is a liability. Short, courteous,
+    door left open.
+    """
+    logo = 'https://experience-wholesale.net/static/ew-logo-email.png'
+    first = (_s(a.get('contact_name')) or '').split(' ')[0]
+    greet = ('Hi %s,' % first) if first else 'Hello,'
+    dealership = _s(a.get('dealership_name')) or 'your dealership'
+    subject = 'Your Experience Wholesale dealer network application'
+    html = """\
+<!--[if mso]><style>body,table,td{font-family:Arial,sans-serif !important}</style><![endif]-->
+<div style="background:#f4f5f7;padding:28px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%" style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb">
+
+  <tr><td align="center" style="padding:30px 30px 20px 30px;border-bottom:1px solid #eef0f3">
+    <img src="%(logo)s" width="240" alt="Experience Wholesale"
+         style="display:block;width:240px;max-width:70%%;height:auto;border:0">
+  </td></tr>
+
+  <tr><td style="padding:30px 34px 34px 34px">
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.62;color:#0f172a">%(greet)s</p>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.62;color:#475569">
+      Thank you for your interest in the Experience Wholesale dealer network, and for
+      taking the time to apply on behalf of <b style="color:#0f172a">%(dealership)s</b>.
+    </p>
+    <p style="margin:0;font-size:15px;line-height:1.62;color:#0f172a">
+      Unfortunately, at this time we are not able to take on your account.
+    </p>
+    <p style="margin:26px 0 0 0;font-size:15px;line-height:1.62;color:#0f172a">
+      &mdash; The Experience Wholesale Team
+    </p>
+  </td></tr>
+
+</table></div>""" % {'logo': logo, 'greet': greet, 'dealership': dealership}
+    return subject, html
+
+
+def _dp_decline_notify(a, who, reason):
+    """Send the applicant their decline letter. Best-effort: a mail problem must
+    never undo a decline that is already committed."""
+    subject, html = _dp_decline_letter(a)
+    name = _s(a.get('dealership_name')) or '(no name)'
+    to_addr = _s(a.get('contact_email'))
+
+    if _dp_rehearsing():
+        to_addr = _dp_rehearsal_email()    # team (or operator alone); never the applicant
+        subject = '[rehearsal] ' + subject
+
+    if not os.path.exists(DP_DECLINE_GATE):
+        print('[dp-network:DECLINE] #%s %s declined by %s (reason=%r) - letter '
+              'NOT sent, DP_DECLINE_LIVE gate is off. Would have gone to: %s'
+              % (a.get('id'), name, who, reason or '', to_addr or '(no email)'),
+              flush=True)
+        return False
+    if not to_addr:
+        print('[dp-network:DECLINE] #%s %s has no contact_email - no letter'
+              % (a.get('id'), name), flush=True)
+        return False
+    print('[dp-network:DECLINE] #%s %s declined by %s - letter -> %s'
+          % (a.get('id'), name, who, to_addr), flush=True)
+    return _email(to_addr, subject, html)
+
+
+# DP_SALES_REP_2026_07_29 — once a dealer is approved, somebody owns the
+# relationship. Unlike approve/decline this is deliberately REVERSIBLE: accounts
+# move between reps, so the control stays on the page and every move is logged
+# to dealerprice_rep_assignments rather than overwriting history.
+DP_SALES_REPS = [r.strip() for r in os.environ.get(
+    'DP_SALES_REPS',
+    'Walt,SteveK,Jordan,Patty,Alan,Jenny,Sam B,Todd,Gregg').split(',') if r.strip()]
+
+
+@bp.route('/network/application/<int:app_id>/assign-rep', methods=['POST'])
+def network_application_assign_rep(app_id):
+    db = _db(); cur = db.cursor()
+    cur.execute("SELECT id, sales_rep FROM dealerprice_members WHERE application_id=%s",
+                (app_id,))
+    m = cur.fetchone()
+    if not m:
+        # No member yet means the dealer is not approved - nothing to assign.
+        db.close()
+        return redirect(url_for('dealerprice_network.network_application', app_id=app_id))
+    rep = (request.form.get('sales_rep') or '').strip()
+    # '' is a legitimate value: it unassigns. Anything else must be a real rep.
+    if rep and rep not in DP_SALES_REPS:
+        db.close()
+        return redirect(url_for('dealerprice_network.network_application',
+                                app_id=app_id, err='rep'))
+    prev = m.get('sales_rep')
+    if rep == (prev or ''):
+        db.close()
+        return redirect(url_for('dealerprice_network.network_application', app_id=app_id))
+    by = _reviewer()
+    try:
+        cur.execute("""UPDATE dealerprice_members
+                          SET sales_rep=%s, sales_rep_assigned_by=%s,
+                              sales_rep_assigned_at=now()
+                        WHERE id=%s""", (rep or None, by, m['id']))
+        cur.execute("""INSERT INTO dealerprice_rep_assignments
+                         (member_id, rep, prev_rep, assigned_by)
+                       VALUES (%s,%s,%s,%s)""", (m['id'], rep or None, prev, by))
+        db.commit()
+        print('[dp-network] rep: member %s %r -> %r by %s'
+              % (m['id'], prev, rep, by), flush=True)
+    except Exception as e:
+        db.rollback()
+        print('[dp-network] assign-rep: %s' % e, flush=True)
+    db.close()
+    return redirect(url_for('dealerprice_network.network_application', app_id=app_id))
+
+
 @bp.route('/network/application/<int:app_id>/reject', methods=['POST'])
 def network_application_reject(app_id):
+    """Decline an application. Mirrors approve: it must be signed by a named
+    partner, and it cannot be clicked twice or clicked on something already
+    decided. Nothing is sent to the dealer."""
     db = _db(); cur = db.cursor()
-    cur.execute("""UPDATE dealer_applications SET status='rejected', reviewer=%s,
-                      reviewed_at=now(), review_notes=COALESCE(%s, review_notes)
-                    WHERE id=%s""",
-                (_reviewer(), _s(request.form.get('review_notes')) or None, app_id))
-    db.commit(); db.close()
+    cur.execute("SELECT * FROM dealer_applications WHERE id=%s", (app_id,))
+    a = cur.fetchone()
+    if not a:
+        db.close(); abort(404)
+    # Already decided? Do not let a decline overwrite an approval, and do not
+    # re-fire the notification on a double click.
+    if a.get('member_id') or a.get('status') == 'rejected':
+        db.close()
+        return redirect(url_for('dealerprice_network.network_application', app_id=app_id))
+    # DP_APPROVER_2026_07_29: same rule as approve - say who you are.
+    who = (request.form.get('approved_by') or '').strip()
+    if who not in DP_APPROVERS:
+        db.close()
+        return redirect(url_for('dealerprice_network.network_application',
+                                app_id=app_id, err='pick'))
+    reason = _s(request.form.get('review_notes')) or None
+    try:
+        cur.execute("""UPDATE dealer_applications SET status='rejected', reviewer=%s,
+                          reviewed_at=now(), review_notes=COALESCE(%s, review_notes)
+                        WHERE id=%s""", (who, reason, app_id))
+        db.commit()
+    except Exception as e:
+        db.rollback(); db.close()
+        print('[dp-network] decline: %s' % e, flush=True)
+        abort(500)
+    db.close()
+    try:
+        _dp_decline_notify(a, who, reason)
+    except Exception as e:
+        print('[dp-network] decline notify: %s' % e, flush=True)
     return redirect(url_for('dealerprice_network.network_application', app_id=app_id))
 
 

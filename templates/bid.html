@@ -576,6 +576,34 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
     <!-- COL 1: Vehicle Details (collapsible) + Message Thread -->
     <div class="col col-intel">
 
+      {# DP_VETTED_ON_BIDS_2026_07_29 - a vetted DealerPrice dealer sent this car
+         in. Joe/Todd/Gregg need to know WHO, and be able to reach them, without
+         leaving the bid. Matched by member token, or by decoding the phone
+         number when they simply texted the car in. #}
+      {% if dp_vetted %}
+      <div class="card" style="flex-shrink:0;border-color:#15803d;background:linear-gradient(180deg,rgba(22,163,74,.10),#0b0f19)">
+        <div class="card-title" style="display:flex;align-items:center;gap:8px">
+          <span style="background:#16a34a;color:#fff;border-radius:999px;padding:2px 10px;font-size:10.5px;font-weight:800;letter-spacing:.4px">DEALERPRICE VETTED</span>
+          <span style="font-size:13px;color:#e2e8f0;font-weight:700">{{ dp_vetted.dealership_name or 'Approved dealer' }}</span>
+          {% if dp_vetted.intent %}<span style="font-size:10.5px;color:#86efac;border:1px solid #166534;border-radius:999px;padding:1px 8px">{{ {'sell':'sells to us','buy':'buys from us','both':'buys &amp; sells'}.get(dp_vetted.intent, dp_vetted.intent) }}</span>{% endif %}
+        </div>
+        <table style="width:100%;font-size:12.5px;color:#cbd5e1;border-collapse:collapse">
+          {% if dp_vetted.contact_name %}<tr><td style="color:#7c8ba1;padding:2px 0;width:78px">Contact</td><td><b style="color:#e2e8f0">{{ dp_vetted.contact_name }}</b></td></tr>{% endif %}
+          {% if dp_vetted.contact_phone %}<tr><td style="color:#7c8ba1;padding:2px 0">Phone</td><td><a href="tel:{{ dp_vetted.contact_phone }}" style="color:#7dd3fc">{{ dp_vetted.contact_phone }}</a></td></tr>{% endif %}
+          {% if dp_vetted.contact_email %}<tr><td style="color:#7c8ba1;padding:2px 0">Email</td><td><a href="mailto:{{ dp_vetted.contact_email }}" style="color:#7dd3fc">{{ dp_vetted.contact_email }}</a></td></tr>{% endif %}
+          <tr><td style="color:#7c8ba1;padding:2px 0">Rep</td><td>{% if dp_vetted.sales_rep %}<b style="color:#86efac">{{ dp_vetted.sales_rep }}</b>{% else %}<span style="color:#fbbf24">unassigned</span>{% endif %}</td></tr>
+          <tr><td style="color:#7c8ba1;padding:2px 0">Bids sent</td><td>{{ dp_vetted.submit_count or 0 }}{% if dp_vetted.approved_at %} &middot; approved {{ dp_vetted.approved_at.strftime('%b %-d, %Y') }}{% endif %}</td></tr>
+          {% if dp_vetted.scanner_dealer_id %}<tr><td style="color:#7c8ba1;padding:2px 0">Scanner</td><td>tracked as dealer #{{ dp_vetted.scanner_dealer_id }}</td></tr>{% endif %}
+        </table>
+        <div style="margin-top:9px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          {% if dp_vetted.packet_url %}<a href="{{ dp_vetted.packet_url }}" style="background:#16a34a;color:#fff;text-decoration:none;border-radius:7px;padding:6px 13px;font-size:12px;font-weight:700">Vetting packet &rarr;</a>{% endif %}
+          <a href="/network/applications" style="color:#86efac;font-size:12px;text-decoration:none">All applications</a>
+          <span style="flex:1"></span>
+          <span style="font-size:10.5px;color:#64748b">matched by {{ 'private link' if dp_vetted.matched_by == 'token' else 'phone number' }}</span>
+        </div>
+      </div>
+      {% endif %}
+
       <div class="card" style="flex-shrink:0">
         <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none" onclick="toggleVehicleDetails()">
           <span>Vehicle Details <span id="vd-chevron" style="font-size:11px;color:#475569;margin-left:6px;transition:transform .2s;display:inline-block;transform:rotate(180deg)">&#9660;</span></span>

@@ -656,6 +656,8 @@ window._partnerOfferCounts = {{ partner_offer_counts|tojson if partner_offer_cou
 // 2026-05-11: window._partnerOfferCounts is set by the /api/bids poll
 // in pollAndRender below. Used here to render the Partner Bid cell so
 // the column persists across auto-poll re-renders.
+window.DP_VETTED = {{ (dp_vetted_phones or {})|tojson }};
+
 function renderRow(b, pc, fp, activeWorker) {
   const _poc = (window._partnerOfferCounts || {})[b.id] || null;
   const _poStar = _poc ? '<span title="Partner offer received" style="color:#fbbf24;font-weight:700;margin-right:3px">&#9733;</span>' : '';
@@ -705,6 +707,20 @@ function renderRow(b, pc, fp, activeWorker) {
   //  - is_db_push: bid created from Dealer DB Search (label: "EW Search")
   //  - default: real customer (name/company/phone)
   const isThalist = (b.phone||'').startsWith('thalist:');
+  // DP_VETTED_ON_BIDS_2026_07_29 — the server-rendered row shows this badge, so
+  // the poll has to as well or the row blinks it away every 15 seconds.
+  const _vd10 = String(b.phone||'').replace(/\D/g,'').slice(-10);
+  const _vd = (window.DP_VETTED||{})[_vd10];
+  // the bid's own contact_name is usually the same string we just printed
+  const _norm = x => String(x||'').trim().toLowerCase();
+  const _vdDup = !!(_vd && _norm(b.contact_name)
+                    && (_norm(b.contact_name) === _norm(_vd.name)
+                        || _norm(b.contact_name) === _norm(_vd.contact)));
+  const vettedCell = _vd
+    ? `<div><span title="Vetted DealerPrice dealer${_vd.name?' - '+_vd.name:''}${_vd.contact?' ('+_vd.contact+')':''}${_vd.rep?' - rep '+_vd.rep:''}" style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(34,197,94,.14);border:1px solid rgba(34,197,94,.35);border-radius:3px;font-size:9px;font-weight:700;color:#4ade80;letter-spacing:.4px;text-transform:uppercase">DealerPrice vetted</span></div>`
+      + (_vd.name ? `<div class="contact-company" style="color:#4ade80;font-size:11px">${_vd.name}</div>` : '')
+      + (_vd.contact ? `<div class="contact-name" style="color:#86efac;font-size:12px">${_vd.contact}</div>` : '')
+    : '';
   const contactCell = b.is_field
     ? `<div class="contact-name">${b.contact_name||'Field Rep'}</div><div><span class="badge-field">${b.contact_role||'Field Rep'}</span></div>`
     : isThalist
@@ -716,12 +732,12 @@ function renderRow(b, pc, fp, activeWorker) {
       + (b.partner_dealer_name ? `<div class="contact-company" style="color:#94a3b8;font-size:11px">${b.partner_dealer_name}</div>` : '')
       + `<div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3);border-radius:3px;font-size:9px;font-weight:700;color:#a78bfa;letter-spacing:.4px;text-transform:uppercase">Dealer DB</span></div>`
     : (b.awaiting_name
-        ? `<div class="contact-name" style="color:#fbbf24">Awaiting name…</div><div class="contact-phone">${b.phone}</div>`
+        ? vettedCell + `<div class="contact-name" style="color:#fbbf24">Awaiting name…</div><div class="contact-phone">${b.phone}</div>`
         : (b.bidder_name
-            ? `<div class="contact-name">${b.bidder_name}</div>`
+            ? vettedCell + `<div class="contact-name">${b.bidder_name}</div>`
               + (b.partner_dealer_name ? `<div class="contact-company" style="color:#a78bfa;font-size:11px">${b.partner_dealer_name}</div>` : '')
               + `<div class="contact-phone">${b.phone}</div>`
-            : `<div class="contact-name">${b.contact_name||b.phone}</div>${b.contact_name?`<div class="contact-phone">${b.phone}</div>`:''}${b.contact_company?`<div class="contact-company">${b.contact_company}</div>`:''}`));
+            : vettedCell + `${_vdDup?'':`<div class="contact-name">${b.contact_name||b.phone}</div>`}${b.contact_name?`<div class="contact-phone">${b.phone}</div>`:''}${b.contact_company?`<div class="contact-company">${b.contact_company}</div>`:''}`));
   const rowClass = ['status-'+b.status, b.is_new ? 'row-new' : '', b.vin_invalid_reason ? 'bad-vin' : '', verifyOpen ? 'needs-verify' : ''].filter(Boolean).join(' ');
   const askPrice = b.asking_price ? `<div style="font-size:15px;font-weight:700;color:#94a3b8">$${Math.round(b.asking_price).toLocaleString()}</div>` : '—';
   const aiPrice  = b.ai_price    ? `<div style="font-size:15px;font-weight:700;color:#a78bfa">$${Math.round(b.ai_price).toLocaleString()}</div>` : '—';
@@ -844,6 +860,10 @@ async function poll() {
 
     // Update vAuto status set
     if (d.vauto_done) _vautoDone = new Set(d.vauto_done);
+    // Refresh the vetted map before rows are rebuilt, so the badge survives
+    // the repaint instead of blinking out until the next full page load.
+    if (d.dp_vetted) window.DP_VETTED = d.dp_vetted;
+
     // 2026-05-11: stash partner offer counts on window so renderRow can
     // re-emit the Partner Bid cell on every auto-poll re-render. Without
     // this the column flickers off-and-on across reload cycles.

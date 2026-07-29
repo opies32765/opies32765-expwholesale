@@ -249,10 +249,88 @@
     </details>
     {% endif %}
 
+    {% if a.status == 'rejected' and not member %}
+      <div style="background:#fef2f2;border:1px solid #fca5a5;border-left:4px solid #b42318;
+                  border-radius:10px;padding:13px 15px;margin-bottom:16px;font-size:13.5px;color:#7f1d1d">
+        ⛔ <b>Declined</b>{% if a.reviewer %} by <b>{{ a.reviewer }}</b>{% endif %}{% if a.reviewed_at %}
+        on {{ a.reviewed_at.strftime('%b %-d, %Y at %-I:%M %p') }}{% endif %}.
+        {% if a.review_notes %}<br><span style="color:#991b1b">Reason: {{ a.review_notes }}</span>{% endif %}
+        {% if decline_live %}<br><span style="font-size:12px;color:#b45309">A decline letter was emailed to the applicant. No reason was given.</span>
+        {% else %}<br><span style="font-size:12px;color:#b45309">The applicant was <b>not</b> emailed — the decline letter is currently switched off.</span>{% endif %}
+      </div>
+    {% endif %}
+
     {% if member %}
       <div class="member">✅ <b>Approved</b> — member #{{ member.id }} provisioned {{ member.approved_at.strftime('%b %-d %-I:%M %p') if member.approved_at else '' }} by {{ member.approved_by }}.
         Access link sent to {{ member.contact_phone }} / {{ member.contact_email }}.<br>
         Token: <code>{{ member.token }}</code> · submits: {{ member.submit_count }}</div>
+
+      {# DP_SALES_REP_2026_07_29: who owns this account. Reversible on purpose -
+         accounts move between reps - so the control stays on the page and every
+         move is written to dealerprice_rep_assignments instead of overwriting. #}
+      <div class="card full" style="margin-bottom:16px;{% if not member.sales_rep %}border-left:4px solid #f59e0b{% else %}border-left:4px solid #16a34a{% endif %}">
+        <h3 style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+          Account owner
+          {% if member.sales_rep %}
+            <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:3px 12px;font-size:13px;font-weight:800">{{ member.sales_rep }}</span>
+          {% else %}
+            <span style="background:#fef3c7;color:#92400e;border-radius:999px;padding:3px 12px;font-size:12px;font-weight:700">Unassigned</span>
+          {% endif %}
+        </h3>
+
+        {% if member.sales_rep and member.sales_rep_assigned_at %}
+        <div style="font-size:12px;color:#8a94a4;margin:-4px 0 10px">
+          assigned {{ member.sales_rep_assigned_at.strftime('%b %-d, %Y at %-I:%M %p') }}{% if member.sales_rep_assigned_by %} by {{ member.sales_rep_assigned_by }}{% endif %}
+        </div>
+        {% elif not member.sales_rep %}
+        <div style="font-size:12.5px;color:#92400e;margin:-4px 0 10px">
+          Nobody owns this dealer yet — assign a rep so their bids route to a person.
+        </div>
+        {% endif %}
+
+        {% if approve_err == 'rep' %}
+        <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:8px;padding:9px 12px;
+                    margin-bottom:10px;font-size:12.5px;color:#7f1d1d">
+          That rep isn’t on the list — nothing was changed.
+        </div>
+        {% endif %}
+
+        <form method="post" action="/network/application/{{ a.id }}/assign-rep"
+              style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+          <select name="sales_rep" id="repSelect"
+                  style="border:1px solid #cdd6e2;border-radius:8px;padding:8px 12px;font-size:14px;
+                         font-weight:600;background:#fff;color:#0f172a;min-width:180px">
+            <option value="">— unassigned —</option>
+            {% for rep in sales_reps %}
+              <option value="{{ rep }}" {% if member.sales_rep == rep %}selected{% endif %}>{{ rep }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit"
+                  style="background:#0f172a;color:#fff;border:0;border-radius:8px;padding:9px 18px;
+                         font-size:13.5px;font-weight:700;cursor:pointer">
+            {% if member.sales_rep %}Change owner{% else %}Assign{% endif %}
+          </button>
+          <span style="font-size:12px;color:#8a94a4">can be changed later</span>
+        </form>
+
+        {% if rep_history %}
+        <details style="margin-top:12px">
+          <summary style="cursor:pointer;font-size:12.5px;color:#5a6472">Assignment history ({{ rep_history|length }})</summary>
+          <table style="width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px">
+            {% for h in rep_history %}
+            <tr style="border-top:1px solid #eef0f3">
+              <td style="padding:5px 8px 5px 0;color:#0f172a">
+                {% if h.prev_rep %}{{ h.prev_rep }} &rarr; {% endif %}<b>{{ h.rep or 'unassigned' }}</b>
+              </td>
+              <td style="padding:5px 8px;color:#8a94a4">{{ h.assigned_by or '—' }}</td>
+              <td style="padding:5px 0;color:#8a94a4;text-align:right">{{ h.assigned_at.strftime('%b %-d, %-I:%M %p') if h.assigned_at else '' }}</td>
+            </tr>
+            {% endfor %}
+          </table>
+        </details>
+        {% endif %}
+      </div>
+
       <div class="card full" style="margin-bottom:16px">
         <h3>Bids from this dealer ({{ member_bids|length }})</h3>
         {% if member_bids %}
@@ -347,19 +425,119 @@
 
     {% if a.review_notes %}<div class="card full" style="margin-top:14px"><h3>Reviewer notes</h3><div class="v">{{ a.review_notes }}</div></div>{% endif %}
 
-    {% if not member %}
+    {% if not member and a.status != 'rejected' %}
     <div class="card full" style="margin-top:14px">
       <h3>Decision</h3>
-      <form method="post" action="/network/application/{{ a.id }}/approve">
-        <textarea name="review_notes" placeholder="Optional note (saved with the decision)…"></textarea>
-        <div class="actions">
-          <button class="approve" type="submit">✓ Approve &amp; provision access</button>
+      {# DP_APPROVER_2026_07_29: one shared login, so the session cannot tell who is
+         clicking. Ask, stamp it, and refuse to proceed without it. The button is
+         held disabled until a name is chosen so nobody can just hit the green. #}
+      {% if approve_err == 'pick' %}
+      <div style="display:flex;gap:9px;align-items:flex-start;background:#fef2f2;border:1px solid #fca5a5;
+                  border-left:4px solid #dc2626;border-radius:9px;padding:11px 13px;margin-bottom:13px">
+        <span style="font-size:15px;line-height:1.2">⚠️</span>
+        <div style="font-size:13px;color:#7f1d1d;line-height:1.45">
+          <strong>Nothing happened.</strong> Choose your name in <em>Acting as</em> first —
+          every decision has to be signed by the person making it.
+        </div>
+      </div>
+      {% endif %}
+      <form method="post" action="/network/application/{{ a.id }}/approve" id="approveForm">
+        <textarea name="review_notes" placeholder="Optional note — also used as the reason if you decline…"></textarea>
+
+        <div id="approveWho"
+             style="display:flex;align-items:center;gap:11px;flex-wrap:wrap;margin:12px 0 4px;
+                    background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:11px 13px">
+          <label for="approved_by" style="font-size:13px;color:#78350f;font-weight:700;white-space:nowrap">
+            Acting as
+          </label>
+          <select id="approved_by" name="approved_by" required
+                  style="border:1px solid #d6a419;border-radius:8px;padding:8px 12px;font-size:14px;
+                         font-weight:600;background:#fff;color:#0f172a;min-width:190px">
+            <option value="">— select your name —</option>
+            {% for who in approvers %}<option value="{{ who }}">{{ who }}</option>{% endfor %}
+          </select>
+          <span id="approveHint" style="font-size:12.5px;color:#92400e;font-weight:600">
+            ← Pick your name to unlock these buttons
+          </span>
+        </div>
+
+        <div class="actions" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button class="approve" type="submit" id="approveBtn" disabled
+                  style="opacity:.45;cursor:not-allowed;filter:grayscale(.7)">
+            Approve
+          </button>
+          {# DP_SALES_REP_2026_07_29: assign the owner in the same action as the
+             approval - a dealer with nobody on it is the failure mode. Optional,
+             and changeable afterwards from the Account owner card. #}
+          <select name="sales_rep" id="approveRep"
+                  style="border:1px solid #cdd6e2;border-radius:8px;padding:9px 12px;
+                         font-size:13.5px;font-weight:600;background:#fff;color:#0f172a">
+            <option value="">— assign a rep —</option>
+            {% for rep in sales_reps %}<option value="{{ rep }}">{{ rep }}</option>{% endfor %}
+          </select>
+          <span style="flex:1"></span>
+          <button type="submit" id="declineBtn" disabled
+                  formaction="/network/application/{{ a.id }}/reject"
+                  style="opacity:.45;cursor:not-allowed;filter:grayscale(.7);
+                         background:#fff;color:#b42318;border:1px solid #f0b4ac;
+                         border-radius:8px;padding:9px 16px;font-size:13.5px;font-weight:700">
+            Decline
+          </button>
         </div>
       </form>
-      <div class="actions" style="margin-top:6px">
-        <form class="inline" method="post" action="/network/application/{{ a.id }}/needs-info"><button class="info" type="submit">Needs more info</button></form>
-        <form class="inline" method="post" action="/network/application/{{ a.id }}/reject"><button class="reject" type="submit">Reject</button></form>
-      </div>
+      <script>
+      var DECLINE_EFFECT = {% if decline_live %}
+        'The applicant will be emailed a short decline letter. No reason is given.'
+      {% else %}
+        'No email will be sent \u2014 the decline letter is currently switched off.'
+      {% endif %};
+      (function(){
+        var f=document.getElementById('approveForm');
+        if(!f) return;
+        var sel =document.getElementById('approved_by'),
+            btn =document.getElementById('approveBtn'),
+            dbtn=document.getElementById('declineBtn'),
+            hint=document.getElementById('approveHint'),
+            box =document.getElementById('approveWho'),
+            notes=f.review_notes,
+            clicked=null;
+        function paint(b,ok,onColor){
+          b.disabled=!ok;
+          b.style.opacity= ok?'1':'.45';
+          b.style.cursor = ok?'pointer':'not-allowed';
+          b.style.filter = ok?'none':'grayscale(.7)';
+        }
+        function sync(){
+          var ok=!!sel.value;
+          paint(btn,ok); paint(dbtn,ok);
+          hint.textContent = ok ? ('\u2713 Acting as ' + sel.value)
+                                : '\u2190 Pick your name to unlock these buttons';
+          hint.style.color     = ok?'#166534':'#92400e';
+          box.style.background = ok?'#f0fdf4':'#fffbeb';
+          box.style.borderColor= ok?'#86efac':'#fcd34d';
+        }
+        sel.addEventListener('change', sync);
+        sync();
+        btn.addEventListener('click',  function(){ clicked='approve'; });
+        dbtn.addEventListener('click', function(){ clicked='decline'; });
+        f.addEventListener('submit', function(e){
+          if(!sel.value){ e.preventDefault(); sel.focus(); return false; }
+          if(clicked==='decline'){
+            var who=sel.value;
+            if(!confirm('Decline this application as '+who+'?\n\n'
+                        +DECLINE_EFFECT+'\n\nThis cannot be undone from here.')){
+              e.preventDefault(); return false;
+            }
+            dbtn.textContent='Declining\u2026';
+          } else {
+            btn.textContent='Approving\u2026';
+          }
+          // one decision per page - the server refuses a second one regardless
+          paint(btn,false); paint(dbtn,false);
+          btn.disabled=true; dbtn.disabled=true;
+        });
+      })();
+      </script>
     </div>
     {% endif %}
 

@@ -49,6 +49,18 @@
             {% if bid.partner_dealer_name %}<div class="contact-company" style="color:#94a3b8;font-size:11px">{{ bid.partner_dealer_name }}</div>{% endif %}
             <div><span style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3);border-radius:3px;font-size:9px;font-weight:700;color:#a78bfa;letter-spacing:.4px;text-transform:uppercase">Dealer DB</span></div>
           {% else %}
+          {# DP_VETTED_ON_BIDS_2026_07_29 - an approved DealerPrice dealer sent this in.
+             Resolved by phone in the dashboard route (one bulk query), so a dealer who
+             simply TEXTS a car still gets identified. #}
+          {% set _v10 = (bid.phone or '')|replace('+','')|replace('-','')|replace(' ','')|replace('(','')|replace(')','') %}
+          {% set _vd = (dp_vetted_phones or {}).get(_v10[-10:]) %}
+          {% if _vd %}
+            <div><span title="Vetted DealerPrice dealer{% if _vd.name %} - {{ _vd.name }}{% endif %}{% if _vd.contact %} ({{ _vd.contact }}){% endif %}{% if _vd.rep %} - rep {{ _vd.rep }}{% endif %}" style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(34,197,94,.14);border:1px solid rgba(34,197,94,.35);border-radius:3px;font-size:9px;font-weight:700;color:#4ade80;letter-spacing:.4px;text-transform:uppercase">DealerPrice vetted</span></div>
+            {% if _vd.name %}<div class="contact-company" style="color:#4ade80;font-size:11px">{{ _vd.name }}</div>{% endif %}
+            {# the individual, not just the store - the bid's own contact_name is
+               often the dealership, so the person is only on the member record #}
+            {% if _vd.contact %}<div class="contact-name" style="color:#86efac;font-size:12px">{{ _vd.contact }}</div>{% endif %}
+          {% endif %}
             {% if bid.awaiting_name %}
               <div class="contact-name" style="color:#fbbf24">Awaiting name…</div>
               <div class="contact-phone">{{ bid.phone }}</div>
@@ -59,7 +71,13 @@
               {% endif %}
               <div class="contact-phone">{{ bid.phone }}</div>
             {% else %}
-              <div class="contact-name">{{ bid.contact_name or bid.phone }}</div>
+              {# A vetted dealer already printed the store and the person above.
+                 The bid's own contact_name is usually the SAME string as one of
+                 them, so printing it again just reads as a duplicate. #}
+              {% set _cn = (bid.contact_name or '')|trim %}
+              {% set _dup = _vd and _cn and (_cn|lower == (_vd.name or '')|trim|lower
+                                             or _cn|lower == (_vd.contact or '')|trim|lower) %}
+              {% if not _dup %}<div class="contact-name">{{ bid.contact_name or bid.phone }}</div>{% endif %}
               {% if bid.contact_name %}<div class="contact-phone">{{ bid.phone }}</div>{% endif %}
               {% if bid.contact_company %}<div class="contact-company">{{ bid.contact_company }}</div>{% endif %}
             {% endif %}

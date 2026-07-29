@@ -17,7 +17,7 @@ systemd services, cron jobs, and manual runs without per-launcher env plumbing:
 Enabled when env EW_LOCAL_BRAIN=1 OR the flag file /opt/expwholesale/LOCAL_BRAIN_ON
 exists. It can never break EW: any error in the local path -> the original Gemini call.
 Kill switch (no restart): rm /opt/expwholesale/LOCAL_BRAIN_ON."""
-import os, json, base64, urllib.request
+import os, json, base64, urllib.request, urllib.error
 
 _FLAG = "/opt/expwholesale/LOCAL_BRAIN_ON"
 _ENVFILE = "/etc/ew-brain.env"
@@ -103,6 +103,17 @@ def _flatten(contents):
                 text.append(p.text)
     return "\n".join(text), imgs
 
+# BRAIN_CTX_RETRY_2026_07_29: vLLM rejects (HTTP 400) when
+# prompt_tokens + max_tokens > max_model_len. Call sites request
+# max_output_tokens=8000 into a 32,768 window, so the real prompt ceiling was
+# 24,768 — and the assessment model only ever emits ~130 tokens (measured max 154
+# over 191 July assessments). Every breach used to land in the `except` below and
+# silently leave the local brain for Gemini: ~9.9% of July assessments.
+# Reserving less output is free, so try a descending ladder before giving up.
+# Only ever runs on a request that has ALREADY failed outright.
+_CTX_RETRY_LADDER = (2048, 512)
+
+
 def _call_brain(model, contents, config):
     prompt, imgs = _flatten(contents)
     if imgs:
@@ -112,11 +123,7 @@ def _call_brain(model, contents, config):
                 "url": "data:" + mime + ";base64," + base64.b64encode(data).decode()}})
     else:
         content = prompt or ""
-    body = {"model": "ew-brain",
-            "messages": [{"role": "user", "content": content}],
-            "max_tokens": int(_cfg(config, "max_output_tokens", 1024) or 1024),
-            "temperature": float(_cfg(config, "temperature", 0.4) or 0.0),
-            "chat_template_kwargs": {"enable_thinking": False}}
+    want = int(_cfg(config, "max_output_tokens", 1024) or 1024)
     # Cloudflare Bot-Fight blocks the default "Python-urllib/x" UA with a fast 403
     # (verified: browser UA -> 200, urllib UA -> 403). Send a browser UA so the
     # named tunnel lets server-to-server POSTs through. Same lesson as AccuTrade CDN.
@@ -126,9 +133,43 @@ def _call_brain(model, contents, config):
                "Accept": "application/json"}
     k = _conf("EW_BRAIN_KEY")
     if k: headers["Authorization"] = "Bearer " + k
-    req = urllib.request.Request(_url(), data=json.dumps(body).encode(), headers=headers)
-    with urllib.request.urlopen(req, timeout=float(_conf("EW_BRAIN_TIMEOUT", "45"))) as r:
-        j = json.loads(r.read().decode())
+
+    def _attempt(maxtok):
+        body = {"model": "ew-brain",
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": maxtok,
+                "temperature": float(_cfg(config, "temperature", 0.4) or 0.0),
+                "chat_template_kwargs": {"enable_thinking": False}}
+        req = urllib.request.Request(_url(), data=json.dumps(body).encode(),
+                                     headers=headers)
+        with urllib.request.urlopen(
+                req, timeout=float(_conf("EW_BRAIN_TIMEOUT", "45"))) as r:
+            return json.loads(r.read().decode())
+
+    try:
+        j = _attempt(want)
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try: detail = e.read().decode()[:400]
+        except Exception: pass
+        # Only squeeze on a genuine context overflow — never mask a real 400.
+        if e.code != 400 or "maximum context length" not in detail:
+            raise
+        j = None
+        for _mt in _CTX_RETRY_LADDER:
+            if _mt >= want:
+                continue
+            try:
+                j = _attempt(_mt)
+                try: print("[local-brain-shim] ctx-squeeze: max_tokens %d->%d, stayed local"
+                           % (want, _mt), flush=True)
+                except Exception: pass
+                break
+            except Exception:
+                continue
+        if j is None:
+            raise
+
     txt = (j.get("choices") or [{}])[0].get("message", {}).get("content")
     if not txt or not txt.strip():
         raise RuntimeError("empty brain response")
