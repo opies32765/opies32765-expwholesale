@@ -298,7 +298,10 @@ if (TBODY) TBODY.addEventListener('click', function(e){
 
 /* remove / restore */
 if (TBODY) TBODY.addEventListener('click', function(e){
-  var btn = e.target.closest('[data-act]'); if (!btn) return;
+  // Scoped to remove/undo ONLY. This used to match [data-act], which also caught
+  // the email pencil (data-act="mail"), so editing an address fired the remove
+  // confirm too - two dialogs for one click.
+  var btn = e.target.closest('[data-act="remove"],[data-act="undo"]'); if (!btn) return;
   var tr = btn.closest('tr'); var id = tr.getAttribute('data-id');
   var undo = btn.getAttribute('data-act') === 'undo';
   var who = (tr.querySelector('.dname') || {}).textContent || 'this dealer';
