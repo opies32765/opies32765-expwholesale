@@ -2812,7 +2812,9 @@ def network_outreach():
     tpl = cur.fetchone()
     cur.execute("""
         SELECT t.id, t.name, t.email, t.phone, t.store_count, t.stores,
-               t.total_profit, t.src_deals, t.buy_deals, t.days_since, t.sold_days,
+               t.total_profit, t.src_profit, t.buy_profit,
+               t.src_deals, t.buy_deals, t.days_since, t.sold_days,
+               t.email_original, t.email_edited_by,
                t.status AS target_status,
                e.id AS email_id, e.status AS email_status, e.sent_at,
                e.opens, e.proxy_opens, e.clicks, e.first_open_at, e.last_click_at,
@@ -2897,4 +2899,54 @@ def network_outreach_remove():
     except Exception as e:
         db.rollback(); db.close()
         print('[dp-outreach] remove %s: %s' % (tid, e), flush=True)
+        return jsonify(ok=False, error=str(e)[:200]), 500
+
+
+# ── EMAIL_EDIT_2026_07_30 — correct a contact address before the send ────────
+# Addresses come out of LSL and some are stale, mistyped or a general inbox that
+# will not reach the buyer. Management needs to fix one without a DBA. The
+# original is kept so a "correction" that was actually a mistake is recoverable.
+
+
+@bp.route('/network/outreach/email', methods=['POST'])
+def network_outreach_email():
+    tid = _int(request.form.get('id'))
+    new = (_s(request.form.get('email')) or '').strip().lower()
+    if not tid:
+        return jsonify(ok=False, error='no id'), 400
+    # Shape check only. Verifying an address really exists is not possible from
+    # here (both of EW's own reply domains accept-all), so a bounce is what
+    # actually proves it — which is exactly what the Bounced column is for.
+    if not re.match(r'^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$', new):
+        return jsonify(ok=False, error='That does not look like an email address.'), 400
+    db = _db(); cur = db.cursor()
+    try:
+        cur.execute("SELECT email, email_original, sent_at FROM dp_outreach_targets WHERE id=%s",
+                    (tid,))
+        row = cur.fetchone()
+        if not row:
+            db.close(); return jsonify(ok=False, error='not found'), 404
+        if (row['email'] or '').lower() == new:
+            db.close(); return jsonify(ok=True, email=new, unchanged=True)
+        # Never let two rows share an address — the send is keyed on it, and a
+        # duplicate would mean one person receiving the campaign twice.
+        cur.execute("SELECT name FROM dp_outreach_targets WHERE lower(email)=%s AND id<>%s",
+                    (new, tid))
+        clash = cur.fetchone()
+        if clash:
+            db.close()
+            return jsonify(ok=False,
+                           error='%s already uses that address.' % clash['name']), 409
+        cur.execute("""UPDATE dp_outreach_targets
+                          SET email_original = COALESCE(email_original, email),
+                              email = %s, email_edited_at = now(), email_edited_by = %s
+                        WHERE id=%s""", (new, _reviewer(), tid))
+        db.commit()
+        print('[dp-outreach] email #%s %r -> %r by %s'
+              % (tid, row['email'], new, _reviewer()), flush=True)
+        db.close()
+        return jsonify(ok=True, email=new, was=row['email'])
+    except Exception as e:
+        db.rollback(); db.close()
+        print('[dp-outreach] email edit %s: %s' % (tid, e), flush=True)
         return jsonify(ok=False, error=str(e)[:200]), 500
