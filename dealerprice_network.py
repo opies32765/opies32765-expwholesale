@@ -347,6 +347,8 @@ def _invite_html(name, link):
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%" style="font-size:14px;line-height:1.6;color:#334155">
           <tr><td style="padding:3px 0" valign="top" width="22">&bull;</td><td style="padding:3px 0">Type the <b>VIN and mileage</b></td></tr>
           <tr><td style="padding:3px 0" valign="top">&bull;</td><td style="padding:3px 0">Or just <b>photograph the VIN plate and the odometer</b> &mdash; we read them automatically</td></tr>
+          <!-- SCREENSHOT_OPTION_2026_07_30 -->
+          <tr><td style="padding:3px 0" valign="top">&bull;</td><td style="padding:3px 0">Or <b>screenshot the VIN and miles</b> from vAuto, your DMS or inventory system &mdash; we read that too</td></tr>
           <tr><td style="padding:3px 0" valign="top">&bull;</td><td style="padding:3px 0">Add as many <b>photos of the car</b> as you want</td></tr>
         </table>
       </td></tr>
@@ -1567,10 +1569,11 @@ def _invite_member(m):
         % name +
         "Two ways to get us a car.\n\n"
         "1) Your private page, no time limit:\n%s\n\n" % link +
-        "2) Or just text this number. Type the VIN and mileage, or snap a photo "
-        "of the VIN plate and the odometer - we read them for you. Add as many "
-        "car photos as you like. Everything for ONE car must land within 60 "
-        "seconds; after that, the next message starts a new car.")
+        "2) Or just text this number. Type the VIN and mileage, snap a photo of "
+        "the VIN plate and the odometer, or screenshot them from vAuto or your "
+        "DMS - we read any of those. Add as many car photos as you like. "
+        "Everything for ONE car must land within 60 seconds; after that, the "
+        "next message starts a new car.")
     if not live:
         sms_body = '[TEST->%s] %s' % (_s(m.get('contact_phone')) or 'no-phone', sms_body)
     for _t in (rehearse_to or ([to_phone] if to_phone else [])):
