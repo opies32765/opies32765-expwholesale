@@ -828,10 +828,15 @@ def _lsl_history(name, supplier_id=None, matched_name=None):
             for v, r in _bby.items():
                 if v in pay_vins:
                     continue
+                # BUY_GROSS_2026_07_30 — show what EW actually MADE on the car.
+                # This was hard-coded to 0, so every car a dealer sold us showed
+                # "EW gross —" and the packet read as though we made nothing on
+                # 18 cars. front_value on the resale IS our gross on that unit.
                 cars.append({'order': _s(r['stock_no']), 'vin': v,
                              'amount': int(r['purchase_cost'] or 0),
                              'date': (_s(r['sold_at']))[:10] or None,
-                             'dir': 'buy', 'gross': 0, 'kind': 'EW bought from them'})
+                             'dir': 'buy', 'gross': int(r['front_value'] or 0),
+                             'kind': 'EW bought from them'})
             for r in sell_rows:
                 cars.append({'order': _s(r['stock_no']), 'vin': _s(r['vin_no']),
                              'amount': int(r['sale_price'] or 0),
