@@ -166,7 +166,7 @@
         <th class="s num" data-sort="n">Clicks <span class="ar">&#9650;&#9660;</span></th>
         <th class="s" data-sort="t">Applied <span class="ar">&#9650;&#9660;</span></th>
         <th class="s num" data-sort="n" title="EW gross profit (front value) across every deal this contact was on either side of. Buy = cars we bought from them and resold. Sell = cars we sold to them. Correct per dealer; do not total the column.">EW profit <span class="ar">&#9650;&#9660;</span></th>
-        <th class="s num" data-sort="n" title="Days since they last SOLD us a car — the win-back clock. &quot;never sold&quot; means they only ever bought from us.">Quiet (sell side) <span class="ar">&#9650;&#9660;</span></th>
+        <th class="s num" data-sort="n" title="Days since ANY deal with us, either direction — bought or sold. The smaller figure underneath is the sell side only: how long since they last sold US a car.">Quiet (any deal) <span class="ar">&#9650;&#9660;</span></th>
         <th>Review</th>
       </tr></thead>
       <tbody>
@@ -206,7 +206,10 @@
             <span class="money"><span>${{ '{:,.0f}'.format(r.total_profit) }}</span>
               {% if r.src_profit or r.buy_profit %}<span class="sub">buy ${{ '{:,.0f}'.format(r.src_profit or 0) }} · sell ${{ '{:,.0f}'.format(r.buy_profit or 0) }}</span>{% endif %}</span>
           {% else %}<span class="muted">—</span>{% endif %}</td>
-          <td class="num">{% if r.sold_days %}{{ r.sold_days }}d{% elif r.days_since is not none %}<span class="muted" title="never sold us a car — {{ r.days_since }}d since any activity">never sold</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="num">{% if r.days_since is not none %}
+            <span class="money"><span>{{ r.days_since }}d</span>
+              <span class="sub">{% if r.sold_days %}sell side {{ r.sold_days }}d{% else %}never sold to us{% endif %}</span></span>
+          {% else %}<span class="muted">—</span>{% endif %}</td>
           <td>
             {% if r.sent_at %}<span class="muted" title="already sent — cannot be un-sent">sent</span>
             {% elif r.removed_at %}<button class="undo" data-act="undo">Restore</button>

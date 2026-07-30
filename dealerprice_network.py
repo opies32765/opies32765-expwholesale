@@ -33,7 +33,7 @@ import json
 import time
 import base64
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 
 from flask import (Blueprint, render_template, request, jsonify, abort,
                    session, redirect, url_for, send_file, current_app)
@@ -2800,6 +2800,9 @@ def _dpo_link_applications(cur):
 
 @bp.route('/network/outreach')
 def network_outreach():
+    # QUIET_LIVE_2026_07_30 — the clocks came from a snapshot and went stale;
+    # refresh them from LSL (cached 10 min) before anything is read.
+    _dpo_refresh_quiet()
     db = _db(); cur = db.cursor()
     try:
         _dpo_link_applications(cur)
@@ -2950,3 +2953,96 @@ def network_outreach_email():
         db.rollback(); db.close()
         print('[dp-outreach] email edit %s: %s' % (tid, e), flush=True)
         return jsonify(ok=False, error=str(e)[:200]), 500
+
+# ── QUIET_LIVE_2026_07_30 — recompute the quiet clocks from LSL ──────────────
+# The clocks were carried over from the 2026-07-06 report and frozen there, so
+# by launch they were 24 days stale and drifting: Scott Ales read 440d when the
+# truth was 464d, and Ultimo Northbrook read 6d having actually dealt two days
+# ago. A list management is deciding cut-offs on cannot be a month behind.
+#
+# Recomputed from LSL by store name (a contact can hold several rooftops, so the
+# clock is the most recent deal across ALL of them):
+#   last_any  — most recent deal in EITHER direction  -> days_since
+#   last_sell — most recent car they SOLD us          -> sold_days
+#
+# One pass over deals, cached for 10 minutes. crm.db is a local file and the
+# whole table is ~29k rows, so this is cheap; the cache exists to stop ten open
+# dashboards each rebuilding it.
+
+_QUIET_CACHE = {'t': 0.0}
+
+
+def _dpo_refresh_quiet(force=False):
+    """Recompute days_since / sold_days from LSL. Never raises into the page."""
+    now = time.time()
+    if not force and (now - _QUIET_CACHE['t']) < 600:
+        return None
+    _QUIET_CACHE['t'] = now
+    try:
+        c = _lsl_conn()
+        last_any, last_sell = {}, {}
+
+        def bump(d, k, v):
+            if k and v and (k not in d or v > d[k]):
+                d[k] = v
+
+        # they SOLD us the car — source_name, corroborated by inventory elsewhere
+        for r in c.execute("SELECT source_name, max(sold_at) d FROM deals "
+                           "WHERE source_name IS NOT NULL AND source_name<>'' "
+                           "GROUP BY source_name"):
+            k = _normalize_name(r['source_name'])
+            bump(last_sell, k, (r['d'] or '')[:10])
+            bump(last_any, k, (r['d'] or '')[:10])
+        # we SOLD them the car — customer/supplier side of the deal row
+        for r in c.execute("SELECT supplier_name, max(sold_at) d FROM deals "
+                           "WHERE supplier_name IS NOT NULL AND supplier_name<>'' "
+                           "GROUP BY supplier_name"):
+            bump(last_any, _normalize_name(r['supplier_name']), (r['d'] or '')[:10])
+        # money we paid them — catches suppliers with no resale deal row yet
+        for r in c.execute("SELECT vendor_name, max(created_at) d FROM payments "
+                           "WHERE type='Purchased' AND vendor_name IS NOT NULL "
+                           "GROUP BY vendor_name"):
+            k = _normalize_name(r['vendor_name'])
+            bump(last_sell, k, (r['d'] or '')[:10])
+            bump(last_any, k, (r['d'] or '')[:10])
+        c.close()
+
+        today = datetime.now().date()
+
+        def age(iso):
+            try:
+                y, m, d = (int(x) for x in iso.split('-')[:3])
+                return (today - date(y, m, d)).days
+            except Exception:
+                return None
+
+        db = _db(); cur = db.cursor()
+        cur.execute("SELECT id, stores, name FROM dp_outreach_targets")
+        rows = cur.fetchall()
+        n = 0
+        for r in rows:
+            names = r['stores'] if isinstance(r['stores'], list) else []
+            if not names:
+                names = [r['name']]
+            a = s = None
+            for nm in names:
+                k = _normalize_name(nm)
+                va, vs = last_any.get(k), last_sell.get(k)
+                if va and (a is None or va > a):
+                    a = va
+                if vs and (s is None or vs > s):
+                    s = vs
+            da, ds = (age(a) if a else None), (age(s) if s else None)
+            cur.execute("UPDATE dp_outreach_targets SET days_since=%s, sold_days=%s "
+                        "WHERE id=%s AND (days_since IS DISTINCT FROM %s "
+                        "                 OR sold_days IS DISTINCT FROM %s)",
+                        (da, ds, r['id'], da, ds))
+            n += cur.rowcount
+        db.commit(); db.close()
+        if n:
+            print('[dp-outreach] quiet clocks refreshed from LSL: %d row(s) changed' % n,
+                  flush=True)
+        return n
+    except Exception as e:
+        print('[dp-outreach] quiet refresh: %s' % e, flush=True)
+        return None
