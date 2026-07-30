@@ -737,12 +737,42 @@ def _lsl_history(name, supplier_id=None, matched_name=None):
                 "SELECT vin_no, purchase_cost, sale_price, front_value, sold_at, stock_no "
                 "FROM deals WHERE supplier_id=?", (supplier_id,)).fetchall()
 
+            # SOURCE_LEG_2026_07_30 — cars EW bought from them that were never
+            # booked as a Purchased payment. Keyed on inventory.purchased_from_id
+            # (an ID, per audit rule 3 — never on source_name, which collides).
+            # Without this the buy side is payments-only and 1,856 of 1,999
+            # source dealers read "0 bought".
+            brows_raw = c.execute(
+                "SELECT d.vin_no, d.purchase_cost, d.sale_price, d.front_value, "
+                "       d.sold_at, d.stock_no "
+                "FROM deals d JOIN inventory i ON i.vin_no = d.vin_no "
+                "WHERE i.purchased_from_id=?", (supplier_id,)).fetchall()
+            # one row per VIN (a car can carry several deal rows); keep the latest
+            _bby = {}
+            for r in brows_raw:
+                v = _s(r['vin_no'])
+                if not v:
+                    continue
+                if v not in _bby or (_s(r['sold_at']) or '') > (_s(_bby[v]['sold_at']) or ''):
+                    _bby[v] = r
+            brows = list(_bby.values())
+
             pay_vins = set(_s(r['vin_no']) for r in prows if _s(r['vin_no']))
+            src_vins = set(_bby.keys())
             sold_vins = set(_s(r['vin_no']) for r in srows if _s(r['vin_no']))
-            bought_vins = pay_vins
+            # union: the payments leg is a strict SUBSET of the source leg in
+            # every case measured, so this never double-counts a car.
+            bought_vins = pay_vins | src_vins
+            # money EW paid: payment amounts, plus purchase_cost for source-leg
+            # cars that have no payment row (else those cars count as $0).
+            src_only_paid = int(sum(r['purchase_cost'] or 0
+                                    for v, r in _bby.items() if v not in pay_vins))
+            src_dates = sorted((_s(r['sold_at']))[:10] for r in brows if _s(r['sold_at']))
             if not bought_vins and not sold_vins:
                 return {}
             pay_dates = sorted((_s(r['created_at']))[:10] for r in prows if _s(r['created_at']))
+            # buy first/last must span BOTH buy legs, not payments only
+            buy_dates = sorted(pay_dates + src_dates)
             sell_dates = sorted((_s(r['sold_at']))[:10] for r in srows if _s(r['sold_at']))
 
             # ── what EW made on this relationship ────────────────────────────
@@ -786,6 +816,15 @@ def _lsl_history(name, supplier_id=None, matched_name=None):
                              'amount': int(r['amount'] or 0),
                              'date': (_s(r['created_at']))[:10] or None,
                              'dir': 'buy', 'gross': 0, 'kind': 'EW bought from them'})
+            # SOURCE_LEG_2026_07_30 — buys with no payment row (skip any VIN the
+            # payments leg already listed so a car never appears twice).
+            for v, r in _bby.items():
+                if v in pay_vins:
+                    continue
+                cars.append({'order': _s(r['stock_no']), 'vin': v,
+                             'amount': int(r['purchase_cost'] or 0),
+                             'date': (_s(r['sold_at']))[:10] or None,
+                             'dir': 'buy', 'gross': 0, 'kind': 'EW bought from them'})
             for r in sell_rows:
                 cars.append({'order': _s(r['stock_no']), 'vin': _s(r['vin_no']),
                              'amount': int(r['sale_price'] or 0),
@@ -818,9 +857,9 @@ def _lsl_history(name, supplier_id=None, matched_name=None):
                 'matched': True,
                 # ── EW BOUGHT FROM them ──
                 'bought_cars': len(bought_vins),
-                'bought_paid': int(sum(r['amount'] or 0 for r in prows)),
-                'buy_first': pay_dates[0] if pay_dates else None,
-                'buy_last': pay_dates[-1] if pay_dates else None,
+                'bought_paid': int(sum(r['amount'] or 0 for r in prows)) + src_only_paid,
+                'buy_first': buy_dates[0] if buy_dates else None,
+                'buy_last': buy_dates[-1] if buy_dates else None,
                 'titles_pending': sum(1 for r in prows if _s(r['title_status']) != 'Yes'),
                 # ── EW SOLD TO them ──
                 'sold_cars': len(sell_rows),
