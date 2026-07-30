@@ -759,6 +759,13 @@ def _lsl_history(name, supplier_id=None, matched_name=None):
 
             pay_vins = set(_s(r['vin_no']) for r in prows if _s(r['vin_no']))
             src_vins = set(_bby.keys())
+            # SELF_DEAL_2026_07_30 — a deal row can name the same dealer as BOTH
+            # the source and the customer (EW bought the car from them and their
+            # name is also in the customer field). That is ONE transaction, so it
+            # must not count as a purchase AND a sale. The car belongs to the buy
+            # leg — it is the direction the money actually moved — so drop those
+            # VINs from the sell leg. Keyed on the id pair, never on names.
+            srows = [r for r in srows if _s(r['vin_no']) not in src_vins]
             sold_vins = set(_s(r['vin_no']) for r in srows if _s(r['vin_no']))
             # union: the payments leg is a strict SUBSET of the source leg in
             # every case measured, so this never double-counts a car.
