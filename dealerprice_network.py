@@ -1551,15 +1551,21 @@ def _invite_member(m):
     # break (. ! ?) between any of those verbs and the words VIN/miles/odometer.
     # The guard is correct; do NOT weaken it to make copy fit. Re-test wording
     # against that regex before changing this string.
+    # WELCOME_LINK_MIDDLE_2026_07_30 — the link must NOT be the last thing in
+    # the body. A trailing URL makes the messaging app render a link-preview
+    # card as a SEPARATE bubble, which arrives looking like an empty message
+    # (reported by a real dealer). Same fix as the partner alert above; the
+    # numbered steps are swapped so the link sits in the middle and the body
+    # ends on text. Do not move the URL back to the end.
     sms_body = (
         "Hi %s - you're approved for the Experience Wholesale dealer network.\n\n"
         % name +
-        "Two ways to get us a car.\n"
-        "1) Just text this number. Type the VIN and mileage, or snap a photo of "
-        "the VIN plate and the odometer - we read them for you. Add as many car "
-        "photos as you like. Everything for ONE car must land within 60 seconds; "
-        "after that, the next message starts a new car.\n"
-        "2) Your private page, no time limit: %s" % link)
+        "Two ways to get us a car.\n\n"
+        "1) Your private page, no time limit:\n%s\n\n" % link +
+        "2) Or just text this number. Type the VIN and mileage, or snap a photo "
+        "of the VIN plate and the odometer - we read them for you. Add as many "
+        "car photos as you like. Everything for ONE car must land within 60 "
+        "seconds; after that, the next message starts a new car.")
     if not live:
         sms_body = '[TEST->%s] %s' % (_s(m.get('contact_phone')) or 'no-phone', sms_body)
     for _t in (rehearse_to or ([to_phone] if to_phone else [])):
@@ -2801,7 +2807,7 @@ def network_outreach():
     tpl = cur.fetchone()
     cur.execute("""
         SELECT t.id, t.name, t.email, t.phone, t.store_count, t.stores,
-               t.total_profit, t.src_deals, t.buy_deals, t.days_since,
+               t.total_profit, t.src_deals, t.buy_deals, t.days_since, t.sold_days,
                t.status AS target_status,
                e.id AS email_id, e.status AS email_status, e.sent_at,
                e.opens, e.proxy_opens, e.clicks, e.first_open_at, e.last_click_at,

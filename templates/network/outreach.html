@@ -156,7 +156,7 @@
         <th class="s num" data-sort="n">Clicks <span class="ar">&#9650;&#9660;</span></th>
         <th class="s" data-sort="t">Applied <span class="ar">&#9650;&#9660;</span></th>
         <th class="s num" data-sort="n">Lifetime $ <span class="ar">&#9650;&#9660;</span></th>
-        <th class="s num" data-sort="n">Quiet <span class="ar">&#9650;&#9660;</span></th>
+        <th class="s num" data-sort="n" title="Days since they last SOLD us a car — the win-back clock. &quot;never sold&quot; means they only ever bought from us.">Quiet (sell side) <span class="ar">&#9650;&#9660;</span></th>
         <th>Review</th>
       </tr></thead>
       <tbody>
@@ -193,7 +193,7 @@
           <td class="num">{{ r.clicks or 0 }}</td>
           <td>{% if r.applied_at %}<a class="badge b-apply" href="/network/application/{{ r.application_id }}">applied →</a>{% else %}<span class="muted">—</span>{% endif %}</td>
           <td class="num">{% if r.total_profit %}${{ '{:,.0f}'.format(r.total_profit) }}{% else %}<span class="muted">—</span>{% endif %}</td>
-          <td class="num">{% if r.days_since %}{{ r.days_since }}d{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="num">{% if r.sold_days %}{{ r.sold_days }}d{% elif r.days_since is not none %}<span class="muted" title="never sold us a car — {{ r.days_since }}d since any activity">never sold</span>{% else %}<span class="muted">—</span>{% endif %}</td>
           <td>
             {% if r.sent_at %}<span class="muted" title="already sent — cannot be un-sent">sent</span>
             {% elif r.removed_at %}<button class="undo" data-act="undo">Restore</button>
