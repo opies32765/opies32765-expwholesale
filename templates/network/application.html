@@ -265,12 +265,12 @@
         Access link sent to {{ member.contact_phone }} / {{ member.contact_email }}.<br>
         Token: <code>{{ member.token }}</code> · submits: {{ member.submit_count }}</div>
 
-      {# DP_SALES_REP_2026_07_29: who owns this account. Reversible on purpose -
+      {# DP_SALES_REP_2026_07_29: which salesperson has this account. Reversible on purpose -
          accounts move between reps - so the control stays on the page and every
          move is written to dealerprice_rep_assignments instead of overwriting. #}
       <div class="card full" style="margin-bottom:16px;{% if not member.sales_rep %}border-left:4px solid #f59e0b{% else %}border-left:4px solid #16a34a{% endif %}">
         <h3 style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
-          Account owner
+          Salesperson
           {% if member.sales_rep %}
             <span style="background:#dcfce7;color:#166534;border-radius:999px;padding:3px 12px;font-size:13px;font-weight:800">{{ member.sales_rep }}</span>
           {% else %}
@@ -308,7 +308,7 @@
           <button type="submit"
                   style="background:#0f172a;color:#fff;border:0;border-radius:8px;padding:9px 18px;
                          font-size:13.5px;font-weight:700;cursor:pointer">
-            {% if member.sales_rep %}Change owner{% else %}Assign{% endif %}
+            {% if member.sales_rep %}Change salesperson{% else %}Assign{% endif %}
           </button>
           <span style="font-size:12px;color:#8a94a4">can be changed later</span>
         </form>
@@ -466,13 +466,13 @@
                   style="opacity:.45;cursor:not-allowed;filter:grayscale(.7)">
             Approve
           </button>
-          {# DP_SALES_REP_2026_07_29: assign the owner in the same action as the
+          {# DP_SALES_REP_2026_07_29: assign the salesperson in the same action as the
              approval - a dealer with nobody on it is the failure mode. Optional,
-             and changeable afterwards from the Account owner card. #}
+             and changeable afterwards from the Salesperson card. #}
           <select name="sales_rep" id="approveRep"
                   style="border:1px solid #cdd6e2;border-radius:8px;padding:9px 12px;
                          font-size:13.5px;font-weight:600;background:#fff;color:#0f172a">
-            <option value="">— assign a rep —</option>
+            <option value="">— assign a salesperson —</option>
             {% for rep in sales_reps %}<option value="{{ rep }}">{{ rep }}</option>{% endfor %}
           </select>
           <span style="flex:1"></span>

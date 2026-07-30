@@ -2184,7 +2184,10 @@ def _dp_decline_notify(a, who, reason):
 # to dealerprice_rep_assignments rather than overwriting history.
 DP_SALES_REPS = [r.strip() for r in os.environ.get(
     'DP_SALES_REPS',
-    'Walt,SteveK,Jordan,Patty,Alan,Jenny,Sam B,Todd,Gregg').split(',') if r.strip()]
+    # Joe added 2026-07-30 (operator): he owns accounts too, and was the only
+    # one of the three partners missing here while already in DP_APPROVERS.
+    # Ordered to match DP_APPROVERS so the partners read Joe/Todd/Gregg in both.
+    'Walt,SteveK,Jordan,Patty,Alan,Jenny,Sam B,Joe,Todd,Gregg').split(',') if r.strip()]
 
 
 @bp.route('/network/application/<int:app_id>/assign-rep', methods=['POST'])
