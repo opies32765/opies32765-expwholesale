@@ -222,7 +222,7 @@ def _dp_receipt_html(first, dealership):
 </table></div>""" % {'logo': logo, 'greet': greet, 'dealership': dealership}
 
 
-def _dp_apply_receipt(app_id, dealership, contact_name, email, phone):
+def _dp_apply_receipt(app_id, dealership, contact_name, email, phone, tcpa=False):
     """Text + email the applicant that we have their application. Best-effort:
     a delivery problem must never fail the submission itself."""
     first = (_s(contact_name) or '').split(' ')[0]
@@ -241,6 +241,13 @@ def _dp_apply_receipt(app_id, dealership, contact_name, email, phone):
     body = ('Thanks%s - Experience Wholesale received your dealer application for %s. '
             'We will email you with our decision.'
             % ((' ' + first) if first else '', dealership))
+    # TCPA_REQUIRED_2026_07_30 — never text without consent, even if a row
+    # somehow reaches here without it (rows predating the gate, or a direct API
+    # post). The email below still goes; only the text is withheld.
+    if to_phone and not tcpa:
+        print('[dp-network] apply receipt sms SUPPRESSED app=%s - no TCPA consent'
+              % app_id, flush=True)
+        to_phone = None
     if to_phone:
         try:
             from app import send_sms
@@ -1461,6 +1468,27 @@ def _invite_member(m):
     # ── SMS ──
     phone = _digits(m.get('contact_phone'))
     to_phone = ('+1' + phone) if len(phone) == 10 else None
+    # TCPA_REQUIRED_2026_07_30 — the welcome text is the single most important
+    # message we send (it carries the portal link), which makes it exactly the
+    # one we must not send without consent. Read it from the application; a
+    # member with no linked application, or one that predates the consent gate,
+    # is treated as NO consent and gets the email only. Fails CLOSED on error.
+    if to_phone:
+        _ok = False
+        try:
+            _db2 = _db(); _c2 = _db2.cursor()
+            _c2.execute("SELECT tcpa_consent FROM dealer_applications WHERE id=%s",
+                        (m.get('application_id'),))
+            _r2 = _c2.fetchone()
+            _ok = bool(_r2 and _r2['tcpa_consent'])
+            _db2.close()
+        except Exception as _e2:
+            print('[dp-network] invite tcpa lookup failed (treating as NO consent): %s'
+                  % _e2, flush=True)
+        if not _ok:
+            print('[dp-network] invite sms SUPPRESSED member=%s app=%s - no TCPA consent'
+                  % (m.get('id'), m.get('application_id')), flush=True)
+            to_phone = None
     if not live:
         to_phone = DP_TEST_PHONE or None      # TEST: operator only
     # Rehearsal: the whole team sees the dealer-facing text, the dealer gets nothing.
@@ -1650,6 +1678,16 @@ def api_dp_apply():
         if not _b(d.get('attestation')):
             return jsonify({'ok': False, 'error': 'Please confirm the information is accurate.'}), 400
 
+    # TCPA_REQUIRED_2026_07_30 — applies to EVERY path, new and existing. The
+    # box was rendered and stored but never enforced, so applications arrived
+    # with consent=false and were texted anyway (app #28). Consent is what makes
+    # the receipt text and the approval link legal to send, and onboarding is
+    # SMS-first, so this is required rather than optional.
+    if not _b(d.get('tcpa_consent')):
+        return jsonify({'ok': False,
+                        'error': 'Please agree to receive text messages so we can '
+                                 'send your application updates.'}), 400
+
     types = d.get('dealer_types')
     if isinstance(types, list):
         types = ', '.join(_s(x) for x in types if _s(x))
@@ -1754,7 +1792,8 @@ def api_dp_apply():
     # Tell the applicant we have it (text + email). Wrapped: a receipt problem
     # must never turn a successful submission into an error for the dealer.
     try:
-        _dp_apply_receipt(app_id, dealership, cname, cemail, cphone)
+        _dp_apply_receipt(app_id, dealership, cname, cemail, cphone,
+                          tcpa=_b(d.get('tcpa_consent')))
     except Exception as _e_r:
         print('[dp-network] apply receipt: %s' % _e_r, flush=True)
 
@@ -1849,6 +1888,23 @@ def network_applications():
             r['name_match'] = m
     return render_template('network/applications.html', rows=rows, counts=counts,
                            types=DEALER_TYPES, class_labels=CLASS_LABELS)
+
+
+@bp.route('/network/pending-count')
+def network_pending_count():
+    """Live count for the dashboard nav chip (DP_LIVE_CHIP_2026_07_30).
+
+    Mirrors /api/recon/new-count. Deliberately under /network/ (login-gated),
+    not /api/dealerprice/ which is a PUBLIC prefix for the site bridge.
+    Reuses the same 15s-cached helper the Jinja global uses, so polling every
+    20s from N open dashboards cannot turn into N queries per second.
+    """
+    try:
+        n = _inject_dp_network()['dealer_apps_pending']()
+    except Exception as e:
+        print('[dp-network] pending-count: %s' % e, flush=True)
+        n = 0
+    return jsonify(count=n)
 
 
 @bp.route('/network/members')
