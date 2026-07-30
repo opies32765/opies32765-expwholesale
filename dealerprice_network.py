@@ -2822,7 +2822,7 @@ def network_outreach():
         SELECT t.id, t.name, t.email, t.phone, t.store_count, t.stores,
                t.total_profit, t.src_profit, t.buy_profit,
                t.src_deals, t.buy_deals, t.days_since, t.sold_days,
-               t.email_original, t.email_edited_by,
+               t.email_original, t.email_edited_by, t.last_deal_at,
                t.status AS target_status,
                e.id AS email_id, e.status AS email_status, e.sent_at,
                e.opens, e.proxy_opens, e.clicks, e.first_open_at, e.last_click_at,
@@ -3038,10 +3038,11 @@ def _dpo_refresh_quiet(force=False):
                 if vs and (s is None or vs > s):
                     s = vs
             da, ds = (age(a) if a else None), (age(s) if s else None)
-            cur.execute("UPDATE dp_outreach_targets SET days_since=%s, sold_days=%s "
-                        "WHERE id=%s AND (days_since IS DISTINCT FROM %s "
-                        "                 OR sold_days IS DISTINCT FROM %s)",
-                        (da, ds, r['id'], da, ds))
+            # LAST_DEAL_DATE_2026_07_30 — the operator wants the actual last day
+            # this dealer bought OR sold, not a derived age and not a sell-side
+            # split. Store the date so the column shows a fact, not a subtraction.
+            cur.execute("UPDATE dp_outreach_targets SET days_since=%s, sold_days=%s, "
+                        "last_deal_at=%s WHERE id=%s", (da, ds, a, r['id']))
             n += cur.rowcount
         db.commit(); db.close()
         if n:
