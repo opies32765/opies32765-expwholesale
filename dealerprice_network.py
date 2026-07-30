@@ -1275,6 +1275,36 @@ INTENT_LABELS = {
 }
 
 
+# WEBSITE_NUDGE_2026_07_30 — one place that decides what a usable site URL is.
+# Deliberately permissive about form: dealers type "smithmotors.com",
+# "www.smithmotors.com", "https://smithmotors.com/inventory" and all are fine.
+# Strict about exactly one thing — there must be a dot and a plausible TLD, so
+# a bare "smithmotors" cannot reach the scanner and fail forever in silence.
+_URL_RE = re.compile(r'^(https?://)?([a-z0-9-]+\.)+[a-z]{2,}(/[^\s]*)?$', re.I)
+
+
+def _url_ok(v):
+    v = (_s(v) or '').strip()
+    if not v or re.search(r'\s', v):
+        return False
+    return bool(_URL_RE.match(v))
+
+
+def _norm_url(v):
+    """Tidy to a storable URL. Returns '' for empty; never raises."""
+    v = (_s(v) or '').strip().rstrip('/')
+    if not v:
+        return ''
+    if not re.match(r'^https?://', v, re.I):
+        v = 'https://' + v
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+        p = urlsplit(v)
+        return urlunsplit((p.scheme.lower(), p.netloc.lower(), p.path, p.query, '')).rstrip('/')
+    except Exception:
+        return v
+
+
 def _dp_intent(v):
     """Normalise whatever the site posts to sell/buy/both, else None."""
     v = (_s(v) or '').strip().lower()
@@ -1573,13 +1603,43 @@ def api_dp_apply():
     # base requirements for everyone. Lot address joined this list 2026-07-29:
     # it is how a dealer gets verified against the license and how anyone finds
     # them, so an application without one cannot really be vetted.
+    # ADDRESS_FOR_EVERYONE_2026_07_30: the LABEL is now just 'Address'. It read
+    # as "lot" = retail car lot, which a wholesaler working out of an office does
+    # not have, so they skipped a field they could actually answer. The db column
+    # stays lot_address on purpose - nothing downstream has to move. The
+    # existing-dealer path was validated against this list but never rendered a
+    # field for it, so "Welcome back" could not be submitted at all; the field
+    # now exists on both paths.
     miss = [lbl for k, lbl in (('dealership_name', 'Dealership name'),
                                ('contact_name', 'Your name'),
                                ('contact_email', 'Email'),
                                ('contact_phone', 'Mobile'),
-                               ('lot_address', 'Lot address')) if not _s(d.get(k))]
+                               ('lot_address', 'Address')) if not _s(d.get(k))]
     if miss:
         return jsonify({'ok': False, 'error': '%s required.' % ', '.join(miss)}), 400
+
+    # Inventory monitoring is opt-in and stays optional - a dealer who only wants
+    # to BUY is a perfectly good dealer whether or not they have a site to read.
+    # But if they DO tick it, the URL is not optional: _dp_register_scanner has
+    # nothing to scan without it and would record "opted in but gave no website"
+    # and quietly never scan them, which looks to the dealer like we agreed to.
+    # Whatever they typed, store it tidy - the scanner matches dealers.url
+    # exactly, so "Smithmotors.com/" and "https://smithmotors.com" must not
+    # become two different dealers.
+    _site_raw = _s(d.get('website'))
+    if _site_raw:
+        d['website'] = _norm_url(_site_raw)
+
+    if _b(d.get('monitor_consent')):
+        if not _s(d.get('website')):
+            return jsonify({'ok': False,
+                            'error': 'Add your website so we know which inventory to '
+                                     'look at - or untick inventory monitoring.'}), 400
+        if not _url_ok(d.get('website')):
+            return jsonify({'ok': False,
+                            'error': '"%s" does not look like a web address. Please enter '
+                                     'the full address, like yourdealership.com.'
+                                     % _site_raw}), 400
 
     # NEW dealers: license + tax-id (number + image) + attestation up front
     if not is_existing:
