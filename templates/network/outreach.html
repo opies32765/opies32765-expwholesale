@@ -94,8 +94,10 @@
       <div>
         <h1>Launch outreach</h1>
         <div class="sub">
-          One row per <b>email address</b>, not per dealership — {{ stats.targets }} addresses
-          covering {{ stats.dealerships }} stores. Several contacts run more than one rooftop.
+          One row per <b>email address</b>, not per dealership — <b id="k-targets">{{ stats.targets }}</b> addresses
+          covering <b id="k-stores">{{ stats.dealerships }}</b> stores. Several contacts run more than one rooftop.
+          <span id="k-removedwrap" style="color:#b91c1c;font-weight:600;{% if not stats.removed %}display:none{% endif %}">·
+            <span id="k-removed">{{ stats.removed }}</span> removed by review</span>
         </div>
       </div>
       <span class="live"><span class="dot"></span> live · refreshes every 20s</span>
@@ -127,7 +129,7 @@
     <div class="feed" id="feed"><span class="muted">waiting for activity…</span></div>
 
     <div class="chips" id="chips">
-      <span class="chip on" data-f="all">All<span class="n">{{ rows|length }}</span></span>
+      <span class="chip on" data-f="all">All<span class="n">{{ stats.targets }}</span></span>
       <span class="chip" data-f="clicked">Clicked</span>
       <span class="chip" data-f="opened">Opened</span>
       <span class="chip" data-f="applied">Applied</span>
@@ -305,6 +307,12 @@ apply();
         set('k-clicked', d.clicked); set('k-clickpct', d.click_pct + '% of delivered');
         set('k-applied', d.applied); set('k-applypct', d.apply_pct + '% of delivered');
         set('k-proxy', d.proxy_only);
+        set('k-targets', d.targets); set('k-stores', d.dealerships);
+        set('k-removed', d.removed);
+        var rw = document.getElementById('k-removedwrap');
+        if (rw) rw.style.display = d.removed ? '' : 'none';
+        var allChip = document.querySelector('.chip[data-f="all"] .n');
+        if (allChip) allChip.textContent = d.targets;
         if(d.recent && d.recent.length){
           feed.innerHTML = d.recent.map(function(x){
             return '<div><span class="muted">' + x.ts + '</span> ' +

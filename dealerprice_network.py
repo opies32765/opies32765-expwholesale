@@ -2746,8 +2746,13 @@ def _dpo_stats(cur):
     """Everything the header tiles need, in one pass."""
     cur.execute("""
         SELECT
-          (SELECT count(*) FROM dp_outreach_targets)                              AS targets,
-          (SELECT coalesce(sum(store_count),0) FROM dp_outreach_targets)          AS dealerships,
+          -- REMOVED_NOT_COUNTED_2026_07_30: these MUST exclude removed rows.
+          -- They are what a reviewer watches to confirm a removal registered;
+          -- counting every row made the button look broken.
+          (SELECT count(*) FROM dp_outreach_targets WHERE removed_at IS NULL)     AS targets,
+          (SELECT coalesce(sum(store_count),0) FROM dp_outreach_targets
+            WHERE removed_at IS NULL)                                             AS dealerships,
+          (SELECT count(*) FROM dp_outreach_targets WHERE removed_at IS NOT NULL) AS removed,
           count(*)                                                                AS sent,
           count(*) FILTER (WHERE status='delivered')                              AS delivered,
           count(*) FILTER (WHERE status='bounced')                                AS bounced,
