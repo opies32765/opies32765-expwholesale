@@ -2841,3 +2841,49 @@ def network_outreach_stats():
                    for r in cur.fetchall()]
     db.close()
     return jsonify(s)
+
+
+# ── DP_OUTREACH_REVIEW_2026_07_30 — management removes names before the send ──
+# Soft removal, and audited. A hard DELETE would throw away the dealer-vs-retail
+# verification behind the row and could not be undone if the wrong name is cut
+# the day before launch, so a removed target is flagged, excluded from sending,
+# and restorable.
+
+
+@bp.route('/network/outreach/remove', methods=['POST'])
+def network_outreach_remove():
+    tid = _int(request.form.get('id'))
+    undo = _b(request.form.get('undo'))
+    reason = _s(request.form.get('reason')) or None
+    if not tid:
+        return jsonify(ok=False, error='no id'), 400
+    db = _db(); cur = db.cursor()
+    try:
+        # Never silently un-send. A target that already went out keeps its
+        # history; removing it only stops any future send.
+        if undo:
+            cur.execute("""UPDATE dp_outreach_targets
+                              SET removed_at=NULL, removed_by=NULL, removed_reason=NULL,
+                                  status = CASE WHEN status='removed' THEN 'pending' ELSE status END
+                            WHERE id=%s RETURNING name, email""", (tid,))
+        else:
+            cur.execute("""UPDATE dp_outreach_targets
+                              SET removed_at=now(), removed_by=%s, removed_reason=%s,
+                                  status = CASE WHEN status='pending' THEN 'removed' ELSE status END
+                            WHERE id=%s RETURNING name, email""",
+                        (_reviewer(), reason, tid))
+        row = cur.fetchone()
+        db.commit()
+        if not row:
+            db.close(); return jsonify(ok=False, error='not found'), 404
+        print('[dp-outreach] %s target #%s %s (%s) by %s'
+              % ('restored' if undo else 'REMOVED', tid, row['name'], row['email'], _reviewer()),
+              flush=True)
+        cur.execute("SELECT count(*) AS n FROM dp_outreach_targets WHERE removed_at IS NULL")
+        left = cur.fetchone()['n']
+        db.close()
+        return jsonify(ok=True, removed=(not undo), remaining=left)
+    except Exception as e:
+        db.rollback(); db.close()
+        print('[dp-outreach] remove %s: %s' % (tid, e), flush=True)
+        return jsonify(ok=False, error=str(e)[:200]), 500

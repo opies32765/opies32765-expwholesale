@@ -59,6 +59,23 @@
   .feed{background:#0b1220;color:#cbd5e1;border-radius:10px;padding:10px 12px;font:11.5px/1.7 ui-monospace,Menlo,Consolas,monospace;margin-bottom:12px;max-height:112px;overflow:auto}
   .feed .k-open{color:#c4b5fd}.feed .k-click{color:#86efac}.feed .k-bounce{color:#fca5a5}
   .feed .k-unsubscribe{color:#fcd34d}.feed .k-complaint{color:#fca5a5}
+  th.s{cursor:pointer;user-select:none;position:relative}
+  th.s:hover{background:#eef2f7;color:#334155}
+  th.s .ar{opacity:.35;font-size:9px;margin-left:4px}
+  th.s.asc .ar,th.s.desc .ar{opacity:1;color:#2563eb}
+  .toolbar{display:flex;gap:10px;align-items:center;margin:0 0 10px;flex-wrap:wrap}
+  .search{flex:1;min-width:220px;max-width:420px;border:1px solid #d1d5db;border-radius:8px;
+          padding:8px 12px;font-size:13px;background:#fff}
+  .search:focus{outline:0;border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+  .cnt{font-size:12px;color:#6b7280;font-weight:600}
+  .rm{border:1px solid #fecaca;background:#fff;color:#b91c1c;border-radius:6px;
+      padding:3px 9px;font-size:11px;font-weight:700;cursor:pointer}
+  .rm:hover{background:#fef2f2}
+  .undo{border:1px solid #d1d5db;background:#fff;color:#374151;border-radius:6px;
+        padding:3px 9px;font-size:11px;font-weight:700;cursor:pointer}
+  tr.gone td{opacity:.4}
+  tr.gone .dname{text-decoration:line-through}
+  .rmnote{font-size:11px;color:#b91c1c;margin-top:3px}
 </style>
 </head>
 <body>
@@ -117,6 +134,14 @@
       <span class="chip" data-f="bounced">Bounced</span>
       <span class="chip" data-f="unsub">Unsubscribed</span>
       <span class="chip" data-f="pending">Not sent</span>
+      <span class="chip" data-f="removed">Removed</span>
+    </div>
+
+    <div class="toolbar">
+      <input class="search" id="q" type="search" autocomplete="off"
+             placeholder="Filter by dealer, contact, email or rooftop…">
+      <span class="cnt" id="cnt"></span>
+      <span class="cnt" style="margin-left:auto">Click any column heading to sort</span>
     </div>
 
     {% if not rows %}
@@ -124,14 +149,22 @@
     {% else %}
     <table id="tbl">
       <thead><tr>
-        <th>Dealer / contact</th><th>Email</th><th>Status</th>
-        <th class="num">Opens</th><th class="num">Clicks</th>
-        <th>Applied</th><th class="num">Lifetime $</th><th class="num">Quiet</th>
+        <th class="s" data-sort="t">Dealer / contact <span class="ar">&#9650;&#9660;</span></th>
+        <th class="s" data-sort="t">Email <span class="ar">&#9650;&#9660;</span></th>
+        <th class="s" data-sort="t">Status <span class="ar">&#9650;&#9660;</span></th>
+        <th class="s num" data-sort="n">Opens <span class="ar">&#9650;&#9660;</span></th>
+        <th class="s num" data-sort="n">Clicks <span class="ar">&#9650;&#9660;</span></th>
+        <th class="s" data-sort="t">Applied <span class="ar">&#9650;&#9660;</span></th>
+        <th class="s num" data-sort="n">Lifetime $ <span class="ar">&#9650;&#9660;</span></th>
+        <th class="s num" data-sort="n">Quiet <span class="ar">&#9650;&#9660;</span></th>
+        <th>Review</th>
       </tr></thead>
       <tbody>
       {% for r in rows %}
         {% set st = r.email_status or ('unsubscribed' if r.target_status=='unsubscribed' else 'pending') %}
-        <tr data-clicked="{{ 1 if (r.clicks or 0) > 0 else 0 }}"
+        <tr class="{{ 'gone' if r.removed_at else '' }}" data-id="{{ r.id }}"
+            data-removed="{{ 1 if r.removed_at else 0 }}"
+            data-clicked="{{ 1 if (r.clicks or 0) > 0 else 0 }}"
             data-opened="{{ 1 if (r.opens or 0) > 0 else 0 }}"
             data-applied="{{ 1 if r.applied_at else 0 }}"
             data-bounced="{{ 1 if r.bounced_at else 0 }}"
@@ -142,6 +175,8 @@
             {% if r.store_count and r.store_count > 1 %}
               <div class="more">+{{ r.store_count - 1 }} more rooftop{{ 's' if r.store_count > 2 else '' }} on this contact</div>
             {% endif %}
+            {% if r.stores %}<div class="more" style="display:none">{{ r.stores|join(' · ') }}</div>{% endif %}
+            {% if r.removed_at %}<div class="rmnote">removed{% if r.removed_by %} by {{ r.removed_by }}{% endif %}</div>{% endif %}
           </td>
           <td>{{ r.email }}</td>
           <td>
@@ -159,6 +194,11 @@
           <td>{% if r.applied_at %}<a class="badge b-apply" href="/network/application/{{ r.application_id }}">applied →</a>{% else %}<span class="muted">—</span>{% endif %}</td>
           <td class="num">{% if r.total_profit %}${{ '{:,.0f}'.format(r.total_profit) }}{% else %}<span class="muted">—</span>{% endif %}</td>
           <td class="num">{% if r.days_since %}{{ r.days_since }}d{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td>
+            {% if r.sent_at %}<span class="muted" title="already sent — cannot be un-sent">sent</span>
+            {% elif r.removed_at %}<button class="undo" data-act="undo">Restore</button>
+            {% else %}<button class="rm" data-act="remove">&#10005; Remove</button>{% endif %}
+          </td>
         </tr>
       {% endfor %}
       </tbody>
@@ -167,16 +207,87 @@
   </div>
 
 <script>
+/* ── review: search + sort + remove ─────────────────────────────────────── */
+var TBODY = document.querySelector('#tbl tbody');
+var ROWS  = TBODY ? [].slice.call(TBODY.querySelectorAll('tr')) : [];
+var curFilter = 'all', q = '';
+
+function visible(tr){
+  if (curFilter !== 'all' && tr.getAttribute('data-' + curFilter) !== '1') return false;
+  // "Removed" is opt-in: a removed name should not keep showing up in the
+  // working list once management has cut it.
+  if (curFilter !== 'removed' && tr.getAttribute('data-removed') === '1') return false;
+  if (q && tr.textContent.toLowerCase().indexOf(q) === -1) return false;
+  return true;
+}
+function apply(){
+  var n = 0;
+  ROWS.forEach(function(tr){
+    var v = visible(tr);
+    tr.style.display = v ? '' : 'none';
+    if (v) n++;
+  });
+  var c = document.getElementById('cnt');
+  if (c) c.textContent = n + ' shown';
+}
+
+var qi = document.getElementById('q');
+if (qi) qi.addEventListener('input', function(){ q = this.value.trim().toLowerCase(); apply(); });
+
+/* sort — numeric columns parse the digits out so "$1,421,025" and "1663d" sort right */
+[].forEach.call(document.querySelectorAll('th.s'), function(th, idx){
+  th.addEventListener('click', function(){
+    var numeric = th.getAttribute('data-sort') === 'n';
+    var desc = !th.classList.contains('desc');
+    [].forEach.call(document.querySelectorAll('th.s'), function(o){ o.classList.remove('asc','desc'); });
+    th.classList.add(desc ? 'desc' : 'asc');
+    var i = [].indexOf.call(th.parentNode.children, th);
+    ROWS.sort(function(a, b){
+      var x = (a.children[i] ? a.children[i].textContent : '').trim();
+      var y = (b.children[i] ? b.children[i].textContent : '').trim();
+      if (numeric){
+        var nx = parseFloat(x.replace(/[^0-9.\-]/g, '')) || 0;
+        var ny = parseFloat(y.replace(/[^0-9.\-]/g, '')) || 0;
+        return desc ? ny - nx : nx - ny;
+      }
+      return desc ? y.localeCompare(x) : x.localeCompare(y);
+    });
+    ROWS.forEach(function(tr){ TBODY.appendChild(tr); });
+  });
+});
+
+/* remove / restore */
+if (TBODY) TBODY.addEventListener('click', function(e){
+  var btn = e.target.closest('[data-act]'); if (!btn) return;
+  var tr = btn.closest('tr'); var id = tr.getAttribute('data-id');
+  var undo = btn.getAttribute('data-act') === 'undo';
+  var who = (tr.querySelector('.dname') || {}).textContent || 'this dealer';
+  if (!undo && !confirm('Remove ' + who.trim() + ' from the launch list?\n\nThey will not be emailed. You can restore them from the Removed tab.')) return;
+  btn.disabled = true;
+  var fd = new FormData(); fd.append('id', id); if (undo) fd.append('undo', '1');
+  fetch('/network/outreach/remove', {method:'POST', body: fd})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (!d || !d.ok){ alert('Could not update: ' + ((d && d.error) || 'unknown')); btn.disabled = false; return; }
+      tr.setAttribute('data-removed', undo ? '0' : '1');
+      tr.classList.toggle('gone', !undo);
+      btn.outerHTML = undo
+        ? '<button class="rm" data-act="remove">\u2715 Remove</button>'
+        : '<button class="undo" data-act="undo">Restore</button>';
+      apply();
+    })
+    .catch(function(){ alert('Network error'); btn.disabled = false; });
+});
+
 /* filter chips */
 document.getElementById('chips').addEventListener('click', function(e){
   var c = e.target.closest('.chip'); if(!c) return;
   [].forEach.call(document.querySelectorAll('.chip'), function(x){ x.classList.remove('on'); });
   c.classList.add('on');
-  var f = c.getAttribute('data-f');
-  [].forEach.call(document.querySelectorAll('#tbl tbody tr'), function(tr){
-    tr.style.display = (f === 'all' || tr.getAttribute('data-' + f) === '1') ? '' : 'none';
-  });
+  curFilter = c.getAttribute('data-f');
+  apply();
 });
+apply();
 
 /* live stats — same cadence as the Recon badge (20s) */
 (function(){
