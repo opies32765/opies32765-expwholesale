@@ -200,6 +200,11 @@ _PUBLIC_PREFIXES = (
     '/api/bid/external', '/api/push-subscribe',
     '/api/push-unsubscribe', '/api/vapid-public-key',
     '/.well-known/', '/api/tesla-vin/', '/share/', '/m/',
+    '/e/',  # DP_OUTREACH_TRACKING_2026_07_30 - email pixel / signed click /
+            # unsubscribe / Resend webhook. MUST be public: these URLs are opened
+            # from a dealer's inbox, by their mail client, with no EW session.
+            # Each carries an opaque per-send token; the click redirect is
+            # HMAC-signed and same-domain-only, and the webhook has its own key.
     '/s/',  # ROLLING_PORTAL_2026_06_02 — per-sender rolling portal (token-auth in handler)
     '/api/quick-extract',
     '/api/recon/inbound-email',  # BOL inbound (CF Email Worker; X-Recon-Inbound secret)

@@ -36,7 +36,7 @@ import secrets
 from datetime import datetime, timezone
 
 from flask import (Blueprint, render_template, request, jsonify, abort,
-                   session, redirect, url_for, send_file)
+                   session, redirect, url_for, send_file, current_app)
 
 bp = Blueprint('dealerprice_network', __name__)
 
@@ -2475,3 +2475,369 @@ def api_dp_member():
         'contact_email': m['contact_email'],
         'contact_phone': m['contact_phone'],
     }})
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DP_OUTREACH_TRACKING_2026_07_30 — open / click / bounce tracking, self-hosted.
+#
+# WHY SELF-HOSTED: the Resend API key is send-only (403 on /domains), so vendor
+# open/click tracking and webhooks cannot be turned on programmatically. Doing it
+# ourselves also puts the events straight into EW's own Postgres, so the tab is a
+# plain SQL read with no vendor dependency. The ONE thing we cannot see without
+# Resend is bounces/complaints — those arrive on the webhook below.
+#
+# Everything here is deliberately fail-open and fast: a tracking failure must
+# never cost a dealer their click. The pixel always returns a GIF, the click
+# always redirects.
+# ═════════════════════════════════════════════════════════════════════════════
+import base64 as _b64
+import hashlib as _hashlib
+import hmac as _hmac
+
+# 1x1 transparent GIF.
+_PIXEL = _b64.b64decode(b'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7')
+
+# Machine fetchers. An "open" from one of these is a PRE-FETCH, not a human:
+# Apple Mail Privacy Protection loads every image for every recipient whether or
+# not they opened it, which is why a blended open-rate is a fiction. Counted
+# separately so the dashboard can lead with clicks and show opens honestly.
+_PROXY_UA = ('googleimageproxy', 'yahoomailproxy', 'yandexmail',
+             'microsoft office', 'msoffice', 'skypeuripreview',
+             'proofpoint', 'barracuda', 'mimecast', 'symantec')
+
+
+def _dpt_secret():
+    """Signing key for click links. Falls back to the app secret."""
+    return (os.environ.get('SECRET_KEY') or 'expwholesale2026secret!').encode()
+
+
+def _dpt_sign(payload):
+    return _hmac.new(_dpt_secret(), payload.encode(), _hashlib.sha256).hexdigest()[:16]
+
+
+def _dpt_wrap(token, url):
+    """Build a signed tracked link. UNSIGNED WOULD BE AN OPEN REDIRECT — anyone
+    could hand out experience-wholesale.net links that bounce to a phishing page,
+    borrowing our domain's reputation. The signature makes the destination
+    tamper-proof."""
+    enc = _b64.urlsafe_b64encode(url.encode()).decode().rstrip('=')
+    return '%s/e/c/%s?u=%s&s=%s' % (DP_TRACK_BASE.rstrip('/'), token, enc,
+                                    _dpt_sign(token + enc))
+
+
+def _dpt_unwrap(token, enc, sig):
+    """Verify + decode. Returns None on any tampering."""
+    if not enc or not sig:
+        return None
+    if not _hmac.compare_digest(sig, _dpt_sign(token + enc)):
+        print('[dp-track] BAD SIGNATURE on click token=%s' % token, flush=True)
+        return None
+    try:
+        pad = '=' * (-len(enc) % 4)
+        url = _b64.urlsafe_b64decode(enc + pad).decode()
+    except Exception:
+        return None
+    # even signed, only ever redirect to our own properties
+    if not re.match(r'^https?://([a-z0-9-]+\.)*(experience-wholesale\.net|dealerprice\.net)(/|$)',
+                    url, re.I):
+        print('[dp-track] refused off-domain redirect: %r' % url[:120], flush=True)
+        return None
+    return url
+
+
+DP_TRACK_BASE = os.environ.get('DP_TRACK_BASE', 'https://experience-wholesale.net')
+
+
+def _dpt_is_proxy(ua):
+    ua = (ua or '').lower()
+    return any(p in ua for p in _PROXY_UA)
+
+
+def _dpt_client_ip():
+    for h in ('CF-Connecting-IP', 'X-Real-IP', 'X-Forwarded-For'):
+        v = (request.headers.get(h) or '').split(',')[0].strip()
+        if v:
+            return v[:64]
+    return (request.remote_addr or '')[:64]
+
+
+def _dpt_row(token):
+    """Look up a send by its opaque token. Returns (db, cur, row) or (None,)*3."""
+    try:
+        db = _db(); cur = db.cursor()
+        cur.execute("SELECT * FROM dp_outreach_email WHERE token=%s", (token,))
+        r = cur.fetchone()
+        if not r:
+            db.close(); return None, None, None
+        return db, cur, r
+    except Exception as e:
+        print('[dp-track] lookup %s: %s' % (token, e), flush=True)
+        return None, None, None
+
+
+def _dpt_event(cur, email_id, kind, url=None, source=None):
+    cur.execute("""INSERT INTO dp_outreach_event (email_id, kind, url, ip, user_agent, source)
+                   VALUES (%s,%s,%s,%s,%s,%s)""",
+                (email_id, kind, url, _dpt_client_ip(),
+                 (request.headers.get('User-Agent') or '')[:400], source))
+
+
+@bp.route('/e/o/<token>.gif')
+def dpt_open(token):
+    """Tracking pixel. ALWAYS returns a GIF — a tracking problem must never show
+    a broken image in a dealer's email."""
+    try:
+        db, cur, r = _dpt_row(token)
+        if r:
+            proxy = _dpt_is_proxy(request.headers.get('User-Agent'))
+            if proxy:
+                cur.execute("""UPDATE dp_outreach_email
+                                  SET proxy_opens = proxy_opens + 1
+                                WHERE id=%s""", (r['id'],))
+                _dpt_event(cur, r['id'], 'proxy_open', source='pixel')
+            else:
+                cur.execute("""UPDATE dp_outreach_email
+                                  SET opens = opens + 1,
+                                      first_open_at = COALESCE(first_open_at, now()),
+                                      last_open_at = now()
+                                WHERE id=%s""", (r['id'],))
+                _dpt_event(cur, r['id'], 'open', source='pixel')
+            db.commit(); db.close()
+    except Exception as e:
+        print('[dp-track] open %s: %s' % (token, e), flush=True)
+    resp = current_app.response_class(_PIXEL, mimetype='image/gif')
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    resp.headers['Pragma'] = 'no-cache'
+    return resp
+
+
+@bp.route('/e/c/<token>')
+def dpt_click(token):
+    """Signed click-through. Records the click, then redirects."""
+    url = _dpt_unwrap(token, request.args.get('u'), request.args.get('s'))
+    if not url:
+        return redirect(DP_TRACK_BASE)
+    try:
+        db, cur, r = _dpt_row(token)
+        if r:
+            cur.execute("""UPDATE dp_outreach_email
+                              SET clicks = clicks + 1,
+                                  first_click_at = COALESCE(first_click_at, now()),
+                                  last_click_at = now(),
+                                  -- a click proves a human, so it also settles
+                                  -- the open question for this contact
+                                  opens = GREATEST(opens, 1),
+                                  first_open_at = COALESCE(first_open_at, now())
+                            WHERE id=%s""", (r['id'],))
+            _dpt_event(cur, r['id'], 'click', url=url, source='link')
+            db.commit(); db.close()
+    except Exception as e:
+        print('[dp-track] click %s: %s' % (token, e), flush=True)
+    return redirect(url)
+
+
+@bp.route('/e/u/<token>')
+def dpt_unsubscribe(token):
+    """One-click unsubscribe. Required for CAN-SPAM and materially helps
+    deliverability; mailbox providers favour senders that honour List-Unsubscribe.
+    Suppression is written to its own table so it OUTLIVES any rebuild of the
+    target list."""
+    done = False
+    try:
+        db, cur, r = _dpt_row(token)
+        if r:
+            cur.execute("""UPDATE dp_outreach_email SET unsubscribed_at=now() WHERE id=%s""",
+                        (r['id'],))
+            cur.execute("""INSERT INTO dp_outreach_suppression (email, reason)
+                           VALUES (%s,'unsubscribed') ON CONFLICT (email) DO NOTHING""",
+                        ((r['email'] or '').lower(),))
+            cur.execute("""UPDATE dp_outreach_targets SET status='unsubscribed'
+                            WHERE lower(email)=%s""", ((r['email'] or '').lower(),))
+            _dpt_event(cur, r['id'], 'unsubscribe', source='link')
+            db.commit(); db.close(); done = True
+    except Exception as e:
+        print('[dp-track] unsub %s: %s' % (token, e), flush=True)
+    return current_app.response_class(
+        '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<div style="font:16px/1.6 -apple-system,Segoe UI,Arial;max-width:520px;'
+        'margin:16vh auto;padding:0 22px;text-align:center;color:#1f2937">'
+        '<h2 style="margin:0 0 10px">%s</h2><p style="color:#6b7280">%s</p></div>'
+        % ('You’re unsubscribed' if done else 'Link not recognised',
+           'You won’t receive further emails from Experience Wholesale about DealerPrice.'
+           if done else 'We couldn’t match that link, so nothing was changed.'),
+        mimetype='text/html')
+
+
+@bp.route('/e/webhook/resend', methods=['POST'])
+def dpt_resend_webhook():
+    """Delivery / bounce / complaint events from Resend.
+
+    This is the ONLY source for bounces — a pixel cannot see them. Auth is a
+    shared secret in the URL (?k=) because the key we hold cannot create a
+    properly-signed webhook via the API.
+    """
+    if (request.args.get('k') or '') != os.environ.get('DP_WEBHOOK_KEY', ''):
+        return jsonify(ok=False), 403
+    d = request.get_json(silent=True) or {}
+    ev = (d.get('type') or '').strip()
+    data = d.get('data') or {}
+    mid = data.get('email_id') or data.get('id')
+    to = data.get('to')
+    if isinstance(to, list):
+        to = to[0] if to else None
+    try:
+        db = _db(); cur = db.cursor()
+        cur.execute("""SELECT * FROM dp_outreach_email
+                        WHERE (provider_id=%s AND %s<>'')
+                           OR (lower(email)=lower(%s) AND provider_id IS NULL)
+                     ORDER BY id DESC LIMIT 1""", (mid, mid or '', to or ''))
+        r = cur.fetchone()
+        if not r:
+            db.close()
+            print('[dp-track] webhook %s: no match (mid=%s to=%s)' % (ev, mid, to), flush=True)
+            return jsonify(ok=True, matched=False)
+        eid = r['id']
+        if ev == 'email.delivered':
+            cur.execute("UPDATE dp_outreach_email SET status='delivered', delivered_at=now() "
+                        "WHERE id=%s AND status NOT IN ('bounced','complained')", (eid,))
+            _dpt_event(cur, eid, 'delivered', source='resend')
+        elif ev in ('email.bounced', 'email.delivery_delayed'):
+            hard = 'hard' if ev == 'email.bounced' else 'soft'
+            cur.execute("UPDATE dp_outreach_email SET status='bounced', bounced_at=now(), "
+                        "bounce_type=%s WHERE id=%s", (hard, eid))
+            _dpt_event(cur, eid, 'bounce', source='resend')
+            if hard == 'hard':
+                cur.execute("INSERT INTO dp_outreach_suppression (email, reason) "
+                            "VALUES (%s,'hard_bounce') ON CONFLICT (email) DO NOTHING",
+                            ((r['email'] or '').lower(),))
+        elif ev == 'email.complained':
+            cur.execute("UPDATE dp_outreach_email SET status='complained', complained_at=now() "
+                        "WHERE id=%s", (eid,))
+            _dpt_event(cur, eid, 'complaint', source='resend')
+            cur.execute("INSERT INTO dp_outreach_suppression (email, reason) "
+                        "VALUES (%s,'complaint') ON CONFLICT (email) DO NOTHING",
+                        ((r['email'] or '').lower(),))
+        db.commit(); db.close()
+    except Exception as e:
+        print('[dp-track] webhook %s: %s' % (ev, e), flush=True)
+    return jsonify(ok=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DP_OUTREACH_TAB_2026_07_30 — the Outreach tab in /network/*.
+#
+# Operator's ask: "see all emails sent, how many bounced, how many were opened,
+# how many clicked around and how many have applied ... dynamic and always
+# polling the info every so often."
+#
+# The unit of a row is an ADDRESS, not a dealership: 1,022 emailable dealerships
+# collapse to 809 inboxes and one address carries 35 stores, so per-dealership
+# sending would put 35 near-identical emails in one person's morning.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _dpo_stats(cur):
+    """Everything the header tiles need, in one pass."""
+    cur.execute("""
+        SELECT
+          (SELECT count(*) FROM dp_outreach_targets)                              AS targets,
+          (SELECT coalesce(sum(store_count),0) FROM dp_outreach_targets)          AS dealerships,
+          count(*)                                                                AS sent,
+          count(*) FILTER (WHERE status='delivered')                              AS delivered,
+          count(*) FILTER (WHERE status='bounced')                                AS bounced,
+          count(*) FILTER (WHERE status='complained')                             AS complained,
+          count(*) FILTER (WHERE status='failed')                                 AS failed,
+          count(*) FILTER (WHERE opens > 0)                                       AS opened,
+          count(*) FILTER (WHERE opens = 0 AND proxy_opens > 0)                   AS proxy_only,
+          count(*) FILTER (WHERE clicks > 0)                                      AS clicked,
+          count(*) FILTER (WHERE unsubscribed_at IS NOT NULL)                     AS unsubscribed,
+          count(*) FILTER (WHERE applied_at IS NOT NULL)                          AS applied
+        FROM dp_outreach_email
+    """)
+    s = dict(cur.fetchone() or {})
+    sent = s.get('sent') or 0
+    s['pending'] = (s.get('targets') or 0) - sent
+    # Rates are quoted against DELIVERED, not sent — an open rate that silently
+    # includes bounced mail flatters itself.
+    base = (s.get('delivered') or 0) or sent
+    s['open_pct'] = round(100.0 * (s.get('opened') or 0) / base, 1) if base else 0.0
+    s['click_pct'] = round(100.0 * (s.get('clicked') or 0) / base, 1) if base else 0.0
+    s['apply_pct'] = round(100.0 * (s.get('applied') or 0) / base, 1) if base else 0.0
+    s['bounce_pct'] = round(100.0 * (s.get('bounced') or 0) / sent, 1) if sent else 0.0
+    return s
+
+
+def _dpo_link_applications(cur):
+    """Attribute applications back to the campaign.
+
+    Matched on the contact email. Deliberately conservative — an application is
+    only credited when its address is one we actually emailed. A dealer who
+    applies from a different address than the one we mailed will not be counted
+    here, which understates rather than overstates.
+    """
+    cur.execute("""
+        UPDATE dp_outreach_email e
+           SET applied_at = a.created_at, application_id = a.id
+          FROM dealer_applications a
+         WHERE lower(a.contact_email) = lower(e.email)
+           AND e.applied_at IS NULL
+           AND e.sent_at IS NOT NULL
+           AND a.created_at >= e.sent_at
+    """)
+    return cur.rowcount
+
+
+@bp.route('/network/outreach')
+def network_outreach():
+    db = _db(); cur = db.cursor()
+    try:
+        _dpo_link_applications(cur)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print('[dp-outreach] link applications: %s' % e, flush=True)
+    stats = _dpo_stats(cur)
+    cur.execute("""SELECT subject, body, updated_at FROM dp_outreach_template WHERE id=1""")
+    tpl = cur.fetchone()
+    cur.execute("""
+        SELECT t.id, t.name, t.email, t.phone, t.store_count, t.stores,
+               t.total_profit, t.src_deals, t.buy_deals, t.days_since,
+               t.status AS target_status,
+               e.id AS email_id, e.status AS email_status, e.sent_at,
+               e.opens, e.proxy_opens, e.clicks, e.first_open_at, e.last_click_at,
+               e.bounced_at, e.unsubscribed_at, e.applied_at, e.application_id
+          FROM dp_outreach_targets t
+          LEFT JOIN LATERAL (
+                SELECT * FROM dp_outreach_email x
+                 WHERE lower(x.email) = lower(t.email)
+                 ORDER BY x.id DESC LIMIT 1) e ON TRUE
+         ORDER BY (e.clicks > 0) DESC NULLS LAST,
+                  (e.opens  > 0) DESC NULLS LAST,
+                  t.total_profit DESC NULLS LAST
+    """)
+    rows = cur.fetchall()
+    db.close()
+    return render_template('network/outreach.html', rows=rows, stats=stats,
+                           tpl=tpl, reps=DP_SALES_REPS)
+
+
+@bp.route('/network/outreach/stats')
+def network_outreach_stats():
+    """Polled by the page. Cheap: aggregates only, no per-row payload."""
+    db = _db(); cur = db.cursor()
+    try:
+        _dpo_link_applications(cur)
+        db.commit()
+    except Exception:
+        db.rollback()
+    s = _dpo_stats(cur)
+    cur.execute("""SELECT e.email, ev.kind, ev.ts
+                     FROM dp_outreach_event ev
+                     JOIN dp_outreach_email e ON e.id = ev.email_id
+                    WHERE ev.kind IN ('open','click','bounce','complaint','unsubscribe')
+                 ORDER BY ev.ts DESC LIMIT 12""")
+    s['recent'] = [{'email': r['email'], 'kind': r['kind'],
+                    'ts': r['ts'].strftime('%H:%M:%S') if r['ts'] else ''}
+                   for r in cur.fetchall()]
+    db.close()
+    return jsonify(s)
