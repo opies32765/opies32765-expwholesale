@@ -28,7 +28,10 @@
   .kpi .n{font-size:11px;color:#9ca3af;margin-top:2px}
 
   .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
-  input.q{border:1px solid #d1d5db;border-radius:8px;padding:7px 11px;font-size:13px;min-width:220px;background:#fff}
+  .qwrap{position:relative;display:inline-flex;align-items:center}
+  input.q{border:1px solid #d1d5db;border-radius:8px;padding:7px 26px 7px 11px;font-size:13px;min-width:220px;background:#fff}
+  .qx{position:absolute;right:8px;color:#9ca3af;font-size:16px;line-height:1;cursor:pointer;font-weight:700}
+  .qx:hover{color:#374151}
   .btn{border:1px solid #d1d5db;background:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-weight:600;font-size:12px}
   .fresh{margin-left:auto;color:#9ca3af;font-size:11.5px}
 
@@ -107,8 +110,14 @@
         <input type="hidden" name="scope" value="{{ scope }}">
         <input type="hidden" name="sort" value="{{ sort }}">
         <input type="hidden" name="dir" value="{{ dir }}">
-        <input class="q" name="q" value="{{ q or '' }}" placeholder="search dealer name…">
+        <div class="qwrap">
+          <input class="q" id="q" name="q" value="{{ q or '' }}" placeholder="search dealer name…" autocomplete="off">
+          {#- the x only exists when there is something to clear, so it never
+              looks like a control that does nothing -#}
+          {% if q %}<a class="qx" href="?scope={{ scope }}&sort={{ sort }}&dir={{ dir }}" title="Clear search">&times;</a>{% endif %}
+        </div>
         <button class="btn" type="submit">Search</button>
+        {% if q %}<a class="btn" href="?scope={{ scope }}&sort={{ sort }}&dir={{ dir }}">Clear</a>{% endif %}
       </form>
       <span class="fresh" id="fresh">
         {% if stats.run and stats.run.finished_at %}updated {{ stats.run.finished_at.strftime('%b %d, %H:%M') }}{% endif %}
@@ -225,6 +234,14 @@ async function poll() {
   } catch (e) { /* leave the last good numbers on screen */ }
 }
 setInterval(poll, 30000);
+
+// Escape clears the search box and reloads the unfiltered board — faster than
+// reaching for the x when you are already typing.
+document.getElementById('q').addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') {
+    if (this.value) { this.value = ''; this.form.submit(); }
+  }
+});
 </script>
 </body>
 </html>

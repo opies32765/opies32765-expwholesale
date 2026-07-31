@@ -3309,6 +3309,9 @@ def network_dealers():
     dirn = 'asc' if _s(request.args.get('dir')).lower() == 'asc' else 'desc'
     db = _db(); cur = db.cursor()
     try:
+        # catch up if someone tagged a dealer since the last rebuild, so a tag
+        # shows on the board immediately instead of at the next hourly cron
+        _scorecard_refresh_if_tagged(cur)
         rows = _scorecard_rows(cur, q=q, scope=scope, sort=sort, dirn=dirn)
         stats = _scorecard_stats(cur)
     finally:
@@ -3434,4 +3437,41 @@ def tag_bid_from_member(cur, bid_id, member):
         return True
     except Exception as e:
         print('[dp-network] tag_bid_from_member: %s' % e, flush=True)
+        return False
+
+
+_SCORECARD_REBUILD = {'t': 0.0}
+
+
+def _scorecard_refresh_if_tagged(cur):
+    """Rebuild the board if a bid was tagged since the last good rebuild.
+
+    Cheap check, rare action: normally this is one comparison against the last
+    run row and returns immediately. It only does real work right after someone
+    tags a dealer, which is exactly when the board would otherwise be wrong.
+
+    Never raises into the page -- a failed rebuild must show stale numbers, not
+    an error screen.
+    """
+    now = time.time()
+    if now - _SCORECARD_REBUILD['t'] < 60:      # anti-stampede
+        return False
+    try:
+        cur.execute("""SELECT finished_at FROM dp_dealer_scorecard_run
+                        WHERE ok IS TRUE ORDER BY id DESC LIMIT 1""")
+        row = cur.fetchone()
+        if not row or not row.get('finished_at'):
+            return False
+        cur.execute("""SELECT 1 FROM bids
+                        WHERE source_tagged_at > %s LIMIT 1""", (row['finished_at'],))
+        if not cur.fetchone():
+            return False
+        _SCORECARD_REBUILD['t'] = now
+        import dealer_scorecard
+        dealer_scorecard.refresh(verbose=False)
+        print('[dp-network] scorecard rebuilt: a bid was tagged since the last run',
+              flush=True)
+        return True
+    except Exception as e:
+        print('[dp-network] refresh_if_tagged: %s' % e, flush=True)
         return False
