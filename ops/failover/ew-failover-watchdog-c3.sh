@@ -30,12 +30,48 @@ FAIL_THRESHOLD=4          # ~2 minutes before acting
 MAX_PROMOTE_LAG_MB=64     # refuse to promote a standby further behind than this
 TG_BOT='8639130743:AAHobws_MAaShpjxaHC0kXMuHZwbebtuYFM'
 TG_CHAT='7985611488'
+# alerts@, deliberately NOT info@ — info@ is DealerPrice's dealer-facing
+# sender and its reputation should not carry ops noise.
+# RESEND_API_KEY comes from the systemd unit, never from this file.
+ALERT_FROM='EW Ops Alerts <alerts@experience-wholesale.net>'
+ALERT_TO="${EW_ALERT_TO:-opies32765@gmail.com}"
 STATE=/var/lib/ew-watchdog
 mkdir -p "$STATE"
 
 log() { echo "$(date -Iseconds) $*"; }
 tg()  { curl -fsS -X POST "https://api.telegram.org/bot${TG_BOT}/sendMessage" \
           --data-urlencode "chat_id=${TG_CHAT}" --data-urlencode "text=$1" --max-time 10 >/dev/null 2>&1 || true; }
+
+# Email is a SECOND independent channel, not a replacement. Telegram is
+# instant but easy to miss; mail survives a muted phone. Both fire, and
+# neither can break the watchdog loop.
+mail_alert() {
+  local subject="$1"
+  local body="$2"
+  [[ -z "${RESEND_API_KEY:-}" ]] && return 0
+  local payload
+  payload=$(SUBJ="$subject" BODY="$body" FROM="$ALERT_FROM" TO="$ALERT_TO" python3 - <<'PY' 2>/dev/null
+import json, os
+html = ('<div style="font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif;color:#1a1a1a;max-width:560px">'
+        '<div style="border-left:4px solid #b3261e;padding:2px 0 2px 14px">'
+        '<div style="font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:#b3261e;'
+        'font-weight:600">EW failover watchdog</div>'
+        '<div style="font-size:19px;font-weight:600;margin-top:2px">%s</div></div>'
+        '<p>%s</p>'
+        '<p style="font-size:12.5px;color:#666;margin-top:20px">Raised by ew-failover-watchdog on C3 '
+        '(147.93.176.207). It probes C1 every 30s and promotes C2 only if C2 is a healthy streaming '
+        'standby with small replay lag.</p></div>') % (os.environ["SUBJ"], os.environ["BODY"])
+print(json.dumps({"from": os.environ["FROM"],
+                  "to": [a.strip() for a in os.environ["TO"].split(",") if a.strip()],
+                  "subject": os.environ["SUBJ"], "html": html}))
+PY
+)
+  [[ -z "$payload" ]] && return 0
+  curl -fsS -X POST "https://api.resend.com/emails" \
+       -H "Authorization: Bearer ${RESEND_API_KEY}" \
+       -H "Content-Type: application/json" \
+       -d "$payload" --max-time 15 >/dev/null 2>&1 || log "mail_alert failed (non-fatal)"
+}
 # fire an alert at most once per hour per key, so a persistent fault does not spam
 alert_once() {
   # NB: these MUST be separate `local` statements. `local a="$1" f="...$a"` evaluates every
@@ -47,6 +83,7 @@ alert_once() {
   now=$(date +%s)
   if [[ -f "$f" ]] && (( now - $(cat "$f" 2>/dev/null || echo 0) < 3600 )); then return; fi
   echo "$now" > "$f"; log "ALERT[$key] $msg"; tg "$msg"
+  mail_alert "$key" "$msg"
 }
 clear_alert() { rm -f "$STATE/alert_$1" 2>/dev/null || true; }
 
@@ -78,17 +115,20 @@ c2_status() {
 promote_c2() {
   log "PROMOTING C2 via /usr/local/bin/ew_promote_c2.sh"
   tg "🚨 EW FAILOVER: C1 unreachable ${FAIL_THRESHOLD}x. Running ew_promote_c2.sh on C2 ($C2)."
+  mail_alert "FAILOVER STARTING" "C1 failed ${FAIL_THRESHOLD} consecutive health checks. Running ew_promote_c2.sh on C2 ($C2)."
   local out rc
   out=$(ssh "${SSH_OPTS[@]}" "root@${C2}" "/usr/local/bin/ew_promote_c2.sh" 2>&1 | tail -8)
   rc=$?
   log "promote rc=$rc output: $out"
   if (( rc != 0 )); then
     tg "🔥 EW FAILOVER: ew_promote_c2.sh exited $rc — MANUAL INTERVENTION NEEDED. Tail: $out"
+    mail_alert "FAILOVER FAILED — manual intervention needed" "ew_promote_c2.sh exited $rc on C2. Tail: $out"
   else
     # finalize is deliberately NOT automatic. It rebuilds C1 as a standby OF C2, reverses lsyncd
     # and disables C1's crons — one-way changes that need a human to first decide the cluster is
     # stable and that C1 is not coming back on its own.
     tg "✅ EW FAILOVER: C2 promoted and serving. NEXT (manual, once stable): ssh root@${C2} '/usr/local/bin/ew_post_failover_finalize_c2.sh' to PREVIEW, then re-run with --execute to rebuild C1 as a standby of C2."
+    mail_alert "FAILOVER COMPLETE — C2 is now serving" "C2 ($C2) was promoted and is serving traffic. C2's code is mirrored from C1 hourly at :17, so it may be up to an hour behind. NEXT (manual, once stable): ssh root@${C2} '/usr/local/bin/ew_post_failover_finalize_c2.sh' to PREVIEW, then re-run with --execute to rebuild C1 as a standby of C2."
   fi
   touch "$STATE/promoted_at_$(date +%s)"
 }
