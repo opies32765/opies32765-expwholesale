@@ -37,6 +37,8 @@
   .muted{color:#9ca3af}
   .neg{color:#b91c1c}
   .empty{padding:34px;text-align:center;color:#9ca3af}
+  .trim{color:#6b7280;font-size:11.5px;margin:-2px 0 8px}
+  .trim a{color:#2563eb;font-weight:700}
   .note{background:#fff;border-radius:10px;padding:12px 14px;margin-top:12px;color:#6b7280;font-size:11.5px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
 </style>
 </head>
@@ -94,7 +96,15 @@
     </table>
     </div>
 
-    <h2>Transaction history{% if cars %} ({{ cars|length }}{% if cars|length >= 400 %} shown{% endif %}){% endif %}</h2>
+    <h2>Transaction history{% if total_cars %} ({{ '{:,}'.format(total_cars) }}){% endif %}</h2>
+    {#- the heading always states the TRUE total, so a trimmed list can never be
+        mistaken for the whole history -#}
+    {% if total_cars and cars|length < total_cars %}
+    <div class="trim">
+      Showing the {{ cars|length }} most recent of {{ '{:,}'.format(total_cars) }}.
+      <a href="?all=1">Show all</a>
+    </div>
+    {% endif %}
     <div class="tablewrap">
     <table>
       <thead><tr><th>Date</th><th>Direction</th><th>Vehicle</th><th>VIN</th><th>Order</th><th class="num">Amount</th><th class="num">EW profit</th></tr></thead>

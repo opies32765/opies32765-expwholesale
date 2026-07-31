@@ -3369,10 +3369,34 @@ def network_dealers_refresh():
         return jsonify(ok=False, error=str(e)[:200]), 500
 
 
+# DEALER_DETAIL_CACHE_2026_07_31 — the drill-down re-read LSL on every click.
+# 5 min TTL: LSL itself only moves every 15 min (extract_recent */15,
+# extract_inventory */5), so this can never be meaningfully staler than source.
+# Scoped to this route on purpose -- the application packet keeps its existing
+# uncached behaviour rather than changing two screens at once.
+_DEALER_HIST_CACHE = {}
+_DEALER_HIST_TTL = 300
+
+
+def _dealer_hist(sid, name):
+    now = time.time()
+    hit = _DEALER_HIST_CACHE.get(sid)
+    if hit and (now - hit[0]) < _DEALER_HIST_TTL:
+        return hit[1]
+    h = _lsl_history(name, supplier_id=sid) or {}
+    # bound the cache so a long-lived worker cannot grow it without limit
+    if len(_DEALER_HIST_CACHE) > 200:
+        for k in sorted(_DEALER_HIST_CACHE, key=lambda k: _DEALER_HIST_CACHE[k][0])[:100]:
+            _DEALER_HIST_CACHE.pop(k, None)
+    _DEALER_HIST_CACHE[sid] = (now, h)
+    return h
+
+
 @bp.route('/network/dealer/<int:sid>')
 def network_dealer_detail(sid):
     """Per-dealer drill-down. Reuses _lsl_history so the car-level list is the
     same one the application packet shows -- one implementation, one answer."""
+    show_all = _b(request.args.get('all'))
     db = _db(); cur = db.cursor()
     try:
         cur.execute("SELECT * FROM dp_dealer_scorecard WHERE supplier_id=%s", (sid,))
@@ -3386,7 +3410,7 @@ def network_dealer_detail(sid):
         db.close()
     if not row:
         abort(404)
-    hist = _lsl_history(row['supplier_name'], supplier_id=sid) or {}
+    hist = _dealer_hist(sid, row['supplier_name'])
     # which set-in cars EW actually ended up owning, so the drill-down can mark
     # each row hit/miss instead of just showing a percentage
     bought = set()
@@ -3395,8 +3419,13 @@ def network_dealer_detail(sid):
             bought.add(car['vin'].upper())
     for b in submitted:
         b['won'] = bool(b['vin'] and b['vin'].upper() in bought)
+    all_cars = hist.get('cars') or []
+    # 150 rows renders instantly; the full list is one click away. The heading
+    # always shows the true total, so a trimmed view never reads as complete.
+    cars = all_cars if show_all else all_cars[:150]
     return render_template('network/dealer_detail.html', row=row, hist=hist,
-                           submitted=submitted, cars=(hist.get('cars') or [])[:400])
+                           submitted=submitted, cars=cars,
+                           total_cars=len(all_cars), show_all=show_all)
 
 
 # ── DP_SUBMIT_ATTRIBUTION_2026_07_31 ─────────────────────────────────────────
