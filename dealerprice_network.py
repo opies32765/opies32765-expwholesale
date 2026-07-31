@@ -3055,3 +3055,266 @@ def _dpo_refresh_quiet(force=False):
     except Exception as e:
         print('[dp-outreach] quiet refresh: %s' % e, flush=True)
         return None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# DEALER_SCORECARD_2026_07_31 — permanent dealer profitability board + batting
+#
+# Management liked the historical-profit figures pulled from LSL for the
+# outreach email. Those were a one-off snapshot in dp_outreach_targets. This
+# makes them a standing screen that refreshes itself, and adds the metric they
+# actually asked for: a dealer who set in 30 cars that we only transacted once.
+#
+# Reads dp_dealer_scorecard, rebuilt by dealer_scorecard.py (cron, after the
+# LSL nightly). Every number on this page traces back to _lsl_history's audited
+# rules -- verified equal across 150 dealers on 2026-07-31.
+#
+# HARD RULES: read-only against LSL (HR6); nothing here can gate, delay or hide
+# an enrichment leg -- the tag is a plain column write on a bid and the board is
+# a separate table (HR1). This data is EW's edge and is INTERNAL ONLY -- it is
+# never texted or emailed out (ENRICHMENT_SMS_DENY_BY_DEFAULT_2026_07_28).
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _roster_pick(q, limit=10):
+    """Typeahead for tagging a bid with the dealer who set the car in.
+    Resolves to a suppliers.id -- a typed name is never stored.
+
+    Deliberately NOT _roster_search(): that one backs the public Q0 "are you
+    already an EW dealer?" lookup and returns DISTINCT NAMES, which is right
+    when a dealer is identifying themselves and wrong here. 43 dealer names map
+    to more than one rooftop, so collapsing them would make it impossible for a
+    rep to tag the correct store (audit rule 3).
+
+    Each hit carries its own history so two same-named rooftops are
+    distinguishable at the moment of choosing.
+    """
+    q = _s(q)
+    if len(q) < 2:
+        return []
+    rows = []
+    try:
+        c = _lsl_conn()
+        try:
+            rows = c.execute(
+                "SELECT id, name, city, state FROM suppliers "
+                "WHERE name LIKE ? AND name<>'' "
+                "ORDER BY (name LIKE ?) DESC, length(name) LIMIT ?",
+                ('%' + q + '%', q + '%', limit)).fetchall()
+        finally:
+            c.close()
+    except Exception as e:
+        print('[dp-network] roster_pick: %s' % e, flush=True)
+        return []
+
+    out = [{'id': int(r['id']), 'name': _s(r['name']),
+            'city': _s(r['city']), 'state': _s(r['state']),
+            'bought': 0, 'sold': 0, 'last': None} for r in rows]
+    if not out:
+        return out
+    # decorate with history so the rep can tell rooftops apart. Best-effort --
+    # a dealer with no scorecard row is still a valid pick (a brand-new store).
+    try:
+        db = _db(); cur = db.cursor()
+        try:
+            cur.execute("SELECT supplier_id, bought_cars, sold_cars, last_activity "
+                        "FROM dp_dealer_scorecard WHERE supplier_id = ANY(%s)",
+                        ([o['id'] for o in out],))
+            hist = {r['supplier_id']: r for r in cur.fetchall()}
+            for o in out:
+                h = hist.get(o['id'])
+                if h:
+                    o['bought'] = h['bought_cars'] or 0
+                    o['sold'] = h['sold_cars'] or 0
+                    o['last'] = h['last_activity'].isoformat() if h['last_activity'] else None
+        finally:
+            db.close()
+    except Exception as e:
+        print('[dp-network] roster_pick history: %s' % e, flush=True)
+    return out
+
+
+@bp.route('/api/network/roster-pick')
+def api_network_roster_pick():
+    """Login-gated (not under /api/dealerprice/, so the app-level require_login
+    covers it and returns a JSON 401 rather than an HTML redirect)."""
+    return jsonify({'ok': True, 'matches': _roster_pick(request.args.get('q'))})
+
+
+@bp.route('/api/network/bid/<int:bid_id>/dealer-tag', methods=['POST'])
+def api_network_bid_dealer_tag(bid_id):
+    """Tag / untag the dealer who set this car in.
+
+    This is the ONLY way the batting average gets a denominator for cars that
+    come in through Joe rather than through a DealerPrice link. Dealers are
+    used to texting him and he submits on their behalf, so the submission
+    itself carries no dealer -- a human has to say who it was.
+
+    Writes five plain columns on the bid and nothing else. It does not touch
+    enrichment, the assessment, or any notify path, and it cannot fail into
+    them (HR1).
+    """
+    sid = _int(request.form.get('supplier_id'))
+    db = _db(); cur = db.cursor()
+    try:
+        if not sid:  # untag
+            cur.execute("""UPDATE bids SET source_supplier_id=NULL,
+                              source_supplier_name=NULL, source_tagged_by=NULL,
+                              source_tagged_at=NULL, source_tag_origin=NULL
+                            WHERE id=%s RETURNING id""", (bid_id,))
+            if not cur.fetchone():
+                return jsonify(ok=False, error='no such bid'), 404
+            db.commit()
+            return jsonify(ok=True, cleared=True)
+
+        # Resolve the name from LSL rather than trusting what the browser sent,
+        # so the stored name can never disagree with the id it sits next to.
+        name = None
+        try:
+            c = _lsl_conn()
+            try:
+                r = c.execute("SELECT name FROM suppliers WHERE id=?", (sid,)).fetchone()
+                name = _s(r['name']) if r else None
+            finally:
+                c.close()
+        except Exception as e:
+            print('[dp-network] dealer_tag lookup: %s' % e, flush=True)
+        if not name:
+            return jsonify(ok=False, error='unknown dealer id'), 400
+
+        cur.execute("""UPDATE bids SET source_supplier_id=%s, source_supplier_name=%s,
+                          source_tagged_by=%s, source_tagged_at=now(),
+                          source_tag_origin='manual'
+                        WHERE id=%s RETURNING id""",
+                    (sid, name, _reviewer(), bid_id))
+        if not cur.fetchone():
+            return jsonify(ok=False, error='no such bid'), 404
+        db.commit()
+        return jsonify(ok=True, supplier_id=sid, name=name)
+    except Exception as e:
+        db.rollback()
+        print('[dp-network] dealer_tag: %s' % e, flush=True)
+        return jsonify(ok=False, error=str(e)[:200]), 500
+    finally:
+        db.close()
+
+
+def _scorecard_rows(cur, q=None, scope='all', limit=400):
+    """Board rows. scope: all | active (dealt inside 12mo) | batting (has cars
+    set in) | cold (set cars in, we bought none)."""
+    where, params = [], []
+    if q:
+        where.append("lower(supplier_name) LIKE %s")
+        params.append('%' + q.lower() + '%')
+    if scope == 'active':
+        where.append("last_activity > current_date - 365")
+    elif scope == 'batting':
+        where.append("set_in_cars > 0")
+    elif scope == 'cold':
+        where.append("set_in_cars > 0 AND acquired_cars = 0")
+    sql = "SELECT * FROM dp_dealer_scorecard"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    # batting first when it exists (that is the new question), then money
+    sql += (" ORDER BY (set_in_cars > 0) DESC, batting ASC NULLS LAST,"
+            " total_gross DESC NULLS LAST LIMIT %s")
+    params.append(limit)
+    cur.execute(sql, params)
+    return cur.fetchall()
+
+
+def _scorecard_stats(cur):
+    cur.execute("""
+        SELECT count(*) dealers,
+               COALESCE(sum(total_gross),0)  gross,
+               COALESCE(sum(bought_cars),0)  bought,
+               COALESCE(sum(sold_cars),0)    sold,
+               count(*) FILTER (WHERE last_activity > current_date - 365) active_1yr,
+               COALESCE(sum(set_in_cars),0)  set_in,
+               COALESCE(sum(acquired_cars),0) acquired,
+               count(*) FILTER (WHERE set_in_cars > 0) measured,
+               count(*) FILTER (WHERE set_in_cars > 0 AND acquired_cars = 0) cold
+          FROM dp_dealer_scorecard""")
+    s = dict(cur.fetchone() or {})
+    si = s.get('set_in') or 0
+    # Fleet batting average. Deliberately computed from the totals rather than
+    # averaging the per-dealer percentages -- averaging averages would let a
+    # dealer who set in one car swing the number as hard as one who set in 300.
+    s['batting'] = round(100.0 * (s.get('acquired') or 0) / si, 1) if si else None
+    cur.execute("""SELECT finished_at, ok, dealers, secs, error
+                     FROM dp_dealer_scorecard_run ORDER BY id DESC LIMIT 1""")
+    s['run'] = cur.fetchone()
+    return s
+
+
+@bp.route('/network/dealers')
+def network_dealers():
+    q = _s(request.args.get('q'))
+    scope = _s(request.args.get('scope')) or 'all'
+    db = _db(); cur = db.cursor()
+    try:
+        rows = _scorecard_rows(cur, q=q, scope=scope)
+        stats = _scorecard_stats(cur)
+    finally:
+        db.close()
+    return render_template('network/dealers.html', rows=rows, stats=stats,
+                           q=q, scope=scope)
+
+
+@bp.route('/network/dealers/stats')
+def network_dealers_stats():
+    """Polled by the page so the header stays live without re-rendering the
+    whole table."""
+    db = _db(); cur = db.cursor()
+    try:
+        s = _scorecard_stats(cur)
+    finally:
+        db.close()
+    run = s.pop('run', None)
+    s['refreshed'] = (run['finished_at'].strftime('%b %-d, %-I:%M %p')
+                      if run and run.get('finished_at') else None)
+    s['stale'] = bool(run and run.get('ok') is False)
+    return jsonify(s)
+
+
+@bp.route('/network/dealers/refresh', methods=['POST'])
+def network_dealers_refresh():
+    """Manual rebuild. The cron keeps it current; this is for when someone is
+    looking at the board right after a deal books and wants it to catch up."""
+    try:
+        import dealer_scorecard
+        n = dealer_scorecard.refresh(verbose=False)
+        return jsonify(ok=True, dealers=n)
+    except Exception as e:
+        print('[dp-network] scorecard refresh: %s' % e, flush=True)
+        return jsonify(ok=False, error=str(e)[:200]), 500
+
+
+@bp.route('/network/dealer/<int:sid>')
+def network_dealer_detail(sid):
+    """Per-dealer drill-down. Reuses _lsl_history so the car-level list is the
+    same one the application packet shows -- one implementation, one answer."""
+    db = _db(); cur = db.cursor()
+    try:
+        cur.execute("SELECT * FROM dp_dealer_scorecard WHERE supplier_id=%s", (sid,))
+        row = cur.fetchone()
+        cur.execute("""SELECT id, vin, year, make, model, trim, created_at, status,
+                              ai_price, bid_amount, source_tag_origin, source_tagged_by
+                         FROM bids WHERE source_supplier_id=%s
+                        ORDER BY created_at DESC LIMIT 300""", (sid,))
+        set_in = cur.fetchall()
+    finally:
+        db.close()
+    if not row:
+        abort(404)
+    hist = _lsl_history(row['supplier_name'], supplier_id=sid) or {}
+    # which set-in cars EW actually ended up owning, so the drill-down can mark
+    # each row hit/miss instead of just showing a percentage
+    bought = set()
+    for car in (hist.get('cars') or []):
+        if car.get('dir') == 'buy' and car.get('vin'):
+            bought.add(car['vin'].upper())
+    for b in set_in:
+        b['won'] = bool(b['vin'] and b['vin'].upper() in bought)
+    return render_template('network/dealer_detail.html', row=row, hist=hist,
+                           set_in=set_in, cars=(hist.get('cars') or [])[:400])

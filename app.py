@@ -13743,6 +13743,285 @@ def api_vauto_urgent():
     return jsonify({'urgent': cnt > 0, 'count': cnt})
 
 
+# ─── VAUTO_CLAIM_GATE_2026_07_31 ────────────────────────────────────────────
+# A worker whose vAuto login has died (per-profile Cox SSO cookie lost) keeps
+# reporting chrome_alive=t and consecutive_failures=0, so nothing stopped it
+# from claiming bids. It then burned ~180s per claim before ew_vauto_watchdog
+# released it, and the bid re-queued to a healthy worker. Measured 2026-07-30:
+# a bid that hit a healthy worker first finished in 24s; bids 5201/5202/5204
+# touched a dead worker first and took 211-732s.
+#
+# This gate is evidence-driven and computed live from worker_jobs on each poll:
+#   * needs GATE_STREAK consecutive completed vauto jobs, all watchdog/stale
+#     releases, with no success among them
+#   * FAILS OPEN — never gates unless some OTHER worker has actually
+#     succeeded at vauto recently. If the whole fleet is sick, a slow bid
+#     beats no bid, so everyone keeps claiming.
+#   * self-clears the instant the worker completes one successful vauto job
+#
+# Deliberately NOT the old blanket auto-demote (disabled 2026-04-30 by
+# operator request, and it never matched 'released_watchdog' anyway). This
+# touches vAuto claiming only; the worker keeps heartbeating and keeps doing
+# AccuTrade/iPacket, which still work fine on those VMs.
+GATE_STREAK = 3                # consecutive vauto failures before gating
+GATE_PEER_WINDOW = '45 minutes'  # a peer must have succeeded this recently
+GATE_FAIL_STATUSES = ('released_watchdog', 'released_stale', 'released_worker',
+                      'failed', 'error')
+GATE_OK_STATUSES = ('ok', 'ok_api_mode')
+WORKER_ALERT_TO = os.environ.get('WORKER_ALERT_TO', 'opies32765@gmail.com')
+# Deliberately NOT info@ — that address is DealerPrice's dealer-facing sender
+# (DP_EMAIL_IDENTITY_2026_07_28) and launch week's campaign reputation should
+# not share a From with internal ops noise. Same Resend-verified domain
+# (experience-wholesale.net), so alerts@ needs no new DNS.
+WORKER_ALERT_FROM = os.environ.get(
+    'WORKER_ALERT_FROM', 'EW Ops Alerts <alerts@experience-wholesale.net>')
+
+
+def _vauto_gate_check(cur, worker_id):
+    """Return (gated, reason, verdict) for this worker's vAuto claims.
+
+    verdict is one of:
+      'healthy'  — recent success, or not enough evidence to judge
+      'gated'    — failing, and a live healthy peer can take the work
+      'failopen' — failing, but NOTHING else can take the work, so it still
+                   gets to claim. A slow bid beats no bid.
+
+    Pure read. Never raises into the caller — any failure means not gated,
+    because a broken gate must never stop the fleet.
+    """
+    try:
+        cur.execute("""
+            SELECT status, completed_at
+              FROM worker_jobs
+             WHERE worker_id = %s
+               AND job_type = 'vauto'
+               AND completed_at IS NOT NULL
+               AND COALESCE(status,'') NOT IN ('cancelled', 'released_admin',
+                                               'released_admin_reprocess',
+                                               'released_invalid_vin')
+             ORDER BY completed_at DESC
+             LIMIT %s
+        """, (worker_id, GATE_STREAK))
+        rows = cur.fetchall()
+        if len(rows) < GATE_STREAK:
+            return False, None, 'healthy'           # not enough evidence yet
+        statuses = [(r['status'] or '') for r in rows]
+        if any(s in GATE_OK_STATUSES for s in statuses):
+            return False, None, 'healthy'           # it worked recently
+        if not all(s in GATE_FAIL_STATUSES for s in statuses):
+            return False, None, 'healthy'           # unknown states -> allow
+
+        since = rows[-1]['completed_at']
+        reason = '%d consecutive vAuto failures (%s) since %s' % (
+            len(statuses), statuses[0],
+            since.strftime('%m-%d %H:%M') if since else '?')
+
+        # Fail open. A peer only counts if it is LIVE, unpaused, NOT ITSELF
+        # GATED, and actually landed a vAuto lookup recently. Requiring
+        # 'not gated' is what stops the last two workers from gating each
+        # other off stale successes and leaving nobody to claim.
+        cur.execute("""
+            SELECT 1
+              FROM workers w
+             WHERE w.worker_id <> %s
+               AND w.vauto_gated_at IS NULL
+               AND NOT COALESCE(w.paused, FALSE)
+               AND w.last_heartbeat > NOW() - INTERVAL '180 seconds'
+               AND EXISTS (
+                     SELECT 1 FROM worker_jobs j
+                      WHERE j.worker_id = w.worker_id
+                        AND j.job_type = 'vauto'
+                        AND j.status IN %s
+                        AND j.completed_at > NOW() - INTERVAL '"""
+                        + GATE_PEER_WINDOW + """'
+                   )
+             LIMIT 1
+        """, (worker_id, GATE_OK_STATUSES))
+        if cur.fetchone() is None:
+            return False, reason, 'failopen'        # nobody else can -> allow
+
+        return True, reason, 'gated'
+    except Exception as e:
+        print('[vauto-gate] check failed, allowing: %s: %s'
+              % (type(e).__name__, e), flush=True)
+        return False, None, 'healthy'
+
+
+def _vauto_gate_email(worker_id, reason, recovered=False, failopen=False):
+    """One-shot internal ops alert (WORKER_ALERT_FROM -> WORKER_ALERT_TO).
+    Fire-and-forget in a thread — /api/vauto/pending is polled constantly and
+    must never wait on Resend."""
+    def _go():
+        try:
+            import resend
+            key = os.environ.get('RESEND_API_KEY', '')
+            if not key:
+                print('[vauto-gate:EMAIL-STUB] %s' % worker_id, flush=True)
+                return
+            resend.api_key = key
+            if failopen:
+                subj = 'vAuto fleet has no healthy worker (%s)' % worker_id
+                lead = ('<b>%s</b> is failing vAuto lookups, but it is still being '
+                        'allowed to claim because <b>no other worker is healthy '
+                        'enough to take over</b>.<br><br>'
+                        'This is the gate deliberately standing down: a slow bid '
+                        'beats no bid. It also means bids are going to run slow '
+                        'until at least one worker gets a working vAuto login.'
+                        '<br><br>Fix: log into vAuto by hand on one of the worker '
+                        'VMs to re-seed its Cox SSO cookie.' % worker_id)
+                tint = '#b3261e'
+            elif recovered:
+                subj = 'vAuto worker recovered: %s' % worker_id
+                lead = ('<b>%s</b> completed a vAuto lookup successfully and is '
+                        'back in rotation. No action needed.' % worker_id)
+                tint = '#0f7b34'
+            else:
+                subj = 'vAuto worker gated: %s' % worker_id
+                lead = ('<b>%s</b> has been pulled out of vAuto claiming. Its last '
+                        '%d vAuto jobs all timed out with no success, and healthy '
+                        'workers are available to take the load.<br><br>'
+                        'Bids are <i>not</i> stalled — they now go straight to a '
+                        'working worker instead of losing ~3 minutes here first. '
+                        'AccuTrade and iPacket still run on this VM.<br><br>'
+                        'Usual cause: the per-profile Cox SSO cookie expired, so '
+                        'the vAuto login loops back to the sign-in page. Fix is to '
+                        'log in once by hand on that VM.' % (worker_id, GATE_STREAK))
+                tint = '#b3261e'
+            html = (
+                '<div style="font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif;'
+                'color:#1a1a1a;max-width:560px">'
+                '<div style="border-left:4px solid %s;padding:2px 0 2px 14px">'
+                '<div style="font-size:13px;letter-spacing:.06em;text-transform:uppercase;'
+                'color:%s;font-weight:600">vAuto claim gate</div>'
+                '<div style="font-size:19px;font-weight:600;margin-top:2px">%s</div>'
+                '</div>'
+                '<p>%s</p>'
+                '<p style="font-size:13px;color:#555;margin:18px 0 0">%s</p>'
+                '<p style="margin-top:22px"><a href="https://experience-wholesale.net/admin/workers" '
+                'style="background:#111;color:#fff;text-decoration:none;padding:10px 18px;'
+                'border-radius:6px;font-size:14px;display:inline-block">Open worker dashboard</a></p>'
+                '</div>'
+            ) % (tint, tint, worker_id, lead, (reason or ''))
+            to_list = [a.strip() for a in WORKER_ALERT_TO.split(',') if a.strip()]
+            resend.Emails.send({
+                'from': WORKER_ALERT_FROM,
+                'to': to_list, 'subject': subj, 'html': html})
+            print('[vauto-gate:EMAIL] %s recovered=%s -> %s'
+                  % (worker_id, recovered, ','.join(to_list)), flush=True)
+        except Exception as e:
+            print('[vauto-gate:EMAIL-FAIL] %s: %s'
+                  % (type(e).__name__, e), flush=True)
+    try:
+        threading.Thread(target=_go, daemon=True).start()
+    except Exception:
+        pass
+
+
+def _vauto_gate_record(db, cur, worker_id, gated, reason, verdict='healthy'):
+    """Persist observed gate state for /admin/workers, and alert exactly once
+    per episode. The UPDATE...RETURNING is the dedupe lock — with 10 gunicorn
+    workers polling, only the one that actually flips the row sends mail."""
+    try:
+        if gated:
+            # Was there actually a bid waiting? Only then did this gate
+            # divert real work, and only then should the counter move.
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT 1 FROM bids b
+                     WHERE b.vin IS NOT NULL AND length(b.vin) = 17
+                       AND b.vin_invalid_reason IS NULL
+                       AND b.mileage IS NOT NULL AND b.mileage > 0
+                       AND (b.needs_verification_at IS NULL
+                            OR b.needs_verification_cleared_at IS NOT NULL)
+                       AND (b.vauto_claimed_at IS NULL
+                            OR b.vauto_claimed_at < NOW() - INTERVAL '5 minutes')
+                       AND (b.enrich_release_at IS NULL
+                            OR b.enrich_release_at <= NOW())
+                       AND NOT EXISTS (
+                             SELECT 1 FROM vauto_lookups vl
+                              WHERE vl.bid_id = b.id
+                                AND (vl.raw_json IS NOT NULL
+                                     OR vl.appraisal_url = '__not_found__')
+                           )
+                ) AS work_waiting
+            """)
+            _row = cur.fetchone()
+            _diverted = 1 if (_row and _row.get('work_waiting')) else 0
+            cur.execute("""
+                UPDATE workers
+                   SET vauto_gated_at = COALESCE(vauto_gated_at, NOW()),
+                       vauto_gate_reason = %s,
+                       vauto_gate_blocks = COALESCE(vauto_gate_blocks,0) + %s,
+                       updated_at = NOW()
+                 WHERE worker_id = %s
+             RETURNING (vauto_gate_notified_at IS NULL
+                        OR vauto_gate_notified_at < vauto_gated_at) AS needs_mail
+            """, (reason, _diverted, worker_id))
+            if _diverted:
+                print('[vauto-gate] DIVERTED a waiting bid away from %s -- %s'
+                      % (worker_id, reason), flush=True)
+            row = cur.fetchone()
+            if row and row.get('needs_mail'):
+                cur.execute("""
+                    UPDATE workers SET vauto_gate_notified_at = NOW()
+                     WHERE worker_id = %s
+                       AND (vauto_gate_notified_at IS NULL
+                            OR vauto_gate_notified_at < vauto_gated_at)
+                 RETURNING worker_id
+                """, (worker_id,))
+                won = cur.fetchone()
+                db.commit()
+                if won:
+                    _vauto_gate_email(worker_id, reason, recovered=False)
+            else:
+                db.commit()
+        else:
+            cur.execute("""
+                UPDATE workers
+                   SET vauto_gated_at = NULL,
+                       vauto_gate_reason = NULL,
+                       vauto_gate_cleared_at = NOW(),
+                       updated_at = NOW()
+                 WHERE worker_id = %s
+                   AND vauto_gated_at IS NOT NULL
+             RETURNING worker_id
+            """, (worker_id,))
+            won = cur.fetchone()
+            db.commit()
+            if won:
+                if verdict == 'failopen':
+                    # Not a recovery — the gate let go because no healthy
+                    # worker is left to take over. That is a fleet-wide
+                    # problem and deserves the loud version.
+                    _vauto_gate_email(worker_id, reason, failopen=True)
+                else:
+                    _vauto_gate_email(worker_id, 'Back in rotation.',
+                                      recovered=True)
+            if verdict == 'failopen' and not won:
+                # Failing worker that was never gated (fleet already sick).
+                # Alert once an hour so this can't go unnoticed, and can't
+                # spam either.
+                cur.execute("""
+                    UPDATE workers SET vauto_gate_notified_at = NOW()
+                     WHERE worker_id = %s
+                       AND (vauto_gate_notified_at IS NULL
+                            OR vauto_gate_notified_at < NOW() - INTERVAL '1 hour')
+                 RETURNING worker_id
+                """, (worker_id,))
+                if cur.fetchone():
+                    db.commit()
+                    _vauto_gate_email(worker_id, reason, failopen=True)
+                else:
+                    db.commit()
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print('[vauto-gate] record failed: %s: %s'
+              % (type(e).__name__, e), flush=True)
+
+
 @app.route('/api/vauto/pending')
 def api_vauto_pending():
     """Return bids that need vAuto lookup, atomically claimed for this worker.
@@ -13783,6 +14062,14 @@ def api_vauto_pending():
     if me and (me.get('paused') or me.get('effective_priority') == 'degraded'):
         db.close()
         return jsonify({'pending': []})
+
+    # ── vAuto claim gate (VAUTO_CLAIM_GATE_2026_07_31) ───────────────────────
+    # Evidence-driven, fails open, self-clears. See _vauto_gate_check.
+    _gated, _gate_reason, _gate_verdict = _vauto_gate_check(cur, worker_id)
+    _vauto_gate_record(db, cur, worker_id, _gated, _gate_reason, _gate_verdict)
+    if _gated:
+        db.close()
+        return jsonify({'pending': [], 'gated': True, 'reason': _gate_reason})
 
     # ── Standby gate ─────────────────────────────────────────────────────────
     # Standby workers defer to primary unless primary is busy or silent.
@@ -16242,6 +16529,9 @@ def api_admin_workers_snapshot():
             w.last_seen_ip::text AS last_seen_ip,
             w.consecutive_failures,
             w.auto_demoted_at,
+            w.vauto_gated_at,
+            w.vauto_gate_reason,
+            COALESCE(w.vauto_gate_blocks, 0) AS vauto_gate_blocks,
             (SELECT COUNT(*) FROM worker_jobs wj
               WHERE wj.worker_id = w.worker_id
                 AND wj.status IN ('ok','ok_api_mode')  -- TIMING_ACCURATE_2026_06_18: api_mode closes as ok_api_mode, was undercounted
@@ -16292,7 +16582,7 @@ def api_admin_workers_snapshot():
 
         # ISO-format timestamps for JSON
         for k in ('last_heartbeat', 'last_lookup_at', 'auto_demoted_at',
-                  'current_claim_at'):
+                  'vauto_gated_at', 'current_claim_at'):
             v = d.get(k)
             if hasattr(v, 'isoformat'):
                 d[k] = v.isoformat()

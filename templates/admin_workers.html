@@ -32,6 +32,19 @@ body{font-family:'Inter',system-ui,sans-serif;background:#0b0f19;color:#e2e8f0;m
 .b-standby{background:rgba(59,130,246,.12);color:#93c5fd;border:1px solid rgba(59,130,246,.3)}
 .b-degraded{background:rgba(245,158,11,.15);color:#fbbf24;border:1px solid rgba(245,158,11,.3)}
 .b-paused{background:rgba(100,116,139,.2);color:#94a3b8;border:1px solid rgba(100,116,139,.3)}
+.b-gated{background:rgba(245,158,11,.18);color:#fbbf24;border:1px solid rgba(245,158,11,.42)}
+.card.gated{border-color:rgba(245,158,11,.45);box-shadow:inset 3px 0 0 #f59e0b}
+.gate-note{margin-top:10px;padding:9px 11px;border-radius:8px;background:rgba(245,158,11,.09);
+  border:1px solid rgba(245,158,11,.22);font-size:11.5px;line-height:1.5;color:#fcd34d}
+.gate-note b{color:#fde68a;font-weight:600}
+.gate-note .sub{display:block;margin-top:4px;color:#a8a29e;font-size:10.5px}
+.gate-banner{display:none;align-items:flex-start;gap:11px;margin:0 0 16px;padding:12px 15px;
+  border-radius:10px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
+  font-size:13px;line-height:1.5;color:#fcd34d}
+.gate-banner.on{display:flex}
+.gate-banner .gb-ico{font-size:15px;line-height:1.35}
+.gate-banner b{color:#fde68a}
+.gate-banner .gb-sub{display:block;margin-top:3px;color:#a8a29e;font-size:11.5px}
 .b-dead{background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.3)}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:12px;margin-bottom:10px}
 .kv .k{color:#64748b;font-weight:500}
@@ -128,6 +141,9 @@ tr:hover td{background:rgba(59,130,246,.04)}
     </div>
   </div>
 
+  <!-- VAUTO_CLAIM_GATE_2026_07_31 -->
+  <div class="gate-banner" id="gate-banner"></div>
+
   <!-- Proxmox host summary strip (added 2026-05-01) -->
   <div class="host-strip" id="host-strip">
     <span class="host-label">Proxmox host</span>
@@ -183,6 +199,20 @@ const fmtSec = (s) => {
   return Math.floor(s/60) + 'm ' + (s%60) + 's';
 };
 
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+  });
+}
+function fmtWhen(iso){
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('en-US',{month:'short',day:'numeric',
+      hour:'numeric',minute:'2-digit'});
+  } catch(e){ return iso; }
+}
+
 function workerCard(w){
   const eff = w.effective_priority || w.priority || 'unknown';
   const hbDead = (w.last_hb_sec === null || w.last_hb_sec > 180);
@@ -191,7 +221,19 @@ function workerCard(w){
   let badge = '<span class="badge b-' + eff + '">' + eff + '</span>';
   if (w.paused) { cardClass += ' paused'; badge = '<span class="badge b-paused">PAUSED</span>'; }
   else if (hbDead) { cardClass += ' dead'; badge = '<span class="badge b-dead">DEAD</span>'; }
+  else if (w.vauto_gated_at) { cardClass += ' gated'; badge = '<span class="badge b-gated">vAuto gated</span>'; }
   else if (eff === 'degraded') { cardClass += ' degraded'; }
+
+  // VAUTO_CLAIM_GATE_2026_07_31 — why it's gated and what it's still doing.
+  let gateBlock = '';
+  if (w.vauto_gated_at){
+    gateBlock = '<div class="gate-note">' +
+      '<b>Not taking vAuto jobs.</b> ' + esc(w.vauto_gate_reason || '') +
+      '<span class="sub">Blocked ' + (w.vauto_gate_blocks || 0) + ' claim' +
+      ((w.vauto_gate_blocks === 1) ? '' : 's') + ' since ' + fmtWhen(w.vauto_gated_at) +
+      ' · still running AccuTrade + iPacket · clears itself on the next successful vAuto lookup</span>' +
+    '</div>';
+  }
 
   // current bid + phase dots
   let currentBlock = '';
@@ -224,6 +266,7 @@ function workerCard(w){
       (w.pause_reason ? '<span class="k">Reason</span><span class="v muted">' + w.pause_reason + '</span>' : '') +
       (w.pending_exit ? '<span class="k">Exit</span><span class="v" style="color:#fbbf24">pending</span>' : '') +
     '</div>' +
+    gateBlock +
     currentBlock +
     '<div class="actions">' +
       (w.paused
@@ -488,6 +531,26 @@ function activityTable(rows){
   return html;
 }
 
+// VAUTO_CLAIM_GATE_2026_07_31 — one line at the top so a gated worker never
+// hides in the grid. Says explicitly that bids still flow, because "gated"
+// reads like "broken" otherwise.
+function renderGateBanner(workers){
+  const el = document.getElementById('gate-banner');
+  if (!el) return;
+  const gated = (workers || []).filter(w => w.vauto_gated_at);
+  if (!gated.length){ el.className = 'gate-banner'; el.innerHTML = ''; return; }
+  const names = gated.map(w => esc(w.worker_id)).join(', ');
+  const blocks = gated.reduce((n,w) => n + (w.vauto_gate_blocks || 0), 0);
+  el.className = 'gate-banner on';
+  el.innerHTML = '<span class="gb-ico">&#9888;</span><span>' +
+    '<b>' + gated.length + ' worker' + (gated.length === 1 ? '' : 's') +
+    ' held out of vAuto claiming:</b> ' + names +
+    '<span class="gb-sub">Bids are not stalled &mdash; they go straight to a healthy worker ' +
+    'instead of timing out here first. ' + blocks + ' claim' + (blocks === 1 ? '' : 's') +
+    ' redirected. Each clears itself on its next successful vAuto lookup; ' +
+    'usual fix is one manual Cox login on that VM.</span></span>';
+}
+
 async function refresh(){
   try {
     const r = await fetch('/api/admin/workers/snapshot', {credentials:'same-origin'});
@@ -495,6 +558,7 @@ async function refresh(){
     const d = await r.json();
     document.getElementById('workers-grid').innerHTML = d.workers.map(workerCard).join('');
     document.getElementById('worker-count').textContent = d.workers.length;
+    renderGateBanner(d.workers);
     renderHostStrip(d.proxmox);
     renderServices(d.services);
     document.getElementById('stuck-wrap').innerHTML = stuckTable(d.stuck);
