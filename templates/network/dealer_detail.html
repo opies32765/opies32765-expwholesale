@@ -61,23 +61,23 @@
     </div>
 
     <div class="kpis">
-      <div class="kpi"><div class="k">EW gross</div><div class="v {% if (row.total_gross or 0) < 0 %}neg{% endif %}">${{ '{:,.0f}'.format(row.total_gross or 0) }}</div><div class="n">{{ '{:,}'.format(row.tx_count or 0) }} transactions</div></div>
+      <div class="kpi"><div class="k">EW profit</div><div class="v {% if (row.total_gross or 0) < 0 %}neg{% endif %}">${{ '{:,.0f}'.format(row.total_gross or 0) }}</div><div class="n">{{ '{:,}'.format(row.tx_count or 0) }} transactions</div></div>
       <div class="kpi"><div class="k">EW bought</div><div class="v">{{ '{:,}'.format(row.bought_cars or 0) }}</div><div class="n">${{ '{:,.0f}'.format(row.bought_paid or 0) }} paid out</div></div>
       <div class="kpi"><div class="k">EW sold</div><div class="v">{{ '{:,}'.format(row.sold_cars or 0) }}</div><div class="n">${{ '{:,.0f}'.format(row.sold_revenue or 0) }} invoiced</div></div>
       <div class="kpi"><div class="k">Last deal</div><div class="v">{% if row.last_activity %}{{ row.last_activity.strftime('%Y-%m-%d') }}{% else %}—{% endif %}</div><div class="n">{% if row.days_since is not none %}{{ row.days_since }} days ago{% endif %}</div></div>
       <div class="kpi">
         <div class="k">Batting</div>
         <div class="v">{% if row.batting is not none %}{{ '{:.0f}'.format(row.batting|float) }}%{% else %}—{% endif %}</div>
-        <div class="n">{% if row.set_in_cars %}{{ row.acquired_cars or 0 }} bought of {{ row.set_in_cars }} set in{% else %}nothing tagged yet{% endif %}</div>
+        <div class="n">{% if row.submitted_cars %}{{ row.acquired_cars or 0 }} bought of {{ row.submitted_cars }} submitted{% else %}nothing tagged yet{% endif %}</div>
       </div>
     </div>
 
-    <h2>Cars set in by this dealer{% if set_in %} ({{ set_in|length }}){% endif %}</h2>
+    <h2>Cars submitted by this dealer{% if submitted %} ({{ submitted|length }}){% endif %}</h2>
     <div class="tablewrap">
     <table>
       <thead><tr><th>Bid</th><th>Vehicle</th><th>VIN</th><th>Submitted</th><th>Tagged by</th><th class="num">Our bid</th><th>Outcome</th></tr></thead>
       <tbody>
-      {% for b in set_in %}
+      {% for b in submitted %}
         <tr>
           <td><a href="/bid/{{ b.id }}" style="color:#2563eb;font-weight:700">#{{ b.id }}</a></td>
           <td>{{ [b.year, b.make, b.model, b.trim]|select|join(' ') or '—' }}</td>
@@ -97,7 +97,7 @@
     <h2>Transaction history{% if cars %} ({{ cars|length }}{% if cars|length >= 400 %} shown{% endif %}){% endif %}</h2>
     <div class="tablewrap">
     <table>
-      <thead><tr><th>Date</th><th>Direction</th><th>Vehicle</th><th>VIN</th><th>Order</th><th class="num">Amount</th><th class="num">EW gross</th></tr></thead>
+      <thead><tr><th>Date</th><th>Direction</th><th>Vehicle</th><th>VIN</th><th>Order</th><th class="num">Amount</th><th class="num">EW profit</th></tr></thead>
       <tbody>
       {% for c in cars %}
         <tr>
@@ -118,7 +118,7 @@
 
     <div class="note">
       Transaction history comes from the same audited LSL read the application packet uses, so this page and the packet always agree.
-      <b>EW bought</b> rows show what we paid and the gross made reselling that unit; <b>EW sold</b> rows show the invoice and the gross on that sale.
+      <b>EW bought</b> rows show what we paid and the profit made reselling that unit; <b>EW sold</b> rows show the invoice and the profit on that sale.
       Internal only — this data is never texted or emailed to a dealer.
     </div>
   </div>

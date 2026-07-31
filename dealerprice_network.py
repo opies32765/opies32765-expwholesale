@@ -3063,7 +3063,7 @@ def _dpo_refresh_quiet(force=False):
 # Management liked the historical-profit figures pulled from LSL for the
 # outreach email. Those were a one-off snapshot in dp_outreach_targets. This
 # makes them a standing screen that refreshes itself, and adds the metric they
-# actually asked for: a dealer who set in 30 cars that we only transacted once.
+# actually asked for: a dealer who submitted 30 cars that we only transacted once.
 #
 # Reads dp_dealer_scorecard, rebuilt by dealer_scorecard.py (cron, after the
 # LSL nightly). Every number on this page traces back to _lsl_history's audited
@@ -3207,7 +3207,7 @@ SCORECARD_SORTS = {
     'sold':    'sold_cars',
     'profit':  'total_gross',
     'last':    'last_activity',
-    'setin':   'set_in_cars',
+    'submitted':   'submitted_cars',
     'won':     'acquired_cars',
     'batting': 'batting',
 }
@@ -3218,7 +3218,7 @@ def _scorecard_rows(cur, q=None, scope='dealers', sort='batting', dirn='desc', l
 
     scope: dealers (DEFAULT -- licence on file) | all (includes the private
     individuals and marketplaces that also appear in suppliers) | active (dealt
-    inside 12mo) | batting (has cars set in) | cold (set cars in, we bought
+    inside 12mo) | batting (has cars submitted) | cold (set cars in, we bought
     none).
 
     'dealers' is the default because suppliers is not a dealer list: of 2,645
@@ -3236,9 +3236,9 @@ def _scorecard_rows(cur, q=None, scope='dealers', sort='batting', dirn='desc', l
     elif scope == 'active':
         where.append("is_dealer AND last_activity > current_date - 365")
     elif scope == 'batting':
-        where.append("set_in_cars > 0")
+        where.append("submitted_cars > 0")
     elif scope == 'cold':
-        where.append("set_in_cars > 0 AND acquired_cars = 0")
+        where.append("submitted_cars > 0 AND acquired_cars = 0")
     sql = "SELECT * FROM dp_dealer_scorecard"
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -3265,20 +3265,37 @@ def _scorecard_stats(cur):
                COALESCE(sum(bought_cars)  FILTER (WHERE is_dealer),0) bought,
                COALESCE(sum(sold_cars)    FILTER (WHERE is_dealer),0) sold,
                count(*) FILTER (WHERE is_dealer AND last_activity > current_date - 365) active_1yr,
-               COALESCE(sum(set_in_cars),0)   set_in,
+               COALESCE(sum(submitted_cars),0)   submitted,
                COALESCE(sum(acquired_cars),0) acquired,
-               count(*) FILTER (WHERE set_in_cars > 0) measured,
-               count(*) FILTER (WHERE set_in_cars > 0 AND acquired_cars = 0) cold
+               count(*) FILTER (WHERE submitted_cars > 0) measured,
+               count(*) FILTER (WHERE submitted_cars > 0 AND acquired_cars = 0) cold
           FROM dp_dealer_scorecard""")
     s = dict(cur.fetchone() or {})
-    si = s.get('set_in') or 0
+    si = s.get('submitted') or 0
     # Fleet batting average. Deliberately computed from the totals rather than
     # averaging the per-dealer percentages -- averaging averages would let a
-    # dealer who set in one car swing the number as hard as one who set in 300.
+    # dealer who submitted one car swing the number as hard as one who submitted 300.
     s['batting'] = round(100.0 * (s.get('acquired') or 0) / si, 1) if si else None
-    cur.execute("""SELECT finished_at, ok, dealers, secs, error
-                     FROM dp_dealer_scorecard_run ORDER BY id DESC LIMIT 1""")
-    s['run'] = cur.fetchone()
+    cur.execute("""SELECT finished_at, ok, dealers, secs, error,
+                          fleet_profit, fleet_deals
+                     FROM dp_dealer_scorecard_run
+                    WHERE ok IS TRUE ORDER BY id DESC LIMIT 1""")
+    run = cur.fetchone()
+    s['run'] = run
+    # FLEET_PROFIT_2026_07_31 -- what EW actually made, each deal counted once.
+    # NEVER sum total_gross across dealers for a headline: a car bought from A
+    # and sold to B credits the same front_value to both relationships. Each
+    # row is right, the sum is not ($71.1M summed vs $35.4M true). The summed
+    # figure is kept as gross_rel ("relationship value") because it is still
+    # the right number for ranking a single dealer, just not for a total.
+    s['gross_rel'] = s.pop('gross', 0)
+    s['fleet_profit'] = (run or {}).get('fleet_profit')
+    s['fleet_deals'] = (run or {}).get('fleet_deals')
+    # newest run of ANY outcome -- so a failed rebuild after a good one is
+    # visible rather than silently serving yesterday's numbers as current
+    cur.execute("SELECT ok FROM dp_dealer_scorecard_run ORDER BY id DESC LIMIT 1")
+    last = cur.fetchone()
+    s['stale'] = bool(last and last.get('ok') is False)
     return s
 
 
@@ -3312,7 +3329,6 @@ def network_dealers_stats():
     run = s.pop('run', None)
     s['refreshed'] = (run['finished_at'].strftime('%b %-d, %-I:%M %p')
                       if run and run.get('finished_at') else None)
-    s['stale'] = bool(run and run.get('ok') is False)
     return jsonify(s)
 
 
@@ -3341,7 +3357,7 @@ def network_dealer_detail(sid):
                               ai_price, bid_amount, source_tag_origin, source_tagged_by
                          FROM bids WHERE source_supplier_id=%s
                         ORDER BY created_at DESC LIMIT 300""", (sid,))
-        set_in = cur.fetchall()
+        submitted = cur.fetchall()
     finally:
         db.close()
     if not row:
@@ -3353,7 +3369,69 @@ def network_dealer_detail(sid):
     for car in (hist.get('cars') or []):
         if car.get('dir') == 'buy' and car.get('vin'):
             bought.add(car['vin'].upper())
-    for b in set_in:
+    for b in submitted:
         b['won'] = bool(b['vin'] and b['vin'].upper() in bought)
     return render_template('network/dealer_detail.html', row=row, hist=hist,
-                           set_in=set_in, cars=(hist.get('cars') or [])[:400])
+                           submitted=submitted, cars=(hist.get('cars') or [])[:400])
+
+
+# ── DP_SUBMIT_ATTRIBUTION_2026_07_31 ─────────────────────────────────────────
+def member_supplier_id(member):
+    """LSL suppliers.id for a DealerPrice member, or None.
+
+    Cached on dealerprice_members.lsl_supplier_id so the roster scan happens
+    once per member rather than once per submitted car.
+
+    STRICT: only a suppliers match counts. _roster_match also falls back to the
+    customers table, but a customers hit is a retail buyer, not a dealer
+    identity -- accepting it would attribute cars to the wrong entity space
+    (the same id-space collision audit rule 2 warns about). No match means the
+    bid stays untagged, which is honest; a guess would not be.
+    """
+    if not member:
+        return None
+    sid = member.get('lsl_supplier_id')
+    if sid:
+        return int(sid)
+    match = _roster_match(_s(member.get('dealership_name')),
+                          _s(member.get('contact_phone'))) or {}
+    if match.get('source') != 'suppliers' or not match.get('supplier_id'):
+        return None
+    sid = int(match['supplier_id'])
+    try:
+        db = _db(); cur = db.cursor()
+        try:
+            cur.execute("UPDATE dealerprice_members SET lsl_supplier_id=%s "
+                        "WHERE id=%s AND lsl_supplier_id IS NULL",
+                        (sid, member['id']))
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        print('[dp-network] cache member supplier: %s' % e, flush=True)
+    return sid
+
+
+def tag_bid_from_member(cur, bid_id, member):
+    """Stamp the submitting dealer onto a bid. Called from the DealerPrice
+    submit bridge in app.py, on the caller's cursor/transaction.
+
+    Never raises into the submit path: a bid that cannot be attributed must
+    still be created and still enrich. Attribution is bookkeeping, the car is
+    the business (HR1).
+    """
+    try:
+        sid = member_supplier_id(member)
+        if not sid:
+            return False
+        cur.execute("""UPDATE bids
+                          SET source_supplier_id=%s,
+                              source_supplier_name=%s,
+                              source_tagged_at=now(),
+                              source_tag_origin='dealerprice'
+                        WHERE id=%s AND source_supplier_id IS NULL""",
+                    (sid, _s(member.get('dealership_name')) or None, bid_id))
+        return True
+    except Exception as e:
+        print('[dp-network] tag_bid_from_member: %s' % e, flush=True)
+        return False

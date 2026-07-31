@@ -12935,6 +12935,12 @@ def api_dealerprice_bid():
                 _m = _member_by_token(_mt, count_submit=True)
                 if _m:
                     cur.execute("UPDATE bids SET dp_member_id=%s WHERE id=%s", (_m['id'], bid_id))
+                    # DP_SUBMIT_ATTRIBUTION_2026_07_31: also record WHICH DEALER
+                    # sent the car, so link submissions feed the batting average
+                    # on /network/dealers without anyone tagging them by hand.
+                    # Best-effort and swallowed -- never blocks the bid (HR1).
+                    from dealerprice_network import tag_bid_from_member
+                    tag_bid_from_member(cur, bid_id, _m)
         except Exception as _e:
             print('[dealerprice] member tag: %s' % _e, flush=True)
 

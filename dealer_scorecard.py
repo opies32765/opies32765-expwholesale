@@ -41,14 +41,14 @@ THE MATH IS NOT NEW
         to multiple rooftops.
 
 THE BATTING AVERAGE
-    set_in_cars   distinct VINs tagged to this dealer on bids.source_supplier_id
+    submitted_cars   distinct VINs tagged to this dealer on bids.source_supplier_id
     acquired_cars of those, the ones LSL shows EW actually bought FROM THIS
                   dealer -- the strict, correct numerator
     acquired_any  of those, the ones EW acquired from ANYONE. Diagnostic only:
                   if acquired_any runs far ahead of acquired_cars, attribution
                   is drifting (we bought the car, but LSL booked it to a
                   different rooftop) and the batting average is understating.
-    batting       acquired_cars / set_in_cars, NULL when nothing was set in.
+    batting       acquired_cars / submitted_cars, NULL when nothing was submitted.
                   NULL means "we have not measured this dealer", which is not
                   the same as 0.00 ("they sent cars and we bought none"). The
                   page must keep those visually distinct.
@@ -251,16 +251,25 @@ def build_profit(c, group_of=None):
     # when EW buys a car from a dealer and resells it, the EW gross on that
     # relationship is the front_value on the RESALE deal.
     vin_deal = {}
-    for r in c.execute(
-            "SELECT vin_no, front_value, sold_at FROM deals "
-            "WHERE vin_no IS NOT NULL AND vin_no <> ''"):
+    novin_profit = 0.0
+    for r in c.execute("SELECT vin_no, front_value, sold_at FROM deals"):
         v = _s(r["vin_no"]).upper()
+        fv = float(r["front_value"] or 0)
         if not v:
+            novin_profit += fv
             continue
         prev = vin_deal.get(v)
         so = _s(r["sold_at"])
         if prev is None or so > prev[1]:
-            vin_deal[v] = (float(r["front_value"] or 0), so)
+            vin_deal[v] = (fv, so)
+
+    # FLEET_PROFIT: what EW actually made, every deal counted ONCE.
+    # Summing the per-dealer total_gross column instead would double count --
+    # a car bought from A and sold to B credits that one front_value to both
+    # relationships. Both rows are right; their sum is not a real number.
+    # Measured 2026-07-31: summed $71.1M against a true $35.4M.
+    fleet = {"profit": int(sum(x[0] for x in vin_deal.values()) + novin_profit),
+             "deals": len(vin_deal)}
 
     S = {}
     gmap = group_of or {}
@@ -383,11 +392,11 @@ def build_profit(c, group_of=None):
             # kept for the batting join below
             "_bought_vins": bought_vins,
         }
-    return out
+    return out, fleet
 
 
 def build_batting(pg_cur, profit, group_of=None):
-    """{rep_supplier_id: (set_in, first, last, acquired, acquired_any)} from the
+    """{rep_supplier_id: (submitted, first, last, acquired, acquired_any)} from the
     dealer tags on bids. Only VINs are counted -- a submission with no VIN
     cannot be matched to an acquisition, so counting it would depress the
     average with something unmeasurable.
@@ -442,7 +451,7 @@ def refresh(verbose=True):
         c = _lsl()
         try:
             group_of, meta = build_groups(c, cur)
-            profit = build_profit(c, group_of)
+            profit, fleet = build_profit(c, group_of)
         finally:
             c.close()
 
@@ -457,7 +466,7 @@ def refresh(verbose=True):
         for sid, p in profit.items():
             m = info(sid)
             b = batting.get(sid)
-            set_in = b[0] if b else 0
+            submitted = b[0] if b else 0
             acquired = b[3] if b else 0
             last = _date(p["last_activity"])
             rows.append((
@@ -470,9 +479,9 @@ def refresh(verbose=True):
                 p["total_gross"], p["tx_count"],
                 _date(p["first_activity"]), last,
                 (today - last).days if last else None,
-                set_in, b[1] if b else None, b[2] if b else None,
+                submitted, b[1] if b else None, b[2] if b else None,
                 acquired, b[4] if b else 0,
-                (round(100.0 * acquired / set_in, 2) if set_in else None),
+                (round(100.0 * acquired / submitted, 2) if submitted else None),
                 _dealer_key(m["name"]) or ("sid:%d" % sid), m["ids"], len(m["ids"]),
                 m["is_dealer"], m["has_license"], m["has_tax_cert"],
             ))
@@ -505,7 +514,7 @@ def refresh(verbose=True):
               sold_cars, sold_revenue, sold_gross, sell_first, sell_last,
               buy_resale_cars, buy_resale_gross, total_gross, tx_count,
               first_activity, last_activity, days_since,
-              set_in_cars, set_in_first, set_in_last,
+              submitted_cars, submitted_first, submitted_last,
               acquired_cars, acquired_any, batting,
               dealer_key, supplier_ids, rooftops,
               is_dealer, has_license, has_tax_cert)
@@ -514,13 +523,16 @@ def refresh(verbose=True):
         cur.execute("UPDATE dp_dealer_scorecard SET refreshed_at = now()")
         secs = round(time.time() - t0, 2)
         cur.execute("UPDATE dp_dealer_scorecard_run SET finished_at=now(), "
-                    "dealers=%s, ok=TRUE, secs=%s WHERE id=%s",
-                    (len(rows), secs, run_id))
+                    "dealers=%s, ok=TRUE, secs=%s, fleet_profit=%s, fleet_deals=%s "
+                    "WHERE id=%s",
+                    (len(rows), secs, fleet["profit"], fleet["deals"], run_id))
         pg.commit()
         if verbose:
             dealers = sum(1 for r in rows if r[-3])
-            print("[scorecard] %d rows (%d licenced dealers, %d unlicenced) in %ss"
-                  % (len(rows), dealers, len(rows) - dealers, secs), flush=True)
+            print("[scorecard] %d rows (%d licenced dealers, %d unlicenced), "
+                  "fleet profit $%s across %d deals, in %ss"
+                  % (len(rows), dealers, len(rows) - dealers,
+                     format(fleet["profit"], ","), fleet["deals"], secs), flush=True)
         return len(rows)
     except Exception as e:
         pg.rollback()

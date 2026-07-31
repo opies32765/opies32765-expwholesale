@@ -28,9 +28,6 @@
   .kpi .n{font-size:11px;color:#9ca3af;margin-top:2px}
 
   .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
-  .chips{display:flex;gap:8px;flex-wrap:wrap}
-  .chip{border:1px solid #d1d5db;background:#fff;border-radius:999px;padding:5px 12px;cursor:pointer;font-weight:600;font-size:12px}
-  .chip.on{background:#111827;color:#fff;border-color:#111827}
   input.q{border:1px solid #d1d5db;border-radius:8px;padding:7px 11px;font-size:13px;min-width:220px;background:#fff}
   .btn{border:1px solid #d1d5db;background:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-weight:600;font-size:12px}
   .fresh{margin-left:auto;color:#9ca3af;font-size:11.5px}
@@ -39,6 +36,10 @@
   table{width:100%;border-collapse:collapse}
   th,td{padding:9px 11px;text-align:left;border-bottom:1px solid #f0f1f3;white-space:nowrap}
   th{background:#f8fafc;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#6b7280;position:sticky;top:0}
+  th a{display:block;color:inherit;cursor:pointer}
+  th.sorted{color:#111827}
+  th .arrow{margin-left:5px;opacity:.45;font-size:9px}
+  th.sorted .arrow{opacity:1}
   td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
   tr:hover td{background:#fafbfc}
   td.dealer{white-space:normal;max-width:330px}
@@ -79,34 +80,36 @@
 
   <div class="wrap">
     <h1>Dealer scorecard</h1>
-    <div class="sub">Every dealer EW has ever transacted with, and what the relationship earned. Live from LiveSalesLog — rebuilt nightly, or on demand.</div>
+    <div class="sub">Every dealer EW has ever transacted with, and what the relationship earned. Live from LiveSalesLog — rebuilt nightly.</div>
 
     <div class="kpis">
       <div class="kpi"><div class="k">Dealers</div><div class="v" id="k-dealers">{{ '{:,}'.format(stats.dealers or 0) }}</div><div class="n" id="k-dealers-n">{{ '{:,}'.format(stats.active_1yr or 0) }} active in 12 mo</div></div>
-      <div class="kpi"><div class="k">EW gross</div><div class="v" id="k-gross">${{ '{:,.0f}'.format(stats.gross or 0) }}</div><div class="n">lifetime, both directions</div></div>
+      {#- Fleet profit is computed ONCE from the deals ledger, not by summing the
+          column below. A car bought from A and sold to B credits the same
+          front_value to both relationships, so the per-dealer rows are each
+          correct while their sum is not a real number ($71.1M vs $35.4M). -#}
+      <div class="kpi"><div class="k">EW profit</div><div class="v" id="k-gross">${{ '{:,.0f}'.format(stats.fleet_profit or 0) }}</div><div class="n">lifetime, across {{ '{:,}'.format(stats.fleet_deals or 0) }} deals · bought AND sold</div></div>
       <div class="kpi"><div class="k">Cars bought</div><div class="v" id="k-bought">{{ '{:,}'.format(stats.bought or 0) }}</div><div class="n">from these dealers</div></div>
       <div class="kpi"><div class="k">Cars sold</div><div class="v" id="k-sold">{{ '{:,}'.format(stats.sold or 0) }}</div><div class="n">to these dealers</div></div>
       <div class="kpi">
         <div class="k">Batting average</div>
         <div class="v" id="k-bat">{% if stats.batting is not none %}{{ stats.batting }}%{% else %}—{% endif %}</div>
-        <div class="n" id="k-bat-n">{{ '{:,}'.format(stats.acquired or 0) }} bought of {{ '{:,}'.format(stats.set_in or 0) }} set in</div>
+        <div class="n" id="k-bat-n">{{ '{:,}'.format(stats.acquired or 0) }} bought of {{ '{:,}'.format(stats.submitted or 0) }} submitted</div>
       </div>
     </div>
 
     <div class="bar">
-      <div class="chips">
-        <a class="chip {% if scope=='dealers' %}on{% endif %}" href="?scope=dealers{% if q %}&q={{ q }}{% endif %}">Dealers</a>
-        <a class="chip {% if scope=='active' %}on{% endif %}" href="?scope=active{% if q %}&q={{ q }}{% endif %}">Active 12 mo</a>
-        <a class="chip {% if scope=='batting' %}on{% endif %}" href="?scope=batting{% if q %}&q={{ q }}{% endif %}">Measured</a>
-        <a class="chip {% if scope=='cold' %}on{% endif %}" href="?scope=cold{% if q %}&q={{ q }}{% endif %}">Cold</a>
-        <a class="chip {% if scope=='all' %}on{% endif %}" href="?scope=all{% if q %}&q={{ q }}{% endif %}">All rows</a>
-      </div>
+      {#- Operator: chips and the rebuild button removed, search only. The
+          scope filters still work as URL params (?scope=all shows the
+          unlicenced private sellers and marketplaces too); they are just not
+          chrome on the page. Rebuild is the nightly cron's job, not a button. -#}
       <form method="get" style="display:flex;gap:8px;align-items:center">
         <input type="hidden" name="scope" value="{{ scope }}">
+        <input type="hidden" name="sort" value="{{ sort }}">
+        <input type="hidden" name="dir" value="{{ dir }}">
         <input class="q" name="q" value="{{ q or '' }}" placeholder="search dealer name…">
         <button class="btn" type="submit">Search</button>
       </form>
-      <button class="btn" onclick="rebuild(this)">↻ Rebuild now</button>
       <span class="fresh" id="fresh">
         {% if stats.run and stats.run.finished_at %}updated {{ stats.run.finished_at.strftime('%b %d, %H:%M') }}{% endif %}
       </span>
@@ -114,16 +117,28 @@
 
     <div class="tablewrap">
     <table>
+      {#- Sorting happens in SQL. The board is capped at 400 rows, so a
+          client-side sort would only reorder the page in hand and hide the
+          real top of the list. Clicking the active column flips direction. -#}
+      {% macro sorth(key, label, cls='') %}
+        {% set active = (sort == key) %}
+        {% set nextdir = 'asc' if (active and dir == 'desc') else ('desc' if not active else 'asc') %}
+        <th class="{{ cls }}{% if active %} sorted{% endif %}">
+          <a href="?scope={{ scope }}&sort={{ key }}&dir={{ nextdir }}{% if q %}&q={{ q }}{% endif %}">
+            {{ label }}<span class="arrow">{% if active %}{{ '▼' if dir == 'desc' else '▲' }}{% else %}⇅{% endif %}</span>
+          </a>
+        </th>
+      {% endmacro %}
       <thead>
         <tr>
-          <th>Dealer</th>
-          <th class="num">Bought</th>
-          <th class="num">Sold</th>
-          <th class="num">EW gross</th>
-          <th>Last deal</th>
-          <th class="num">Set in</th>
-          <th class="num">We bought</th>
-          <th class="num">Batting</th>
+          {{ sorth('dealer', 'Dealer') }}
+          {{ sorth('bought', 'Bought', 'num') }}
+          {{ sorth('sold', 'Sold', 'num') }}
+          {{ sorth('profit', 'EW profit', 'num') }}
+          {{ sorth('last', 'Last deal') }}
+          {{ sorth('submitted', 'Submitted', 'num') }}
+          {{ sorth('won', 'We bought', 'num') }}
+          {{ sorth('batting', 'Batting', 'num') }}
         </tr>
       </thead>
       <tbody>
@@ -141,14 +156,24 @@
           </td>
           <td class="num">{{ '{:,}'.format(r.bought_cars or 0) }}</td>
           <td class="num">{{ '{:,}'.format(r.sold_cars or 0) }}</td>
-          <td class="num money {% if (r.total_gross or 0) < 0 %}neg{% endif %}">${{ '{:,.0f}'.format(r.total_gross or 0) }}</td>
+          {#- EW profit, both directions. sold_gross is what we made selling TO
+              them; buy_resale_gross is what we made on the cars we bought FROM
+              them and resold. The split is shown so "profit regardless of
+              buying or selling" is visible, not just asserted. -#}
+          <td class="num money {% if (r.total_gross or 0) < 0 %}neg{% endif %}">${{ '{:,.0f}'.format(r.total_gross or 0) }}
+            <div class="meta">
+              {% if r.buy_resale_gross %}${{ '{:,.0f}'.format(r.buy_resale_gross) }} buy{% endif %}
+              {% if r.buy_resale_gross and r.sold_gross %} · {% endif %}
+              {% if r.sold_gross %}${{ '{:,.0f}'.format(r.sold_gross) }} sell{% endif %}
+            </div>
+          </td>
           <td>
             {% if r.last_activity %}{{ r.last_activity.strftime('%Y-%m-%d') }}
               <div class="meta">{{ r.days_since }}d ago</div>
             {% else %}<span class="muted">—</span>{% endif %}
           </td>
-          <td class="num">{% if r.set_in_cars %}{{ '{:,}'.format(r.set_in_cars) }}{% else %}<span class="muted">—</span>{% endif %}</td>
-          <td class="num">{% if r.set_in_cars %}{{ '{:,}'.format(r.acquired_cars or 0) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="num">{% if r.submitted_cars %}{{ '{:,}'.format(r.submitted_cars) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="num">{% if r.submitted_cars %}{{ '{:,}'.format(r.acquired_cars or 0) }}{% else %}<span class="muted">—</span>{% endif %}</td>
           <td class="num">
             {% if r.batting is not none %}
               {% set b = r.batting|float %}
@@ -167,24 +192,21 @@
     </div>
 
     <div class="note">
-      <b>Batting average</b> = cars EW actually bought ÷ cars the dealer set in, matched VIN by VIN.
+      <b>Batting average</b> = cars EW actually bought ÷ cars the dealer submitted, matched VIN by VIN.
       A dash means no cars have been tagged to that dealer yet — deliberately not shown as 0%, which would read as "they sent cars and we bought none."
       Tagging starts on the bid page; cars submitted before 2026-07-31 carry no dealer, so the measured set grows from here.
       <br>
+      <b>EW profit</b> per row is what EW made on that relationship in <i>both</i> directions — the profit on cars we sold them, plus the profit on cars we bought from them and resold. It is profit, not revenue.
+      <br>
+      The rows do <b>not</b> add up to the headline, and should not. A car bought from one dealer and sold to another credits that single deal's profit to <i>both</i> relationships — correct for judging each dealer, wrong as a total. The headline is computed once from the deals ledger ($35.4M), not by summing the column ($71.1M).
+      <br>
       <b>Dealers</b> are suppliers with a licence or tax cert on file. The <i>All rows</i> filter also shows private sellers and marketplaces that appear in the same table.
+      <br>
+      Any column sorts — click a heading, click again to flip. Default is the highest batting average first.
     </div>
   </div>
 
 <script>
-async function rebuild(btn) {
-  btn.disabled = true; const t = btn.textContent; btn.textContent = 'Rebuilding…';
-  try {
-    const r = await fetch('/network/dealers/refresh', {method: 'POST'});
-    const d = await r.json();
-    if (d.ok) { location.reload(); } else { alert('Rebuild failed: ' + (d.error || '?')); btn.disabled = false; btn.textContent = t; }
-  } catch (e) { alert('Rebuild failed: ' + e); btn.disabled = false; btn.textContent = t; }
-}
-
 // Header polls so the numbers stay live while the table stays put — reloading
 // the whole page would fight anyone mid-search.
 async function poll() {
@@ -192,12 +214,12 @@ async function poll() {
     const d = await (await fetch('/network/dealers/stats')).json();
     document.getElementById('k-dealers').textContent = (d.dealers || 0).toLocaleString();
     document.getElementById('k-dealers-n').textContent = (d.active_1yr || 0).toLocaleString() + ' active in 12 mo';
-    document.getElementById('k-gross').textContent = '$' + Math.round(d.gross || 0).toLocaleString();
+    document.getElementById('k-gross').textContent = '$' + Math.round(d.fleet_profit || 0).toLocaleString();
     document.getElementById('k-bought').textContent = (d.bought || 0).toLocaleString();
     document.getElementById('k-sold').textContent = (d.sold || 0).toLocaleString();
     document.getElementById('k-bat').textContent = (d.batting === null || d.batting === undefined) ? '—' : d.batting + '%';
     document.getElementById('k-bat-n').textContent =
-      (d.acquired || 0).toLocaleString() + ' bought of ' + (d.set_in || 0).toLocaleString() + ' set in';
+      (d.acquired || 0).toLocaleString() + ' bought of ' + (d.submitted || 0).toLocaleString() + ' submitted';
     if (d.refreshed) document.getElementById('fresh').textContent =
       (d.stale ? '⚠ last rebuild FAILED · ' : 'updated ') + d.refreshed;
   } catch (e) { /* leave the last good numbers on screen */ }
