@@ -179,6 +179,20 @@ def ew_get_accutrade_pending():
     return []
 
 
+def ew_get_ipacket_pending():
+    # IPACKET_ONLY_QUEUE_2026_06_13: vAuto API cutover — poll the iPacket-only
+    # queue so iPacket runs solo when vAuto was provided by the API path.
+    try:
+        params = {"worker_id": WORKER_ID}
+        r = http_requests.get(f"{EW_SERVER}/api/ipacket/pending",
+                              params=params, timeout=30)
+        if r.status_code == 200:
+            return r.json().get("pending", [])
+    except Exception as e:
+        print(f"  [EW] Error fetching ipacket pending: {e}")
+    return []
+
+
 def _ew_submit_with_retry(url, payload, name, max_attempts=3):
     """POST payload to EW server, retry on transient failures.
     timeout=60 catches slow gunicorn responses (was 15 — too tight when
@@ -210,6 +224,25 @@ def _ew_submit_with_retry(url, payload, name, max_attempts=3):
 
 def ew_submit_vauto(payload):
     return _ew_submit_with_retry(f"{EW_SERVER}/api/vauto/submit", payload, "vAuto")
+
+
+_ACCU_DECOUPLE = {"v": False, "t": 0.0}
+def _ew_accutrade_decoupled():
+    """ACCUTRADE_DECOUPLE_2026_06_18: poll C1 for the decouple flag. True -> skip the
+    bundled AccuTrade leg (it runs via the dedicated /api/accutrade/pending runner).
+    30s cache; defaults to last-known/False on any error (safe = current bundled behavior)."""
+    import time as _adt
+    now = _adt.time()
+    if now - _ACCU_DECOUPLE["t"] < 30:
+        return _ACCU_DECOUPLE["v"]
+    try:
+        r = http_requests.get(f"{EW_SERVER}/api/accutrade/decoupled", timeout=5)
+        if r.status_code == 200:
+            _ACCU_DECOUPLE["v"] = bool(r.json().get("decoupled"))
+    except Exception:
+        pass
+    _ACCU_DECOUPLE["t"] = now
+    return _ACCU_DECOUPLE["v"]
 
 
 def ew_submit_accutrade(payload):
@@ -447,7 +480,7 @@ def process_one_bid(item):
         _post_phase(bid_id, phase, state)
 
     try:
-        result = process_bid(vin, miles, trim, on_phase=_phase_cb, bid_id=bid_id)
+        result = process_bid(vin, miles, trim, on_phase=_phase_cb, bid_id=bid_id, skip_accutrade=_ew_accutrade_decoupled())
     except Exception as e:
         traceback.print_exc()
         # If process_bid raised because Cox sent us to signin, surface that.
@@ -474,7 +507,10 @@ def process_one_bid(item):
 
     # ── vAuto submit ─────────────────────────────────────────────────────
     vauto_ok = False
-    if vauto and not vauto.get("error"):
+    if vauto and vauto.get("api_mode"):
+        print(f"  vAuto API_MODE: data from server BFF API (books/Carfax/AutoCheck); worker submit skipped")
+        _post_phase(bid_id, "vauto", "done")
+    elif vauto and not vauto.get("error"):
         carfax_path = vauto_upload(vauto.get("carfax_screenshot"))
         autocheck_path = vauto_upload(vauto.get("autocheck_screenshot"))
 
@@ -520,25 +556,23 @@ def process_one_bid(item):
             # "unavailable_reason" not "reason"; the old lookup masked every
             # failure mode as the generic literal "unavailable", losing
             # diagnostic detail like "mileage_did_not_commit_v2".
-            # ACCU_FAIL_SCREENSHOT_2026_06_16: forward the saved-appraisal
-            # screenshot even on the not_available / mileage_did_not_commit path.
-            # The worker captured it (_failed_<vin>.png); the server 9B-vision
-            # reads the on-screen tiles and RECOVERS the bid (clears not_available)
-            # when the DOM value-change detector false-failed but the appraisal IS
-            # saved correctly. Mirrors the iPacket Refinement-C forward.
-            _na_shot = accutrade_upload(accu.get("screenshot")) if accu.get("screenshot") else None
-            ok = ew_submit_accutrade({
+            _na_accu = {
                 "bid_id": bid_id, "vin": vin,
                 "not_available": True,
                 "unavailable_reason": (accu.get("unavailable_reason")
                                        or accu.get("reason")
                                        or "unavailable"),
-                "screenshot": _na_shot,
-                "appraisal_url": accu.get("appraisal_url"),
-                "selected_trim_text": accu.get("selected_trim_text"),
-                "trim_select_source": accu.get("trim_select_source"),
-            })
-            print(f"  AccuTrade {'OK' if ok else 'FAIL'}: NOT AVAILABLE (ss fwd={'y' if _na_shot else 'n'})")
+            }
+            # ACCU_VISION_2026_06_13: forward the appraisal screenshot (exotic
+            # manual-quote pages) so EW can 9B-vision the tiles and backfill a
+            # value the DOM scrape missed. Mirrors the iPacket not_available
+            # branch below.
+            if accu.get("screenshot"):
+                _na_ss = accutrade_upload(accu.get("screenshot"))
+                if _na_ss:
+                    _na_accu["screenshot"] = _na_ss
+            ok = ew_submit_accutrade(_na_accu)
+            print(f"  AccuTrade {'OK' if ok else 'FAIL'}: NOT AVAILABLE")
         else:
             screenshot_path = accutrade_upload(accu.get("screenshot"))
             a_payload = {
@@ -764,14 +798,26 @@ def process_one_accutrade(item):
         print(f"  AccuTrade {'OK' if ok else 'FAIL'}: error->NA")
         return ok
     if result.get("not_available"):
-        ok = ew_submit_accutrade({
+        # ACCU_NA_FORWARD_SCREENSHOT_2026_06_18: forward the appraisal screenshot + url
+        # so C1 accu-vision can read Median/Target Retail off the page (exotics show
+        # "Median Retail" with N/A instant-offer tiles -- that is NOT no-data). The
+        # bundled path did this; the decoupled dedicated runner was dropping it -> bare NA.
+        _na = {
             "bid_id": bid_id, "vin": vin,
             "not_available": True,
             "unavailable_reason": (result.get("unavailable_reason")
                                    or result.get("reason")
                                    or "unavailable"),
-        })
-        print(f"  AccuTrade {'OK' if ok else 'FAIL'}: NOT AVAILABLE")
+            "appraisal_url": result.get("appraisal_url"),
+            "selected_trim_text": result.get("selected_trim_text"),
+            "trim_select_source": result.get("trim_select_source"),
+        }
+        if result.get("screenshot"):
+            _na_ss = accutrade_upload(result.get("screenshot"))
+            if _na_ss:
+                _na["screenshot"] = _na_ss
+        ok = ew_submit_accutrade(_na)
+        print(f"  AccuTrade {'OK' if ok else 'FAIL'}: NOT AVAILABLE (ss fwd)")
         return ok
     screenshot_path = accutrade_upload(result.get("screenshot"))
     a_payload = {
@@ -823,6 +869,18 @@ def run_pass():
         for item in accu_pending:
             try:
                 process_one_accutrade(item)
+            except Exception:
+                traceback.print_exc()
+            time.sleep(2)
+
+    # IPACKET_ONLY_QUEUE_2026_06_13: also poll the iPacket-only queue (vAuto API
+    # cutover). Kept after vauto + accutrade so they stay primary.
+    ipkt_pending = ew_get_ipacket_pending()
+    if ipkt_pending:
+        print(f"  {len(ipkt_pending)} ipacket pending")
+        for item in ipkt_pending:
+            try:
+                process_one_ipacket(item)
             except Exception:
                 traceback.print_exc()
             time.sleep(2)

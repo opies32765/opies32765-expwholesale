@@ -46,6 +46,9 @@ def _post_jwt_refresh(jwt):
         print(f"[ipacket] JWT refresh skipped: {type(e).__name__}: {str(e)[:80]}")
 
 
+_LAST_JWT = None  # IPACKET_DJAPI_2026_06_16: latest captured iPacket Bearer JWT
+
+
 def _attach_jwt_capture(ctx):
     """Hook context.on('request') to capture Authorization Bearer tokens from
     autoipacket.com XHRs and POST them to the refresh endpoint. Idempotent —
@@ -68,6 +71,7 @@ def _attach_jwt_capture(ctx):
             if not tok.startswith("eyJ") or tok == last["token"]:
                 return
             last["token"] = tok
+            globals()["_LAST_JWT"] = tok
             _post_jwt_refresh(tok)
         except Exception:
             pass
@@ -217,6 +221,89 @@ def auto_login(page, ctx, max_seconds=60):
     return False
 
 
+def _djapi_fast_path(vin, t, bid_id=None):
+    # IPACKET_DJAPI_2026_06_16: pull the OEM sticker via iPacket's internal API
+    # (the exact calls the dpapp browser makes) instead of driving the SPA and
+    # screenshotting a flaky canvas. pull -> poll -> download PDF (~2-3s), then
+    # fitz extracts text (MSRP/trim/options) + renders the page to PNG. Returns
+    # the same dict shape as the browser path, or None to fall through.
+    jwt = _LAST_JWT
+    if not jwt:
+        return None
+    try:
+        import requests as _rq, time as _tm
+        H = {"Authorization": "bearer " + jwt,
+             "Origin": "https://dpapp.autoipacket.com",
+             "Referer": "https://dpapp.autoipacket.com/",
+             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/147.0.0.0 Safari/537.36"}
+        pr = _rq.put("https://djapi.autoipacket.com/v2/sticker-puller/pull/" + vin, headers=H, timeout=15)
+        if pr.status_code not in (200, 201):
+            print("[+%5.1fs] [ipacket] djapi pull %s -- fallthrough" % (time.time()-t, pr.status_code))
+            return None
+        job = pr.json().get("id")
+        if not job:
+            return None
+        pdf_url = None
+        for _ in range(20):
+            _tm.sleep(1)
+            b = _rq.get("https://djapi.autoipacket.com/v2/sticker-puller/poll/" + str(job), headers=H, timeout=10)
+            bj = b.json() if b.status_code in (200, 201) else {}
+            stt = bj.get("state")
+            if stt == "SUCCESS":
+                pdf_url = bj.get("pdf") or bj.get("ipacket_viewer")
+                break
+            if stt in ("FAILED", "ERROR"):
+                print("[+%5.1fs] [ipacket] djapi poll FAILED -- fallthrough" % (time.time()-t))
+                return None
+        if not pdf_url:
+            print("[+%5.1fs] [ipacket] djapi poll timeout -- fallthrough" % (time.time()-t))
+            return None
+        pdf_bytes = _rq.get(pdf_url, headers=H, timeout=20).content
+        if not pdf_bytes or len(pdf_bytes) < 5000:
+            return None
+        import fitz as _fitz
+        doc = _fitz.open(stream=pdf_bytes, filetype="pdf")
+        txt = "".join(p.get_text() for p in doc)
+        ts = int(time.time())
+        png_path = REPORTS_DIR / ("ipacket_%s_%d.png" % (vin, ts))
+        png_path.write_bytes(doc[0].get_pixmap(dpi=130).tobytes("png"))
+        try:
+            (REPORTS_DIR / ("ipacket_%s_%d.pdf" % (vin, ts))).write_bytes(pdf_bytes)
+        except Exception:
+            pass
+        parsed = _parse_sticker_text(txt) if txt else {}
+        # IPACKET_OCR_EARLY_2026_06_16: push the sticker OCR text to the server
+        # NOW (before the end-of-bid submit) so AccuTrade trim-select has the
+        # trim in time. Best-effort; never blocks the result.
+        if bid_id and txt:
+            try:
+                import requests as _rq2
+                _rq2.post(EW_SERVER + "/api/ipacket/ocr_early",
+                          json={"bid_id": bid_id, "vin": vin, "ocr_text": txt,
+                                "total_msrp": parsed.get("total_msrp"),
+                                "base_price": parsed.get("base_price"),
+                                "options": parsed.get("options", [])},
+                          timeout=8)
+                print("[+%5.1fs] [ipacket] OCR pushed early (bid %s)" % (time.time()-t, bid_id))
+            except Exception as _ee:
+                print("[+%5.1fs] [ipacket] ocr_early push err %r" % (time.time()-t, _ee))
+        print("[+%5.1fs] [ipacket] DJAPI SUCCESS msrp=%s text=%dc png=%db" % (
+            time.time()-t, parsed.get("total_msrp"), len(txt), png_path.stat().st_size))
+        return {
+            "screenshot": str(png_path),
+            "sticker_url": pdf_url,
+            "total_msrp": parsed.get("total_msrp"),
+            "base_price": parsed.get("base_price"),
+            "exterior_color": parsed.get("exterior_color"),
+            "interior_color": parsed.get("interior_color"),
+            "raw": {"options": parsed.get("options", []), "_ocr_text": txt,
+                    "djapi_path": True, "text_chars": len(txt)},
+        }
+    except Exception as e:
+        print("[+%5.1fs] [ipacket] djapi error %r -- fallthrough" % (time.time()-t, e))
+        return None
+
+
 def lookup(page, ctx, vin, t, bid_id=None):
     print(f"[+{time.time()-t:5.1f}s] [ipacket] start")
     _attach_jwt_capture(ctx)  # 2026-05-08: keep server JWT fresh on every call (ctx-level since 2026-05-14)
@@ -238,6 +325,16 @@ def lookup(page, ctx, vin, t, bid_id=None):
             return {"error": "auto_login_failed"}
         page.goto("https://dpapp.autoipacket.com/stickerpull", wait_until="domcontentloaded", timeout=20000)
         time.sleep(3)
+
+    # IPACKET_DJAPI_2026_06_16: API fast-path (~3s) BEFORE the slow browser
+    # canvas-render. Additive: any failure (no token, 401, timeout) falls
+    # through to the existing V9/Submit flow unchanged.
+    try:
+        _dj = _djapi_fast_path(vin, t, bid_id)
+        if _dj is not None:
+            return _dj
+    except Exception as _dje:
+        print("[+%5.1fs] [ipacket] djapi wrapper err %r" % (time.time()-t, _dje))
 
     # ===== V9 fast-path (additive, repeat-VIN only) =====
     # If this VIN is already in iPacket's Recent Sticker Pulls table, the

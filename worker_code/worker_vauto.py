@@ -271,18 +271,84 @@ def auto_login(page, ctx, max_seconds=60):
     return False
 
 
-def lookup(page, ctx, vin, miles, t):
+def _ensure_appraisal_ready(page, ctx, t):
+    """WARM_PAGE_2026_06_17: reuse an already-loaded BLANK vAuto appraisal page so we skip the
+    ~15s HOME+APPRAISAL re-navigation every bid. Returns (page, reused). BULLETPROOF: on ANY
+    doubt it falls through to the full cold re-establish (today's proven flow), so worst case
+    == today, best case (the common case, after bid #1) saves ~15s."""
+    import time as _tm
+    try:
+        for _p in list(ctx.pages):
+            try:
+                _u = _p.url or ''
+            except Exception:
+                continue
+            if not (any(h in _u for h in SUCCESS_HOSTS) and 'ppraisal' in _u):
+                continue
+            try:
+                _p.add_script_tag(content=JS_HELPERS)
+                _state = _p.evaluate("""() => {
+                    try {
+                        const host = document.querySelector('profit-time-guided-appraisal');
+                        if (!host || !host.shadowRoot) return 'no_component';
+                        const v = window.__vauto.findByLabel('VIN');
+                        if (!v) return 'no_vin_field';
+                        return ((v.value || '').trim()) ? 'stale' : 'blank';
+                    } catch (e) { return 'err'; }
+                }""")
+            except Exception:
+                _state = 'err'
+            if _state == 'blank':
+                print(f"[+{_tm.time()-t:5.1f}s] [vauto] REUSED warm appraisal page (skip re-nav)")
+                return _p, True
+            # component-up-but-stale / no-field / err -> fall through to safe cold re-establish
+    except Exception:
+        pass
+    # COLD re-establish == today's proven flow (the bulletproof fallback)
+    try:
+        page.goto(VAUTO_HOME, wait_until="domcontentloaded", timeout=30000)
+        if not any(h in page.url for h in SUCCESS_HOSTS):
+            if not auto_login(page, ctx):
+                return None, False
+        page = next((pg for pg in ctx.pages if any(h in pg.url for h in SUCCESS_HOSTS)), page)
+        page.goto(VAUTO_APPRAISAL, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_function("() => document.querySelector('profit-time-guided-appraisal')?.shadowRoot != null", timeout=15000)
+        print(f"[+{_tm.time()-t:5.1f}s] [vauto] re-established appraisal page (cold)")
+        return page, False
+    except Exception as _e:
+        print(f"[+{_tm.time()-t:5.1f}s] [vauto] re-establish err: {_e}")
+        return None, False
+
+
+def lookup(page, ctx, vin, miles, t, bid_id=None):
     """Full vAuto pipeline. Returns dict with books + Carfax/AutoCheck PDFs + saved URL."""
     print(f"[+{time.time()-t:5.1f}s] [vauto] start")
-    page.goto(VAUTO_HOME, wait_until="domcontentloaded", timeout=30000)
-    if not any(h in page.url for h in SUCCESS_HOSTS):
-        if not auto_login(page, ctx):
-            return {"error": "auto_login_failed"}
-    print(f"[+{time.time()-t:5.1f}s] [vauto] logged in")
-    page = next((pg for pg in ctx.pages if any(h in pg.url for h in SUCCESS_HOSTS)), page)
-
-    page.goto(VAUTO_APPRAISAL, wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_function("() => document.querySelector('profit-time-guided-appraisal')?.shadowRoot != null", timeout=15000)
+    page, _reused = _ensure_appraisal_ready(page, ctx, t)
+    if page is None:
+        return {"error": "auto_login_failed"}
+    print(f"[+{time.time()-t:5.1f}s] [vauto] appraisal page ready (reused={_reused})")
+    # VAUTO_API_MODE_2026_06_16: session established; push pool + fire the server BFF
+    # API enrich (books+Carfax+AutoCheck+gate) now that the pooled session is FRESH,
+    # then skip the slow browser hydration/Carfax/AutoCheck/save (~30-40s).
+    try:
+        _push_vauto_session(ctx)
+        if bid_id:
+            try:
+                import requests as _rqv2
+                _rqv2.post(EW_SERVER + "/api/vauto/carfax_api_enrich",
+                           json={"bid_id": bid_id, "vin": vin}, timeout=8)
+            except Exception:
+                pass
+        print(f"[+{time.time()-t:5.1f}s] [vauto] API_MODE: session pushed + enrich fired (fresh); skipping browser pull")
+    except Exception as _apie:
+        print(f"[+{time.time()-t:5.1f}s] [vauto] API_MODE push err {_apie}")
+    _api_appr_url = None
+    try:
+        _api_appr_url = _apimode_save_appraisal(page, ctx, vin, miles, bid_id, t)
+    except Exception as _save_e:
+        print("[vauto] api_mode appraisal-save outer err %s" % _save_e)
+    return {"api_mode": True, "appraisal_url": _api_appr_url, "books": {}, "raw": {}, "title": None,
+            "carfax_screenshot": None, "autocheck_screenshot": None}
     page.add_script_tag(content=JS_HELPERS)
     page.wait_for_function("() => window.__vauto.findByLabel('VIN') != null", timeout=15000)
     page.wait_for_function("() => window.__vauto.findByLabel('Odometer') != null", timeout=15000)
@@ -300,16 +366,13 @@ def lookup(page, ctx, vin, miles, t):
         if r == "none": break
         time.sleep(0.5)
 
-    t0 = time.time(); last = {}
-    keys = ("rbook","black_book","mmr","kbb","kbb_com","jd_power")
-    while time.time() - t0 < HYDRATE_TIMEOUT:
-        s = page.evaluate("() => window.__vauto.readSummary()") or {}
-        last = s
-        if sum(1 for k in keys if s.get(k)) == 6: break
-        time.sleep(0.4)  # was 1.0 — tighter polling shaves ~5s on average hydrate
-    print(f"[+{time.time()-t:5.1f}s] [vauto] hydration done in {time.time()-t0:.1f}s")
-
-    title = page.evaluate("() => window.__vauto.titleStatus()")
+    # CARFAX_FIRST_2026_06_16 (operator directive): book-hydration + title MOVED
+    # below the Carfax/AutoCheck pull so Carfax is captured + OCR-pushed the
+    # INSTANT the appraisal exists (the only trim source the 9B waits for), not
+    # ~10s later after all 6 books hydrate. Brief settle lets the appraisal page
+    # render the Carfax button first; full hydration runs below before save.
+    last = {}
+    time.sleep(3)
 
     # 2026-05-08: Carfax/AutoCheck expect_page timeouts bumped from 15000 to
     # 45000 ms — intermittently >15s on heavy-image bids (Rolls/Bentley).
@@ -350,6 +413,27 @@ def lookup(page, ctx, vin, miles, t):
             cf_tab.screenshot(path=str(carfax), full_page=True)
             cf_tab.close()
             print(f"[+{time.time()-t:5.1f}s] [vauto] carfax PNG saved")
+            # CARFAX_EARLY_PUSH_2026_06_16: upload the Carfax PNG + trigger the
+            # server OCR NOW (not at end-of-leg) so AccuTrade trim-select gets the
+            # Carfax trim fast -- critical when iPacket is absent (iPacket djapi
+            # already early-exits the trim wait; Carfax must too). Best-effort;
+            # never blocks the vAuto leg.
+            if bid_id:
+                try:
+                    import requests as _rq
+                    with open(str(carfax), "rb") as _cf:
+                        _up = _rq.post(EW_SERVER + "/api/vauto/upload_report",
+                                       files={"file": (os.path.basename(str(carfax)), _cf, "image/png")},
+                                       timeout=20)
+                    _fn = _up.json().get("filename") if _up.status_code == 200 else None
+                    if _fn:
+                        _rq.post(EW_SERVER + "/api/vauto/carfax_early",
+                                 json={"bid_id": bid_id, "vin": vin,
+                                       "carfax_screenshot": "/vauto_reports/" + _fn},
+                                 timeout=25)
+                        print(f"[+{time.time()-t:5.1f}s] [vauto] carfax pushed early (bid {bid_id})")
+                except Exception as _ce:
+                    print(f"[+{time.time()-t:5.1f}s] [vauto] carfax early-push err {_ce}")
         except Exception as e:
             print(f"[+{time.time()-t:5.1f}s] [vauto] carfax screenshot FAIL: {e}")
             carfax = None
@@ -363,6 +447,26 @@ def lookup(page, ctx, vin, miles, t):
         except Exception as e:
             print(f"[+{time.time()-t:5.1f}s] [vauto] autocheck screenshot FAIL: {e}")
             autocheck = None
+
+    # CARFAX_FIRST_2026_06_16: hydrate the 6 books NOW (Carfax already captured +
+    # pushed above), before saving the appraisal.
+    t0 = time.time()
+    keys = ("rbook","black_book","mmr","kbb","kbb_com","jd_power")
+    _prev_n = -1; _settled_at = None
+    while time.time() - t0 < HYDRATE_TIMEOUT:
+        s = page.evaluate("() => window.__vauto.readSummary()") or {}
+        last = s
+        _n = sum(1 for k in keys if s.get(k))
+        if _n == 6: break
+        if _n > 0:
+            if _n != _prev_n:
+                _prev_n = _n; _settled_at = time.time()
+            elif time.time() - _settled_at >= 3.0:
+                break
+        time.sleep(0.4)
+    print(f"[+{time.time()-t:5.1f}s] [vauto] hydration done in {time.time()-t0:.1f}s")
+
+    title = page.evaluate("() => window.__vauto.titleStatus()")
 
     # Save appraisal
     saved_ok = False
@@ -520,3 +624,210 @@ def lookup(page, ctx, vin, miles, t):
         "appraisal_url": appraisal_url,
         "raw": last,  # keep raw text for debug
     }
+
+
+def _apimode_save_appraisal(page, ctx, vin, miles, bid_id, t):
+    """API_MODE saved-appraisal (2026-06-16). The appraisal page (?new=true) is
+    loaded, the pooled session pushed, and the fast server BFF enrich fired. Now
+    enter VIN+miles, SAVE the appraisal, capture the saved permalink, and POST it
+    to /api/vauto/url_capture_result (server then sets vauto_lookups.appraisal_url
+    + kicks the direct rBook/Manheim BFF enrichment -> Saved-vAuto link + rBook/MMR
+    cards). Runs in parallel with AccuTrade/iPacket; best-effort + bounded; never
+    raises. Returns the captured URL or None."""
+    import time as _t, requests as _rq
+    appraisal_url = None
+    _summary = {}
+    _rbook_val = None
+    _rbook_debug = ''
+    _rbook_shot = ''
+    _summary_shot = ''
+    try:
+        page.add_script_tag(content=JS_HELPERS)
+        page.wait_for_function("() => window.__vauto.findByLabel('VIN') != null", timeout=15000)
+        page.wait_for_function("() => window.__vauto.findByLabel('Odometer') != null", timeout=15000)
+        page.evaluate("""(d) => {
+            window.__vauto.setValue(window.__vauto.findByLabel('VIN'), d.vin);
+            window.__vauto.setValue(window.__vauto.findByLabel('Odometer'), d.miles);
+        }""", {"vin": vin, "miles": str(miles)})
+        if not page.evaluate("() => window.__vauto.clickGo()"):
+            print("[+%5.1fs] [vauto] api_mode save: go not clicked" % (_t.time() - t))
+            return None
+        _t.sleep(2)
+        for _ in range(10):
+            r = page.evaluate("() => window.__vauto.dismissDuplicate()")
+            if r == "ignored":
+                _t.sleep(3); break
+            if r == "none":
+                break
+            _t.sleep(1)
+        # (Summary-9B pre-save capture removed 2026-06-17: the vAuto Summary panel never
+        # hydrates in fast api_mode, so it wasted ~25s/bid and always failed. The 5
+        # non-rBook books come from the priceGuides API; rBook stays comp-median.)
+        # POST_SAVE_NAV_2026_06_17: clicking Save makes vAuto AUTO-NAVIGATE to the saved
+        # appraisal detail page (Default.aspx?Id=<persisted>). That URL *is* the permalink --
+        # just wait for the nav + read page.url. (The PUT-listener never matched, and the old
+        # Quick-Search goto to List.aspx RACED this very navigation -> "interrupted by another
+        # navigation to Default.aspx" -> bids 3449/3450 lost the link. This is simpler + the
+        # page lands on the Books detail page, which the rBook scrape below also needs.)
+        try:
+            if page.evaluate("() => window.__vauto.clickActions()") == "clicked":
+                _t.sleep(1.5)
+                page.evaluate("() => window.__vauto.clickSave()")
+        except Exception:
+            pass
+        for _ in range(8):  # was 22; nav-capture misses + Quick Search gets the link -- just let nav settle
+            _t.sleep(1)
+            _hit = ''
+            try:
+                for _fr in page.frames:          # the appraisal loads in an IFRAME, not main
+                    try:
+                        _fu = _fr.url or ''
+                    except Exception:
+                        _fu = ''
+                    if 'Appraisal/Default.aspx?Id=' in _fu:
+                        _hit = _fu
+                        break
+                    # WARM-SAFE permalink: the "Appraisal Saved" banner has a "View Appraisal"
+                    # link whose href IS the saved permalink. Read it (no click/nav) instead of
+                    # the Quick-Search, which navigates to the LIST and leaves the page there --
+                    # defeating warm-page reuse. Reading it keeps the page on the blank form = WARM.
+                    try:
+                        _va = _fr.evaluate(r"""() => {
+                            const a = [...document.querySelectorAll('a')].find(x =>
+                                /view\s*appraisal/i.test((x.textContent || '').trim())
+                                && /Default\.aspx\?Id=/i.test(x.href || ''));
+                            return a ? a.href : '';
+                        }""")
+                        if _va and 'Default.aspx?Id=' in _va:
+                            _hit = _va
+                            break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            if _hit:
+                appraisal_url = _hit
+                break
+        if appraisal_url:
+            print("[+%5.1fs] [vauto] api_mode permalink via post-save nav: %s" % (_t.time() - t, appraisal_url[:72]))
+        else:
+            print("[+%5.1fs] [vauto] api_mode no post-save nav URL -> Quick Search fallback" % (_t.time() - t))
+        print("[+%5.1fs] [vauto] api_mode appraisal saved; capturing permalink" % (_t.time() - t))
+        # (post-Save rBook DOM-scrape + full-page screenshot removed 2026-06-17: post-Save
+        # the form resets to blank so it read nothing + cost ~8s + a 200KB shot.)
+        # FALLBACK: Quick-Search-by-VIN on the list page (only if the PUT capture missed)
+        if not appraisal_url:
+            page.goto(APPRAISAL_LIST, wait_until="domcontentloaded", timeout=20000)
+            _t.sleep(3)
+        find_input_js = r"""
+            (() => {
+                let q = document.querySelector(
+                    'input[placeholder*="Quick" i], input[type=search], input[name*="quickSearch" i]');
+                if (q && q.offsetParent !== null) return q;
+                const btns = [...document.querySelectorAll('button, a, input[type=submit], input[type=button]')];
+                const go = btns.find(b => ((b.textContent || b.value || '').trim().toLowerCase()) === 'go'
+                                          && b.offsetParent !== null);
+                if (!go) return null;
+                let p = go;
+                for (let h = 0; h < 8 && p; h++) {
+                    const inp = p.querySelector('input[type=text], input:not([type])');
+                    if (inp && inp.offsetParent !== null) return inp;
+                    p = p.parentElement;
+                }
+                const all = [...document.querySelectorAll('input')];
+                return all.find(i => i.offsetParent !== null
+                                      && (i.type === 'text' || i.type === 'search' || !i.type)) || null;
+            })()
+        """
+        qs_frame = None
+        qs_handle = None
+        deadline = _t.time() + 30
+        while _t.time() < deadline and qs_handle is None and not appraisal_url:
+            for f in page.frames:
+                try:
+                    handle = f.evaluate_handle(find_input_js)
+                    if handle and handle.evaluate("el => !!el && el.offsetParent !== null"):
+                        qs_handle = handle
+                        qs_frame = f
+                        break
+                except Exception:
+                    continue
+            if qs_handle is None:
+                _t.sleep(1)
+        if qs_handle is None:
+            print("[+%5.1fs] [vauto] api_mode permalink: Quick Search not found" % (_t.time() - t))
+        else:
+            qs_handle.evaluate("""el => {
+                el.focus();
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                setter.call(el, '');
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+            }""")
+            qs_handle.evaluate("""(el, vin) => {
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                setter.call(el, vin);
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                el.dispatchEvent(new KeyboardEvent('keydown', {bubbles: true, key: 'Enter', keyCode: 13, which: 13}));
+                el.dispatchEvent(new KeyboardEvent('keypress', {bubbles: true, key: 'Enter', keyCode: 13, which: 13}));
+                el.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true, key: 'Enter', keyCode: 13, which: 13}));
+            }""", vin)
+            _t.sleep(0.4)
+            qs_frame.evaluate(r"""() => {
+                const btns = [...document.querySelectorAll('button, a, input[type=submit], input[type=button]')];
+                const go = btns.find(b => ((b.textContent || b.value || '').trim().toLowerCase()) === 'go'
+                                          && b.offsetParent !== null);
+                if (go) go.click();
+            }""")
+            for attempt in range(1, 4):
+                _t.sleep(3)
+                result = qs_frame.evaluate(r"""(expected) => {
+                const want = (expected || '').toLowerCase();
+                const titles = [...document.querySelectorAll('a.AppraisalVehicleTitle')]
+                                .filter(a => a.offsetParent !== null);
+                if (titles.length === 0) return {err: 'no_titles'};
+                let target = null;
+                if (want) {
+                    target = titles.find(a =>
+                        (a.textContent || '').trim().toLowerCase().startsWith(want));
+                }
+                if (!target) target = titles[0];
+                const href = target.href || '';
+                if (href.indexOf('Appraisal/Default.aspx?Id=') !== -1) {
+                    return {action: 'href', href: href, total: titles.length};
+                }
+                target.click();
+                return {action: 'clicked', total: titles.length};
+            }""", "") or {}
+                if result.get('action') == 'href' and result.get('href'):
+                    appraisal_url = result['href']
+                    break
+                elif result.get('action') == 'clicked':
+                    d2 = _t.time() + 8
+                    while _t.time() < d2:
+                        for url_src in (page.url, qs_frame.url):
+                            if 'Appraisal/Default.aspx?Id=' in url_src:
+                                appraisal_url = url_src
+                                break
+                        if appraisal_url:
+                            break
+                        _t.sleep(0.5)
+                    if appraisal_url:
+                        break
+    except Exception as e:
+        print("[+%5.1fs] [vauto] api_mode appraisal-save FAIL: %s" % (_t.time() - t, e))
+    if (appraisal_url or _rbook_val or _rbook_shot or _summary_shot) and bid_id:
+        try:
+            _rq.post(EW_SERVER + "/api/vauto/url_capture_result",
+                     json={"bid_id": bid_id, "vin": vin, "appraisal_url": appraisal_url, "books": _summary,
+                           "rbook_exact": _rbook_val, "rbook_debug": _rbook_debug, "rbook_shot": _rbook_shot,
+                           "summary_shot": _summary_shot}, timeout=30)
+            print("[+%5.1fs] [vauto] api_mode url/rbook POSTED: url=%s rbook_dom=%s summary=%s" % (_t.time() - t, (appraisal_url or '-')[:55], _rbook_val, bool(_summary_shot)))
+        except Exception as _pe:
+            print("[+%5.1fs] [vauto] api_mode url post err: %s" % (_t.time() - t, _pe))
+    else:
+        print("[+%5.1fs] [vauto] api_mode: no appraisal_url captured" % (_t.time() - t))
+    # (re-warm-at-end removed 2026-06-17: it added ~15-45s to every vAuto leg with no benefit on
+    # a sporadic workload -- page idle-expires before the next bid -- and could tip a slow bid
+    # over the 180s worker watchdog. vAuto leg back to the lean ~38s cleaned path.)
+    return appraisal_url

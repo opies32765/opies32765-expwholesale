@@ -32,7 +32,7 @@ TEST_MILES = 30000
 TEST_TRIM = None
 
 # Per-vendor wall-clock cap. Single hung lookup can't block the bid forever.
-LOOKUP_TIMEOUT_SEC = 90
+LOOKUP_TIMEOUT_SEC = 150  # 2026-06-13 rolled: was 90 (slow same-VIN AccuTrade dropped past cap)
 
 
 def _run_lookup_in_own_browser(profile_dir, runner):
@@ -98,7 +98,7 @@ def _ipacket_already_good(bid_id):
         return False
 
 
-def process_bid(vin, miles, trim=None, on_phase=None, bid_id=None):
+def process_bid(vin, miles, trim=None, on_phase=None, bid_id=None, skip_accutrade=False):
     """Run all three lookups in parallel.
 
     on_phase: optional callback (phase: str, state: str) for watchdog markers.
@@ -128,14 +128,17 @@ def process_bid(vin, miles, trim=None, on_phase=None, bid_id=None):
         threading.Thread(
             target=_wrap, name="vauto", daemon=True,
             args=("vauto", VAUTO_PROFILE_DIR,
-                  lambda page, ctx: worker_vauto.lookup(page, ctx, vin, miles, t)),
+                  lambda page, ctx: worker_vauto.lookup(page, ctx, vin, miles, t, bid_id=bid_id)),
         ),
-        threading.Thread(
+    ]
+    # ACCUTRADE_DECOUPLE_2026_06_18: decoupled -> AccuTrade runs ONLY via the dedicated
+    # /api/accutrade/pending runner; do NOT bundle it into this (vauto) job.
+    if not skip_accutrade:
+        threads.append(threading.Thread(
             target=_wrap, name="accutrade", daemon=True,
             args=("accutrade", ACCUTRADE_PROFILE_DIR,
                   lambda page, ctx: worker_accutrade.lookup(page, ctx, vin, miles, t, trim=trim, bid_id=bid_id)),
-        ),
-    ]
+        ))
     # IPACKET_WORKER_SKIP_2026_05_31: if the bid already has a GOOD iPacket, do
     # NOT launch the iPacket browser at all — no pull, no iPacket hit, the good
     # sticker is left completely untouched (result['ipacket'] stays None, so
