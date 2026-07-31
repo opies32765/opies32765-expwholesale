@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dealer Network · Dealers</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#eef0f2;color:#1f2937;font:13px/1.45 -apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  a{color:inherit;text-decoration:none}
+  .topbar{background:#2b2f33;color:#fff;display:flex;align-items:center;height:54px;padding:0 18px;gap:18px}
+  .brand{font-weight:800;font-size:18px;letter-spacing:.4px}
+  .brand .b{color:#3b82f6}
+  .topbar .nav{display:flex;gap:14px;margin-left:10px}
+  .topbar .nav a{color:#cbd5e1;font-size:13px;font-weight:600}
+  .topbar .nav a.on{color:#fff}
+  .topbar .back{color:#9ca3af;font-size:12px;margin-left:auto}
+  .wrap{max-width:1360px;margin:18px auto;padding:0 16px}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:#6b7280;font-size:12px;margin-bottom:14px}
+
+  /* KPI row — a stat tile, not a chart: these are single headline numbers with
+     no distribution to show, so a plot would add ink and no information. */
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+  .kpi{background:#fff;border-radius:10px;padding:12px 14px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+  .kpi .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:#6b7280;font-weight:700}
+  .kpi .v{font-size:22px;font-weight:800;margin-top:3px;letter-spacing:-.4px}
+  .kpi .n{font-size:11px;color:#9ca3af;margin-top:2px}
+
+  .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap}
+  .chip{border:1px solid #d1d5db;background:#fff;border-radius:999px;padding:5px 12px;cursor:pointer;font-weight:600;font-size:12px}
+  .chip.on{background:#111827;color:#fff;border-color:#111827}
+  input.q{border:1px solid #d1d5db;border-radius:8px;padding:7px 11px;font-size:13px;min-width:220px;background:#fff}
+  .btn{border:1px solid #d1d5db;background:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-weight:600;font-size:12px}
+  .fresh{margin-left:auto;color:#9ca3af;font-size:11.5px}
+
+  .tablewrap{overflow-x:auto;background:#fff;border-radius:10px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:9px 11px;text-align:left;border-bottom:1px solid #f0f1f3;white-space:nowrap}
+  th{background:#f8fafc;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#6b7280;position:sticky;top:0}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  tr:hover td{background:#fafbfc}
+  td.dealer{white-space:normal;max-width:330px}
+  .dname{font-weight:700;font-size:13px}
+  .meta{color:#9ca3af;font-size:11px;margin-top:2px}
+  .badge{display:inline-block;border-radius:6px;padding:1px 7px;font-size:10.5px;font-weight:700;margin-left:6px}
+  .b-roof{background:#ede9fe;color:#5b21b6}
+  .b-retail{background:#f3f4f6;color:#6b7280}
+  .money{font-weight:700}
+  .neg{color:#b91c1c}
+  .muted{color:#9ca3af}
+
+  /* Batting. Status colours are reserved for state and always ship with the
+     number beside them — never colour alone. An unmeasured dealer shows a dash,
+     NOT 0%: "we have not measured them" and "they sent cars we never bought"
+     are different facts and must not look the same. */
+  .bat{font-weight:800;font-variant-numeric:tabular-nums}
+  .bat-good{color:#15803d}
+  .bat-mid{color:#b45309}
+  .bat-bad{color:#b91c1c}
+  .meter{height:4px;border-radius:2px;background:#eef0f2;margin-top:4px;width:64px;overflow:hidden}
+  .meter i{display:block;height:100%;border-radius:2px}
+  .empty{padding:44px;text-align:center;color:#9ca3af}
+  .note{background:#fff;border-radius:10px;padding:12px 14px;margin-top:12px;color:#6b7280;font-size:11.5px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="brand">Dealer<span class="b">Price</span> · Network</span>
+    <span class="nav">
+      <a href="/network/applications">Applications</a>
+      <a href="/network/members">Members</a>
+      <a href="/network/outreach">Outreach</a>
+      <a class="on" href="/network/dealers">Dealers</a>
+    </span>
+    <a class="back" href="/">← EW Dashboard</a>
+  </div>
+
+  <div class="wrap">
+    <h1>Dealer scorecard</h1>
+    <div class="sub">Every dealer EW has ever transacted with, and what the relationship earned. Live from LiveSalesLog — rebuilt nightly, or on demand.</div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="k">Dealers</div><div class="v" id="k-dealers">{{ '{:,}'.format(stats.dealers or 0) }}</div><div class="n" id="k-dealers-n">{{ '{:,}'.format(stats.active_1yr or 0) }} active in 12 mo</div></div>
+      <div class="kpi"><div class="k">EW gross</div><div class="v" id="k-gross">${{ '{:,.0f}'.format(stats.gross or 0) }}</div><div class="n">lifetime, both directions</div></div>
+      <div class="kpi"><div class="k">Cars bought</div><div class="v" id="k-bought">{{ '{:,}'.format(stats.bought or 0) }}</div><div class="n">from these dealers</div></div>
+      <div class="kpi"><div class="k">Cars sold</div><div class="v" id="k-sold">{{ '{:,}'.format(stats.sold or 0) }}</div><div class="n">to these dealers</div></div>
+      <div class="kpi">
+        <div class="k">Batting average</div>
+        <div class="v" id="k-bat">{% if stats.batting is not none %}{{ stats.batting }}%{% else %}—{% endif %}</div>
+        <div class="n" id="k-bat-n">{{ '{:,}'.format(stats.acquired or 0) }} bought of {{ '{:,}'.format(stats.set_in or 0) }} set in</div>
+      </div>
+    </div>
+
+    <div class="bar">
+      <div class="chips">
+        <a class="chip {% if scope=='dealers' %}on{% endif %}" href="?scope=dealers{% if q %}&q={{ q }}{% endif %}">Dealers</a>
+        <a class="chip {% if scope=='active' %}on{% endif %}" href="?scope=active{% if q %}&q={{ q }}{% endif %}">Active 12 mo</a>
+        <a class="chip {% if scope=='batting' %}on{% endif %}" href="?scope=batting{% if q %}&q={{ q }}{% endif %}">Measured</a>
+        <a class="chip {% if scope=='cold' %}on{% endif %}" href="?scope=cold{% if q %}&q={{ q }}{% endif %}">Cold</a>
+        <a class="chip {% if scope=='all' %}on{% endif %}" href="?scope=all{% if q %}&q={{ q }}{% endif %}">All rows</a>
+      </div>
+      <form method="get" style="display:flex;gap:8px;align-items:center">
+        <input type="hidden" name="scope" value="{{ scope }}">
+        <input class="q" name="q" value="{{ q or '' }}" placeholder="search dealer name…">
+        <button class="btn" type="submit">Search</button>
+      </form>
+      <button class="btn" onclick="rebuild(this)">↻ Rebuild now</button>
+      <span class="fresh" id="fresh">
+        {% if stats.run and stats.run.finished_at %}updated {{ stats.run.finished_at.strftime('%b %d, %H:%M') }}{% endif %}
+      </span>
+    </div>
+
+    <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Dealer</th>
+          <th class="num">Bought</th>
+          <th class="num">Sold</th>
+          <th class="num">EW gross</th>
+          <th>Last deal</th>
+          <th class="num">Set in</th>
+          <th class="num">We bought</th>
+          <th class="num">Batting</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr onclick="location.href='/network/dealer/{{ r.supplier_id }}'" style="cursor:pointer">
+          <td class="dealer">
+            <div class="dname">{{ r.supplier_name or '(no name on file)' }}
+              {% if r.rooftops and r.rooftops > 1 %}<span class="badge b-roof">{{ r.rooftops }} ids merged</span>{% endif %}
+              {% if not r.is_dealer %}<span class="badge b-retail">no licence</span>{% endif %}
+            </div>
+            <div class="meta">
+              {% if r.first_activity %}since {{ r.first_activity.strftime('%b %Y') }}{% endif %}
+              {% if r.tx_count %} · {{ '{:,}'.format(r.tx_count) }} transactions{% endif %}
+            </div>
+          </td>
+          <td class="num">{{ '{:,}'.format(r.bought_cars or 0) }}</td>
+          <td class="num">{{ '{:,}'.format(r.sold_cars or 0) }}</td>
+          <td class="num money {% if (r.total_gross or 0) < 0 %}neg{% endif %}">${{ '{:,.0f}'.format(r.total_gross or 0) }}</td>
+          <td>
+            {% if r.last_activity %}{{ r.last_activity.strftime('%Y-%m-%d') }}
+              <div class="meta">{{ r.days_since }}d ago</div>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td class="num">{% if r.set_in_cars %}{{ '{:,}'.format(r.set_in_cars) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="num">{% if r.set_in_cars %}{{ '{:,}'.format(r.acquired_cars or 0) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="num">
+            {% if r.batting is not none %}
+              {% set b = r.batting|float %}
+              <span class="bat {% if b >= 25 %}bat-good{% elif b >= 10 %}bat-mid{% else %}bat-bad{% endif %}">{{ '{:.0f}'.format(b) }}%</span>
+              <div class="meter" style="margin-left:auto"><i style="width:{{ [b,100]|min }}%;background:{% if b >= 25 %}#15803d{% elif b >= 10 %}#b45309{% else %}#b91c1c{% endif %}"></i></div>
+            {% else %}
+              <span class="muted" title="No cars tagged to this dealer yet — not the same as 0%">—</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" class="empty">Nothing matches that filter.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+
+    <div class="note">
+      <b>Batting average</b> = cars EW actually bought ÷ cars the dealer set in, matched VIN by VIN.
+      A dash means no cars have been tagged to that dealer yet — deliberately not shown as 0%, which would read as "they sent cars and we bought none."
+      Tagging starts on the bid page; cars submitted before 2026-07-31 carry no dealer, so the measured set grows from here.
+      <br>
+      <b>Dealers</b> are suppliers with a licence or tax cert on file. The <i>All rows</i> filter also shows private sellers and marketplaces that appear in the same table.
+    </div>
+  </div>
+
+<script>
+async function rebuild(btn) {
+  btn.disabled = true; const t = btn.textContent; btn.textContent = 'Rebuilding…';
+  try {
+    const r = await fetch('/network/dealers/refresh', {method: 'POST'});
+    const d = await r.json();
+    if (d.ok) { location.reload(); } else { alert('Rebuild failed: ' + (d.error || '?')); btn.disabled = false; btn.textContent = t; }
+  } catch (e) { alert('Rebuild failed: ' + e); btn.disabled = false; btn.textContent = t; }
+}
+
+// Header polls so the numbers stay live while the table stays put — reloading
+// the whole page would fight anyone mid-search.
+async function poll() {
+  try {
+    const d = await (await fetch('/network/dealers/stats')).json();
+    document.getElementById('k-dealers').textContent = (d.dealers || 0).toLocaleString();
+    document.getElementById('k-dealers-n').textContent = (d.active_1yr || 0).toLocaleString() + ' active in 12 mo';
+    document.getElementById('k-gross').textContent = '$' + Math.round(d.gross || 0).toLocaleString();
+    document.getElementById('k-bought').textContent = (d.bought || 0).toLocaleString();
+    document.getElementById('k-sold').textContent = (d.sold || 0).toLocaleString();
+    document.getElementById('k-bat').textContent = (d.batting === null || d.batting === undefined) ? '—' : d.batting + '%';
+    document.getElementById('k-bat-n').textContent =
+      (d.acquired || 0).toLocaleString() + ' bought of ' + (d.set_in || 0).toLocaleString() + ' set in';
+    if (d.refreshed) document.getElementById('fresh').textContent =
+      (d.stale ? '⚠ last rebuild FAILED · ' : 'updated ') + d.refreshed;
+  } catch (e) { /* leave the last good numbers on screen */ }
+}
+setInterval(poll, 30000);
+</script>
+</body>
+</html>

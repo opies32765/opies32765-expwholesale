@@ -56,6 +56,38 @@ THE BATTING AVERAGE
     Tagging started 2026-07-31. Bids before that carry no dealer by design --
     the operator chose to start clean rather than backfill inferred guesses.
 
+WHO COUNTS AS A DEALER  (operator correction, 2026-07-31)
+    suppliers holds 2,645 rows and they are NOT all dealers. Only 1,967 have an
+    uploaded licence or tax cert; the rest are largely private individuals who
+    sold one car to the desk, plus marketplaces (Backlotcars, TradeRev,
+    Manheim). Measured here: 1,180 licenced dealers carry $67.9M of the $71.1M
+    gross, and the 1,168 unlicenced carry $3.2M.
+
+    The uploaded licence is the discriminator -- 83% of the outreach targets
+    have one against 0% of known retail. source_deals is NOT dealer proof: 96%
+    of known-retail people have source deals, because an individual selling
+    their own car creates exactly those rows.
+
+    is_dealer is a FLAG, not a filter. 53 real-looking franchise stores have no
+    uploaded licence, so dropping unlicenced rows would lose real dealers. The
+    board defaults to dealers and can show everything.
+
+ONE ROOFTOP, MANY SUPPLIER IDS
+    A single dealership can hold several suppliers.id. That fragmentation is
+    what hid Scott Ales from the outreach list. Ids are merged on a
+    CONSERVATIVE key -- case, punctuation and invisible-character folding only,
+    trade words KEPT.
+
+    classify.py normalize_name is deliberately NOT used here. It strips
+    auto/motors/group/sales, which merges "Wholesale Auto Group" with
+    "Wholesale Inc" and "Dealer Wholesale Group LLC" into one dealer. The
+    conservative key folds 56 ids into 26 groups and every one is a genuine
+    duplicate (Signature Auto Group x4, F.c. Kerbeck & Sons x3, BMW FINANCIAL
+    SERVICES vs Bmw Financial Services).
+
+    Operator decisions in dealerprice_person_links are unioned on top and win
+    over the name key: confirmed pairs are merged, rejected pairs never are.
+
 HARD RULES
     HR6  crm.db is opened read-only, mode=ro. Nothing here writes to LSL.
     HR1  Never touches the bid/enrichment path. Read-side only; a failure here
@@ -65,9 +97,12 @@ HARD RULES
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import sqlite3
+import unicodedata
+from collections import defaultdict
 from datetime import datetime, date
 
 import psycopg2
@@ -108,10 +143,109 @@ def _pg():
     return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 
+def _dealer_key(name):
+    """Case / punctuation / invisible-character fold. Trade words are KEPT, so
+    'Wholesale Auto Group' stays distinct from 'Wholesale Inc'. See the module
+    docstring for why classify.py normalize_name is wrong for this job."""
+    s = unicodedata.normalize("NFKC", name or "")
+    s = "".join(ch for ch in s if unicodedata.category(ch)[0] != "C")
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def build_groups(c, pg_cur):
+    """Fold suppliers.id into one row per real dealership.
+
+    Returns (group_of, meta):
+      group_of[sid]  -> representative sid for that dealership
+      meta[rep]      -> {ids, name, has_license, has_tax_cert, is_dealer}
+    """
+    sup = {}
+    for r in c.execute("SELECT id, name, license_url, tax_cert_url FROM suppliers"):
+        sid = int(r["id"])
+        sup[sid] = {"name": _s(r["name"]),
+                    "lic": bool(_s(r["license_url"])),
+                    "tax": bool(_s(r["tax_cert_url"]))}
+
+    parent = {sid: sid for sid in sup}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            # keep the lower id as representative so the key is stable across runs
+            lo, hi = (ra, rb) if ra < rb else (rb, ra)
+            parent[hi] = lo
+
+    # name key. An empty key (NULL/blank supplier name) never groups -- those
+    # rows would otherwise all collapse into one giant fake dealer.
+    by_key = defaultdict(list)
+    for sid, d in sup.items():
+        k = _dealer_key(d["name"])
+        if k:
+            by_key[k].append(sid)
+    for k, ids in by_key.items():
+        for other in ids[1:]:
+            union(ids[0], other)
+
+    # operator decisions win over the name key
+    rejected = set()
+    try:
+        pg_cur.execute("SELECT primary_sid, linked_sid, decision "
+                       "FROM dealerprice_person_links")
+        for r in pg_cur.fetchall():
+            a, b = int(r["primary_sid"]), int(r["linked_sid"])
+            if a not in parent or b not in parent:
+                continue
+            if r["decision"] == "confirmed":
+                union(a, b)
+            elif r["decision"] == "rejected":
+                rejected.add((min(a, b), max(a, b)))
+    except Exception as e:
+        print("[scorecard] person_links unavailable, name key only: %s" % e, flush=True)
+
+    # A rejected pair must never end up merged. The name key alone has never
+    # produced one (checked 2026-07-31), but say so loudly rather than silently
+    # overriding an operator decision.
+    for a, b in rejected:
+        if find(a) == find(b):
+            print("[scorecard] WARNING: operator REJECTED merging %s/%s but the "
+                  "name key groups them -- left merged, needs a manual split" % (a, b),
+                  flush=True)
+
+    group_of, members = {}, defaultdict(list)
+    for sid in sup:
+        rep = find(sid)
+        group_of[sid] = rep
+        members[rep].append(sid)
+
+    meta = {}
+    for rep, ids in members.items():
+        # display name: the longest non-empty one, so 'Professional Sales, Inc.'
+        # beats 'Professional Sales Inc' and a blank never wins
+        names = sorted((sup[i]["name"] for i in ids if sup[i]["name"]),
+                       key=len, reverse=True)
+        lic = any(sup[i]["lic"] for i in ids)
+        tax = any(sup[i]["tax"] for i in ids)
+        meta[rep] = {"ids": sorted(ids), "name": names[0] if names else None,
+                     "has_license": lic, "has_tax_cert": tax,
+                     "is_dealer": lic or tax}
+    return group_of, meta
+
+
 # -- the one pass over LSL ---------------------------------------------------
-def build_profit(c):
-    """Return {supplier_id: {...profit legs...}} for every supplier with any
-    activity. One pass per table, bucketed by supplier_id."""
+def build_profit(c, group_of=None):
+    """Return {rep_supplier_id: {...profit legs...}} for every dealership with
+    any activity. One pass per table, bucketed by the GROUP representative.
+
+    Bucketing before the fold (rather than folding per id and summing after) is
+    what makes the merge correct: a VIN that appears under two of a dealership's
+    supplier ids lands in one set and is counted once. Summing per-id totals
+    would double-count it."""
 
     # vin -> latest deal (front_value, sold_at). Needed for buy_resale_gross:
     # when EW buys a car from a dealer and resells it, the EW gross on that
@@ -129,12 +263,15 @@ def build_profit(c):
             vin_deal[v] = (float(r["front_value"] or 0), so)
 
     S = {}
+    gmap = group_of or {}
 
     def slot(sid):
-        if sid not in S:
-            S[sid] = {"pay_vins": set(), "pay_paid": 0, "pay_dates": [],
+        # an id LSL references but suppliers has no row for keeps its own bucket
+        rep = gmap.get(sid, sid)
+        if rep not in S:
+            S[rep] = {"pay_vins": set(), "pay_paid": 0.0, "pay_dates": [],
                       "src": {}, "sell": {}, "sell_novin": []}
-        return S[sid]
+        return S[rep]
 
     # -- buy leg A: payments EW made to them --------------------------------
     for r in c.execute(
@@ -249,20 +386,25 @@ def build_profit(c):
     return out
 
 
-def build_batting(pg_cur, profit):
-    """{supplier_id: (set_in, first, last, acquired, acquired_any)} from the
+def build_batting(pg_cur, profit, group_of=None):
+    """{rep_supplier_id: (set_in, first, last, acquired, acquired_any)} from the
     dealer tags on bids. Only VINs are counted -- a submission with no VIN
     cannot be matched to an acquisition, so counting it would depress the
-    average with something unmeasurable."""
+    average with something unmeasurable.
+
+    Tags are mapped through the same grouping as the profit legs. A rep who
+    tagged one rooftop of a dealership and a deal that booked to another must
+    land on the same row, or the car reads as set-in-but-never-bought."""
     pg_cur.execute("""
         SELECT source_supplier_id sid, upper(vin) vin, created_at
           FROM bids
          WHERE source_supplier_id IS NOT NULL
            AND vin IS NOT NULL AND length(vin) = 17
     """)
+    gmap = group_of or {}
     per = {}
     for r in pg_cur.fetchall():
-        sid = int(r["sid"])
+        sid = gmap.get(int(r["sid"]), int(r["sid"]))
         e = per.setdefault(sid, {"vins": set(), "first": None, "last": None})
         e["vins"].add(r["vin"])
         ts = r["created_at"].date() if r["created_at"] else None
@@ -299,23 +441,27 @@ def refresh(verbose=True):
     try:
         c = _lsl()
         try:
-            profit = build_profit(c)
-            names = {int(r["id"]): _s(r["name"]) for r in
-                     c.execute("SELECT id, name FROM suppliers")}
+            group_of, meta = build_groups(c, cur)
+            profit = build_profit(c, group_of)
         finally:
             c.close()
 
-        batting = build_batting(cur, profit)
+        batting = build_batting(cur, profit, group_of)
         today = date.today()
+
+        def info(sid):
+            return meta.get(sid, {"ids": [sid], "name": None, "has_license": False,
+                                  "has_tax_cert": False, "is_dealer": False})
 
         rows = []
         for sid, p in profit.items():
+            m = info(sid)
             b = batting.get(sid)
             set_in = b[0] if b else 0
             acquired = b[3] if b else 0
             last = _date(p["last_activity"])
             rows.append((
-                sid, names.get(sid) or None,
+                sid, m["name"],
                 p["bought_cars"], p["bought_paid"],
                 _date(p["buy_first"]), _date(p["buy_last"]),
                 p["sold_cars"], p["sold_revenue"], p["sold_gross"],
@@ -327,6 +473,8 @@ def refresh(verbose=True):
                 set_in, b[1] if b else None, b[2] if b else None,
                 acquired, b[4] if b else 0,
                 (round(100.0 * acquired / set_in, 2) if set_in else None),
+                _dealer_key(m["name"]) or ("sid:%d" % sid), m["ids"], len(m["ids"]),
+                m["is_dealer"], m["has_license"], m["has_tax_cert"],
             ))
 
         # A dealer can be tagged on a bid before LSL has any history for them
@@ -336,11 +484,15 @@ def refresh(verbose=True):
         for sid, b in batting.items():
             if sid in profit:
                 continue
-            rows.append((sid, names.get(sid) or None,
+            m = info(sid)
+            rows.append((sid, m["name"],
                          0, 0, None, None, 0, 0, 0, None, None, 0, 0, 0, 0,
                          None, None, None,
                          b[0], b[1], b[2], b[3], b[4],
-                         (round(100.0 * b[3] / b[0], 2) if b[0] else None)))
+                         (round(100.0 * b[3] / b[0], 2) if b[0] else None),
+                         _dealer_key(m["name"]) or ("sid:%d" % sid), m["ids"],
+                         len(m["ids"]), m["is_dealer"], m["has_license"],
+                         m["has_tax_cert"]))
 
         # Full rebuild in one transaction. It is a derived cache, so replacing
         # it wholesale is safe -- and it means a dealer whose last deal was
@@ -354,7 +506,9 @@ def refresh(verbose=True):
               buy_resale_cars, buy_resale_gross, total_gross, tx_count,
               first_activity, last_activity, days_since,
               set_in_cars, set_in_first, set_in_last,
-              acquired_cars, acquired_any, batting)
+              acquired_cars, acquired_any, batting,
+              dealer_key, supplier_ids, rooftops,
+              is_dealer, has_license, has_tax_cert)
             VALUES %s
         """, rows, page_size=500)
         cur.execute("UPDATE dp_dealer_scorecard SET refreshed_at = now()")
@@ -364,7 +518,9 @@ def refresh(verbose=True):
                     (len(rows), secs, run_id))
         pg.commit()
         if verbose:
-            print("[scorecard] %d dealers in %ss" % (len(rows), secs), flush=True)
+            dealers = sum(1 for r in rows if r[-3])
+            print("[scorecard] %d rows (%d licenced dealers, %d unlicenced) in %ss"
+                  % (len(rows), dealers, len(rows) - dealers, secs), flush=True)
         return len(rows)
     except Exception as e:
         pg.rollback()

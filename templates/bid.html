@@ -637,53 +637,56 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
         </div>
       </div>
 
-      <!-- AI Assessment -->
-      <div class="card" id="operator-estimate-card" style="flex-shrink:0;margin-bottom:10px">
+      <!-- DEALER_SOURCE_2026_07_31 -- replaced the Operator Estimate card.
+           Dealers text their cars to Joe and Todd, who submit on their behalf,
+           so a bid carries no dealer of its own. This is the only place that
+           fact gets recorded, and it is the denominator of the batting average
+           on /network/dealers. Writes bids.source_supplier_id -- an LSL
+           suppliers.id, never a typed name (43 dealer names map to more than
+           one rooftop). Purely additive: it cannot gate or delay enrichment. -->
+      <div class="card" id="dealer-source-card" style="flex-shrink:0;margin-bottom:10px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
           <div style="display:flex;align-items:baseline;gap:8px">
-            <span class="card-title" style="margin:0">Operator Estimate</span>
-            <span style="font-size:10.5px;color:#64748b">your value &middot; trains the model</span>
+            <span class="card-title" style="margin:0">Dealer</span>
+            <span style="font-size:10.5px;color:#64748b">who sent this car in &middot; feeds the batting average</span>
           </div>
-          {% if bid.client_estimate %}
-          <span id="est-status" style="font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;padding:3px 8px;border-radius:5px;
-            {% if bid.ai_assessed_at and bid.client_estimate_at and (bid.client_estimate_at|naive_dt) < bid.ai_assessed_at %}{#- ESTIMATE_TZ_FIX_2026_05_18 -#}background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.3)
-            {% elif bid.ai_assessed_at %}background:rgba(245,158,11,.12);color:#fbbf24;border:1px solid rgba(245,158,11,.25)
-            {% else %}background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.3)
-            {% endif %}">
-            {% if bid.ai_assessed_at and bid.client_estimate_at and (bid.client_estimate_at|naive_dt) < bid.ai_assessed_at %}{#- ESTIMATE_TZ_FIX_2026_05_18 -#}before AI &middot; clean signal
-            {% elif bid.ai_assessed_at %}after AI &middot; weaker signal
-            {% else %}before AI &middot; clean signal
-            {% endif %}
+          {% if bid.source_supplier_id %}
+          <span style="font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;padding:3px 8px;border-radius:5px;background:rgba(34,197,94,.15);color:#4ade80;border:1px solid rgba(34,197,94,.3)">
+            {% if bid.source_tag_origin == 'dealerprice' %}via DealerPrice{% else %}tagged{% endif %}
           </span>
           {% endif %}
         </div>
 
-        {% if bid.client_estimate %}
-        <div style="background:linear-gradient(180deg,rgba(59,130,246,.08),rgba(59,130,246,.02));border:1px solid rgba(59,130,246,.3);border-radius:10px;padding:14px 16px;margin-bottom:10px;display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
-          <div>
-            <div style="font-size:10.5px;color:#7a9bb5;text-transform:uppercase;letter-spacing:.7px;font-weight:700;margin-bottom:4px">Your saved estimate</div>
-            <div style="font-size:26px;font-weight:800;color:#93c5fd;font-family:'JetBrains Mono','Consolas',monospace;letter-spacing:-.5px">${{ '{:,}'.format(bid.client_estimate) }}</div>
-          </div>
-          <div style="text-align:right;font-size:11px;color:#64748b;line-height:1.5">
-            Saved {{ bid.client_estimate_at.strftime('%b %d, %H:%M') if bid.client_estimate_at else '' }}
-            {% if bid.client_estimate_by %}<br>by {{ bid.client_estimate_by }}{% endif %}
+        <div id="dealer-saved" {% if not bid.source_supplier_id %}style="display:none"{% endif %}>
+          <div style="background:linear-gradient(180deg,rgba(59,130,246,.08),rgba(59,130,246,.02));border:1px solid rgba(59,130,246,.3);border-radius:10px;padding:14px 16px;display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
+            <div>
+              <div style="font-size:10.5px;color:#7a9bb5;text-transform:uppercase;letter-spacing:.7px;font-weight:700;margin-bottom:4px">Set in by</div>
+              <div id="dealer-saved-name" style="font-size:19px;font-weight:800;color:#93c5fd;letter-spacing:-.2px">{{ bid.source_supplier_name or '' }}</div>
+            </div>
+            <div style="text-align:right;font-size:11px;color:#64748b;line-height:1.5">
+              {% if bid.source_tagged_at %}Tagged {{ bid.source_tagged_at.strftime('%b %d, %H:%M') }}{% endif %}
+              {% if bid.source_tagged_by %}<br>by {{ bid.source_tagged_by }}{% endif %}
+              <br>
+              <span onclick="dealerChange()" style="cursor:pointer;color:#93c5fd;font-weight:600">Change</span>
+              &middot;
+              <span onclick="dealerClear()" style="cursor:pointer;color:#94a3b8">Clear</span>
+            </div>
           </div>
         </div>
-        {% endif %}
 
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <div style="display:flex;align-items:center;background:#0f172a;border:1px solid #334155;border-radius:8px;overflow:hidden;flex:1;min-width:160px;max-width:240px">
-            <span style="padding:9px 11px;color:#64748b;font-size:14px;font-weight:600">$</span>
-            <input id="est-input" type="number" min="1" max="5000000" step="100"
-                   value="{{ bid.client_estimate or '' }}"
-                   placeholder="{% if bid.client_estimate %}update estimate{% else %}your number{% endif %}"
-                   style="flex:1;background:transparent;border:none;outline:none;color:#f1f5f9;font-size:14px;font-weight:600;font-family:'JetBrains Mono',Consolas,monospace;padding:9px 6px 9px 0;width:100%">
+        <div id="dealer-pick" {% if bid.source_supplier_id %}style="display:none"{% endif %}>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="display:flex;align-items:center;background:#0f172a;border:1px solid #334155;border-radius:8px;overflow:hidden;flex:1;min-width:200px">
+              <span style="padding:9px 11px;color:#64748b;font-size:13px">&#128269;</span>
+              <input id="dealer-input" type="text" autocomplete="off" placeholder="type a dealer name, e.g. marino"
+                     oninput="dealerSearch()" onkeydown="dealerKey(event)"
+                     style="flex:1;background:transparent;border:none;outline:none;color:#f1f5f9;font-size:14px;font-weight:600;padding:9px 6px 9px 0;width:100%">
+            </div>
+            <span id="dealer-msg" style="font-size:11.5px;color:#94a3b8;flex:1;text-align:right;min-width:120px"></span>
           </div>
-          <button id="est-submit" onclick="submitEstimate()" style="padding:9px 18px;border-radius:6px;background:#3b82f6;color:#fff;font-size:12px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;border:none;cursor:pointer">{% if bid.client_estimate %}Update{% else %}Submit{% endif %}</button>
-          {% if bid.client_estimate %}
-          <button onclick="clearEstimate()" style="padding:9px 12px;border-radius:6px;background:transparent;color:#94a3b8;font-size:11px;border:1px solid #334155;cursor:pointer">Clear</button>
-          {% endif %}
-          <span id="est-msg" style="font-size:11.5px;color:#94a3b8;flex:1;text-align:right;min-width:120px"></span>
+          <!-- results. Each hit carries its own history so two same-named
+               rooftops are distinguishable at the moment of choosing. -->
+          <div id="dealer-results" style="margin-top:8px;display:none;background:#0f172a;border:1px solid #334155;border-radius:8px;overflow:hidden;max-height:260px;overflow-y:auto"></div>
         </div>
       </div>
       <div class="card card-assess" id="assess-card" style="flex-shrink:0">
@@ -3827,48 +3830,110 @@ function deleteBid(e, bid_id){
     .catch(err => alert("Delete failed: " + err));
 }
 
-// ── Operator estimate (independent of AI) ──────────────────────────────
-async function submitEstimate() {
-  const input = document.getElementById('est-input');
-  const btn = document.getElementById('est-submit');
-  const msg = document.getElementById('est-msg');
-  const v = parseInt(input.value, 10);
-  if (!v || v <= 0) {
-    msg.textContent = 'Enter a number';
-    msg.style.color = '#f87171';
-    return;
-  }
-  btn.disabled = true;
-  msg.textContent = 'Saving...';
-  msg.style.color = '#94a3b8';
+// -- Dealer who set the car in (DEALER_SOURCE_2026_07_31) ---------------
+// Took over the slot the operator-estimate handlers used to occupy. That API
+// still exists and the 86 saved estimates are untouched -- only the UI that
+// created new ones was retired, because the estimate is still a training label
+// in train_per_make.py.
+let _dealerT = null, _dealerHits = [], _dealerSel = -1;
+
+function dealerSearch() {
+  const q = document.getElementById('dealer-input').value.trim();
+  clearTimeout(_dealerT);
+  if (q.length < 2) { dealerHide(); return; }
+  // debounced: a rep types a whole name, we do not need a request per keystroke
+  _dealerT = setTimeout(() => dealerFetch(q), 220);
+}
+
+async function dealerFetch(q) {
+  const msg = document.getElementById('dealer-msg');
   try {
-    const r = await fetch(`/api/bid/{{ bid.id }}/estimate`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({estimate: v}),
-    });
+    const r = await fetch('/api/network/roster-pick?q=' + encodeURIComponent(q));
+    if (r.status === 401) { msg.textContent = 'session expired'; msg.style.color = '#f87171'; return; }
     const d = await r.json();
-    if (d.ok) {
-      msg.textContent = d.entered_before_ai
-        ? '✓ saved (before AI)'
-        : '✓ saved (after AI — still counts for training)';
-      msg.style.color = '#4ade80';
-      setTimeout(() => location.reload(), 800);
-    } else {
-      msg.textContent = '✗ ' + (d.error || 'failed');
-      msg.style.color = '#f87171';
-      btn.disabled = false;
-    }
+    _dealerHits = d.matches || [];
+    _dealerSel = -1;
+    dealerRender();
+    msg.textContent = _dealerHits.length ? '' : 'no match in LSL';
+    msg.style.color = '#94a3b8';
   } catch (e) {
-    msg.textContent = '✗ ' + String(e);
+    msg.textContent = String(e);
     msg.style.color = '#f87171';
-    btn.disabled = false;
   }
 }
 
-async function clearEstimate() {
-  if (!confirm('Clear the operator estimate?')) return;
-  await fetch(`/api/bid/{{ bid.id }}/estimate`, {method: 'DELETE'});
+function dealerRender() {
+  const box = document.getElementById('dealer-results');
+  if (!_dealerHits.length) { box.style.display = 'none'; return; }
+  box.innerHTML = _dealerHits.map((m, i) => {
+    const where = [m.city, m.state].filter(Boolean).join(', ');
+    // history is what separates two rooftops with the same name
+    const hist = (m.bought || m.sold)
+      ? `${m.bought} bought &middot; ${m.sold} sold${m.last ? ' &middot; last ' + m.last : ''}`
+      : 'no LSL history';
+    return `<div class="dealer-hit" data-i="${i}" onclick="dealerPick(${i})"
+      style="padding:9px 12px;cursor:pointer;border-bottom:1px solid #1e293b;background:${i === _dealerSel ? '#1e293b' : 'transparent'}">
+      <div style="font-size:13px;font-weight:700;color:#e2e8f0">${dealerEsc(m.name)}</div>
+      <div style="font-size:11px;color:#64748b;margin-top:2px">${dealerEsc(where)}${where ? ' &middot; ' : ''}${hist}</div>
+    </div>`;
+  }).join('');
+  box.style.display = 'block';
+}
+
+function dealerEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
+function dealerKey(e) {
+  if (!_dealerHits.length) return;
+  if (e.key === 'ArrowDown') { _dealerSel = Math.min(_dealerSel + 1, _dealerHits.length - 1); dealerRender(); e.preventDefault(); }
+  else if (e.key === 'ArrowUp') { _dealerSel = Math.max(_dealerSel - 1, 0); dealerRender(); e.preventDefault(); }
+  else if (e.key === 'Enter' && _dealerSel >= 0) { dealerPick(_dealerSel); e.preventDefault(); }
+  else if (e.key === 'Escape') { dealerHide(); }
+}
+
+function dealerHide() {
+  document.getElementById('dealer-results').style.display = 'none';
+  _dealerHits = []; _dealerSel = -1;
+}
+
+async function dealerPick(i) {
+  const m = _dealerHits[i];
+  if (!m) return;
+  const msg = document.getElementById('dealer-msg');
+  msg.textContent = 'Saving...'; msg.style.color = '#94a3b8';
+  const fd = new FormData();
+  fd.append('supplier_id', m.id);
+  try {
+    const r = await fetch(`/api/network/bid/{{ bid.id }}/dealer-tag`, {method: 'POST', body: fd});
+    const d = await r.json();
+    if (d.ok) {
+      msg.textContent = '\u2713 saved';
+      msg.style.color = '#4ade80';
+      dealerHide();
+      setTimeout(() => location.reload(), 600);
+    } else {
+      msg.textContent = '\u2717 ' + (d.error || 'failed');
+      msg.style.color = '#f87171';
+    }
+  } catch (e) {
+    msg.textContent = '\u2717 ' + String(e);
+    msg.style.color = '#f87171';
+  }
+}
+
+function dealerChange() {
+  document.getElementById('dealer-saved').style.display = 'none';
+  document.getElementById('dealer-pick').style.display = 'block';
+  document.getElementById('dealer-input').focus();
+}
+
+async function dealerClear() {
+  if (!confirm('Remove the dealer on this bid?')) return;
+  const fd = new FormData();
+  fd.append('supplier_id', '');
+  await fetch(`/api/network/bid/{{ bid.id }}/dealer-tag`, {method: 'POST', body: fd});
   location.reload();
 }
 

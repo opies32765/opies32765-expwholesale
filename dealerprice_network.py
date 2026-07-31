@@ -3199,15 +3199,42 @@ def api_network_bid_dealer_tag(bid_id):
         db.close()
 
 
-def _scorecard_rows(cur, q=None, scope='all', limit=400):
-    """Board rows. scope: all | active (dealt inside 12mo) | batting (has cars
-    set in) | cold (set cars in, we bought none)."""
+# Whitelist -- the sort key is interpolated into the ORDER BY, so it can never
+# come straight from the query string.
+SCORECARD_SORTS = {
+    'dealer':  'lower(supplier_name)',
+    'bought':  'bought_cars',
+    'sold':    'sold_cars',
+    'profit':  'total_gross',
+    'last':    'last_activity',
+    'setin':   'set_in_cars',
+    'won':     'acquired_cars',
+    'batting': 'batting',
+}
+
+
+def _scorecard_rows(cur, q=None, scope='dealers', sort='batting', dirn='desc', limit=400):
+    """Board rows.
+
+    scope: dealers (DEFAULT -- licence on file) | all (includes the private
+    individuals and marketplaces that also appear in suppliers) | active (dealt
+    inside 12mo) | batting (has cars set in) | cold (set cars in, we bought
+    none).
+
+    'dealers' is the default because suppliers is not a dealer list: of 2,645
+    rows only ~1,967 have an uploaded licence, and the unlicenced remainder is
+    mostly individuals who sold the desk one car. They carry $3.2M against the
+    licenced $67.9M. 'all' still shows them -- 53 real franchise stores have no
+    uploaded licence, so this filters the view, it never deletes a row.
+    """
     where, params = [], []
     if q:
         where.append("lower(supplier_name) LIKE %s")
         params.append('%' + q.lower() + '%')
-    if scope == 'active':
-        where.append("last_activity > current_date - 365")
+    if scope == 'dealers':
+        where.append("is_dealer")
+    elif scope == 'active':
+        where.append("is_dealer AND last_activity > current_date - 365")
     elif scope == 'batting':
         where.append("set_in_cars > 0")
     elif scope == 'cold':
@@ -3215,22 +3242,30 @@ def _scorecard_rows(cur, q=None, scope='all', limit=400):
     sql = "SELECT * FROM dp_dealer_scorecard"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    # batting first when it exists (that is the new question), then money
-    sql += (" ORDER BY (set_in_cars > 0) DESC, batting ASC NULLS LAST,"
-            " total_gross DESC NULLS LAST LIMIT %s")
+    col = SCORECARD_SORTS.get(sort, SCORECARD_SORTS['batting'])
+    direction = 'ASC' if str(dirn).lower() == 'asc' else 'DESC'
+    # total_gross is the tiebreak so equal-batting dealers rank by money, and
+    # the order is stable between refreshes
+    sql += (" ORDER BY %s %s NULLS LAST, total_gross DESC NULLS LAST LIMIT %%s"
+            % (col, direction))
     params.append(limit)
     cur.execute(sql, params)
     return cur.fetchall()
 
 
 def _scorecard_stats(cur):
+    # Headline figures count DEALERS only. Including the unlicenced rows would
+    # inflate the dealer count by ~1,167 individuals and marketplaces while
+    # moving the money by 4%.
     cur.execute("""
-        SELECT count(*) dealers,
-               COALESCE(sum(total_gross),0)  gross,
-               COALESCE(sum(bought_cars),0)  bought,
-               COALESCE(sum(sold_cars),0)    sold,
-               count(*) FILTER (WHERE last_activity > current_date - 365) active_1yr,
-               COALESCE(sum(set_in_cars),0)  set_in,
+        SELECT count(*) FILTER (WHERE is_dealer) dealers,
+               count(*)                          rows_all,
+               COALESCE(sum(total_gross)  FILTER (WHERE is_dealer),0) gross,
+               COALESCE(sum(total_gross),0)                           gross_all,
+               COALESCE(sum(bought_cars)  FILTER (WHERE is_dealer),0) bought,
+               COALESCE(sum(sold_cars)    FILTER (WHERE is_dealer),0) sold,
+               count(*) FILTER (WHERE is_dealer AND last_activity > current_date - 365) active_1yr,
+               COALESCE(sum(set_in_cars),0)   set_in,
                COALESCE(sum(acquired_cars),0) acquired,
                count(*) FILTER (WHERE set_in_cars > 0) measured,
                count(*) FILTER (WHERE set_in_cars > 0 AND acquired_cars = 0) cold
@@ -3250,15 +3285,19 @@ def _scorecard_stats(cur):
 @bp.route('/network/dealers')
 def network_dealers():
     q = _s(request.args.get('q'))
-    scope = _s(request.args.get('scope')) or 'all'
+    scope = _s(request.args.get('scope')) or 'dealers'
+    sort = _s(request.args.get('sort')) or 'batting'
+    if sort not in SCORECARD_SORTS:
+        sort = 'batting'
+    dirn = 'asc' if _s(request.args.get('dir')).lower() == 'asc' else 'desc'
     db = _db(); cur = db.cursor()
     try:
-        rows = _scorecard_rows(cur, q=q, scope=scope)
+        rows = _scorecard_rows(cur, q=q, scope=scope, sort=sort, dirn=dirn)
         stats = _scorecard_stats(cur)
     finally:
         db.close()
     return render_template('network/dealers.html', rows=rows, stats=stats,
-                           q=q, scope=scope)
+                           q=q, scope=scope, sort=sort, dir=dirn)
 
 
 @bp.route('/network/dealers/stats')
