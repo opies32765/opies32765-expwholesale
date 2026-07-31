@@ -804,16 +804,25 @@ def _lsl_history(name, supplier_id=None, matched_name=None):
             # any VIN already counted on the sell leg so a buy-back can't
             # double-count the same front_value.
             resale_vins = [v for v in bought_vins if v not in sold_vins]
-            buy_resale_gross, buy_resale_cars = 0, 0
-            if resale_vins:
-                rby = {}
-                rph = ','.join('?' * len(resale_vins))
+            # BUY_GROSS_PAYMENTS_LEG_2026_07_31 — look up the resale front_value
+            # for EVERY car EW bought, not just the ones counted in
+            # buy_resale_gross. The per-unit figure is needed for DISPLAY on both
+            # buy legs; the aggregate below still counts resale_vins only, so
+            # widening this lookup cannot double count anything.
+            buy_fv = {}
+            _allbuy = list(bought_vins)
+            if _allbuy:
+                _aph = ','.join('?' * len(_allbuy))
                 for r in c.execute(
                         "SELECT vin_no, front_value, sold_at FROM deals "
-                        "WHERE vin_no IN (%s)" % rph, resale_vins):
+                        "WHERE vin_no IN (%s)" % _aph, _allbuy):
                     v = _s(r['vin_no'])
-                    if v and (v not in rby or (_s(r['sold_at']) or '') > (_s(rby[v]['sold_at']) or '')):
-                        rby[v] = r
+                    if v and (v not in buy_fv or
+                              (_s(r['sold_at']) or '') > (_s(buy_fv[v]['sold_at']) or '')):
+                        buy_fv[v] = r
+            buy_resale_gross, buy_resale_cars = 0, 0
+            if resale_vins:
+                rby = {v: buy_fv[v] for v in resale_vins if v in buy_fv}
                 buy_resale_cars = len(rby)
                 buy_resale_gross = int(sum(r['front_value'] or 0 for r in rby.values()))
             total_gross = sold_gross + buy_resale_gross
@@ -821,10 +830,20 @@ def _lsl_history(name, supplier_id=None, matched_name=None):
             # per-VIN car list (for the expandable "all cars" panel on the packet)
             cars = []
             for r in prows:
-                cars.append({'order': _s(r['stock_no']), 'vin': _s(r['vin_no']),
+                # BUY_GROSS_PAYMENTS_LEG_2026_07_31 — was hard-coded 0, so every
+                # car that came in with a Purchased payment row rendered "EW
+                # profit —" even though the resale front_value was sitting right
+                # there. The dash tracked which leg the car arrived on, not
+                # whether EW made anything. A dash now means genuinely no resale
+                # deal yet (still in stock), which is the honest use of it.
+                _pv = _s(r['vin_no'])
+                _pd = buy_fv.get(_pv)
+                cars.append({'order': _s(r['stock_no']), 'vin': _pv,
                              'amount': int(r['amount'] or 0),
                              'date': (_s(r['created_at']))[:10] or None,
-                             'dir': 'buy', 'gross': 0, 'kind': 'EW bought from them'})
+                             'dir': 'buy',
+                             'gross': int((_pd['front_value'] or 0) if _pd else 0),
+                             'kind': 'EW bought from them'})
             # SOURCE_LEG_2026_07_30 — buys with no payment row (skip any VIN the
             # payments leg already listed so a car never appears twice).
             for v, r in _bby.items():
@@ -834,10 +853,12 @@ def _lsl_history(name, supplier_id=None, matched_name=None):
                 # This was hard-coded to 0, so every car a dealer sold us showed
                 # "EW gross —" and the packet read as though we made nothing on
                 # 18 cars. front_value on the resale IS our gross on that unit.
+                _sd = buy_fv.get(v)
                 cars.append({'order': _s(r['stock_no']), 'vin': v,
                              'amount': int(r['purchase_cost'] or 0),
                              'date': (_s(r['sold_at']))[:10] or None,
-                             'dir': 'buy', 'gross': int(r['front_value'] or 0),
+                             'dir': 'buy',
+                             'gross': int((_sd['front_value'] if _sd else r['front_value']) or 0),
                              'kind': 'EW bought from them'})
             for r in sell_rows:
                 cars.append({'order': _s(r['stock_no']), 'vin': _s(r['vin_no']),
