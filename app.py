@@ -2481,6 +2481,28 @@ _TWILIO_MAGIC_RE = re.compile(r'^\+1555555\d{4}$')
 # constant kept as a fallback safety floor — leave it empty in code.
 SMS_BOT_SKIP_PHONES = set()  # fallback floor; runtime list lives in DB
 
+# --- BID_RECEIPT_2026_07_31 -----------------------------------------------
+# THE receipt. Every submission path calls this: text-in, photo-hold promote,
+# awaiting-name release, and DealerPrice link submissions. Do NOT inline this
+# string again -- it previously existed as four separate copies and drifted.
+#
+# WARNING: wording is constrained by NO_DATA_REQUEST_2026_06_12. send_sms()
+# silently DROPS anything matching
+#   (send|text|reply|provide|verify|confirm)[^.!?]{0,40}(vin|mileage|miles|odometer)
+# Re-test any change against that regex -- a match means total silence, not an
+# error. That is exactly how the ANYONE_GETS_A_REPLY fallback net died: 299
+# attempts, 299 dropped, and it logged "sent" every single time.
+def _bid_receipt(bid_ids):
+    """Operator wording, 2026-07-31. Handles one bid or several."""
+    ids = [bid_ids] if isinstance(bid_ids, (int, str)) else list(bid_ids)
+    if len(ids) == 1:
+        lead = 'Bid #%s Received.' % ids[0]
+    else:
+        lead = 'Bids %s Received.' % ', '.join('#%s' % i for i in ids)
+    return (lead + ' Give us a bit. One of our Experience-Wholesale '
+            'Team Members will contact you.')
+
+
 def send_sms(to, body):
     """Send SMS via Twilio. Returns True on success, False on failure. Never raises.
 
@@ -2779,9 +2801,7 @@ def _promote_photo_hold(bid_id):
         if promoted:
             if phone and not phone.startswith('field:'):
                 try:
-                    send_sms(phone, f"Bid #{bid_id} Received. Give us a bit. If you "
-                                    f"need to contact us please text us "
-                                    f"with your Bid #{bid_id}.")
+                    send_sms(phone, _bid_receipt(bid_id))
                 except Exception as _e:
                     print(f'[photo-hold-promote] ack err bid={bid_id}: {_e}', flush=True)
             try:
@@ -5946,14 +5966,9 @@ def twilio_webhook():
 
             # Combined Phase 3 ack covering every released bid.
             if len(_held_ids) == 1:
-                _ack_body = (f"Bid #{_held_ids[0]} Received. Give us a bit. If "
-                             f"you need to contact us please text Joe, Todd or "
-                             f"Gregg with your Bid #{_held_ids[0]}.")
+                _ack_body = _bid_receipt(_held_ids[0])
             else:
-                _bid_list = ', '.join('#' + str(i) for i in _held_ids)
-                _ack_body = (f"Bids {_bid_list} Received. Give us a bit. If "
-                             f"you need to contact us please text Joe, Todd or "
-                             f"Gregg with your Bid #.")
+                _ack_body = _bid_receipt(_held_ids)
             _sent = send_sms(from_phone, _ack_body)
             if _sent:
                 cur.execute("""UPDATE bids
@@ -6826,10 +6841,7 @@ def twilio_webhook():
           f'kind={bidder["kind"]}', flush=True)
     if from_phone and not from_phone.startswith('field:'):
         try:
-            _ack_result = send_sms(
-                from_phone,
-                f"Bid #{bid_id} Received. Give us a bit. If you need to "
-                f"contact us please text us with your Bid #{bid_id}.")
+            _ack_result = send_sms(from_phone, _bid_receipt(bid_id))
             print(f'[bid-ack] sent bid={bid_id} result={_ack_result}', flush=True)
         except Exception as _ack_e:
             print(f'[bid-ack] error bid={bid_id}: {_ack_e}', flush=True)
@@ -13018,6 +13030,21 @@ def api_dealerprice_bid():
         trigger_market_check(bid_id, vin)
     except Exception as e:
         print(f'[dealerprice] market_check kick failed: {e}', flush=True)
+
+    # DP_SUBMIT_RECEIPT_2026_07_31 (operator): a dealer submitting through their
+    # private link gets the SAME receipt, immediately, as one who texted the car
+    # in. Sent at the very end so we never text about a bid that failed to land.
+    # Best-effort -- a failed text must never fail the submission.
+    try:
+        if contact_phone and not str(contact_phone).startswith('dp:'):
+            _rc_to = ('+1' + str(contact_phone)) if len(str(contact_phone)) == 10 else str(contact_phone)
+            send_sms(_rc_to, _bid_receipt(bid_id))
+            print('[dealerprice] submit receipt sent bid=%s' % bid_id, flush=True)
+        else:
+            print('[dealerprice] submit receipt SKIPPED bid=%s - no usable mobile'
+                  % bid_id, flush=True)
+    except Exception as _rc_e:
+        print('[dealerprice] submit receipt failed bid=%s: %s' % (bid_id, _rc_e), flush=True)
 
     return jsonify({'ok': True, 'status': 'new', 'bid_id': bid_id, 'vin': vin})
 
@@ -23809,29 +23836,27 @@ def _notify_driver_combined(bid_id):
         # Only explicitly-granted phones receive the enrichment bid card (the
         # /m/<token>/full link exposes MMR, book values, comps, AI reasoning).
         # EVERYONE ELSE gets a plain receipt. Default DENY — see the helper.
-        if _enrichment_sms_allowed(bid['driver_phone']):
-            body = f"{_greet}Bid #{bid['id']} {ymm_full} {link}"
-            print(f'[enrichment-gate] ALLOW bid={bid_id} -> {bid["driver_phone"]}', flush=True)
-        else:
-            # Greet by DEALERSHIP name for network members (operator wording),
-            # falling back to the captured bidder first name.
-            _who = (_first or '').strip()
-            if bid.get('dp_member_id'):
-                try:
-                    cur.execute("SELECT dealership_name FROM dealerprice_members "
-                                "WHERE id=%s", (bid['dp_member_id'],))
-                    _mrow = cur.fetchone()
-                    if _mrow and (_mrow.get('dealership_name') or '').strip():
-                        _who = _mrow['dealership_name'].strip()
-                except Exception as _dn_e:
-                    print(f'[combined-sms] dealership name lookup: {_dn_e}', flush=True)
-            body = (f"Hi {_who}, Bid #{bid['id']} received. Give us a bit — "
-                    f"an Experience Wholesale team member will get back to you."
-                    if _who else
-                    f"Bid #{bid['id']} received. Give us a bit — "
-                    f"an Experience Wholesale team member will get back to you.")
+        # == HARD RULE -- ONE_RECEIPT_ONLY_2026_07_31 (operator, emphatic) ==
+        # A non-granted dealer gets exactly ONE text per car: the receipt fired
+        # at submission. There is NO second text of any kind for them -- not the
+        # enrichment card, not a plain acknowledgement. Only explicitly granted
+        # numbers reach the send below.
+        if not _enrichment_sms_allowed(bid['driver_phone']):
+            # Stamp both notify columns anyway so nothing downstream can decide
+            # this bid still owes a text. (The legacy Phase 1 / Phase 2 senders
+            # are dead stubs today -- this keeps them harmless if ever revived.)
+            cur.execute("UPDATE bids "
+                        "SET driver_notified_at = NOW(), phase2_notified_at = NOW() "
+                        "WHERE id = %s", (bid_id,))
+            db.commit()
             print(f'[enrichment-gate] WITHHELD bid={bid_id} -> {bid["driver_phone"]} '
-                  f'(not granted; plain receipt sent)', flush=True)
+                  f'(not granted; NO second text - receipt already sent at submission)',
+                  flush=True)
+            db.close()
+            return True
+
+        body = f"{_greet}Bid #{bid['id']} {ymm_full} {link}"
+        print(f'[enrichment-gate] ALLOW bid={bid_id} -> {bid["driver_phone"]}', flush=True)
 
         sent = send_sms(bid['driver_phone'], body)
         if sent:
