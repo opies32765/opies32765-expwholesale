@@ -2078,6 +2078,45 @@ def _parse_sticker_text(text):
     return result
 
 
+def vin_nearmiss_from_file(file_bytes, media_type='image/jpeg'):
+    """VIN_LENGTH_SURFACE_2026_07_31: last-resort read for a VIN-like run that
+    is NOT a valid 17-char VIN, so the UI can explain why no VIN was extracted.
+
+    Called ONLY after every validated strategy in extract_vin_from_file has
+    declined. Never used as a VIN -- it is display-only, for a human to confirm.
+    Deliberately does not truncate or 'fix' anything: for the 18-char string on
+    bid 5224, dropping the trailing '1' AND dropping the 'K' both produce a
+    valid check digit, so guessing would be a coin flip.
+    """
+    try:
+        prompt = (
+            'Look for a VIN-like alphanumeric run in this image (a long '
+            'unbroken string of capital letters and digits, often the vehicle '
+            'identification number).\n'
+            'Report it EXACTLY as printed - do not correct it, do not pad it, '
+            'do not shorten it, even if it is the wrong length for a VIN.\n'
+            'Reply with ONLY that string, or NONE if there is no such run.'
+        )
+        out = gemini_call(prompt, image_bytes=file_bytes, mime=media_type,
+                          model='gemini-2.5-pro', max_tokens=200,
+                          img_max_dim=3000, img_quality=92, temperature=0.0)
+        if not out:
+            return None
+        m = re.search(r'[A-HJ-NPR-Z0-9]{12,25}', out.strip().upper())
+        if not m:
+            return None
+        cand = m.group(0)
+        if len(cand) == 17 and vin_check_digit_valid(cand):
+            return None   # a real VIN would have been taken already
+        print('[OCR] VIN near-miss captured: %s (%d chars)' % (cand, len(cand)),
+              flush=True)
+        return cand
+    except Exception as _e:
+        print('[OCR] near-miss capture failed: %s: %s' % (type(_e).__name__, _e),
+              flush=True)
+        return None
+
+
 def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
     """Extract VIN from image.
 
@@ -5073,6 +5112,23 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     print(f'[sms-ocr] VIN via Gemini bid={bid_id}: {vin}', flush=True)
             except Exception as _e:
                 print(f'[sms-ocr] vin err bid={bid_id} photo={photo_id}: {_e}', flush=True)
+
+        # VIN_LENGTH_SURFACE_2026_07_31: no VIN survived validation. Capture the
+        # raw run so the dashboard can say WHY instead of showing a blank VIN.
+        if vin is None:
+            try:
+                _nm = vin_nearmiss_from_file(img_bytes, mime)
+                if _nm:
+                    _db2 = get_db(); _c2 = _db2.cursor()
+                    _c2.execute("UPDATE bids SET vin_candidate=%s "
+                                "WHERE id=%s AND (vin IS NULL OR vin='')",
+                                (_nm, bid_id))
+                    _db2.commit(); _db2.close()
+                    print('[sms-ocr] bid=%s vin_candidate=%s (%d chars) - not a valid VIN'
+                          % (bid_id, _nm, len(_nm)), flush=True)
+            except Exception as _nme:
+                print('[sms-ocr] near-miss store err bid=%s: %s' % (bid_id, _nme),
+                      flush=True)
 
         # Gemini fallback for miles
         if miles is None:
@@ -13798,6 +13854,7 @@ def api_vauto_urgent():
 # AccuTrade/iPacket, which still work fine on those VMs.
 GATE_STREAK = 3                # consecutive vauto failures before gating
 GATE_PEER_WINDOW = '45 minutes'  # a peer must have succeeded this recently
+GATE_PROBATION_MIN = 10   # a gated worker gets one trial claim this often
 GATE_FAIL_STATUSES = ('released_watchdog', 'released_stale', 'released_worker',
                       'failed', 'error')
 GATE_OK_STATUSES = ('ok', 'ok_api_mode')
@@ -13872,6 +13929,57 @@ def _vauto_gate_check(cur, worker_id):
         """, (worker_id, GATE_OK_STATUSES))
         if cur.fetchone() is None:
             return False, reason, 'failopen'        # nobody else can -> allow
+
+        # PROBATION. Without this the gate is a one-way door: a gated worker
+        # never claims, so it never completes a job, so its failure streak can
+        # never break -- it stays benched even after someone fixes it by hand.
+        # Let exactly one claim through every GATE_PROBATION_MIN minutes so it
+        # can prove itself.
+        #
+        # ONLY spend the probation when a bid is actually waiting. Measured
+        # 2026-07-31: bid 5213 went to a healthy worker at 12:44:44 and the two
+        # gated workers probed at 12:45 against an empty queue -- burning their
+        # trial on nothing and re-locking for 10 minutes. Healthy workers poll
+        # every few seconds, so a gated worker that spends its shot on an empty
+        # queue may never get a real one.
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM bids b
+                 WHERE b.vin IS NOT NULL AND length(b.vin) = 17
+                   AND b.vin_invalid_reason IS NULL
+                   AND b.mileage IS NOT NULL AND b.mileage > 0
+                   AND (b.needs_verification_at IS NULL
+                        OR b.needs_verification_cleared_at IS NOT NULL)
+                   AND (b.vauto_claimed_at IS NULL
+                        OR b.vauto_claimed_at < NOW() - INTERVAL '5 minutes')
+                   AND (b.enrich_release_at IS NULL OR b.enrich_release_at <= NOW())
+                   AND NOT EXISTS (
+                         SELECT 1 FROM vauto_lookups vl
+                          WHERE vl.bid_id = b.id
+                            AND (vl.raw_json IS NOT NULL
+                                 OR vl.appraisal_url = '__not_found__')
+                       )
+            ) AS work_waiting
+        """)
+        _w = cur.fetchone()
+        if not (_w and _w.get('work_waiting')):
+            # Nothing to claim. Let it poll (it can only take what exists) and
+            # keep the probation banked for a moment when work is actually there.
+            return False, reason, 'probation_idle'
+
+        # UPDATE..RETURNING is the lock: with 10 gunicorn workers polling, only
+        # the one that actually moves the timestamp wins the trial.
+        cur.execute("""
+            UPDATE workers
+               SET vauto_gate_probe_at = NOW()
+             WHERE worker_id = %s
+               AND (vauto_gate_probe_at IS NULL
+                    OR vauto_gate_probe_at < NOW() - INTERVAL '"""
+                    + str(GATE_PROBATION_MIN) + """ minutes')
+         RETURNING worker_id
+        """, (worker_id,))
+        if cur.fetchone() is not None:
+            return False, reason, 'probation'       # one real trial claim
 
         return True, reason, 'gated'
     except Exception as e:
@@ -13951,6 +14059,32 @@ def _vauto_gate_email(worker_id, reason, recovered=False, failopen=False):
 
 
 def _vauto_gate_record(db, cur, worker_id, gated, reason, verdict='healthy'):
+    # PROBATION: still gated, just allowed one trial claim. Do NOT clear the
+    # gate and do NOT send a recovery mail -- nothing has recovered yet. Commit
+    # only the probe timestamp stamped by the check.
+    if verdict == 'probation_idle':
+        # Gated, allowed to poll an empty queue, probation NOT spent. Silent:
+        # this happens constantly and means nothing happened.
+        try:
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return
+    if verdict == 'probation':
+        try:
+            db.commit()
+            print('[vauto-gate] PROBATION claim allowed for %s -- %s'
+                  % (worker_id, reason), flush=True)
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return
+
     """Persist observed gate state for /admin/workers, and alert exactly once
     per episode. The UPDATE...RETURNING is the dedupe lock — with 10 gunicorn
     workers polling, only the one that actually flips the row sends mail."""
@@ -14014,6 +14148,7 @@ def _vauto_gate_record(db, cur, worker_id, gated, reason, verdict='healthy'):
                    SET vauto_gated_at = NULL,
                        vauto_gate_reason = NULL,
                        vauto_gate_cleared_at = NOW(),
+                       vauto_gate_probe_at = NULL,
                        updated_at = NOW()
                  WHERE worker_id = %s
                    AND vauto_gated_at IS NOT NULL

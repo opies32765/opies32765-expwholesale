@@ -90,7 +90,7 @@
               <div class="vehicle-desc">{{ bid.year or '' }} {{ bid.make or '' }} {{ bid.model or '' }}{% if bid.mileage %} {% if bid.year or bid.make %}· {% endif %}{{ '{:,}'.format(bid.mileage) }} mi{% endif %}</div>
             {% endif %}
           {% else %}
-            <div class="no-vin">No VIN extracted</div>
+            <div class="no-vin" style="color:#fca5a5;font-style:normal;font-weight:700" title="No VIN on this bid. The worker pool skips it entirely - it can never be enriched until a 17-character VIN is set.">&#9888; NO VIN &middot; not enrichable{% if bid.vin_candidate %}<div style="margin-top:3px;font-size:11px;font-weight:600;font-style:normal;color:#fbbf24;letter-spacing:.2px" title="This was read from the photo but rejected - it is not a valid 17-character VIN. Check it against the photo and correct it; do not guess which character to drop.">read &ldquo;{{ bid.vin_candidate }}&rdquo; &middot; {{ bid.vin_candidate|length }} chars, VINs are 17</div>{% endif %}</div>
           {% endif %}
         </td>
         <td>
