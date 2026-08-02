@@ -1,9 +1,9 @@
 {
   "make_name": "ACURA",
-  "trained_at": "2026-07-31T08:30:26.266686Z",
-  "n_total": 234,
+  "trained_at": "2026-08-01T08:30:39.300243Z",
+  "n_total": 236,
   "n_train": 218,
-  "n_test": 16,
+  "n_test": 18,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,49 +215,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 6616.0,
-    "mape_pct": 11.42,
-    "r2": 0.8212,
-    "within_5pct": 43.8,
-    "within_10pct": 68.8
+    "mae_dollars": 5980.0,
+    "mape_pct": 10.53,
+    "r2": 0.8241,
+    "within_5pct": 38.9,
+    "within_10pct": 66.7
   },
   "baseline_metrics": {
-    "mae_dollars": 4659.0,
-    "mape_pct": 12.3,
+    "mae_dollars": 4303.0,
+    "mape_pct": 11.42,
     "ratio": 1.0181
   },
   "top_features": [
     {
       "name": "original_msrp",
-      "importance": 0.6777417063713074
+      "importance": 0.632185161113739
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.1753486543893814
-    },
-    {
-      "name": "base_appraised_value",
-      "importance": 0.057133011519908905
+      "importance": 0.20860202610492706
     },
     {
       "name": "market_asking_price",
-      "importance": 0.04867423325777054
+      "importance": 0.06200554966926575
     },
     {
-      "name": "supplier_name_Mall Of Georgia Mazda",
-      "importance": 0.0031607255805283785
+      "name": "base_appraised_value",
+      "importance": 0.05069062113761902
     },
     {
       "name": "model_name_TLX Technology Package Sedan",
-      "importance": 0.0029478040523827076
-    },
-    {
-      "name": "model_name_MDX Sport Utility Vehicle",
-      "importance": 0.002685895189642906
+      "importance": 0.004124130588024855
     },
     {
       "name": "supplier_name_Manheim Orlando",
-      "importance": 0.0025671871844679117
+      "importance": 0.0036171996034681797
+    },
+    {
+      "name": "days_on_lot",
+      "importance": 0.0033526795450598
+    },
+    {
+      "name": "supplier_name_Mall Of Georgia Mazda",
+      "importance": 0.0026870230212807655
     }
   ]
 }
