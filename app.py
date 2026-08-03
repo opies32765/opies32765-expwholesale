@@ -14862,6 +14862,97 @@ def api_vauto_refresh_session():
                     'probe_verdict': _verdict})
 
 
+# ─── COX_2FA_AUTOHEAL_2026_08_03 ────────────────────────────────────────────
+COX2FA_LABEL = os.environ.get('COX2FA_LABEL', 'cox2fa')
+COX2FA_USER = os.environ.get('COX2FA_USER', '')
+COX2FA_PASS = os.environ.get('COX2FA_PASS', '')
+COX2FA_MAX_AGE_S = int(os.environ.get('COX2FA_MAX_AGE_S', '240'))
+_COX2FA_RE = re.compile(r'verification[:\s]*([0-9]{6})', re.I)
+_COX2FA_RE2 = re.compile(r'\b([0-9]{6})\b')
+
+
+def _cox2fa_fetch_code():
+    """Newest Cox one-time code from the dedicated Gmail label, or None.
+
+    Reads ONLY the label -- not the inbox. Rejects anything older than
+    COX2FA_MAX_AGE_S so an old code can never be replayed into a login.
+    """
+    if not (COX2FA_USER and COX2FA_PASS):
+        return None, 'COX2FA_USER/PASS not configured'
+    import imaplib, email as _email, time as _t
+    from email.utils import parsedate_to_datetime
+    try:
+        M = imaplib.IMAP4_SSL('imap.gmail.com', 993)
+        try:
+            M.login(COX2FA_USER, COX2FA_PASS)
+            # the label is a folder in Gmail's IMAP view
+            # Prefer the dedicated label (tightest scope). If the operator has
+            # not built the filter, fall back to a NARROW subject search of
+            # INBOX so the feature works without setup -- C1 still only ever
+            # fetches Cox one-time-code mail, never anything else.
+            src = COX2FA_LABEL
+            typ, _ = M.select('"%s"' % COX2FA_LABEL, readonly=True)
+            if typ != 'OK':
+                src = 'INBOX'
+                typ, _ = M.select('INBOX', readonly=True)
+                if typ != 'OK':
+                    return None, 'cannot open %r or INBOX' % COX2FA_LABEL
+                typ, data = M.search(None, '(SUBJECT "One-time Bridge ID code")')
+            else:
+                typ, data = M.search(None, 'ALL')
+            ids = (data[0].split() if data and data[0] else [])
+            if not ids:
+                return None, 'no Cox code mail in %s' % src
+            now = _t.time()
+            for mid in reversed(ids[-8:]):          # newest few only
+                typ, md = M.fetch(mid, '(RFC822)')
+                if typ != 'OK' or not md or not md[0]:
+                    continue
+                msg = _email.message_from_bytes(md[0][1])
+                try:
+                    age = now - parsedate_to_datetime(msg['Date']).timestamp()
+                except Exception:
+                    age = 1e9
+                if age > COX2FA_MAX_AGE_S:
+                    continue                        # stale -> never replay
+                body = ''
+                if msg.is_multipart():
+                    for part in msg.walk():
+                        if part.get_content_type() == 'text/plain':
+                            body += part.get_payload(decode=True).decode(
+                                part.get_content_charset() or 'utf-8', 'ignore')
+                else:
+                    body = msg.get_payload(decode=True).decode(
+                        msg.get_content_charset() or 'utf-8', 'ignore')
+                m = _COX2FA_RE.search(body) or _COX2FA_RE2.search(body)
+                if m:
+                    return m.group(1), 'age=%ds via %s' % (int(age), src)
+            return None, 'no fresh code in %s (newest older than %ds)' % (src, COX2FA_MAX_AGE_S)
+        finally:
+            try:
+                M.logout()
+            except Exception:
+                pass
+    except Exception as e:
+        return None, '%s: %s' % (type(e).__name__, e)
+
+
+@app.route('/api/vauto/2fa_code', methods=['GET'])
+def api_vauto_2fa_code():
+    """Hand a worker the current Cox one-time code so it can finish its own
+    login. X-Auth gated with EW_VAUTO_REFRESH_SECRET (workers already have it).
+    """
+    expected = (os.environ.get('EW_VAUTO_REFRESH_SECRET') or '').strip()
+    if not expected or (request.headers.get('X-Auth') or '').strip() != expected:
+        return jsonify({'ok': False, 'error': 'unauthorized'}), 401
+    code, note = _cox2fa_fetch_code()
+    if not code:
+        print('[cox2fa] no code: %s' % note, flush=True)
+        return jsonify({'ok': False, 'error': note}), 404
+    print('[cox2fa] served code to worker (%s)' % note, flush=True)
+    return jsonify({'ok': True, 'code': code, 'note': note})
+
+
 @app.route('/api/vauto/get_current_cookies', methods=['GET'])
 def api_vauto_get_current_cookies():
     """Return the current vauto_session.json payload so consumers (verifiers,

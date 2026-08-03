@@ -2,6 +2,11 @@
 import os, re, time
 from pathlib import Path
 
+# WORKER_PORTABLE_2026_07_31 — one knob decides where the worker keeps state.
+# Defaults to the Windows location so existing VMs are unaffected.
+WORKER_ROOT = Path(os.environ.get("EW_WORKER_ROOT", r"C:\worker"))
+
+
 
 def _parse_dollars(s):
     """Convert vAuto dollar text to int. '$50,775' -> 50775. '$0'/'—'/None -> None."""
@@ -14,7 +19,7 @@ def _parse_dollars(s):
         return None
 
 
-REPORTS_DIR = Path(r"C:\worker\vauto_reports")
+REPORTS_DIR = WORKER_ROOT / "vauto_reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 VAUTO_USERNAME = os.environ.get("VAUTO_USERNAME", "OscarPas")
@@ -244,13 +249,109 @@ window.__vauto = (function() {
 """
 
 
+def _fetch_2fa_code(t0, max_wait=100):
+    """Ask C1 for the Cox one-time code. Polls because the mail takes a few
+    seconds to arrive; C1 refuses anything older than ~4 min so we can never
+    replay a stale code."""
+    import json as _j, time as _tm
+    from urllib import request as _u
+    deadline = _tm.time() + max_wait
+    while _tm.time() < deadline:
+        try:
+            _req = _u.Request(f"{EW_SERVER}/api/vauto/2fa_code",
+                              headers={"X-Auth": EW_REFRESH_SECRET,
+                                       "User-Agent": _BROWSER_UA})
+            with _u.urlopen(_req, timeout=10) as _r:
+                d = _j.load(_r)
+            if d.get("ok") and d.get("code"):
+                print(f"[vauto] 2FA code received from C1 ({d.get('note','')})")
+                return d["code"]
+        except Exception:
+            pass          # 404 until the mail lands -- expected
+        _tm.sleep(5)
+    print("[vauto] no 2FA code available after %ds" % max_wait)
+    return None
+
+
+def _try_trust_device(page):
+    """Tick any 'trust/remember this device' box. That is what mints the
+    87-day bridge-device-token and stops the whole cycle repeating."""
+    try:
+        n = page.evaluate("""() => {
+            let hit = 0;
+            for (const el of document.querySelectorAll('input[type=checkbox]')) {
+                const lab = (el.closest('label')?.innerText || '') + ' ' +
+                            (document.querySelector('label[for="'+el.id+'"]')?.innerText || '') +
+                            ' ' + (el.name||'') + ' ' + (el.id||'');
+                if (/trust|remember|don't ask|do not ask/i.test(lab) && !el.checked) {
+                    el.click(); hit++;
+                }
+            }
+            return hit;
+        }""")
+        if n:
+            print(f"[vauto] ticked 'trust this device' ({n})")
+    except Exception:
+        pass
+
+
+def _pick_email_2fa(page):
+    """Cox asks HOW to verify before showing a code box. Choose email -- C1 can
+    read email, it cannot read the SMS that goes to a human's phone. Returns
+    True if we clicked something."""
+    try:
+        return bool(page.evaluate("""() => {
+            const body = document.body.innerText || '';
+            if (!/how would you like to verify/i.test(body)) return false;
+            // find the row that mentions an email address, then its button
+            const nodes = Array.from(document.querySelectorAll('*'));
+            for (const n of nodes) {
+                const t = (n.innerText || '').trim();
+                if (!t || t.length > 120) continue;
+                if (!/@|gmail|mail/i.test(t)) continue;
+                let scope = n;
+                for (let i = 0; i < 4 && scope; i++) {
+                    const btn = scope.querySelector &&
+                        scope.querySelector('button, a[role=button], [class*=select i]');
+                    if (btn) { btn.click(); return true; }
+                    scope = scope.parentElement;
+                }
+            }
+            return false;
+        }"""))
+    except Exception as _e:
+        print(f"[vauto] 2FA chooser error: {type(_e).__name__}: {_e}")
+        return False
+
+
 def auto_login(page, ctx, max_seconds=60):
-    t0 = time.time(); last = ""
+    # AUTOLOGIN_VISIBILITY_2026_08_03: same logic, but it now says what it saw.
+    t0 = time.time(); last = ""; _seen = None; _passes = 0
     while time.time() - t0 < max_seconds:
+        _passes += 1
         for pg in ctx.pages:
             try:
-                if any(h in pg.url for h in SUCCESS_HOSTS): return True
+                if any(h in pg.url for h in SUCCESS_HOSTS):
+                    print(f"[vauto] auto_login OK after {time.time()-t0:.0f}s "
+                          f"({_passes} passes)")
+                    return True
             except Exception: pass
+        # one-line state snapshot whenever it CHANGES, so a stuck login is
+        # obvious instead of 60 silent seconds
+        try:
+            _u = page.url[:70]
+            _uf = page.query_selector('input[type="email"], input[name="username"]')
+            _pf = page.query_selector('input[type="password"]')
+            _st = (_u,
+                   bool(_uf) and _uf.is_visible(),
+                   bool(_pf) and _pf.is_visible(),
+                   last)
+            if _st != _seen:
+                print(f"[vauto] auto_login t={time.time()-t0:4.0f}s url={_st[0]} "
+                      f"user_field={_st[1]} pass_field={_st[2]} step={last or '-'}")
+                _seen = _st
+        except Exception as _se:
+            print(f"[vauto] auto_login state read err: {type(_se).__name__}: {_se}")
         try:
             uf = page.query_selector('input[type="email"], input[name="username"]')
             if uf and uf.is_visible() and last != "user":
@@ -258,7 +359,8 @@ def auto_login(page, ctx, max_seconds=60):
                 btn = page.query_selector('button[type="submit"], button:has-text("Next")')
                 (btn.click() if btn else uf.press("Enter"))
                 last = "user"; time.sleep(2); continue
-        except Exception: pass
+        except Exception as _e1:
+            print(f"[vauto] auto_login username step: {type(_e1).__name__}: {_e1}")
         try:
             pw = page.query_selector('input[type="password"]')
             if pw and pw.is_visible() and last != "pass":
@@ -266,8 +368,119 @@ def auto_login(page, ctx, max_seconds=60):
                 btn = page.query_selector('button[type="submit"], button:has-text("Sign in")')
                 (btn.click() if btn else pw.press("Enter"))
                 last = "pass"; time.sleep(3); continue
+        except Exception as _e2:
+            print(f"[vauto] auto_login password step: {type(_e2).__name__}: {_e2}")
+        # COX_2FA_AUTOHEAL_2026_08_03: a one-time-code field means Cox wants
+        # 2FA. Cox mails the code; C1 reads it from a dedicated Gmail label and
+        # hands it over, so the worker finishes its own login with no human.
+        # Only runs AFTER the password went in, so we cannot grab a code minted
+        # for somebody else's attempt.
+        # COX_2FA_CHOOSER_2026_08_03: Cox shows a method picker with NO input
+        # fields before it will show a code box. Choose email so C1 can read it.
+        try:
+            if last in ("pass", "chooser") and _pick_email_2fa(page):
+                print("[vauto] selected EMAIL for 2FA delivery")
+                last = "chooser"; time.sleep(4); continue
         except Exception: pass
+        try:
+            if last in ("pass", "chooser"):
+                otp = None
+                for sel in ('input[autocomplete="one-time-code"]',
+                            'input[name*="code" i]', 'input[id*="code" i]',
+                            'input[name*="otp" i]', 'input[id*="otp" i]'):
+                    el = page.query_selector(sel)
+                    if el and el.is_visible():
+                        otp = el; break
+                if otp is not None and last != "otp":
+                    print("[vauto] Cox is asking for a 2FA code - fetching from C1")
+                    code = _fetch_2fa_code(t0)
+                    if code:
+                        otp.fill(code)
+                        _try_trust_device(page)
+                        b = page.query_selector('button[type="submit"], '
+                                                'button:has-text("Verify"), '
+                                                'button:has-text("Submit"), '
+                                                'button:has-text("Continue")')
+                        (b.click() if b else otp.press("Enter"))
+                        last = "otp"; time.sleep(4); continue
+        except Exception as _otpe:
+            print(f"[vauto] 2FA step error (falling through): {_otpe}")
         time.sleep(1)
+    print(f"[vauto] auto_login GAVE UP after {max_seconds}s "
+          f"({_passes} passes, last step={last or 'none'}) url={page.url[:90]}")
+    return False
+
+
+# ── POOL_CONSUMER_2026_07_31 ────────────────────────────────────────────────
+# Borrow a live Cox session from the shared pool. Producer side has run on
+# every lookup for months (_push_vauto_session below); the server has served
+# the full-fidelity payload since 2026-05-14. This is the missing half.
+#
+# Verified 2026-07-31: a brand-new Chromium profile with zero Cox history
+# reached the vAuto appraisal page in ~5s using only pooled cookies -- no
+# username, no password, no 2FA.
+def consume_vauto_session(ctx):
+    """Inject the pooled Cox cookies into ctx. True if injected."""
+    try:
+        import json as _j
+        from urllib import request as _u
+        _req = _u.Request(
+            f"{EW_SERVER}/api/vauto/get_current_cookies",
+            headers={"X-Auth": EW_REFRESH_SECRET, "User-Agent": _BROWSER_UA})
+        with _u.urlopen(_req, timeout=10) as _r:
+            payload = _j.load(_r)
+        raw = payload.get("cookies") or []
+        if not any(c.get("name") == "vAutoAuth" for c in raw):
+            print("[vauto] pool has no vAutoAuth - not consuming")
+            return False
+        clean = []
+        for c in raw:
+            if not c.get("name") or not c.get("domain"):
+                continue
+            ss = str(c.get("sameSite") or "Lax").capitalize()
+            if ss not in ("Strict", "Lax", "None"):
+                ss = "Lax"
+            try:
+                exp = float(c.get("expires", -1))
+            except Exception:
+                exp = -1
+            clean.append({"name": c["name"], "value": c.get("value", ""),
+                          "domain": c["domain"], "path": c.get("path", "/"),
+                          "expires": exp, "httpOnly": bool(c.get("httpOnly")),
+                          "secure": bool(c.get("secure")), "sameSite": ss})
+        if len(clean) < 10:
+            print(f"[vauto] pool too thin ({len(clean)}) - not consuming")
+            return False
+        ctx.add_cookies(clean)
+        print(f"[vauto] consumed pooled session ({len(clean)} cookies)")
+        return True
+    except Exception as _e:
+        print(f"[vauto] consume failed: {type(_e).__name__}: {_e}")
+        return False
+
+
+
+def _appraisal_form_ready(page, t, timeout_s=12):
+    """True once the appraisal form has actually rendered its input fields.
+
+    Distinguishes a working page from vAuto's in-component error card, which
+    mounts profit-time-guided-appraisal WITH a shadowRoot but WITHOUT any
+    vauto-appraisal-formatted-input hosts.
+    """
+    import time as _t2
+    deadline = _t2.time() + timeout_s
+    while _t2.time() < deadline:
+        try:
+            n = page.evaluate("""() => {
+                const a = document.querySelector('profit-time-guided-appraisal');
+                if (!a || !a.shadowRoot) return -1;
+                return a.shadowRoot.querySelectorAll('vauto-appraisal-formatted-input').length;
+            }""")
+            if isinstance(n, int) and n > 0:
+                return True
+        except Exception:
+            pass
+        _t2.sleep(0.5)
     return False
 
 
@@ -308,11 +521,37 @@ def _ensure_appraisal_ready(page, ctx, t):
     try:
         page.goto(VAUTO_HOME, wait_until="domcontentloaded", timeout=30000)
         if not any(h in page.url for h in SUCCESS_HOSTS):
+            # POOL_CONSUMER_2026_07_31 -- DISABLED 2026-07-31 after measurement.
+            # Injecting pooled cookies authenticates the page SHELL but every
+            # slot1.bff.megazord call still 401s, so the appraisal form never
+            # renders and the bid loses its permalink (bid 5227). Worse, on a
+            # box that HAS a good local session the injection lands on top of it
+            # and breaks it -- the first hop through the signin host looks like
+            # "not logged in", so it fired against a session created minutes
+            # earlier with 2FA. auto_login + the trusted-device cookie is the
+            # only thing that actually works for the browser path.
+            # consume_vauto_session() is kept for server-side/BFF use, where the
+            # required platformuserid/entityid headers are supplied.
             if not auto_login(page, ctx):
                 return None, False
         page = next((pg for pg in ctx.pages if any(h in pg.url for h in SUCCESS_HOSTS)), page)
         page.goto(VAUTO_APPRAISAL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_function("() => document.querySelector('profit-time-guided-appraisal')?.shadowRoot != null", timeout=15000)
+        # APPRAISAL_FORM_READY_2026_07_31: the component mounting is NOT the same
+        # as the form rendering. vAuto draws its "technical issue" card inside
+        # this very component, so shadowRoot exists with zero input hosts. Wait
+        # for a real field, and reload once if it is missing -- which is exactly
+        # what that error card instructs.
+        if not _appraisal_form_ready(page, t):
+            print(f"[+{_tm.time()-t:5.1f}s] [vauto] appraisal form not rendered - reloading once")
+            page.reload(wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.wait_for_function("() => document.querySelector('profit-time-guided-appraisal')?.shadowRoot != null", timeout=15000)
+            except Exception:
+                pass
+            if not _appraisal_form_ready(page, t):
+                print(f"[+{_tm.time()-t:5.1f}s] [vauto] appraisal page will not render its form (vAuto-side error) - giving up cleanly")
+                return None, False
         print(f"[+{_tm.time()-t:5.1f}s] [vauto] re-established appraisal page (cold)")
         return page, False
     except Exception as _e:
@@ -533,7 +772,7 @@ def lookup(page, ctx, vin, miles, t, bid_id=None):
 
         if qs_handle is None:
             print(f"[+{time.time()-t:5.1f}s] [vauto] permalink: Quick Search not found in any frame; frames={len(page.frames)}, url={page.url[:90]}")
-            try: page.screenshot(path=r"C:\worker\vauto_list_no_input.png", full_page=True)
+            try: page.screenshot(path=str(WORKER_ROOT / "vauto_list_no_input.png"), full_page=True)
             except Exception: pass
         else:
             print(f"[+{time.time()-t:5.1f}s] [vauto] permalink: found Quick Search in frame {qs_frame.url[:80]}")

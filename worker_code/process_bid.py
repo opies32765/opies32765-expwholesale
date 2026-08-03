@@ -10,6 +10,7 @@ different auth systems:
 Wall-clock per bid drops from ~92s sequential to ~40s = max(vauto, accutrade, ipacket).
 """
 import sys, time, json, threading
+import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -20,9 +21,14 @@ import worker_ipacket
 
 from playwright.sync_api import sync_playwright
 
-VAUTO_PROFILE_DIR     = Path(r"C:\worker\vauto_profile")
-ACCUTRADE_PROFILE_DIR = Path(r"C:\worker\accutrade_profile")
-IPACKET_PROFILE_DIR   = Path(r"C:\worker\ipacket_profile")
+# WORKER_PORTABLE_2026_07_31 — one knob decides where the worker keeps state.
+# Defaults to the Windows location so existing VMs are unaffected.
+WORKER_ROOT = Path(os.environ.get("EW_WORKER_ROOT", r"C:\worker"))
+
+
+VAUTO_PROFILE_DIR     = WORKER_ROOT / "vauto_profile"
+ACCUTRADE_PROFILE_DIR = WORKER_ROOT / "accutrade_profile"
+IPACKET_PROFILE_DIR   = WORKER_ROOT / "ipacket_profile"
 for d in (VAUTO_PROFILE_DIR, ACCUTRADE_PROFILE_DIR, IPACKET_PROFILE_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
@@ -90,7 +96,16 @@ def _ipacket_already_good(bid_id):
     try:
         import os, json as _json, urllib.request as _u
         _ew = os.environ.get("EW_SERVER", "https://experience-wholesale.net")
-        with _u.urlopen(f"{_ew}/api/ipacket/status/{bid_id}", timeout=8) as _r:
+        # IPACKET_SKIPCHECK_UA_2026_07_31: Cloudflare 403s the default
+        # Python-urllib UA, so this check silently failed on every worker and
+        # fell through to "no sticker" -- causing the very re-pulls it exists
+        # to prevent. A browser UA makes it work.
+        _req = _u.Request(
+            f"{_ew}/api/ipacket/status/{bid_id}",
+            headers={"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    "Chrome/147.0.0.0 Safari/537.36")})
+        with _u.urlopen(_req, timeout=8) as _r:
             _d = _json.loads(_r.read().decode("utf-8"))
         return bool(_d.get("has_sticker"))
     except Exception as _e:
