@@ -316,6 +316,16 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
   </form>
 </dialog>
 
+<style>
+.wizship{margin-top:14px;border-top:1px solid rgba(255,255,255,.14);padding-top:12px}
+.wizshiph{font-size:12px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;margin-bottom:8px;opacity:.85}
+.wizradio{display:flex;align-items:flex-start;gap:9px;padding:9px 11px;border:1px solid rgba(255,255,255,.16);border-radius:8px;margin-bottom:7px;cursor:pointer}
+.wizradio:hover{background:rgba(255,255,255,.05)}
+.wizradio input{margin-top:2px}
+.wizradio span{font-size:14px;line-height:1.35}
+.wizradio small{display:block;font-size:12px;opacity:.65;font-weight:400;margin-top:1px}
+.wizshipmsg{font-size:12.5px;color:#fbbf24;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.4);border-radius:7px;padding:8px 10px;margin-top:4px;display:none}
+</style>
 <div id="boardWiz" class="wizmask" style="display:none">
   <div class="wizbox">
     <div class="wizh">Routing to Home Base first</div>
@@ -324,10 +334,21 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
       <label class="wizlbl">Why is it coming to Home Base first — does it need recon? What's needed?</label>
       <textarea id="bwNote" class="wiztext" placeholder="e.g. needs recon: bumper + full detail before it heads to the dealer"></textarea>
       <label class="wizchk"><input type="checkbox" id="bwPhotos"> This vehicle needs photos taken on arrival</label>
+
+      <div class="wizship">
+        <div class="wizshiph">How is it getting here?</div>
+        <label class="wizradio"><input type="radio" name="bwVia" value="cobra" onchange="bwViaChanged()">
+          <span><b>Cobra</b> &mdash; local tow<small>Texts Jordan on confirm</small></span></label>
+        <label class="wizradio"><input type="radio" name="bwVia" value="austin" onchange="bwViaChanged()">
+          <span><b>Out of the area</b><small>Emails Austin on confirm</small></span></label>
+        <label class="wizradio"><input type="radio" name="bwVia" value="none" onchange="bwViaChanged()">
+          <span><b>Not yet</b> &mdash; I&rsquo;ll arrange it<small>Nothing is sent</small></span></label>
+        <div id="bwShipMsg" class="wizshipmsg"></div>
+      </div>
     </div>
     <div class="wizf">
       <button class="wbtn gray" onclick="cancelBoardWiz()">Cancel</button>
-      <button class="wbtn" onclick="confirmBoardWiz()">Confirm &amp; route to Home Base</button>
+      <button class="wbtn" id="bwConfirmBtn" onclick="confirmBoardWiz()">Confirm &amp; route to Home Base</button>
     </div>
   </div>
 </div>
@@ -519,6 +540,9 @@ function openBoardWiz(id, code, el, sold){
   document.getElementById('bwMsg').innerHTML=((el.getAttribute('data-veh')||'This vehicle').trim()||'This vehicle')+
     ' is sold to <b>'+sold.replace(/</g,'&lt;')+'</b>, but you’re routing it to <b>Home Base</b> first. Confirm and capture why:';
   document.getElementById('bwNote').value=''; document.getElementById('bwPhotos').checked=false;
+  Array.prototype.forEach.call(document.getElementsByName('bwVia'),
+    function(r){ r.checked=false; });
+  bwViaChanged();
   document.getElementById('boardWiz').style.display='flex';
 }
 function cancelBoardWiz(){
@@ -526,19 +550,51 @@ function cancelBoardWiz(){
   if(_bw && _bw.el){ _bw.el.value=_bw.el.getAttribute('data-cur'); }
   _bw=null;
 }
+function bwVia(){
+  var r=document.querySelector('input[name="bwVia"]:checked');
+  return r?r.value:'';
+}
+function bwViaChanged(){
+  var v=bwVia(), b=document.getElementById('bwConfirmBtn'), m=document.getElementById('bwShipMsg');
+  if(b){
+    b.textContent = v==='cobra'  ? 'Confirm & text Jordan'
+                  : v==='austin' ? 'Confirm & email Austin'
+                  : 'Confirm & route to Home Base';
+  }
+  if(m){
+    // say plainly what the click is about to send -- no surprises
+    m.style.display = (v==='cobra'||v==='austin') ? '' : 'none';
+    m.textContent = v==='cobra'
+      ? 'Confirming will TEXT Jordan at Cobra with the pickup details.'
+      : (v==='austin'
+         ? 'Confirming will EMAIL Austin to arrange out-of-area transport.'
+         : '');
+  }
+}
 async function confirmBoardWiz(){
   if(!_bw) return;
   var id=_bw.id, code=_bw.code, sold=(_bw.el.getAttribute('data-sold')||'').trim();
   var note=(document.getElementById('bwNote').value||'').trim();
   var pics=document.getElementById('bwPhotos').checked;
+  var via=bwVia();
+  if(!via){ alert('Pick how it is getting here — choose "Not yet" if it is not decided.'); return; }
+  var btn=document.getElementById('bwConfirmBtn');
+  if(btn){ btn.disabled=true; }             // no double-fire on a double-click
+  function J(b){ return {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}; }
   try{
-    var rm=await fetch('/api/recon/'+id+'/move',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to_step:code})});
+    var rm=await fetch('/api/recon/'+id+'/move', J({to_step:code}));
     var jm=await rm.json();
-    if(!jm.ok){ alert(jm.error||'move failed'); return; }
-    if(note){ await fetch('/api/recon/'+id+'/note',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body:'Routed to Home Base first → '+sold+'. '+note, category:'recon'})}); }
-    if(pics){ await fetch('/api/recon/'+id+'/photos-flag',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({needs_photos:true})}); }
+    if(!jm.ok){ alert(jm.error||'move failed'); if(btn){btn.disabled=false;} return; }
+    if(note){ await fetch('/api/recon/'+id+'/note', J({body:'Routed to Home Base first → '+sold+'. '+note, category:'recon'})); }
+    if(pics){ await fetch('/api/recon/'+id+'/photos-flag', J({needs_photos:true})); }
+    // transport LAST: never message anyone for a move that did not take
+    if(via!=='none'){
+      var rt=await fetch('/api/recon/'+id+'/home-transport', J({via:via, note:note}));
+      var jt=await rt.json();
+      if(!jt.ok){ alert('Car moved, but transport was NOT arranged: '+(jt.error||'failed')); }
+    }
     location.reload();
-  }catch(e){ alert('network error'); }
+  }catch(e){ alert('network error'); if(btn){btn.disabled=false;} }
 }
 let _fp=null;
 async function poll(){

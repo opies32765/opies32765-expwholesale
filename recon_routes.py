@@ -54,6 +54,21 @@ EMAIL_RECIP = {'austin': 'austin@experience-wholesale.com',
 RECON_OWNERS = {'me': '+14074309675', 'joe': '+13522099696',
                 'todd': '+15613018622', 'gregg': '+15166803500'}
 HOME_BASE = 'Home Base (Pompano)'
+
+# ─── RECON_HOME_TRANSPORT_2026_08_04 ───────────────────────────────────────
+# Cobra (local tow) -> text Jordan.  Out of area -> email Austin.
+# Fired from the Home Base wizard on confirm; see api_home_transport below.
+#
+# STAGED BY DEFAULT. Recon email is already live (RECON_EMAILS_LIVE exists), so
+# an automatic fire would otherwise reach Austin on the first click. While
+# staged both channels go to the operator and the body is marked [TEST].
+HOME_TRANSPORT_LIVE = os.environ.get('RECON_TRANSPORT_LIVE', '0') == '1'
+COBRA_SMS_TO = os.environ.get('RECON_COBRA_SMS', '+19546092424')       # Jordan
+COBRA_LABEL = 'Cobra'
+TRANSPORT_TEST_PHONE = os.environ.get('RECON_TRANSPORT_TEST_PHONE',
+                                      '+14074309675')
+TRANSPORT_TEST_EMAIL = os.environ.get('RECON_TRANSPORT_TEST_EMAIL',
+                                      'opies32765@gmail.com')
 # LSL web record deep-link. %s = inventory id (recon_units.lsl_inventory_ref).
 # ⚠ best-guess path — confirm the exact app.livesaleslog.com route with the operator.
 LSL_RECORD_URL = 'https://app.livesaleslog.com/inventory/%s'
@@ -2113,6 +2128,190 @@ def api_email_austin(unit_id):
                     (unit_id, u.get('current_step_id'), _actor(), nbody))
         db.commit()
         return jsonify({'ok': True, 'emailed_at': _fmt_et(ts)})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+
+
+# ── RECON_HOME_TRANSPORT_2026_08_04: wizard-fired transport arrangement ─────
+def _transport_lines(u, force_home=True):
+    """Vehicle / pick-up / deliver-to block shared by the text and the email so
+    the two channels can never drift apart.
+
+    force_home: this endpoint exists to arrange a haul TO HOME BASE, so the
+    destination is asserted rather than inferred from path. Inferring it means
+    that if the move has not landed yet (failed move, retry, a future caller)
+    the message tells the carrier to deliver to the BUYER instead. Wrong
+    destination on a transport request is an expensive mistake."""
+    ymm = ('%s %s %s %s' % (u.get('year') or '', u.get('make') or '',
+                            u.get('model') or '', u.get('trim') or '')).strip()
+    pickup = _resolve_party(u, 'pickup')
+    deliv = _resolve_party(u, 'delivery')
+    if force_home or u.get('path') == 'to_home':
+        deliv_name = HOME_BASE
+        deliv = {'name': HOME_BASE, 'address': deliv.get('address') or '',
+                 'phone': deliv.get('phone') or '', 'contact': deliv.get('contact') or ''}
+    else:
+        deliv_name = deliv.get('name') or u.get('sold_to') or 'the buying dealer'
+    return ymm, pickup, deliv, deliv_name
+
+
+def _one_line_addr(p):
+    bits = [p.get('address') or '']
+    if p.get('phone'):
+        bits.append(p['phone'])
+    return ', '.join(b for b in bits if b)
+
+
+def api_home_transport_body(u, note, staged):
+    """The Austin email. Subject leads with the car, the stock number and the
+    destination so it can be triaged from the inbox list without opening it --
+    the old subject was just "Transport needed: <ymm>"."""
+    ymm, pickup, deliv, deliv_name = _transport_lines(u)
+    stock = u.get('stock_no') or '—'
+    subj = 'Transport needed — %s · Stock %s · to %s' % (ymm, stock, deliv_name)
+    if staged:
+        subj = '[TEST] ' + subj
+
+    def blk(title, name, p):
+        out = ['%s\n  %s' % (title, name or '—')]
+        if p.get('address'):
+            out.append('  ' + p['address'])
+        if p.get('phone'):
+            out.append('  Phone: ' + p['phone'])
+        if p.get('contact'):
+            out.append('  Contact: ' + p['contact'])
+        return '\n'.join(out)
+
+    miles = u.get('miles')
+    body = ['Transport needed — this one is out of the area.', '']
+    body.append('VEHICLE\n  %s' % ymm)
+    body.append('  VIN    %s' % (u.get('vin') or '—'))
+    body.append('  Stock  %s' % stock)
+    if miles:
+        body.append('  Miles  %s' % format(int(miles), ','))
+    if u.get('exterior_color'):
+        body.append('  Color  %s' % u['exterior_color'])
+    body.append('')
+    body.append(blk('PICK UP FROM', pickup.get('name') or u.get('bought_from'), pickup))
+    body.append('')
+    body.append(blk('DELIVER TO', deliv_name, deliv))
+    if u.get('sold_to'):
+        body.append('  (then on to %s once recon is done)' % u['sold_to'])
+    if note:
+        body.append('')
+        body.append('NOTE\n  %s' % note)
+    body.append('')
+    body.append('Requested by %s.' % _actor())
+    if u.get('recon_token'):
+        body.append('Unit: %s/recon/u/%s' % (
+            os.environ.get('DP_TRACK_BASE', 'https://experience-wholesale.net'),
+            u['recon_token']))
+    if staged:
+        body.append('')
+        body.append('--- STAGED TEST. Live, this would go to %s. ---'
+                    % EMAIL_RECIP['austin'])
+    return subj, '\n'.join(body)
+
+
+def api_home_transport_sms(u, note, staged):
+    """Jordan's text. Short on purpose -- enough to roll on without a call."""
+    ymm, pickup, deliv, deliv_name = _transport_lines(u)
+    parts = ['%sCobra pickup — %s' % ('[TEST] ' if staged else '', ymm)]
+    if u.get('stock_no'):
+        parts.append('Stock %s' % u['stock_no'])
+    if u.get('vin'):
+        parts.append('VIN %s' % u['vin'])
+    frm = pickup.get('name') or u.get('bought_from') or 'seller'
+    a = _one_line_addr(pickup)
+    parts.append('From: %s%s' % (frm, (' — ' + a) if a else ''))
+    parts.append('To: %s' % deliv_name)
+    if note:
+        parts.append('Note: %s' % note)
+    return '\n'.join(parts)
+
+
+@bp.route('/api/recon/<int:unit_id>/home-transport', methods=['POST'])
+def api_home_transport(unit_id):
+    """Fired from the Home Base wizard. via in {cobra, austin, none}."""
+    data = request.get_json(silent=True) or request.form
+    via = (data.get('via') or '').strip().lower()
+    note = (data.get('note') or '').strip()[:500]
+    if via not in ('cobra', 'austin', 'none'):
+        return jsonify({'error': 'pick how it is getting here'}), 400
+    if via == 'none':
+        return jsonify({'ok': True, 'via': 'none', 'sent': False})
+
+    staged = not HOME_TRANSPORT_LIVE
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT * FROM recon_units WHERE id=%s", (unit_id,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'unit not found'}), 404
+        u = dict(row)
+        # do not arrange twice -- api_email_austin passes dedupe=False, so
+        # nothing else stops a second send
+        if u.get('shipping_arranged_at'):
+            return jsonify({'error': 'shipping is already arranged for this car',
+                            'already': True}), 409
+
+        if via == 'cobra':
+            body = api_home_transport_sms(u, note, staged)
+            to = TRANSPORT_TEST_PHONE if staged else COBRA_SMS_TO
+            n = _send_sms([to], body)
+            if not n:
+                return jsonify({'error': 'text failed to send'}), 502
+            cur.execute("""UPDATE recon_units
+                              SET transport_company=COALESCE(transport_company,%s),
+                                  shipping_arranged_at=now(),
+                                  shipping_arranged_via='cobra',
+                                  shipping_arranged_who=%s,
+                                  shipping_arranged_note=%s,
+                                  updated_at=now()
+                            WHERE id=%s""",
+                        (COBRA_LABEL, COBRA_LABEL + ' (Jordan)', note or None, unit_id))
+            cur.execute("INSERT INTO recon_transport_companies (name) VALUES (%s) "
+                        "ON CONFLICT (name) DO NOTHING", (COBRA_LABEL,))
+            nb = ('🚚 Cobra texted to collect%s — sent to %s:\n%s'
+                  % (('' if not staged else ' [TEST — sent to the operator]'),
+                     to, body))
+            cur.execute("INSERT INTO recon_notes (unit_id, step_id, author, body, category) "
+                        "VALUES (%s,%s,%s,%s,'general')",
+                        (unit_id, u.get('current_step_id'), _actor(), nb))
+            _audit(cur, unit_id, 'shipping', None, 'cobra_sms', _actor(),
+                   {'to': to, 'staged': staged, 'body': body})
+            db.commit()
+            return jsonify({'ok': True, 'via': 'cobra', 'sent': True,
+                            'staged': staged, 'to': to})
+
+        # via == 'austin'
+        subj, body = api_home_transport_body(u, note, staged)
+        to = TRANSPORT_TEST_EMAIL if staged else EMAIL_RECIP['austin']
+        _recon_email(cur, unit_id, 'austin_wizard', to, subj, body, dedupe=False)
+        cur.execute("""UPDATE recon_units
+                          SET austin_emailed_at=now(),
+                              shipping_arranged_at=now(),
+                              shipping_arranged_via='austin',
+                              shipping_arranged_who='Austin',
+                              shipping_arranged_note=%s,
+                              updated_at=now()
+                        WHERE id=%s""", (note or None, unit_id))
+        nb = '📧 Emailed Austin to arrange transport (out of the area)%s.' % (
+            '' if not staged else ' [TEST — sent to the operator]')
+        if note:
+            nb += ' Note: ' + note
+        cur.execute("INSERT INTO recon_notes (unit_id, step_id, author, body, category) "
+                    "VALUES (%s,%s,%s,%s,'general')",
+                    (unit_id, u.get('current_step_id'), _actor(), nb))
+        _audit(cur, unit_id, 'shipping', None, 'austin_wizard', _actor(),
+               {'to': to, 'staged': staged})
+        db.commit()
+        return jsonify({'ok': True, 'via': 'austin', 'sent': True,
+                        'staged': staged, 'to': to})
     except Exception as e:
         db.rollback()
         return jsonify({'error': str(e)}), 500

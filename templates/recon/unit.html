@@ -325,6 +325,16 @@
   </div>
 </div>
 
+<style>
+.wizship{margin-top:14px;border-top:1px solid #e5e7eb;padding-top:12px}
+.wizshiph{font-size:12px;font-weight:800;letter-spacing:.4px;color:#0f172a;text-transform:uppercase;margin-bottom:8px}
+.wizradio{display:flex;align-items:flex-start;gap:9px;padding:9px 11px;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:7px;cursor:pointer;background:#fff}
+.wizradio:hover{background:#f8fafc}
+.wizradio input{margin-top:2px}
+.wizradio span{font-size:14px;line-height:1.35;color:#0f172a}
+.wizradio small{display:block;font-size:12px;color:#64748b;font-weight:400;margin-top:1px}
+.wizshipmsg{font-size:12.5px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:7px;padding:8px 10px;margin-top:4px;display:none}
+</style>
 <div id="homeWiz" class="wizmask" style="display:none">
   <div class="wizbox">
     <div class="wizh">Routing to Home Base first</div>
@@ -333,10 +343,21 @@
       <label class="wizlbl">Why is it coming to Home Base first — does it need recon? What's needed?</label>
       <textarea id="wizNote" class="wiztext" placeholder="e.g. needs recon: bumper + full detail before it heads to the dealer"></textarea>
       <label class="wizchk"><input type="checkbox" id="wizPhotos"> This vehicle needs photos taken on arrival</label>
+
+      <div class="wizship">
+        <div class="wizshiph">How is it getting here?</div>
+        <label class="wizradio"><input type="radio" name="wizVia" value="cobra" onchange="wizViaChanged()">
+          <span><b>Cobra</b> &mdash; local tow<small>Texts Jordan on confirm</small></span></label>
+        <label class="wizradio"><input type="radio" name="wizVia" value="austin" onchange="wizViaChanged()">
+          <span><b>Out of the area</b><small>Emails Austin on confirm</small></span></label>
+        <label class="wizradio"><input type="radio" name="wizVia" value="none" onchange="wizViaChanged()">
+          <span><b>Not yet</b> &mdash; I&rsquo;ll arrange it<small>Nothing is sent</small></span></label>
+        <div id="wizShipMsg" class="wizshipmsg"></div>
+      </div>
     </div>
     <div class="wizf">
       <button class="btn gray" onclick="closeHomeWiz()">Cancel</button>
-      <button class="btn" onclick="confirmHomeWizard()">Confirm &amp; route to Home Base</button>
+      <button class="btn" id="wizConfirmBtn" onclick="confirmHomeWizard()">Confirm &amp; route to Home Base</button>
     </div>
   </div>
 </div>
@@ -365,20 +386,54 @@ function openHomeWiz(code){
   document.getElementById('wizMsg').innerHTML='This vehicle is sold to <b>'+SOLD_TO.replace(/</g,'&lt;')+
     '</b>, but you’re routing it to <b>Home Base</b> first. Confirm and capture why:';
   document.getElementById('wizNote').value=''; document.getElementById('wizPhotos').checked=false;
+  Array.prototype.forEach.call(document.getElementsByName('wizVia'),
+    function(r){ r.checked=false; });
+  wizViaChanged();
   document.getElementById('homeWiz').style.display='flex';
 }
 function closeHomeWiz(){ document.getElementById('homeWiz').style.display='none'; }
+function wizVia(){
+  var r=document.querySelector('input[name="wizVia"]:checked');
+  return r?r.value:'';
+}
+function wizViaChanged(){
+  var v=wizVia(), b=document.getElementById('wizConfirmBtn');
+  var m=document.getElementById('wizShipMsg');
+  if(b){
+    b.textContent = v==='cobra'  ? 'Confirm & text Jordan'
+                  : v==='austin' ? 'Confirm & email Austin'
+                  : 'Confirm & route to Home Base';
+  }
+  if(m){
+    // say plainly what the click is about to send -- no surprises
+    m.style.display = (v==='cobra'||v==='austin') ? '' : 'none';
+    m.textContent = v==='cobra'
+      ? 'Confirming will TEXT Jordan at Cobra with the pickup details.'
+      : (v==='austin'
+         ? 'Confirming will EMAIL Austin to arrange out-of-area transport.'
+         : '');
+  }
+}
 async function confirmHomeWizard(){
   var code=window._wizCode;
   var note=(document.getElementById('wizNote').value||'').trim();
   var pics=document.getElementById('wizPhotos').checked;
+  var via=wizVia();
+  if(!via){ alert('Pick how it is getting here — choose "Not yet" if it is not decided.'); return; }
+  var btn=document.getElementById('wizConfirmBtn');
+  if(btn){ btn.disabled=true; }              // no double-fire on a double-click
   try{
     var j=await api('/move',{to_step:code});
-    if(!j.ok){ alert(j.error||'move failed'); return; }
+    if(!j.ok){ alert(j.error||'move failed'); if(btn){btn.disabled=false;} return; }
     if(note){ await api('/note',{body:'Routed to Home Base first → '+SOLD_TO+'. '+note, category:'recon'}); }
     if(pics){ await api('/photos-flag',{needs_photos:true}); }
+    // transport LAST: never message anyone for a move that did not take
+    if(via!=='none'){
+      var t=await api('/home-transport',{via:via, note:note});
+      if(!t.ok){ alert('Car moved, but transport was NOT arranged: '+(t.error||'failed')); }
+    }
     location.reload();
-  }catch(e){ alert('network error'); }
+  }catch(e){ alert('network error'); if(btn){btn.disabled=false;} }
 }
 
 let carrierTimer=null;
