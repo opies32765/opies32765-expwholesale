@@ -2816,6 +2816,70 @@ def _upsert_bidder_contact(cur, phone, name):
     """, (phone, name))
 
 
+# ─── UNREADABLE_ALERT_2026_08_03 ────────────────────────────────────────────
+# Bid 5302 (VIN plate through a wet windscreen) and 5224 (an 18-char VIN in a
+# screenshot) both died silently: unusable bid, sender assumed it was in hand,
+# nobody told. 81 bids in 30 days landed flagged or VIN-less.
+#
+# Ask the SENDER for another photo, record WHAT we could not read, and surface
+# it on the bid listing so the desk sees it where they already look.
+UNREADABLE_TELL_SENDER = os.environ.get('UNREADABLE_TELL_SENDER', '1') == '1'
+
+
+def _unreadable_notify(bid_id, got_vin, got_miles):
+    """Photo OCR could not produce VIN and/or miles. Text the sender once and
+    stamp the bid so the listing can show it. Never raises."""
+    if got_vin and got_miles:
+        return
+    reason = ('vin' if (not got_vin and got_miles)
+              else 'miles' if (got_vin and not got_miles)
+              else 'both')
+    try:
+        db = get_db(); cur = db.cursor()
+        # one-shot guard -- a bid gets at most one of these, ever
+        cur.execute("""UPDATE bids
+                          SET unreadable_notified_at = NOW(),
+                              unreadable_reason = %s
+                        WHERE id = %s AND unreadable_notified_at IS NULL
+                    RETURNING phone, bidder_name""", (reason, bid_id))
+        row = cur.fetchone()
+        db.commit(); db.close()
+        if not row:
+            return                       # already handled
+        phone = (row.get('phone') or '')
+        who = (row.get('bidder_name') or '').strip()
+        first = who.split()[0] if who else ''
+
+        if not (UNREADABLE_TELL_SENDER and phone
+                and not phone.startswith(('field:', 'drop:'))):
+            print('[unreadable] bid=%s reason=%s - no sender text (disabled or '
+                  'no usable phone); listing will still show it'
+                  % (bid_id, reason), flush=True)
+            return
+
+        msg = ('Hi%s, Bid #%s - that photo came through too unclear for us to '
+               'read. Could you send another? We need both the VIN and the '
+               'mileage to price it.' % ((' ' + first) if first else '', bid_id))
+        try:
+            if send_sms(phone, msg):
+                print('[unreadable] bid=%s reason=%s - asked sender to resend'
+                      % (bid_id, reason), flush=True)
+            else:
+                # send_sms returns False on bot_mute / STOP / the NO_DATA_REQUEST
+                # guard. Mark it so the listing does not claim we texted them.
+                _d = get_db(); _c = _d.cursor()
+                _c.execute("UPDATE bids SET unreadable_reason=%s WHERE id=%s",
+                           (reason + '_nosms', bid_id))
+                _d.commit(); _d.close()
+                print('[unreadable] bid=%s reason=%s - sender text SUPPRESSED'
+                      % (bid_id, reason), flush=True)
+        except Exception as _se:
+            print('[unreadable] sender sms bid=%s: %s' % (bid_id, _se), flush=True)
+    except Exception as e:
+        print('[unreadable] bid=%s error: %s: %s' % (bid_id, type(e).__name__, e),
+              flush=True)
+
+
 def _promote_photo_hold(bid_id):
     """LONE_PIC_HOLD_2026_07_15: promote a held lone-pic bid to a live bid the
     instant it has a VIN or miles (from OCR, window-merge, or reclaim). Sends the
@@ -5152,6 +5216,19 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     print(f'[sms-ocr] stated-miles via text-read bid={bid_id}: {miles}', flush=True)
             except Exception as _e:
                 print(f'[sms-ocr] stated-miles err bid={bid_id} photo={photo_id}: {_e}', flush=True)
+
+        # UNREADABLE_ALERT_2026_08_03: every extraction path has now run. If we
+        # still lack VIN and/or miles, the photo was unreadable -- tell the
+        # partners which field failed, and tell the sender once. Threaded so a
+        # slow SMS can never hold up the write below.
+        try:
+            if vin is None or miles is None:
+                threading.Thread(
+                    target=_unreadable_notify,
+                    args=(bid_id, vin is not None, miles is not None),
+                    daemon=True, name='unreadable-%s' % bid_id).start()
+        except Exception as _ue:
+            print('[unreadable] spawn err bid=%s: %s' % (bid_id, _ue), flush=True)
 
         # Write everything in one transaction
         with get_db() as conn:
