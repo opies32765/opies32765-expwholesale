@@ -1,9 +1,9 @@
 {
   "make_name": "ACURA",
-  "trained_at": "2026-08-03T08:30:26.708196Z",
-  "n_total": 236,
+  "trained_at": "2026-08-04T08:30:22.511145Z",
+  "n_total": 237,
   "n_train": 218,
-  "n_test": 18,
+  "n_test": 19,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,49 +215,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 5980.0,
-    "mape_pct": 10.53,
-    "r2": 0.8241,
-    "within_5pct": 38.9,
-    "within_10pct": 66.7
+    "mae_dollars": 5686.0,
+    "mape_pct": 10.06,
+    "r2": 0.8247,
+    "within_5pct": 42.1,
+    "within_10pct": 68.4
   },
   "baseline_metrics": {
-    "mae_dollars": 4303.0,
-    "mape_pct": 11.42,
+    "mae_dollars": 4129.0,
+    "mape_pct": 11.03,
     "ratio": 1.0181
   },
   "top_features": [
     {
       "name": "original_msrp",
-      "importance": 0.632185161113739
+      "importance": 0.6305868625640869
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.20860202610492706
+      "importance": 0.20452846586704254
     },
     {
       "name": "market_asking_price",
-      "importance": 0.06200554966926575
+      "importance": 0.06072162836790085
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.05069062113761902
+      "importance": 0.059204235672950745
     },
     {
       "name": "model_name_TLX Technology Package Sedan",
-      "importance": 0.004124130588024855
+      "importance": 0.0037701774854213
     },
     {
       "name": "supplier_name_Manheim Orlando",
-      "importance": 0.0036171996034681797
+      "importance": 0.0033815267961472273
     },
     {
       "name": "days_on_lot",
-      "importance": 0.0033526795450598
+      "importance": 0.003064936026930809
     },
     {
       "name": "supplier_name_Mall Of Georgia Mazda",
-      "importance": 0.0026870230212807655
+      "importance": 0.0027012850623577833
     }
   ]
 }
