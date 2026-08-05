@@ -49,6 +49,8 @@
   .b-bounce{background:#fee2e2;color:#991b1b}
   .b-unsub{background:#e5e7eb;color:#374151}
   .b-delay{background:#fef3c7;color:#92400e}
+  .t-delay{border-left:3px solid #f59e0b}
+  .t-dead{border-left:3px solid #7f1d1d}
   .b-proxy{background:#f5f3ff;color:#7c3aed;opacity:.85}
   .muted{color:#9ca3af}
   .chips{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 10px}
@@ -120,8 +122,12 @@
         <div class="s" id="k-pending">{{ stats.pending }} not yet sent</div></div>
       <div class="tile t-deliv"><div class="n" id="k-delivered">{{ stats.delivered }}</div><div class="l">Delivered</div>
         <div class="s muted" id="k-delivnote">confirmed by Resend</div></div>
-      <div class="tile t-bounce" data-tile-f="bounced" title="Show only these in the table below"><div class="n" id="k-bounced">{{ stats.bounced }}</div><div class="l">Bounced</div>
-        <div class="s" id="k-bouncepct">{{ stats.bounce_pct }}% of sent</div></div>
+      <div class="tile t-delay" data-tile-f="delayed" title="Show only these in the table below"><div class="n" id="k-delayed">{{ stats.delayed or 0 }}</div><div class="l">Delayed</div>
+        <div class="s" id="k-delaynote">in flight &middot; still retrying</div></div>
+      <div class="tile t-bounce" data-tile-f="bounced" title="Show only these in the table below"><div class="n" id="k-bounced">{{ stats.retryable or 0 }}</div><div class="l">Bounced</div>
+        <div class="s" id="k-bouncepct">temporary &middot; retryable</div></div>
+      <div class="tile t-dead" data-tile-f="dead" title="Show only these in the table below"><div class="n" id="k-dead">{{ stats.dead or 0 }}</div><div class="l">Dead</div>
+        <div class="s" id="k-deadnote">suppressed permanently</div></div>
       <div class="tile t-open" data-tile-f="opened" title="Show only these in the table below"><div class="n" id="k-opened">{{ stats.opened }}</div><div class="l">Opened</div>
         <div class="s" id="k-openpct">{{ stats.open_pct }}% of delivered</div></div>
       <div class="tile t-click" data-tile-f="clicked" title="Show only these in the table below"><div class="n" id="k-clicked">{{ stats.clicked }}</div><div class="l">Clicked</div>
@@ -145,7 +151,9 @@
       <span class="chip" data-f="clicked">Clicked</span>
       <span class="chip" data-f="opened">Opened</span>
       <span class="chip" data-f="applied">Applied</span>
-      <span class="chip" data-f="bounced">Bounced</span>
+      <span class="chip" data-f="delayed" title="Receiving server asked us to retry - still in flight">Delayed</span>
+      <span class="chip" data-f="bounced" title="Temporary failure - retryable">Bounced</span>
+      <span class="chip" data-f="dead" title="Permanently undeliverable — suppressed and never retried">Dead</span>
       <span class="chip" data-f="unsub">Unsubscribed</span>
       <span class="chip" data-f="pending">Not sent</span>
       <span class="chip" data-f="removed">Removed</span>
@@ -181,7 +189,9 @@
             data-clicked="{{ 1 if (r.clicks or 0) > 0 else 0 }}"
             data-opened="{{ 1 if (r.opens or 0) > 0 else 0 }}"
             data-applied="{{ 1 if r.applied_at else 0 }}"
-            data-bounced="{{ 1 if (r.bounced_at and r.email_status != 'delayed') else 0 }}"
+            data-bounced="{{ 1 if (r.email_status == 'bounced' and r.bounce_type != 'hard') else 0 }}"
+            data-dead="{{ 1 if (r.email_status == 'bounced' and r.bounce_type == 'hard') else 0 }}"
+            data-delayed="{{ 1 if r.email_status == 'delayed' else 0 }}"
             data-unsub="{{ 1 if r.unsubscribed_at else 0 }}"
             data-pending="{{ 1 if not r.sent_at else 0 }}"
             data-email="{{ (r.email or '')|lower }}">
@@ -236,9 +246,12 @@ var curFilter = 'all', q = '';
 
 function visible(tr){
   if (curFilter !== 'all' && tr.getAttribute('data-' + curFilter) !== '1') return false;
-  // "Removed" is opt-in: a removed name should not keep showing up in the
-  // working list once management has cut it.
-  if (curFilter !== 'removed' && tr.getAttribute('data-removed') === '1') return false;
+  // "Removed" is opt-in in the WORKING views only. A status filter is a
+  // diagnostic question — "what bounced?" — and must answer completely, or the
+  // tile and the table disagree. Two hard bounces were auto-removed by
+  // suppression and vanished from the Bounced filter that was counting them.
+  var WORKING = (curFilter === 'all' || curFilter === 'pending');
+  if (WORKING && tr.getAttribute('data-removed') === '1') return false;
   if (q && tr.textContent.toLowerCase().indexOf(q) === -1) return false;
   return true;
 }
@@ -366,7 +379,10 @@ apply();
         if(!d) return;
         set('k-sent', d.sent); set('k-pending', d.pending + ' not yet sent');
         set('k-delivered', d.delivered);
-        set('k-bounced', d.bounced); set('k-bouncepct', d.bounce_pct + '% of sent');
+        set('k-delivnote', 'confirmed by Resend');
+        set('k-delayed', d.delayed); set('k-dead', d.dead);
+        set('k-bounced', d.retryable);
+        set('k-bouncepct', (d.dead || 0) + ' dead \u00b7 ' + (d.retryable || 0) + ' retry');
         set('k-opened', d.opened);   set('k-openpct',  d.open_pct  + '% of delivered');
         set('k-clicked', d.clicked); set('k-clickpct', d.click_pct + '% of delivered');
         set('k-applied', d.applied); set('k-applypct', d.apply_pct + '% of delivered');
@@ -388,7 +404,10 @@ apply();
             tr.setAttribute('data-opened',  x.opens  > 0 ? '1' : '0');
             tr.setAttribute('data-clicked', x.clicks > 0 ? '1' : '0');
             tr.setAttribute('data-bounced',
-              (x.bounced && x.status !== 'delayed') ? '1' : '0');
+              (x.status === 'bounced' && x.bounce_type !== 'hard') ? '1' : '0');
+            tr.setAttribute('data-dead',
+              (x.status === 'bounced' && x.bounce_type === 'hard') ? '1' : '0');
+            tr.setAttribute('data-delayed', x.status === 'delayed' ? '1' : '0');
             tr.setAttribute('data-unsub',   x.unsub   ? '1' : '0');
             tr.setAttribute('data-applied', x.applied ? '1' : '0');
             tr.setAttribute('data-pending', x.sent    ? '0' : '1');

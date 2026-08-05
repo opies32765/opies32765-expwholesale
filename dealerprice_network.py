@@ -2984,7 +2984,14 @@ def _dpo_stats(cur):
           (SELECT count(*) FROM dp_outreach_targets WHERE removed_at IS NOT NULL) AS removed,
           count(*)                                                                AS sent,
           count(*) FILTER (WHERE status='delivered')                              AS delivered,
+          -- DP_DELAYED_VISIBLE_2026-08-05: in flight, not failed. Without this
+          -- the tiles do not sum to `sent` and the whole board looks wrong.
+          count(*) FILTER (WHERE status='delayed')                                AS delayed,
           count(*) FILTER (WHERE status='bounced')                                AS bounced,
+          -- DP_DEAD_VS_RETRY_2026-08-05: a permanent bounce is a lost address;
+          -- a soft one is a retry. Reporting them as one number hides both.
+          count(*) FILTER (WHERE status='bounced' AND bounce_type='hard')         AS dead,
+          count(*) FILTER (WHERE status='bounced' AND bounce_type<>'hard')        AS retryable,
           count(*) FILTER (WHERE status='complained')                             AS complained,
           count(*) FILTER (WHERE status='failed')                                 AS failed,
           count(*) FILTER (WHERE opens > 0)                                       AS opened,
@@ -3077,7 +3084,8 @@ def network_outreach():
                t.removed_at, t.removed_by, t.removed_reason,
                e.id AS email_id, e.status AS email_status, e.sent_at,
                e.opens, e.proxy_opens, e.clicks, e.first_open_at, e.last_click_at,
-               e.bounced_at, e.unsubscribed_at, e.applied_at, e.application_id
+               e.bounced_at, e.bounce_type, e.unsubscribed_at, e.applied_at,
+               e.application_id
           FROM dp_outreach_targets t
           LEFT JOIN LATERAL (
                 SELECT * FROM dp_outreach_email x
@@ -3126,14 +3134,15 @@ def network_outreach_stats():
     # update, so this stays small (it can never exceed the number sent).
     cur.execute("""
         SELECT DISTINCT ON (lower(e.email))
-               lower(e.email) AS email, e.status, e.opens, e.proxy_opens,
-               e.clicks, e.sent_at, e.bounced_at, e.unsubscribed_at,
-               e.applied_at, e.application_id
+               lower(e.email) AS email, e.status, e.bounce_type, e.opens,
+               e.proxy_opens, e.clicks, e.sent_at, e.bounced_at,
+               e.unsubscribed_at, e.applied_at, e.application_id
           FROM dp_outreach_email e
          ORDER BY lower(e.email), e.id DESC""")
     s['rows'] = [{
         'email': r['email'],
         'status': r['status'],
+        'bounce_type': r['bounce_type'],
         'opens': r['opens'] or 0,
         'proxy': r['proxy_opens'] or 0,
         'clicks': r['clicks'] or 0,
