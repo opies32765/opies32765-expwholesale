@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Visitors · DealerPrice Network</title>
+<style>
+  :root{--ink:#0f172a;--mut:#64748b;--line:#e2e8f0;--bg:#f6f7f9;--card:#fff;
+        --good:#15803d;--warn:#b45309;--bad:#b91c1c;--accent:#1e3a8a}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+  .top{background:#0f172a;color:#fff;padding:14px 22px;display:flex;align-items:center;gap:22px;flex-wrap:wrap}
+  .brand{font-weight:800;letter-spacing:-.2px}
+  .brand span{color:#60a5fa}
+  .nav a{color:#cbd5e1;text-decoration:none;margin-right:16px;font-weight:600;font-size:13.5px}
+  .nav a.on{color:#fff;border-bottom:2px solid #60a5fa;padding-bottom:3px}
+  .nav a:hover{color:#fff}
+  .wrap{max-width:1400px;margin:0 auto;padding:22px}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:var(--mut);font-size:13px;margin-bottom:18px}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}
+  .tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .tile .n{font-size:26px;font-weight:800;letter-spacing:-.5px}
+  .tile .l{font-size:11.5px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.4px;margin-top:2px}
+  .tile .s{font-size:11.5px;color:var(--mut);margin-top:3px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:20px}
+  @media(max-width:1000px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--mut);
+           margin:0;padding:12px 16px;border-bottom:1px solid var(--line);font-weight:800}
+  table{width:100%;border-collapse:collapse}
+  th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--mut);
+     padding:9px 14px;border-bottom:1px solid var(--line);font-weight:700;white-space:nowrap}
+  td{padding:9px 14px;border-bottom:1px solid #f1f5f9;vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+  .pill{display:inline-block;font-size:10.5px;font-weight:800;padding:2px 7px;border-radius:999px;letter-spacing:.3px}
+  .p-app{background:#dcfce7;color:var(--good)}
+  .p-bot{background:#fee2e2;color:var(--bad)}
+  .muted{color:var(--mut)}
+  .empty{padding:26px 16px;color:var(--mut);text-align:center}
+  .scroll{max-height:640px;overflow:auto}
+  .rangebar{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center}
+  .rangebar a{font-size:12.5px;font-weight:700;padding:5px 11px;border:1px solid var(--line);
+              border-radius:999px;text-decoration:none;color:var(--ink);background:#fff}
+  .rangebar a.on{background:#0f172a;color:#fff;border-color:#0f172a}
+  .note{background:#fffbeb;border:1px solid #fde68a;color:#78350f;border-radius:8px;
+        padding:11px 14px;font-size:12.5px;margin-bottom:18px;line-height:1.55}
+</style>
+</head>
+<body>
+<div class="top">
+  <span class="brand">Dealer<span>Price</span> · Network</span>
+  <span class="nav">
+    <a href="/network/applications">Applications</a>
+    <a href="/network/members">Members</a>
+    <a href="/network/outreach">Outreach</a>
+    <a href="/network/dealers">Dealers</a>
+    <a class="on" href="/network/visitors">Visitors</a>
+  </span>
+</div>
+
+<div class="wrap">
+  <h1>Who is visiting dealerprice.net</h1>
+  <div class="sub">
+    Counted by a beacon that only fires in a real browser — scanners don&rsquo;t run JavaScript.
+    A visitor is one browser, not one IP.
+  </div>
+
+  <div class="rangebar">
+    {% for d in [1, 7, 14, 30, 90] %}
+      <a class="{{ 'on' if days == d else '' }}" href="/network/visitors?days={{ d }}">
+        {{ 'Today' if d == 1 else (d ~ ' days') }}</a>
+    {% endfor %}
+  </div>
+
+  {% if not visitors %}
+  <div class="note">
+    <b>No visits recorded yet.</b> The beacon has just been installed — this fills as
+    people load the site. It counts only genuine browsers, so it will read lower than
+    raw server logs, which are dominated by scanners probing for WordPress.
+  </div>
+  {% endif %}
+
+  <div class="tiles">
+    <div class="tile"><div class="n">{{ stats.uniques or 0 }}</div><div class="l">Unique visitors</div>
+      <div class="s">one browser = one visitor</div></div>
+    <div class="tile"><div class="n">{{ stats.views or 0 }}</div><div class="l">Page views</div>
+      <div class="s">humans only</div></div>
+    <div class="tile"><div class="n" style="color:var(--good)">{{ stats.applied or 0 }}</div><div class="l">Applied</div>
+      <div class="s">reached the apply form</div></div>
+    <div class="tile"><div class="n" style="color:var(--bad)">{{ stats.bots or 0 }}</div><div class="l">Datacenter IPs</div>
+      <div class="s">excluded from the counts</div></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>By day</h2>
+      <table>
+        <tr><th>Day</th><th class="num">Unique</th><th class="num">Views</th><th class="num">Applied</th></tr>
+        {% for d in by_day %}
+        <tr>
+          <td>{{ d.day.strftime('%a %d %b') }}</td>
+          <td class="num"><b>{{ d.uniques }}</b></td>
+          <td class="num muted">{{ d.views }}</td>
+          <td class="num">{% if d.applied %}<b style="color:var(--good)">{{ d.applied }}</b>{% else %}<span class="muted">—</span>{% endif %}</td>
+        </tr>
+        {% else %}<tr><td colspan="4" class="empty">Nothing yet.</td></tr>{% endfor %}
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Where they are</h2>
+      <div class="scroll">
+      <table>
+        <tr><th>Country</th><th>Region</th><th class="num">Unique</th><th class="num">Views</th></tr>
+        {% for g in by_geo %}
+        <tr>
+          <td>{{ g.country }}</td>
+          <td class="muted">{{ g.region or '—' }}</td>
+          <td class="num"><b>{{ g.uniques }}</b></td>
+          <td class="num muted">{{ g.views }}</td>
+        </tr>
+        {% else %}<tr><td colspan="4" class="empty">Nothing yet.</td></tr>{% endfor %}
+      </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Every visitor &mdash; deduplicated ({{ visitors|length }} shown)</h2>
+    <div class="scroll">
+    <table>
+      <tr>
+        <th>IP</th><th>Location</th><th>Network</th>
+        <th class="num">Views</th><th>First seen</th><th>Last seen</th><th>Came from</th><th></th>
+      </tr>
+      {% for v in visitors %}
+      <tr>
+        <td class="mono">{{ v.ip or '—' }}</td>
+        <td>{% if v.city or v.country %}{{ v.city or '' }}{% if v.city and v.region %}, {% endif %}{{ v.region or '' }}
+            {% if v.country %}<span class="muted"> · {{ v.country }}</span>{% endif %}
+            {% else %}<span class="muted">resolving…</span>{% endif %}</td>
+        <td class="muted" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ v.isp or '—' }}</td>
+        <td class="num">{{ v.views }}</td>
+        <td class="muted">{{ v.first_seen.strftime('%d %b %H:%M') if v.first_seen else '' }}</td>
+        <td class="muted">{{ v.last_seen.strftime('%d %b %H:%M') if v.last_seen else '' }}</td>
+        <td class="muted" style="max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ v.referer or 'direct' }}</td>
+        <td>{% if v.applied %}<span class="pill p-app">APPLIED</span>{% endif %}
+            {% if v.hosting %}<span class="pill p-bot">DATACENTER</span>{% endif %}</td>
+      </tr>
+      {% else %}<tr><td colspan="8" class="empty">No visitors recorded yet.</td></tr>{% endfor %}
+    </table>
+    </div>
+  </div>
+
+  {% if stats.ungeo %}
+  <div class="sub" style="margin-top:12px">
+    {{ stats.ungeo }} visit(s) still awaiting location lookup &mdash; resolved in
+    batches of 60 each time this page loads (ip-api.com, free tier).
+  </div>
+  {% endif %}
+</div>
+</body>
+</html>

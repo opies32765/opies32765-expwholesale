@@ -187,6 +187,9 @@ _PUBLIC_PREFIXES = (
     '/api/enrichment/',  # rbook/manheim enrichment workers (oscar VMs)
     '/api/thalist/',     # thalist.com scraper -> EW (shared-secret auth)
     '/api/dealerprice/',  # dealerprice.net public lead-gen -> EW (shared-secret auth)
+    '/api/dp/visit',  # DP_SITE_VISITS_2026_08_05: visitor beacon fired by
+                      # anonymous browsers on dealerprice.net. Exact path,
+                      # not a prefix. Write-only, returns 204, no body.
     '/api/carworth/',    # carworth.net consumer assistant -> EW (shared-secret auth)
     '/api/comp_msrp/',   # VM 121 comp_msrp worker (claim, submit, jwt, status)
     "/api/internal/",  # internal worker -> SMS bridge (X-Auth gated inside handler)

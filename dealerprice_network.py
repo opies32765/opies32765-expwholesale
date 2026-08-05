@@ -219,7 +219,13 @@ def _dp_receipt_html(first, dealership):
     </p>
   </td></tr>
 
-</table></div>""" % {'logo': logo, 'greet': greet, 'dealership': dealership}
+  <tr><td style="padding:16px 34px 26px 34px;background:#f8fafc;border-top:1px solid #eef0f3">
+    <p style="margin:0;font-size:12px;color:#94a3b8">Experience Wholesale &middot; 1210 S Andrews Ave, Pompano Beach, FL 33069</p>
+    %(social)s
+  </td></tr>
+
+</table></div>""" % {'logo': logo, 'greet': greet, 'dealership': dealership,
+                       'social': _social_row()}
 
 
 def _dp_apply_receipt(app_id, dealership, contact_name, email, phone, tcpa=False):
@@ -311,6 +317,40 @@ def _dp_apply_alert_sms(app_id, dealership, contact, hist, is_existing):
             print('[dp-network] apply-alert -> %s (live=%s)' % (digits, live), flush=True)
         except Exception as e:
             print('[dp-network] apply-alert %s failed: %s' % (digits, e), flush=True)
+
+
+# ─── DP_SOCIAL_FOOTER_2026_08_05 ───────────────────────────────────────────
+# One definition, used by every dealer-facing email, so the links cannot drift.
+# Text, not icons: mail clients block remote images from unknown senders by
+# default, and three broken-image boxes in a cold email footer looks worse than
+# no icons at all.
+EW_SOCIALS = (
+    ('Facebook',  'https://www.facebook.com/experiencewholesale/'),
+    ('LinkedIn',  'https://www.linkedin.com/company/experiencewholesale'),
+    ('Instagram', 'https://www.instagram.com/experiencewholesale/'),
+)
+
+
+EW_ICON_BASE = os.environ.get(
+    'EW_ICON_BASE', 'https://experience-wholesale.net/static/icons')
+
+
+def _social_row(color='#94a3b8', top=14):
+    """Social icons for an email footer.
+
+    24px images from the Resend-verified host — the same origin as the logo in
+    these templates, which is why images can be trusted here. alt text carries
+    the label so a client that blocks images still shows the three names.
+    Table-based row: Outlook ignores flex/inline-block gaps."""
+    cells = ''.join(
+        '<td style="padding:0 7px 0 0">'
+        '<a href="%s" style="text-decoration:none">'
+        '<img src="%s/%s.png" width="26" height="26" alt="%s" '
+        'style="display:block;width:26px;height:26px;border:0"></a></td>'
+        % (url, EW_ICON_BASE, label.lower(), label)
+        for label, url in EW_SOCIALS)
+    return ('<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+            'style="margin-top:%dpx"><tr>%s</tr></table>' % (top, cells))
 
 
 def _invite_html(name, link):
@@ -417,9 +457,13 @@ def _invite_html(name, link):
       You received this because your dealership was approved for the Experience Wholesale
       dealer network. Your submission link is private &mdash; don&rsquo;t forward it.
     </p>
+    <p style="margin:9px 0 0 0;font-size:11.5px;color:#94a3b8">
+      Experience Wholesale &middot; 1210 S Andrews Ave, Pompano Beach, FL 33069</p>
+    %(social)s
   </td></tr>
 
-</table></div>""" % {'logo': logo, 'name': name, 'link': link, 'sms': EW_SMS_NUMBER}
+</table></div>""" % {'logo': logo, 'name': name, 'link': link,
+                       'sms': EW_SMS_NUMBER, 'social': _social_row()}
 
 
 # NO_CACHE_2026_07_17 — the operator review pages (/network/...) re-run live LSL
@@ -2839,6 +2883,32 @@ def network_outreach():
     except Exception as e:
         db.rollback()
         print('[dp-outreach] link applications: %s' % e, flush=True)
+
+    # DP_SUPPRESSION_REAPPLY_2026_08_05 — a rebuild of the target list drops
+    # removed_at (it is a column on the row being replaced), which is how Joe's
+    # pre-07-30 removals came back. Suppression outlives the rebuild, so re-apply
+    # it here. Idempotent: matches nothing once the list is in sync.
+    try:
+        cur.execute("""UPDATE dp_outreach_targets t
+                          SET removed_at = s.created_at,
+                              removed_by = COALESCE(t.removed_by, 'suppression'),
+                              removed_reason = COALESCE(t.removed_reason, s.reason),
+                              status = CASE WHEN t.status='pending' THEN 'removed'
+                                            ELSE t.status END
+                         FROM dp_outreach_suppression s
+                        WHERE lower(t.email) = s.email
+                          AND t.removed_at IS NULL
+                      RETURNING t.id, t.name, s.reason""")
+        _re = cur.fetchall() or []
+        db.commit()
+        if _re:
+            print('[dp-outreach] re-applied suppression to %d target(s) after a '
+                  'list rebuild: %s' % (len(_re),
+                  ', '.join('%s(%s)' % (r['name'], r['reason']) for r in _re[:10])),
+                  flush=True)
+    except Exception as e:
+        db.rollback()
+        print('[dp-outreach] suppression re-apply: %s' % e, flush=True)
     stats = _dpo_stats(cur)
     cur.execute("""SELECT subject, body, updated_at FROM dp_outreach_template WHERE id=1""")
     tpl = cur.fetchone()
@@ -2848,6 +2918,7 @@ def network_outreach():
                t.src_deals, t.buy_deals, t.days_since, t.sold_days,
                t.email_original, t.email_edited_by, t.last_deal_at,
                t.status AS target_status,
+               t.removed_at, t.removed_by, t.removed_reason,
                e.id AS email_id, e.status AS email_status, e.sent_at,
                e.opens, e.proxy_opens, e.clicks, e.first_open_at, e.last_click_at,
                e.bounced_at, e.unsubscribed_at, e.applied_at, e.application_id
@@ -2918,11 +2989,29 @@ def network_outreach_remove():
                             WHERE id=%s RETURNING name, email""",
                         (_reviewer(), reason, tid))
         row = cur.fetchone()
+        # DP_REMOVE_SUPPRESSION_2026_08_05: the durable half of the removal.
+        # removed_at lives on a row a rebuild discards; this does not.
+        _em = ((row or {}).get('email') or '').strip().lower()
+        if _em:
+            if undo:
+                # only lift a manual removal -- a hard bounce or a complaint is
+                # the mailbox provider's call, not ours, and stays suppressed
+                cur.execute("DELETE FROM dp_outreach_suppression "
+                            "WHERE email=%s AND reason='manual_removal'", (_em,))
+            else:
+                cur.execute(
+                    "INSERT INTO dp_outreach_suppression (email, reason, note) "
+                    "VALUES (%s, 'manual_removal', %s) "
+                    "ON CONFLICT (email) DO NOTHING",
+                    (_em, ('removed by %s on the outreach list%s'
+                           % (_reviewer(), (' — ' + reason) if reason else ''))[:400]))
         db.commit()
         if not row:
             db.close(); return jsonify(ok=False, error='not found'), 404
-        print('[dp-outreach] %s target #%s %s (%s) by %s'
-              % ('restored' if undo else 'REMOVED', tid, row['name'], row['email'], _reviewer()),
+        print('[dp-outreach] %s target #%s %s (%s) by %s%s'
+              % ('restored' if undo else 'REMOVED', tid, row['name'], row['email'],
+                 _reviewer(), '' if not _em else
+                 (' · suppression lifted' if undo else ' · suppressed permanently')),
               flush=True)
         cur.execute("SELECT count(*) AS n FROM dp_outreach_targets WHERE removed_at IS NULL")
         left = cur.fetchone()['n']
@@ -2932,6 +3021,173 @@ def network_outreach_remove():
         db.rollback(); db.close()
         print('[dp-outreach] remove %s: %s' % (tid, e), flush=True)
         return jsonify(ok=False, error=str(e)[:200]), 500
+
+
+# ─── DP_SITE_VISITS_2026_08_05 — dealerprice.net visitor analytics ──────────
+# Fed by a JS beacon injected into the public site (nginx sub_filter), so only
+# browsers that run JavaScript are counted. See the module patch notes for why
+# the nginx access log is unusable for this.
+DP_VISIT_ORIGINS = ('https://dealerprice.net', 'https://www.dealerprice.net')
+
+
+def _dpv_client_ip():
+    for h in ('CF-Connecting-IP', 'X-Real-IP', 'X-Forwarded-For'):
+        v = (request.headers.get(h) or '').split(',')[0].strip()
+        if v:
+            return v[:64]
+    return (request.remote_addr or '')[:64]
+
+
+@bp.route('/api/dp/visit', methods=['POST', 'OPTIONS'])
+def dp_visit_beacon():
+    """Page-view beacon from dealerprice.net. Fail-open and silent: analytics
+    must never surface an error on the public site."""
+    origin = request.headers.get('Origin', '')
+    allow = origin if origin in DP_VISIT_ORIGINS else DP_VISIT_ORIGINS[0]
+    if request.method == 'OPTIONS':
+        return ('', 204, {
+            'Access-Control-Allow-Origin': allow,
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Allow-Methods': 'POST, OPTIONS',
+            'Access-Control-Max-Age': '86400'})
+
+    hdrs = {'Access-Control-Allow-Origin': allow}
+    try:
+        d = request.get_json(silent=True) or {}
+        vid = (_s(d.get('vid')) or '')[:64]
+        path = (_s(d.get('path')) or '/')[:200]
+        ref = (_s(d.get('ref')) or '')[:300]
+        applied = bool(d.get('applied'))
+        ua = (request.headers.get('User-Agent') or '')[:400]
+        ip = _dpv_client_ip()
+        db = _db(); cur = db.cursor()
+        try:
+            cur.execute("""INSERT INTO dp_site_visits
+                             (visitor_id, ip, path, referer, ua, applied)
+                           VALUES (%s,%s,%s,%s,%s,%s)""",
+                        (vid or None, ip or None, path, ref or None, ua, applied))
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        print('[dp-visit] %s: %s' % (type(e).__name__, str(e)[:120]), flush=True)
+    return ('', 204, hdrs)
+
+
+def _dpv_geofill(max_lookups=60):
+    """Resolve country/region/city/isp for visits with no geo yet.
+
+    Mirrors _geofill_pending in wholesaler_review.py: ip-api.com /batch, free,
+    45 req/min, no key, called lazily from the dashboard. Also stores hosting/
+    proxy — that is what identifies a datacenter IP dressed up as Chrome."""
+    try:
+        import json as _json
+        import urllib.request as _u
+        db = _db(); cur = db.cursor()
+        try:
+            cur.execute("""SELECT DISTINCT ip FROM dp_site_visits
+                            WHERE country IS NULL AND ip IS NOT NULL AND ip <> ''
+                            ORDER BY ip LIMIT %s""", (max_lookups,))
+            ips = [r['ip'] for r in cur.fetchall()]
+            if not ips:
+                return 0
+            payload = _json.dumps([
+                {'query': ip,
+                 'fields': 'status,country,regionName,city,isp,hosting,proxy,query'}
+                for ip in ips]).encode()
+            req = _u.Request('http://ip-api.com/batch', data=payload,
+                             headers={'Content-Type': 'application/json',
+                                      'User-Agent': 'EW-DealerPriceVisits/1.0'})
+            with _u.urlopen(req, timeout=8) as resp:
+                results = _json.loads(resp.read())
+            n = 0
+            for r in results:
+                if not isinstance(r, dict) or r.get('status') != 'success':
+                    continue
+                cur.execute("""UPDATE dp_site_visits
+                                  SET country=%s, region=%s, city=%s, isp=%s,
+                                      is_hosting=%s, is_proxy=%s
+                                WHERE ip=%s AND country IS NULL""",
+                            (r.get('country'), r.get('regionName'), r.get('city'),
+                             r.get('isp'), bool(r.get('hosting')),
+                             bool(r.get('proxy')), r.get('query')))
+                n += cur.rowcount
+            db.commit()
+            return n
+        finally:
+            db.close()
+    except Exception as e:
+        print('[dp-visit] geofill %s: %s' % (type(e).__name__, str(e)[:120]), flush=True)
+        return 0
+
+
+@bp.route('/network/visitors')
+def network_visitors():
+    """Who actually visited dealerprice.net.
+
+    'Unique' is per visitor_id, falling back to ip for the handful of rows
+    logged before the beacon set one. Datacenter traffic (is_hosting) is
+    excluded from the headline numbers but still listed, flagged, so nobody
+    wonders where it went."""
+    try:
+        _dpv_geofill()
+    except Exception:
+        pass
+    days = _int(request.args.get('days')) or 14
+    days = max(1, min(days, 90))
+    db = _db(); cur = db.cursor()
+    try:
+        cur.execute("""
+            SELECT count(DISTINCT COALESCE(visitor_id, ip))
+                     FILTER (WHERE NOT COALESCE(is_hosting,false))            AS uniques,
+                   count(*) FILTER (WHERE NOT COALESCE(is_hosting,false))      AS views,
+                   count(DISTINCT COALESCE(visitor_id, ip))
+                     FILTER (WHERE applied)                                    AS applied,
+                   count(DISTINCT ip) FILTER (WHERE COALESCE(is_hosting,false))AS bots,
+                   count(*) FILTER (WHERE country IS NULL)                     AS ungeo
+              FROM dp_site_visits
+             WHERE visited_at > now() - (%s || ' days')::interval""", (days,))
+        stats = dict(cur.fetchone() or {})
+
+        cur.execute("""
+            SELECT visited_at::date AS day,
+                   count(DISTINCT COALESCE(visitor_id, ip)) AS uniques,
+                   count(*) AS views,
+                   count(DISTINCT COALESCE(visitor_id, ip)) FILTER (WHERE applied) AS applied
+              FROM dp_site_visits
+             WHERE visited_at > now() - (%s || ' days')::interval
+               AND NOT COALESCE(is_hosting, false)
+             GROUP BY 1 ORDER BY 1 DESC""", (days,))
+        by_day = cur.fetchall()
+
+        cur.execute("""
+            SELECT COALESCE(country,'(resolving…)') AS country,
+                   COALESCE(region,'') AS region,
+                   count(DISTINCT COALESCE(visitor_id, ip)) AS uniques,
+                   count(*) AS views
+              FROM dp_site_visits
+             WHERE visited_at > now() - (%s || ' days')::interval
+               AND NOT COALESCE(is_hosting, false)
+             GROUP BY 1,2 ORDER BY 3 DESC LIMIT 40""", (days,))
+        by_geo = cur.fetchall()
+
+        cur.execute("""
+            SELECT COALESCE(v.visitor_id, v.ip) AS who, max(v.ip) AS ip,
+                   max(v.country) AS country, max(v.region) AS region,
+                   max(v.city) AS city, max(v.isp) AS isp,
+                   bool_or(COALESCE(v.is_hosting,false)) AS hosting,
+                   bool_or(v.applied) AS applied,
+                   count(*) AS views, min(v.visited_at) AS first_seen,
+                   max(v.visited_at) AS last_seen,
+                   max(v.referer) AS referer
+              FROM dp_site_visits v
+             WHERE v.visited_at > now() - (%s || ' days')::interval
+             GROUP BY 1 ORDER BY max(v.visited_at) DESC LIMIT 300""", (days,))
+        visitors = cur.fetchall()
+    finally:
+        db.close()
+    return render_template('network/visitors.html', stats=stats, by_day=by_day,
+                           by_geo=by_geo, visitors=visitors, days=days)
 
 
 # ── EMAIL_EDIT_2026_07_30 — correct a contact address before the send ────────

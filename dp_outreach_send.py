@@ -143,7 +143,7 @@ def build_html(first, token):
     </p>
     <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
       <td align="center" style="background:#b91c2c;border-radius:8px">
-        <a href="%(cta)s" style="display:inline-block;padding:14px 32px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none">Get started &rarr;</a>
+        <a href="%(cta)s" style="display:inline-block;padding:14px 32px;font-size:15px;font-weight:700;color:#ffffff;text-decoration:none">Apply Now &rarr;</a>
       </td></tr>
     </table>
   </td></tr>
@@ -157,7 +157,13 @@ def build_html(first, token):
   </td></tr>
 
   <tr><td style="padding:15px 34px 22px 34px;background:#f8fafc;border-top:1px solid #eef0f3">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 10px 0"><tr>
+      <td style="padding:0 8px 0 0"><a href="https://www.facebook.com/experiencewholesale/" style="text-decoration:none"><img src="https://experience-wholesale.net/static/icons/facebook.png" width="26" height="26" alt="Facebook" style="display:block;width:26px;height:26px;border:0"></a></td>
+      <td style="padding:0 8px 0 0"><a href="https://www.linkedin.com/company/experiencewholesale" style="text-decoration:none"><img src="https://experience-wholesale.net/static/icons/linkedin.png" width="26" height="26" alt="LinkedIn" style="display:block;width:26px;height:26px;border:0"></a></td>
+      <td style="padding:0 8px 0 0"><a href="https://www.instagram.com/experiencewholesale/" style="text-decoration:none"><img src="https://experience-wholesale.net/static/icons/instagram.png" width="26" height="26" alt="Instagram" style="display:block;width:26px;height:26px;border:0"></a></td>
+    </tr></table>
     <p style="margin:0;font-size:11.5px;line-height:1.55;color:#94a3b8">
+      Experience Wholesale &middot; 1210 S Andrews Ave, Pompano Beach, FL 33069<br>
       You received this because your dealership has done business with Experience
       Wholesale. <a href="%(unsub)s" style="color:#94a3b8;text-decoration:underline">Unsubscribe</a>
       and we won&rsquo;t email you about this again.
