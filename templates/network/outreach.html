@@ -197,7 +197,7 @@
           <td>
             {% if r.unsubscribed_at %}<span class="badge b-unsub">unsubscribed</span>
             {% elif r.email_status == 'delayed' %}<span class="badge b-delay" title="The receiving server asked us to try again later. Resend is still retrying — this is not a failed address.">delayed</span>
-            {% elif r.bounced_at %}<span class="badge b-bounce">bounced</span>
+            {% elif r.bounced_at %}<span class="badge b-bounce" title="{% if r.bounce_type == 'hard' %}Permanent failure — this address is suppressed and will never be mailed again.{% else %}Temporary failure on the receiving end. Still on the list; eligible for one retry.{% endif %}">bounced{% if r.bounce_type != 'hard' %} &middot; retry{% endif %}</span>
             {% elif not r.sent_at %}<span class="badge b-pending">not sent</span>
             {% elif r.clicks %}<span class="badge b-click">clicked</span>
             {% elif r.opens %}<span class="badge b-open">opened</span>
@@ -205,7 +205,7 @@
             {% elif st == 'delivered' %}<span class="badge b-deliv">delivered</span>
             {% else %}<span class="badge b-sent">sent</span>{% endif %}
           </td>
-          <td class="num">{{ r.opens or 0 }}{% if r.proxy_opens %}<span class="muted"> (+{{ r.proxy_opens }})</span>{% endif %}</td>
+          <td class="num" title="{{ r.opens or 0 }} human open(s){% if r.proxy_opens %} · {{ r.proxy_opens }} machine fetch(es) by a mail scanner or privacy proxy — not counted{% endif %}">{{ r.opens or 0 }}{% if r.proxy_opens %}<span class="muted"> (+{{ r.proxy_opens }})</span>{% endif %}</td>
           <td class="num">{{ r.clicks or 0 }}</td>
           <td>{% if r.applied_at %}<a class="badge b-apply" href="/network/application/{{ r.application_id }}">applied →</a>{% else %}<span class="muted">—</span>{% endif %}</td>
           <td class="num">{% if r.total_profit %}
