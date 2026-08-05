@@ -382,7 +382,6 @@ apply();
         set('k-delivnote', 'confirmed by Resend');
         set('k-delayed', d.delayed); set('k-dead', d.dead);
         set('k-bounced', d.retryable);
-        set('k-bouncepct', (d.dead || 0) + ' dead \u00b7 ' + (d.retryable || 0) + ' retry');
         set('k-opened', d.opened);   set('k-openpct',  d.open_pct  + '% of delivered');
         set('k-clicked', d.clicked); set('k-clickpct', d.click_pct + '% of delivered');
         set('k-applied', d.applied); set('k-applypct', d.apply_pct + '% of delivered');
