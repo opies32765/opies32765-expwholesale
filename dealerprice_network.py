@@ -2627,6 +2627,105 @@ def _dpt_unwrap(token, enc, sig):
 DP_TRACK_BASE = os.environ.get('DP_TRACK_BASE', 'https://experience-wholesale.net')
 
 
+# ─── DP_MACHINE_EVENTS_2026-08-05 ──────────────────────────────────────────
+# A mail-security scanner that follows every link produces opens, clicks and —
+# before the POST-only fix — unsubscribes, from a dealer who never saw the
+# message. UA matching cannot catch it: Defender sends a normal Chrome UA. The
+# tell is the IP, which belongs to a datacentre.
+def _dpt_machine_ip(cur, ip):
+    """True / False / None(unknown-yet) for 'this IP is a machine'.
+
+    Reads the local cache only — never blocks a pixel or a redirect on an HTTP
+    call to a third party. Unknown IPs are classified later by
+    _dpt_classify_ips() and the counters are rebuilt then."""
+    if not ip:
+        return None
+    try:
+        cur.execute("SELECT is_hosting, is_proxy FROM dp_ip_intel WHERE ip=%s", (ip,))
+        r = cur.fetchone()
+        if not r:
+            return None
+        return bool(r['is_hosting'] or r['is_proxy'])
+    except Exception:
+        return None
+
+
+def _dpt_classify_ips(max_lookups=90):
+    """Resolve unclassified event IPs, then rebuild the affected counters.
+
+    Same ip-api.com/batch pattern as _dpv_geofill and the signup-visits
+    dashboard. Called from the stats poll, so it keeps up on its own."""
+    try:
+        import json as _j
+        import urllib.request as _u
+        db = _db(); cur = db.cursor()
+        try:
+            cur.execute("""SELECT DISTINCT ev.ip FROM dp_outreach_event ev
+                            WHERE ev.ip IS NOT NULL AND ev.ip <> ''
+                              AND NOT EXISTS (SELECT 1 FROM dp_ip_intel i
+                                               WHERE i.ip = ev.ip)
+                            LIMIT %s""", (max_lookups,))
+            ips = [r['ip'] for r in cur.fetchall()]
+            if ips:
+                payload = _j.dumps([{'query': i,
+                                     'fields': 'status,hosting,proxy,isp,org,query'}
+                                    for i in ips]).encode()
+                req = _u.Request('http://ip-api.com/batch', data=payload,
+                                 headers={'Content-Type': 'application/json',
+                                          'User-Agent': 'EW-DealerPriceOutreach/1.0'})
+                with _u.urlopen(req, timeout=8) as resp:
+                    for r in _j.loads(resp.read()):
+                        if not isinstance(r, dict) or r.get('status') != 'success':
+                            continue
+                        cur.execute("""INSERT INTO dp_ip_intel
+                                         (ip, is_hosting, is_proxy, isp)
+                                       VALUES (%s,%s,%s,%s)
+                                       ON CONFLICT (ip) DO UPDATE SET
+                                         is_hosting=EXCLUDED.is_hosting,
+                                         is_proxy=EXCLUDED.is_proxy,
+                                         isp=EXCLUDED.isp""",
+                                    (r.get('query'), bool(r.get('hosting')),
+                                     bool(r.get('proxy')),
+                                     (r.get('isp') or r.get('org') or '')[:120]))
+                db.commit()
+
+            # stamp any event whose IP is now known
+            cur.execute("""UPDATE dp_outreach_event ev
+                              SET is_machine = (i.is_hosting OR i.is_proxy)
+                             FROM dp_ip_intel i
+                            WHERE i.ip = ev.ip AND ev.is_machine IS DISTINCT FROM
+                                  (i.is_hosting OR i.is_proxy)
+                        RETURNING ev.email_id""")
+            touched = {r['email_id'] for r in cur.fetchall()}
+            db.commit()
+
+            # rebuild counters from the events, so a late classification
+            # retroactively corrects a number that was already displayed
+            if touched:
+                cur.execute("""
+                    UPDATE dp_outreach_email e SET
+                      opens = (SELECT count(*) FROM dp_outreach_event v
+                                WHERE v.email_id=e.id AND v.kind='open'
+                                  AND NOT COALESCE(v.is_machine,false)),
+                      proxy_opens = (SELECT count(*) FROM dp_outreach_event v
+                                      WHERE v.email_id=e.id
+                                        AND v.kind IN ('open','proxy_open')
+                                        AND COALESCE(v.is_machine,false)),
+                      clicks = (SELECT count(*) FROM dp_outreach_event v
+                                 WHERE v.email_id=e.id AND v.kind='click'
+                                   AND NOT COALESCE(v.is_machine,false))
+                     WHERE e.id = ANY(%s)""", (list(touched),))
+                db.commit()
+                print('[dp-track] reclassified %d IP(s), rebuilt %d email counter(s)'
+                      % (len(ips), len(touched)), flush=True)
+            return len(touched)
+        finally:
+            db.close()
+    except Exception as e:
+        print('[dp-track] classify %s: %s' % (type(e).__name__, str(e)[:120]), flush=True)
+        return 0
+
+
 def _dpt_is_proxy(ua):
     ua = (ua or '').lower()
     return any(p in ua for p in _PROXY_UA)
@@ -2654,11 +2753,18 @@ def _dpt_row(token):
         return None, None, None
 
 
-def _dpt_event(cur, email_id, kind, url=None, source=None):
-    cur.execute("""INSERT INTO dp_outreach_event (email_id, kind, url, ip, user_agent, source)
-                   VALUES (%s,%s,%s,%s,%s,%s)""",
-                (email_id, kind, url, _dpt_client_ip(),
-                 (request.headers.get('User-Agent') or '')[:400], source))
+def _dpt_event(cur, email_id, kind, url=None, source=None, machine=None):
+    """Record an event. `machine` is the datacentre verdict for the client IP —
+    None when the IP has not been classified yet, which _dpt_classify_ips()
+    resolves later and then rebuilds the counters."""
+    _ip = _dpt_client_ip()
+    if machine is None:
+        machine = _dpt_machine_ip(cur, _ip)
+    cur.execute("""INSERT INTO dp_outreach_event
+                     (email_id, kind, url, ip, user_agent, source, is_machine)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                (email_id, kind, url, _ip,
+                 (request.headers.get('User-Agent') or '')[:400], source, machine))
 
 
 @bp.route('/e/o/<token>.gif')
@@ -2668,7 +2774,10 @@ def dpt_open(token):
     try:
         db, cur, r = _dpt_row(token)
         if r:
-            proxy = _dpt_is_proxy(request.headers.get('User-Agent'))
+            # UA matching alone misses mail-security scanners — Defender
+            # sends a plain Chrome UA. The datacentre IP is the real tell.
+            proxy = (_dpt_is_proxy(request.headers.get('User-Agent'))
+                     or _dpt_machine_ip(cur, _dpt_client_ip()) is True)
             if proxy:
                 cur.execute("""UPDATE dp_outreach_email
                                   SET proxy_opens = proxy_opens + 1
@@ -2698,6 +2807,13 @@ def dpt_click(token):
         return redirect(DP_TRACK_BASE)
     try:
         db, cur, r = _dpt_row(token)
+        if r and _dpt_machine_ip(cur, _dpt_client_ip()) is True:
+            # A scanner following the link. Log it, redirect it (refusing would
+            # make Defender report a broken link and may quarantine the mail),
+            # but do NOT let it register as a person clicking.
+            _dpt_event(cur, r['id'], 'click', url=url, source='link', machine=True)
+            db.commit(); db.close()
+            return redirect(url)
         if r:
             cur.execute("""UPDATE dp_outreach_email
                               SET clicks = clicks + 1,
@@ -2715,12 +2831,32 @@ def dpt_click(token):
     return redirect(url)
 
 
-@bp.route('/e/u/<token>')
+@bp.route('/e/u/<token>', methods=['GET', 'POST'])
 def dpt_unsubscribe(token):
     """One-click unsubscribe. Required for CAN-SPAM and materially helps
     deliverability; mailbox providers favour senders that honour List-Unsubscribe.
     Suppression is written to its own table so it OUTLIVES any rebuild of the
     target list."""
+    # DP_UNSUB_POST_ONLY_2026-08-05: a GET only ASKS. Mail-security scanners
+    # (Defender Safe Links et al) follow every link in a message; when this
+    # acted on GET they unsubscribed real dealers who never saw the email.
+    if request.method != 'POST':
+        return current_app.response_class(
+            '<!doctype html><meta name="viewport" content="width=device-width,'
+            'initial-scale=1"><div style="font:16px/1.6 -apple-system,Segoe UI,'
+            'Arial;max-width:520px;margin:14vh auto;padding:0 22px;text-align:'
+            'center;color:#1f2937">'
+            '<h2 style="margin:0 0 10px">Unsubscribe?</h2>'
+            '<p style="color:#6b7280">Confirm and Experience Wholesale will stop '
+            'emailing you about DealerPrice.</p>'
+            '<form method="POST" style="margin-top:22px">'
+            '<button type="submit" style="background:#ab2430;color:#fff;border:0;'
+            'border-radius:8px;padding:13px 28px;font-size:15px;font-weight:700;'
+            'cursor:pointer">Yes, unsubscribe me</button></form>'
+            '<p style="color:#9ca3af;font-size:13px;margin-top:18px">'
+            'Nothing has changed yet.</p></div>',
+            mimetype='text/html')
+
     done = False
     try:
         db, cur, r = _dpt_row(token)
@@ -2781,14 +2917,34 @@ def dpt_resend_webhook():
                         "WHERE id=%s AND status NOT IN ('bounced','complained')", (eid,))
             _dpt_event(cur, eid, 'delivered', source='resend')
         elif ev in ('email.bounced', 'email.delivery_delayed'):
-            hard = 'hard' if ev == 'email.bounced' else 'soft'
-            cur.execute("UPDATE dp_outreach_email SET status='bounced', bounced_at=now(), "
-                        "bounce_type=%s WHERE id=%s", (hard, eid))
+            # DP_BOUNCE_TYPE_2026-08-05: trust Resend's classification instead of
+            # calling every bounce permanent. A transient failure — full mailbox,
+            # greylisting, a mail loop on the recipient's own server — must not
+            # cost us the address forever. Preferred Ford was suppressed for a
+            # "554 hop count exceeded" that Resend had labelled Transient.
+            _b = (data.get('bounce') or {})
+            _btype = (_b.get('type') or '').strip().lower()
+            if ev == 'email.delivery_delayed':
+                _btype = 'transient'
+            permanent = (_btype == 'permanent')
+            # A DELAY is not a failure: the receiving server asked us to try
+            # again and Resend still is. Giving it its own status keeps a clean
+            # list from looking dirty on the dashboard.
+            _status = 'delayed' if ev == 'email.delivery_delayed' else 'bounced'
+            cur.execute("UPDATE dp_outreach_email SET status=%s, bounced_at=now(), "
+                        "bounce_type=%s, error=%s WHERE id=%s",
+                        (_status, 'hard' if permanent else 'soft',
+                         (' | '.join(_b.get('diagnosticCode') or []) or
+                          _b.get('message') or '')[:400], eid))
             _dpt_event(cur, eid, 'bounce', source='resend')
-            if hard == 'hard':
+            if permanent:
                 cur.execute("INSERT INTO dp_outreach_suppression (email, reason) "
                             "VALUES (%s,'hard_bounce') ON CONFLICT (email) DO NOTHING",
                             ((r['email'] or '').lower(),))
+                print('[dp-track] PERMANENT bounce -> suppressed %s' % r['email'], flush=True)
+            else:
+                print('[dp-track] transient bounce (%s) for %s - NOT suppressed'
+                      % (_btype or 'unclassified', r['email']), flush=True)
         elif ev == 'email.complained':
             cur.execute("UPDATE dp_outreach_email SET status='complained', complained_at=now() "
                         "WHERE id=%s", (eid,))
@@ -2946,15 +3102,47 @@ def network_outreach_stats():
         db.commit()
     except Exception:
         db.rollback()
+    try:
+        _dpt_classify_ips()   # keeps machine detection current
+    except Exception:
+        pass
     s = _dpo_stats(cur)
-    cur.execute("""SELECT e.email, ev.kind, ev.ts
+    # DP_FEED_HONEST_2026-08-05: humans only, and a delay is not a bounce.
+    cur.execute("""SELECT e.email,
+                          CASE WHEN ev.kind='bounce' AND e.status='delayed'
+                               THEN 'delayed' ELSE ev.kind END AS kind,
+                          ev.ts
                      FROM dp_outreach_event ev
                      JOIN dp_outreach_email e ON e.id = ev.email_id
                     WHERE ev.kind IN ('open','click','bounce','complaint','unsubscribe')
+                      AND NOT COALESCE(ev.is_machine, false)
                  ORDER BY ev.ts DESC LIMIT 12""")
     s['recent'] = [{'email': r['email'], 'kind': r['kind'],
                     'ts': r['ts'].strftime('%H:%M:%S') if r['ts'] else ''}
                    for r in cur.fetchall()]
+
+    # DP_LIVE_ROWS_2026-08-05: per-row state so the table tracks the counters.
+    # Only addresses with something to say — an untouched target has nothing to
+    # update, so this stays small (it can never exceed the number sent).
+    cur.execute("""
+        SELECT DISTINCT ON (lower(e.email))
+               lower(e.email) AS email, e.status, e.opens, e.proxy_opens,
+               e.clicks, e.sent_at, e.bounced_at, e.unsubscribed_at,
+               e.applied_at, e.application_id
+          FROM dp_outreach_email e
+         ORDER BY lower(e.email), e.id DESC""")
+    s['rows'] = [{
+        'email': r['email'],
+        'status': r['status'],
+        'opens': r['opens'] or 0,
+        'proxy': r['proxy_opens'] or 0,
+        'clicks': r['clicks'] or 0,
+        'sent': bool(r['sent_at']),
+        'bounced': bool(r['bounced_at']),
+        'unsub': bool(r['unsubscribed_at']),
+        'applied': bool(r['applied_at']),
+        'app_id': r['application_id'],
+    } for r in cur.fetchall()]
     db.close()
     return jsonify(s)
 
