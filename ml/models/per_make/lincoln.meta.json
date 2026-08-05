@@ -1,9 +1,9 @@
 {
   "make_name": "LINCOLN",
-  "trained_at": "2026-08-04T08:30:23.592816Z",
-  "n_total": 184,
+  "trained_at": "2026-08-05T08:30:44.827453Z",
+  "n_total": 185,
   "n_train": 174,
-  "n_test": 10,
+  "n_test": 11,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -211,49 +211,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1462.0,
-    "mape_pct": 4.34,
-    "r2": 0.9348,
-    "within_5pct": 70.0,
-    "within_10pct": 100.0
+    "mae_dollars": 1957.0,
+    "mape_pct": 6.02,
+    "r2": 0.857,
+    "within_5pct": 63.6,
+    "within_10pct": 90.9
   },
   "baseline_metrics": {
-    "mae_dollars": 1990.0,
-    "mape_pct": 5.98,
+    "mae_dollars": 2631.0,
+    "mape_pct": 8.18,
     "ratio": 1.0062
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.45872369408607483
+      "importance": 0.4589466154575348
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.2819444537162781
+      "importance": 0.2729009985923767
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.18778370320796967
-    },
-    {
-      "name": "model_name_Continental Reserve Sedan",
-      "importance": 0.011535484343767166
+      "importance": 0.1911129653453827
     },
     {
       "name": "original_msrp",
-      "importance": 0.009723744355142117
+      "importance": 0.012267695739865303
+    },
+    {
+      "name": "model_name_Continental Reserve Sedan",
+      "importance": 0.00754164531826973
     },
     {
       "name": "supplier_name_Infiniti Of Coconut Creek",
-      "importance": 0.0062439111061394215
+      "importance": 0.004082131199538708
     },
     {
-      "name": "supplier_name_Ed Voyles Chrysler Jeep",
-      "importance": 0.004882580600678921
+      "name": "odometer",
+      "importance": 0.003480099607259035
     },
     {
-      "name": "model_name_MKC Reserve Sport Utility Vehicle",
-      "importance": 0.0034511229023337364
+      "name": "year",
+      "importance": 0.003472729353234172
     }
   ]
 }

@@ -1,9 +1,9 @@
 {
   "make_name": "CHEVROLET",
-  "trained_at": "2026-08-04T08:30:09.976656Z",
-  "n_total": 2370,
+  "trained_at": "2026-08-05T08:30:12.892367Z",
+  "n_total": 2377,
   "n_train": 2123,
-  "n_test": 247,
+  "n_test": 254,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -227,49 +227,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3364.0,
-    "mape_pct": 6.43,
-    "r2": 0.8603,
-    "within_5pct": 53.0,
-    "within_10pct": 79.8
+    "mae_dollars": 3349.0,
+    "mape_pct": 6.45,
+    "r2": 0.8608,
+    "within_5pct": 51.6,
+    "within_10pct": 80.3
   },
   "baseline_metrics": {
-    "mae_dollars": 3768.0,
-    "mape_pct": 8.07,
+    "mae_dollars": 3745.0,
+    "mape_pct": 8.05,
     "ratio": 1.048
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.37324216961860657
+      "importance": 0.38569897413253784
     },
     {
       "name": "market_asking_price",
-      "importance": 0.2716080844402313
+      "importance": 0.2799014151096344
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.2655869722366333
-    },
-    {
-      "name": "model_name_Camaro 2SS Coupe",
-      "importance": 0.0031471350230276585
-    },
-    {
-      "name": "supplier_name_Classic Cars Of Palm Beach Llc",
-      "importance": 0.003143152454867959
-    },
-    {
-      "name": "sold_year",
-      "importance": 0.0030880942940711975
-    },
-    {
-      "name": "model_name_Tahoe Premier Sport Utility Vehicle",
-      "importance": 0.0030688466504216194
+      "importance": 0.24356649816036224
     },
     {
       "name": "supplier_name_Nissan Of Orange Park",
-      "importance": 0.002774610184133053
+      "importance": 0.003841953817754984
+    },
+    {
+      "name": "supplier_name_Classic Cars Of Palm Beach Llc",
+      "importance": 0.0033445784356445074
+    },
+    {
+      "name": "sold_year",
+      "importance": 0.0031818263232707977
+    },
+    {
+      "name": "model_name_Tahoe Premier Sport Utility Vehicle",
+      "importance": 0.0029736042488366365
+    },
+    {
+      "name": "supplier_name_Ultimo Northbrook",
+      "importance": 0.002902332693338394
     }
   ]
 }
