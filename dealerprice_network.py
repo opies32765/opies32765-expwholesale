@@ -3003,7 +3003,19 @@ def _dpo_stats(cur):
     """)
     s = dict(cur.fetchone() or {})
     sent = s.get('sent') or 0
-    s['pending'] = (s.get('targets') or 0) - sent
+    # DP_PENDING_COUNT_2026-08-05: count the sendable targets directly. The old
+    # `targets - sent` went negative once bounces started suppressing addresses
+    # out of `targets` while their attempt rows remained.
+    cur.execute("""
+        SELECT count(*) AS n
+          FROM dp_outreach_targets t
+         WHERE t.removed_at IS NULL
+           AND t.email IS NOT NULL AND t.email <> ''
+           AND NOT EXISTS (SELECT 1 FROM dp_outreach_suppression sp
+                            WHERE sp.email = lower(t.email))
+           AND NOT EXISTS (SELECT 1 FROM dp_outreach_email e
+                            WHERE lower(e.email) = lower(t.email))""")
+    s['pending'] = (cur.fetchone() or {}).get('n') or 0
     # Rates are quoted against DELIVERED, not sent — an open rate that silently
     # includes bounced mail flatters itself.
     base = (s.get('delivered') or 0) or sent

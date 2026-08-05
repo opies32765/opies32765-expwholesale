@@ -64,11 +64,31 @@ def pick(cur, limit, order):
           FROM dp_outreach_targets t
          WHERE t.removed_at IS NULL
            AND t.email IS NOT NULL AND t.email <> ''
+           -- DP_DEFER_2026-08-05: a target held for a scheduled window is not
+           -- eligible yet. NULL (the default) means "send whenever".
+           AND (t.send_after IS NULL OR t.send_after <= now())
            AND NOT EXISTS (SELECT 1 FROM dp_outreach_suppression s
                             WHERE s.email = lower(t.email))
            AND NOT EXISTS (SELECT 1 FROM dp_outreach_email e
                             WHERE lower(e.email) = lower(t.email))
          ORDER BY """ + ob + """
+         LIMIT %s""", (limit,))
+    return cur.fetchall()
+
+
+def pick_deferred(cur, limit):
+    """Only targets explicitly deferred to a window that has now opened."""
+    cur.execute("""
+        SELECT t.id, t.name, t.email, t.total_profit
+          FROM dp_outreach_targets t
+         WHERE t.removed_at IS NULL
+           AND t.email IS NOT NULL AND t.email <> ''
+           AND t.send_after IS NOT NULL AND t.send_after <= now()
+           AND NOT EXISTS (SELECT 1 FROM dp_outreach_suppression s
+                            WHERE s.email = lower(t.email))
+           AND NOT EXISTS (SELECT 1 FROM dp_outreach_email e
+                            WHERE lower(e.email) = lower(t.email))
+         ORDER BY COALESCE(t.total_profit,0) DESC
          LIMIT %s""", (limit,))
     return cur.fetchall()
 
@@ -118,7 +138,18 @@ def status(cur):
                (SELECT count(*) FROM dp_outreach_email
                  WHERE unsubscribed_at IS NOT NULL)                                AS unsubscribed""")
     r = dict(cur.fetchone())
-    remaining = r['live'] - r['attempted']
+    # DP_PENDING_COUNT_2026-08-05: see dealerprice_network.py. live - attempted
+    # goes negative as bounces suppress addresses out of `live`.
+    cur.execute("""
+        SELECT count(*) AS n
+          FROM dp_outreach_targets t
+         WHERE t.removed_at IS NULL
+           AND t.email IS NOT NULL AND t.email <> ''
+           AND NOT EXISTS (SELECT 1 FROM dp_outreach_suppression sp
+                            WHERE sp.email = lower(t.email))
+           AND NOT EXISTS (SELECT 1 FROM dp_outreach_email e
+                            WHERE lower(e.email) = lower(t.email))""")
+    remaining = (cur.fetchone() or {}).get('n') or 0
     print('  live targets      %d' % r['live'])
     print('  suppressed        %d   (never mailed)' % r['suppressed'])
     print('  ── sent so far ──')
@@ -150,6 +181,8 @@ def main():
     ap.add_argument('--send', action='store_true')
     ap.add_argument('--order', choices=['profit', 'low', 'random'], default='profit')
     ap.add_argument('--status', action='store_true')
+    ap.add_argument('--deferred', action='store_true',
+                    help='send ONLY the deferred cohort whose window has opened')
     ap.add_argument('--retry-soft', action='store_true',
                     help='resend to soft bounces instead of new targets')
     ap.add_argument('--retry-after-hours', type=int, default=6,
@@ -175,12 +208,16 @@ def main():
 
     if a.retry_soft:
         rows = pick_retries(cur, a.limit, a.retry_after_hours, a.max_attempts)
+    elif a.deferred:
+        rows = pick_deferred(cur, a.limit)
     else:
         rows = pick(cur, a.limit, a.order)
     print('campaign : %s' % CAMPAIGN)
     print('subject  : %s' % SUBJECT)
     print('from     : %s' % DPN.DP_EMAIL_FROM)
-    if a.retry_soft:
+    if a.deferred:
+        print('mode     : DEFERRED cohort (scheduled window)')
+    elif a.retry_soft:
         print('mode     : RETRY soft bounces settled >%dh, max %d attempts'
               % (a.retry_after_hours, a.max_attempts))
     else:
