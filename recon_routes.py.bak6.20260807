@@ -2596,50 +2596,6 @@ def _bol_match_unit(cur, vins, stocks):
     return None
 
 
-# BOL_YMM_FALLBACK_2026_08_07 — some carrier BOLs leave the VIN column BLANK
-# (verified: PROS MOVERS LZ-6124/6125). VIN and stock both fail, but the doc still
-# names the vehicle. Match year+make+model against OPEN recon units, and ONLY when
-# exactly one candidate survives — an ambiguous guess would attach a BOL to the
-# wrong car, which is worse than leaving it queued. 502 of 560 open units are
-# uniquely identified by year/make/model; the other 37 groups stay queued.
-_YMM_STOP = {'the', 'and', 'sport', 'utility', 'vehicle', 'coupe', 'sedan', 'truck',
-             'convertible', 'wagon', 'hatchback', 'pickup', 'suv', 'awd', '4wd'}
-
-
-def _ymm_tokens(s):
-    return {t for t in _bre.findall(r'[a-z0-9]+', (s or '').lower())
-            if t not in _YMM_STOP and len(t) > 1}
-
-
-def _bol_match_ymm(cur, label):
-    """'2019 Porsche 718 Boxster' -> the one open unit it can only be, else None.
-    Returns (unit, n_candidates)."""
-    if not label:
-        return None, 0
-    m = _bre.search(r'(19|20)[0-9]{2}', label)
-    if not m:
-        return None, 0
-    year = int(m.group(0))
-    parts = label[m.end():].strip().split()
-    if not parts:
-        return None, 0
-    make = parts[0]
-    model_toks = _ymm_tokens(' '.join(parts[1:]))
-    cur.execute("SELECT id, stock_no, vin, year, make, model, trim, miles, current_step_id "
-                "FROM recon_units WHERE status NOT IN ('removed','sold') "
-                "AND year=%s AND make ILIKE %s", (year, '%' + make + '%'))
-    rows = cur.fetchall() or []
-    cands = rows
-    if model_toks:
-        hit = [r for r in rows
-               if model_toks & _ymm_tokens('%s %s' % (r.get('model') or '', r.get('trim') or ''))]
-        if hit:
-            cands = hit
-    if len(cands) == 1:
-        return cands[0], 1
-    return None, len(cands)
-
-
 def _bol_attach(cur, unit, bol_id, subject, saved):
     for i, s in enumerate(saved):
         url = '/api/recon/bol/%d/doc/%d' % (bol_id, i)
@@ -2705,11 +2661,6 @@ def api_inbound_email():
             vins.add(m)
     for m in _bre.findall(r'\bLL\d{3,6}\b', (body_text or '').upper()):
         stocks.add(m)
-    # BOL_PDF_FIRST_2026_08_07 — carrier emails often attach BOTH a screenshot
-    # (image.png, no text layer -> the 9B degenerates and invents a vehicle) and the
-    # real PDF. Label/VIN were taken first-wins, so the raster's fabrication beat the
-    # PDF's grounded read. Process text-bearing PDFs first.
-    atts = sorted(atts, key=lambda t: 0 if 'pdf' in (t[1] or '').lower() else 1)
     for (fn, ct, data) in atts:
         ex = _bol_extract(data, ct)
         vins.update(ex['vins'])
@@ -2729,37 +2680,21 @@ def api_inbound_email():
     db = _db(); cur = db.cursor()
     try:
         unit = _bol_match_unit(cur, sorted(vins), sorted(stocks))
-        ymm_matched = False
-        if not unit:
-            unit, _ncand = _bol_match_ymm(cur, label)
-            if unit:
-                ymm_matched = True
-                print('[bol] matched by YEAR/MAKE/MODEL (no VIN on doc): %r -> unit %s'
-                      % (label, unit['id']), flush=True)
-            elif _ncand > 1:
-                print('[bol] YMM ambiguous (%d cands) for %r - left queued'
-                      % (_ncand, label), flush=True)
         status = 'matched' if unit else ('needs_match' if (vins or stocks) else 'no_vin')
         cur.execute("""INSERT INTO recon_inbound_bol
               (from_addr, to_addr, subject, status, matched_unit_id, extracted_vin,
                extracted_stock, extracted_label, body_text, attach_count, raw_path, attachments)
               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                     (hfrom[:300], hto[:300], subject[:500], status, (unit['id'] if unit else None),
-                     # BOL_NO_UNGROUNDED_2026_08_07 — the 9B can emit check-digit-valid
-                     # VINs that are pure invention (1C4RJXSJ1RW101234 on 10 BOLs,
-                     # 2FRDKGVX9ZDAR62PU...). If it grounds to no unit, do not show it:
-                     # a fabricated VIN in the inbox sends someone chasing a car that
-                     # does not exist. Matched rows take the VIN from the unit itself.
-                     (unit['vin'] if unit else None),
-                     ((sorted(stocks)[0] if stocks else None) if unit else None),
+                     (unit['vin'] if unit else (sorted(vins)[0] if vins else None)),
+                     (sorted(stocks)[0] if stocks else None),
                      label[:200], (body_text or '')[:4000], len(saved),
                      _bos.path.join(bdir, 'raw.eml'), _bjson.dumps(saved)))
         bol_id = cur.fetchone()['id']
         if unit:
             _bol_attach(cur, unit, bol_id, subject, saved)
-            note = '\U0001f4c4 BOL received from %s%s — auto-matched & attached%s' % (
-                hfrom or 'carrier', (' (%s)' % subject[:60]) if subject else '',
-                ' ⚠ matched by YEAR/MAKE/MODEL (no VIN printed on the BOL) - please verify' if ymm_matched else '')
+            note = '\U0001f4c4 BOL received from %s%s — auto-matched & attached' % (
+                hfrom or 'carrier', (' (%s)' % subject[:60]) if subject else '')
             cur.execute("INSERT INTO recon_notes (unit_id, step_id, author, body, category) "
                         "VALUES (%s,%s,'email_bol',%s,'general')", (unit['id'], unit['current_step_id'], note))
             try:

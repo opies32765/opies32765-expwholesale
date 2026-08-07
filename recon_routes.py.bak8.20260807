@@ -2745,13 +2745,8 @@ def api_inbound_email():
                extracted_stock, extracted_label, body_text, attach_count, raw_path, attachments)
               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                     (hfrom[:300], hto[:300], subject[:500], status, (unit['id'] if unit else None),
-                     # BOL_NO_UNGROUNDED_2026_08_07 — the 9B can emit check-digit-valid
-                     # VINs that are pure invention (1C4RJXSJ1RW101234 on 10 BOLs,
-                     # 2FRDKGVX9ZDAR62PU...). If it grounds to no unit, do not show it:
-                     # a fabricated VIN in the inbox sends someone chasing a car that
-                     # does not exist. Matched rows take the VIN from the unit itself.
-                     (unit['vin'] if unit else None),
-                     ((sorted(stocks)[0] if stocks else None) if unit else None),
+                     (unit['vin'] if unit else (sorted(vins)[0] if vins else None)),
+                     (sorted(stocks)[0] if stocks else None),
                      label[:200], (body_text or '')[:4000], len(saved),
                      _bos.path.join(bdir, 'raw.eml'), _bjson.dumps(saved)))
         bol_id = cur.fetchone()['id']
