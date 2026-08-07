@@ -1,9 +1,9 @@
 {
   "make_name": "LAMBORGHINI",
-  "trained_at": "2026-08-06T08:30:23.488609Z",
-  "n_total": 138,
+  "trained_at": "2026-08-07T08:30:40.761741Z",
+  "n_total": 139,
   "n_train": 118,
-  "n_test": 20,
+  "n_test": 21,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -211,49 +211,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 28273.0,
-    "mape_pct": 10.13,
-    "r2": 0.7692,
-    "within_5pct": 30.0,
-    "within_10pct": 80.0
+    "mae_dollars": 27135.0,
+    "mape_pct": 9.71,
+    "r2": 0.7703,
+    "within_5pct": 33.3,
+    "within_10pct": 81.0
   },
   "baseline_metrics": {
-    "mae_dollars": 69853.0,
-    "mape_pct": 31.17,
+    "mae_dollars": 71108.0,
+    "mape_pct": 31.3,
     "ratio": 1.3222
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.3770650029182434
+      "importance": 0.3770860731601715
     },
     {
       "name": "market_asking_price",
-      "importance": 0.22238397598266602
+      "importance": 0.2219918668270111
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.11898143589496613
+      "importance": 0.11923187971115112
     },
     {
       "name": "year",
-      "importance": 0.04870893433690071
+      "importance": 0.04868967831134796
     },
     {
       "name": "model_name_Huracan LP580-2 Coupe",
-      "importance": 0.025156294927001
+      "importance": 0.025209244340658188
     },
     {
       "name": "model_name_Huracan LP 580-2 Spyder Convertible",
-      "importance": 0.01593424193561077
+      "importance": 0.015967782586812973
     },
     {
       "name": "model_name_Huracan",
-      "importance": 0.015134025365114212
+      "importance": 0.015165879391133785
     },
     {
       "name": "model_name_Huracan EVO Coupe",
-      "importance": 0.011042761616408825
+      "importance": 0.011066005565226078
     }
   ]
 }
