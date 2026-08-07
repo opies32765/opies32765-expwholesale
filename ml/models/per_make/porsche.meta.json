@@ -1,6 +1,6 @@
 {
   "make_name": "PORSCHE",
-  "trained_at": "2026-08-05T08:30:16.756361Z",
+  "trained_at": "2026-08-06T08:30:11.345536Z",
   "n_total": 2066,
   "n_train": 1866,
   "n_test": 200,
@@ -221,14 +221,14 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 9704.0,
+    "mae_dollars": 9699.0,
     "mape_pct": 8.95,
     "r2": 0.9239,
     "within_5pct": 41.0,
     "within_10pct": 68.5
   },
   "baseline_metrics": {
-    "mae_dollars": 8590.0,
+    "mae_dollars": 8585.0,
     "mape_pct": 10.88,
     "ratio": 1.0378
   },

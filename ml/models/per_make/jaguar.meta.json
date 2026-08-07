@@ -1,9 +1,9 @@
 {
   "make_name": "JAGUAR",
-  "trained_at": "2026-08-05T08:30:41.189828Z",
-  "n_total": 279,
+  "trained_at": "2026-08-06T08:30:20.791774Z",
+  "n_total": 280,
   "n_train": 270,
-  "n_test": 9,
+  "n_test": 10,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,15 +219,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2872.0,
-    "mape_pct": 14.74,
-    "r2": 0.9418,
-    "within_5pct": 33.3,
-    "within_10pct": 44.4
+    "mae_dollars": 2590.0,
+    "mape_pct": 13.28,
+    "r2": 0.9428,
+    "within_5pct": 40.0,
+    "within_10pct": 50.0
   },
   "baseline_metrics": {
-    "mae_dollars": 3619.0,
-    "mape_pct": 16.37,
+    "mae_dollars": 3543.0,
+    "mape_pct": 15.65,
     "ratio": 1.0578
   },
   "top_features": [
