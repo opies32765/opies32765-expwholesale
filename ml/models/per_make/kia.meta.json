@@ -1,9 +1,9 @@
 {
   "make_name": "KIA",
-  "trained_at": "2026-08-07T08:30:30.382254Z",
-  "n_total": 395,
+  "trained_at": "2026-08-08T08:30:16.990358Z",
+  "n_total": 396,
   "n_train": 374,
-  "n_test": 21,
+  "n_test": 22,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -221,15 +221,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1955.0,
-    "mape_pct": 12.94,
-    "r2": 0.8576,
-    "within_5pct": 38.1,
-    "within_10pct": 71.4
+    "mae_dollars": 1918.0,
+    "mape_pct": 12.55,
+    "r2": 0.8595,
+    "within_5pct": 40.9,
+    "within_10pct": 72.7
   },
   "baseline_metrics": {
-    "mae_dollars": 2058.0,
-    "mape_pct": 12.01,
+    "mae_dollars": 2035.0,
+    "mape_pct": 11.73,
     "ratio": 1.0335
   },
   "top_features": [
