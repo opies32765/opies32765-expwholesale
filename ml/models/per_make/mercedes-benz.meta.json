@@ -1,9 +1,9 @@
 {
   "make_name": "MERCEDES-BENZ",
-  "trained_at": "2026-08-08T08:30:08.666080Z",
-  "n_total": 3802,
+  "trained_at": "2026-08-09T08:30:11.146352Z",
+  "n_total": 3803,
   "n_train": 3596,
-  "n_test": 206,
+  "n_test": 207,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -223,49 +223,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 7756.0,
-    "mape_pct": 10.05,
-    "r2": 0.9364,
-    "within_5pct": 44.2,
-    "within_10pct": 68.4
+    "mae_dollars": 7655.0,
+    "mape_pct": 9.82,
+    "r2": 0.937,
+    "within_5pct": 44.4,
+    "within_10pct": 69.1
   },
   "baseline_metrics": {
-    "mae_dollars": 7049.0,
-    "mape_pct": 10.86,
+    "mae_dollars": 7024.0,
+    "mape_pct": 10.82,
     "ratio": 1.0341
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.38574323058128357
+      "importance": 0.3953516185283661
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.3720676898956299
+      "importance": 0.3600514531135559
     },
     {
       "name": "original_msrp",
-      "importance": 0.05022995546460152
+      "importance": 0.045724738389253616
     },
     {
       "name": "model_name_G-Class G63 AMG Sport Utility Vehicle",
-      "importance": 0.029796279966831207
+      "importance": 0.034037332981824875
     },
     {
       "name": "body_type_SUV",
-      "importance": 0.022988753393292427
+      "importance": 0.021818857640028
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.020420826971530914
+      "importance": 0.020789453759789467
     },
     {
       "name": "odometer",
-      "importance": 0.01555615197867155
+      "importance": 0.014187552034854889
     },
     {
       "name": "model_name_G-Class",
-      "importance": 0.009220408275723457
+      "importance": 0.009707581251859665
     }
   ]
 }
