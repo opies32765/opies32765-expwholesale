@@ -1,9 +1,9 @@
 {
   "make_name": "ACURA",
-  "trained_at": "2026-08-10T08:30:22.172351Z",
-  "n_total": 238,
+  "trained_at": "2026-08-11T08:30:32.999999Z",
+  "n_total": 242,
   "n_train": 218,
-  "n_test": 20,
+  "n_test": 24,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,49 +215,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 5477.0,
-    "mape_pct": 9.77,
-    "r2": 0.8248,
-    "within_5pct": 45.0,
-    "within_10pct": 70.0
+    "mae_dollars": 4886.0,
+    "mape_pct": 9.0,
+    "r2": 0.8237,
+    "within_5pct": 54.2,
+    "within_10pct": 79.2
   },
   "baseline_metrics": {
-    "mae_dollars": 4010.0,
-    "mape_pct": 10.73,
+    "mae_dollars": 3491.0,
+    "mape_pct": 9.36,
     "ratio": 1.0181
   },
   "top_features": [
     {
       "name": "original_msrp",
-      "importance": 0.631621778011322
+      "importance": 0.6617752313613892
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.20798014104366302
-    },
-    {
-      "name": "market_asking_price",
-      "importance": 0.06177045777440071
+      "importance": 0.18484440445899963
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.052379537373781204
+      "importance": 0.05683519318699837
     },
     {
-      "name": "model_name_TLX Technology Package Sedan",
-      "importance": 0.004076342098414898
-    },
-    {
-      "name": "supplier_name_Manheim Orlando",
-      "importance": 0.0035752851981669664
-    },
-    {
-      "name": "days_on_lot",
-      "importance": 0.00331383035518229
+      "name": "market_asking_price",
+      "importance": 0.05304443836212158
     },
     {
       "name": "supplier_name_Mall Of Georgia Mazda",
-      "importance": 0.002655887044966221
+      "importance": 0.0033971064258366823
+    },
+    {
+      "name": "supplier_name_Manheim Orlando",
+      "importance": 0.0028955067973583937
+    },
+    {
+      "name": "model_name_TLX Technology Package Sedan",
+      "importance": 0.00286585814319551
+    },
+    {
+      "name": "days_on_lot",
+      "importance": 0.002532742451876402
     }
   ]
 }
