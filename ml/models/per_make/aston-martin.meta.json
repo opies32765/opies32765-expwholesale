@@ -1,9 +1,9 @@
 {
   "make_name": "ASTON MARTIN",
-  "trained_at": "2026-08-11T08:30:35.324660Z",
-  "n_total": 168,
+  "trained_at": "2026-08-12T08:30:21.330700Z",
+  "n_total": 169,
   "n_train": 138,
-  "n_test": 30,
+  "n_test": 31,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -205,15 +205,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 18350.0,
-    "mape_pct": 10.6,
-    "r2": 0.8439,
-    "within_5pct": 30.0,
-    "within_10pct": 60.0
+    "mae_dollars": 17994.0,
+    "mape_pct": 10.47,
+    "r2": 0.8447,
+    "within_5pct": 29.0,
+    "within_10pct": 61.3
   },
   "baseline_metrics": {
-    "mae_dollars": 29182.0,
-    "mape_pct": 22.35,
+    "mae_dollars": 29475.0,
+    "mape_pct": 22.7,
     "ratio": 1.2152
   },
   "top_features": [

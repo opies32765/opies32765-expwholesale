@@ -1,9 +1,9 @@
 {
   "make_name": "LINCOLN",
-  "trained_at": "2026-08-11T08:30:34.595875Z",
-  "n_total": 185,
+  "trained_at": "2026-08-12T08:30:20.334194Z",
+  "n_total": 186,
   "n_train": 174,
-  "n_test": 11,
+  "n_test": 12,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -211,49 +211,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1957.0,
-    "mape_pct": 6.02,
-    "r2": 0.857,
-    "within_5pct": 63.6,
-    "within_10pct": 90.9
+    "mae_dollars": 1979.0,
+    "mape_pct": 6.07,
+    "r2": 0.848,
+    "within_5pct": 58.3,
+    "within_10pct": 91.7
   },
   "baseline_metrics": {
-    "mae_dollars": 2631.0,
-    "mape_pct": 8.18,
+    "mae_dollars": 2741.0,
+    "mape_pct": 8.46,
     "ratio": 1.0062
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.4589466154575348
+      "importance": 0.4598609209060669
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.2729009985923767
+      "importance": 0.27281683683395386
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.1911129653453827
+      "importance": 0.18895071744918823
     },
     {
       "name": "original_msrp",
-      "importance": 0.012267695739865303
+      "importance": 0.012374275363981724
     },
     {
       "name": "model_name_Continental Reserve Sedan",
-      "importance": 0.00754164531826973
+      "importance": 0.007250046823173761
     },
     {
       "name": "supplier_name_Infiniti Of Coconut Creek",
-      "importance": 0.004082131199538708
+      "importance": 0.0039242953062057495
     },
     {
-      "name": "odometer",
-      "importance": 0.003480099607259035
+      "name": "supplier_name_Rountree Moore Chevrolet",
+      "importance": 0.0037919229362159967
     },
     {
       "name": "year",
-      "importance": 0.003472729353234172
+      "importance": 0.0035624285228550434
     }
   ]
 }
