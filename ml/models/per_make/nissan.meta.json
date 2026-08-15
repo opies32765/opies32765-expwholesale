@@ -1,6 +1,6 @@
 {
   "make_name": "NISSAN",
-  "trained_at": "2026-08-13T08:30:20.361633Z",
+  "trained_at": "2026-08-14T08:30:17.278525Z",
   "n_total": 544,
   "n_train": 490,
   "n_test": 54,
@@ -227,15 +227,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 4428.0,
-    "mape_pct": 11.02,
+    "mae_dollars": 4434.0,
+    "mape_pct": 11.05,
     "r2": 0.8619,
     "within_5pct": 48.1,
     "within_10pct": 68.5
   },
   "baseline_metrics": {
-    "mae_dollars": 2931.0,
-    "mape_pct": 12.64,
+    "mae_dollars": 2922.0,
+    "mape_pct": 12.61,
     "ratio": 1.0252
   },
   "top_features": [

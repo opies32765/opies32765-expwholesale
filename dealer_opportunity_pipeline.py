@@ -167,6 +167,10 @@ def upsert_dealer_mmr(rows: list[dict]) -> None:
     """Bulk UPSERT into dealer_mmr. Rows are dicts from mmr_one()."""
     if not rows:
         return
+    # MMR_UPSERT_DEDUPE_2026_08_14: the same VIN can be active at two dealers
+    # (group stores cross-list). ON CONFLICT cannot update a row twice in one
+    # statement, so keep only the last row per VIN within each batch.
+    rows = list({r['vin']: r for r in rows}.values())
     with conn() as c, c.cursor() as cur:
         psycopg2.extras.execute_values(cur, """
             INSERT INTO dealer_mmr

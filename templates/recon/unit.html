@@ -340,9 +340,10 @@
     <div class="wizh">Routing to Home Base first</div>
     <div class="wizb">
       <p id="wizMsg" class="wizmsg"></p>
+      <label class="wizchk"><input type="checkbox" id="wizPhotos"> This vehicle needs photos taken on arrival</label>
+      <label class="wizchk"><input type="checkbox" id="wizDenes"> 🔧 This car needs recon — text Denes what&rsquo;s needed <small>(recon notes below become required)</small></label>
       <label class="wizlbl">Why is it coming to Home Base first — does it need recon? What's needed?</label>
       <textarea id="wizNote" class="wiztext" placeholder="e.g. needs recon: bumper + full detail before it heads to the dealer"></textarea>
-      <label class="wizchk"><input type="checkbox" id="wizPhotos"> This vehicle needs photos taken on arrival</label>
 
       <div class="wizship">
         <div class="wizshiph">How is it getting here?</div>
@@ -378,14 +379,17 @@ async function move(code){
 function moveAny(){
   var code=document.getElementById('anyStep').value;
   // routing a dealer-bound car to Home Base first -> wizard to capture why + photos
-  if((code==='dealer_to_home' || code==='indiv_to_home') && SOLD_TO){ openHomeWiz(code); }
+  // HOME_WIZ_ALWAYS_2026_08_14: wizard on EVERY move to a Home lane, sold or not
+  if(code==='dealer_to_home' || code==='indiv_to_home'){ openHomeWiz(code); }
   else { move(code); }
 }
 function openHomeWiz(code){
   window._wizCode=code;
-  document.getElementById('wizMsg').innerHTML='This vehicle is sold to <b>'+SOLD_TO.replace(/</g,'&lt;')+
-    '</b>, but you’re routing it to <b>Home Base</b> first. Confirm and capture why:';
+  document.getElementById('wizMsg').innerHTML = SOLD_TO
+    ? 'This vehicle is sold to <b>'+SOLD_TO.replace(/</g,'&lt;')+'</b>, but you’re routing it to <b>Home Base</b> first. Confirm and capture why:'
+    : 'This vehicle is being routed to <b>Home Base</b>. Capture why it’s coming here:';
   document.getElementById('wizNote').value=''; document.getElementById('wizPhotos').checked=false;
+  document.getElementById('wizDenes').checked=false;
   Array.prototype.forEach.call(document.getElementsByName('wizVia'),
     function(r){ r.checked=false; });
   wizViaChanged();
@@ -419,14 +423,20 @@ async function confirmHomeWizard(){
   var note=(document.getElementById('wizNote').value||'').trim();
   var pics=document.getElementById('wizPhotos').checked;
   var via=wizVia();
+  var denes=document.getElementById('wizDenes').checked;
+  if(denes && !note){ alert('Recon notes are required when texting Denes — describe what recon is needed in the box above.'); return; }
   if(!via){ alert('Pick how it is getting here — choose "Not yet" if it is not decided.'); return; }
   var btn=document.getElementById('wizConfirmBtn');
   if(btn){ btn.disabled=true; }              // no double-fire on a double-click
   try{
     var j=await api('/move',{to_step:code});
     if(!j.ok){ alert(j.error||'move failed'); if(btn){btn.disabled=false;} return; }
-    if(note){ await api('/note',{body:'Routed to Home Base first → '+SOLD_TO+'. '+note, category:'recon'}); }
+    if(note){ await api('/note',{body:(SOLD_TO?'Routed to Home Base first → '+SOLD_TO+'. ':'Routed to Home Base. ')+note, category:'recon'}); }
     if(pics){ await api('/photos-flag',{needs_photos:true}); }
+    if(denes){
+      var dj=await api('/notify-denes',{note:note});
+      if(!dj.ok){ alert('Car moved, but Denes was NOT texted: '+(dj.error||'failed')); }
+    }
     // transport LAST: never message anyone for a move that did not take
     if(via!=='none'){
       var t=await api('/home-transport',{via:via, note:note});

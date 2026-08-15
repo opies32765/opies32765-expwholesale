@@ -26266,6 +26266,262 @@ def api_opportunity_pitch(opp_id):
 
 
 
+# ── /dealer-offers — OFFER_REVIEW_2026_08_14 owner review of 9B offer drafts ──
+# Review surface for dealer_offer_drafts written by dealer_offer_scout.py.
+# NO send path exists here by design: reachable statuses are draft/approved/
+# rejected only — 'sent' is deliberately not settable from this UI, and no
+# email/SMS is triggered anywhere in this block.
+@app.route('/dealer-offers')
+def dealer_offers_page():
+    return render_template('dealer_offers.html')
+
+
+@app.route('/api/dealer-offers')
+def api_dealer_offers():
+    dealer_id = request.args.get('dealer_id', type=int)
+    db = get_db()
+    cur = db.cursor()
+    where = 'WHERE o.dealer_id = %s' if dealer_id else ''
+    params = (dealer_id,) if dealer_id else ()
+    cur.execute(f"""
+        SELECT o.*, d.name AS dealer_name,
+               d.phone AS dealer_phone, d.salesperson_phone,
+               b.status AS bid_status, b.mileage AS bid_mileage,
+               b.created_at AS bid_created_at, b.ai_price AS bid_ai_price,
+               di.status AS stock_status, di.last_seen_at AS stock_seen_at,
+               di.price AS current_price, di.mileage AS current_mileage
+          FROM dealer_offer_drafts o
+          JOIN dealers d ON d.id = o.dealer_id
+          LEFT JOIN bids b ON b.id = o.bid_id
+          LEFT JOIN dealer_inventory di ON di.id = o.inventory_id
+          {where}
+         ORDER BY o.run_batch DESC, o.opp_score DESC NULLS LAST, o.id
+    """, params)
+    rows = [dict(r) for r in cur.fetchall()]
+    db.close()
+    for r in rows:
+        for k in ('created_at', 'updated_at', 'status_at', 'mmr_fetched_at', 'sent_at', 'stock_seen_at', 'bid_created_at'):
+            if r.get(k):
+                r[k] = r[k].isoformat()
+    return jsonify({'offers': rows})
+
+
+@app.route('/api/dealer-offers/<int:offer_id>/status', methods=['POST'])
+def api_dealer_offer_status(offer_id):
+    data = request.get_json(silent=True) or {}
+    status = (data.get('status') or '').strip()
+    by = (data.get('by') or '').strip().upper()[:8]
+    if status not in ('approved', 'rejected', 'draft'):
+        return jsonify({'ok': False, 'error': 'bad status'}), 400
+    if not by:
+        return jsonify({'ok': False, 'error': 'initials required'}), 400
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""UPDATE dealer_offer_drafts
+                      SET status = %s, status_by = %s,
+                          status_at = NOW(), updated_at = NOW()
+                    WHERE id = %s""", (status, by, offer_id))
+    db.commit()
+    ok = cur.rowcount == 1
+    db.close()
+    return jsonify({'ok': True} if ok else {'ok': False, 'error': 'not found'}), (200 if ok else 404)
+
+
+# ── OFFER_ENRICH_SEND_2026_08_14 ─────────────────────────────────────────────
+@app.route('/api/dealer-offers/<int:offer_id>/enrich', methods=['POST'])
+def api_dealer_offer_enrich(offer_id):
+    """Put the draft's car on the bid dashboard for FULL enrichment (vAuto,
+    AccuTrade, iPacket, books, assessment) before the owner sends an offer.
+
+    Creates a real bid through the standard intake hook. Per-draft only —
+    deliberately no bulk endpoint: a second bid on a VIN re-pulls iPacket
+    (account-ban-sensitive), so we dedupe against any live bid on this VIN
+    from the last 30 days and link to it instead of creating another.
+    """
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("""SELECT o.*, d.name AS dealer_name FROM dealer_offer_drafts o
+                   JOIN dealers d ON d.id = o.dealer_id WHERE o.id = %s""",
+                (offer_id,))
+    o = cur.fetchone()
+    if not o:
+        db.close()
+        return jsonify({'ok': False, 'error': 'not found'}), 404
+    if o.get('bid_id'):
+        db.close()
+        return jsonify({'ok': True, 'bid_id': o['bid_id'], 'linked': 'existing'})
+
+    cur.execute("""SELECT id FROM bids WHERE vin = %s
+                    AND created_at > NOW() - INTERVAL '30 days'
+                    AND COALESCE(status,'') NOT IN ('cancelled','rejected')
+                  ORDER BY id DESC LIMIT 1""", (o['vin'],))
+    dupe = cur.fetchone()
+    if dupe:
+        cur.execute("""UPDATE dealer_offer_drafts SET bid_id = %s,
+                       updated_at = NOW() WHERE id = %s""",
+                    (dupe['id'], offer_id))
+        db.commit()
+        db.close()
+        return jsonify({'ok': True, 'bid_id': dupe['id'], 'linked': 'dedupe'})
+
+    # ⛔ HARD CONSTRAINT — the bid carries a SYNTHETIC phone, NEVER the
+    # dealer's real number. Bid-side notify paths text bids.phone on
+    # enrichment events; a granted dealer number here would receive the
+    # /m/ valuation mini-site FOR A CAR ON THEIR OWN LOT we are about to
+    # offer under asking on. The dealer's real number lives only on the
+    # draft row (contact_phone). Do not "fix" this to the real number.
+    scout_phone = f"scout:{o['dealer_id']}"
+    cur.execute("""INSERT INTO contacts (phone, name, company)
+                   VALUES (%s, %s, 'OfferScout')
+                   ON CONFLICT (phone) DO UPDATE
+                     SET name = COALESCE(EXCLUDED.name, contacts.name)
+                   RETURNING id""", (scout_phone, o['dealer_name']))
+    contact_id = cur.fetchone()['id']
+    raw = (f"[OFFER SCOUT] {o['dealer_name']} — {o['year']} {o['make']} "
+           f"{o['model']} — ask ${o['asking_price']:,} · {o['effective_dol']}d on lot")
+    cur.execute("""INSERT INTO bids (contact_id, phone, vin, mileage, year,
+                     make, model, trim, raw_message, status, creation_source,
+                     vauto_priority, partner_dealer_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'new','offer_scout',
+                           TRUE,%s)
+                   RETURNING id""",
+                (contact_id, scout_phone, o['vin'], o['mileage'], o['year'],
+                 o['make'], o['model'], o.get('trim'), raw, o['dealer_id']))
+    bid_id = cur.fetchone()['id']
+    cur.execute("""UPDATE dealer_offer_drafts SET bid_id = %s,
+                   updated_at = NOW() WHERE id = %s""", (bid_id, offer_id))
+    db.commit()
+    db.close()
+    try:
+        trigger_market_check(bid_id, o['vin'])
+    except Exception as e:
+        print(f'[offer-enrich] market_check kick failed bid={bid_id}: {e}',
+              flush=True)
+    return jsonify({'ok': True, 'bid_id': bid_id, 'linked': 'created'})
+
+
+@app.route('/api/dealer-offers/<int:offer_id>/send_text', methods=['POST'])
+def api_dealer_offer_send_text(offer_id):
+    """Owner-clicked SMS of an APPROVED offer draft. One send per draft.
+
+    This is the ONLY send path for offer drafts (no email send, no bulk, no
+    automation) — a human initiates every message, so the permanently-off
+    sourcing-bot rule stays honored. Body guard is mechanical only (no links,
+    length); the owner's prose is their own.
+    """
+    data = request.get_json(silent=True) or {}
+    by = (data.get('by') or '').strip().upper()[:8]
+    body = (data.get('body') or '').strip()
+    digits = re.sub(r'[^0-9]', '', data.get('phone') or '')
+    if len(digits) == 11 and digits.startswith('1'):
+        digits = digits[1:]
+    dry_run = bool(data.get('dry_run'))
+
+    if not by:
+        return jsonify({'ok': False, 'error': 'initials required'}), 400
+    if len(digits) != 10:
+        return jsonify({'ok': False, 'error': 'need a 10-digit phone'}), 400
+    if not body or len(body) > 480:
+        return jsonify({'ok': False, 'error': 'body empty or over 480 chars'}), 400
+    low = body.lower()
+    if 'http' in low or '/m/' in low:
+        # enrichment mini-site / links never ride an offer text
+        return jsonify({'ok': False, 'error': 'links are not allowed in offer texts'}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT * FROM dealer_offer_drafts WHERE id = %s", (offer_id,))
+    o = cur.fetchone()
+    if not o:
+        db.close()
+        return jsonify({'ok': False, 'error': 'not found'}), 404
+    if o['status'] != 'approved':
+        db.close()
+        return jsonify({'ok': False, 'error': 'draft must be APPROVED before sending'}), 409
+    if o.get('sent_at'):
+        db.close()
+        return jsonify({'ok': False, 'error': f"already sent {o['sent_at']:%m-%d %H:%M}"}), 409
+
+    # STOCK_GUARD_2026_08_14 — never text an offer on a car that is no longer
+    # showing in the dealer's live inventory. Checked at send time, not draft
+    # time: cars sell between the scout run and the owner's click.
+    cur.execute("SELECT status FROM dealer_inventory WHERE id = %s",
+                (o.get('inventory_id'),))
+    inv = cur.fetchone()
+    if not inv or inv['status'] != 'active':
+        db.close()
+        return jsonify({'ok': False,
+                        'error': 'this car is NO LONGER showing in stock on the '
+                                 'dealer site — offer not sent'}), 409
+
+    if dry_run:
+        db.close()
+        return jsonify({'ok': True, 'dry_run': True, 'to': digits, 'body': body})
+
+    to = '+1' + digits
+    if not send_sms(to, body):
+        # send_sms returns False on Twilio failure AND on its silent guards
+        # (bot-mute, magic numbers, NO_DATA_REQUEST regex) — never mark sent.
+        db.close()
+        return jsonify({'ok': False,
+                        'error': 'send failed or blocked by SMS guards — not marked sent'}), 502
+
+    cur.execute("""UPDATE dealer_offer_drafts
+                      SET status = 'sent', sent_via = 'sms', sent_at = NOW(),
+                          sent_by = %s, contact_phone = %s, sms_draft = %s,
+                          updated_at = NOW()
+                    WHERE id = %s""", (by, digits, body, offer_id))
+    if o.get('bid_id'):
+        cur.execute("""INSERT INTO bid_messages (bid_id, direction, message, to_phone)
+                       VALUES (%s, 'outbound', %s, %s)""",
+                    (o['bid_id'], f'[offer text by {by}] {body}', to))
+    db.commit()
+    db.close()
+    return jsonify({'ok': True, 'sent_to': digits})
+
+
+@app.route('/api/dealer-offers/<int:offer_id>/price', methods=['POST'])
+def api_dealer_offer_price(offer_id):
+    """OFFER_PRICE_ADJUST_2026_08_14 — owner overrides the offer price on an
+    unsent draft. The band is advisory for humans: any positive price is
+    accepted (owners outrank the algorithm), but the response flags
+    outside-band so the UI can say so. First adjustment snapshots the 9B's
+    original price into offer_price_orig — that delta is the calibration
+    signal for tuning the band constants later."""
+    data = request.get_json(silent=True) or {}
+    by = (data.get('by') or '').strip().upper()[:8]
+    try:
+        price = int(re.sub(r'[^0-9]', '', str(data.get('price') or '')))
+    except ValueError:
+        price = 0
+    if not by:
+        return jsonify({'ok': False, 'error': 'initials required'}), 400
+    if price < 500 or price > 2000000:
+        return jsonify({'ok': False, 'error': 'price out of sane range'}), 400
+
+    db = get_db()
+    cur = db.cursor()
+    cur.execute("SELECT * FROM dealer_offer_drafts WHERE id = %s", (offer_id,))
+    o = cur.fetchone()
+    if not o:
+        db.close()
+        return jsonify({'ok': False, 'error': 'not found'}), 404
+    if o.get('sent_at'):
+        db.close()
+        return jsonify({'ok': False, 'error': 'already sent — price is frozen'}), 409
+
+    cur.execute("""UPDATE dealer_offer_drafts
+                      SET offer_price_orig = COALESCE(offer_price_orig, offer_price),
+                          offer_price = %s, price_adjusted_by = %s,
+                          price_adjusted_at = NOW(), updated_at = NOW()
+                    WHERE id = %s""", (price, by, offer_id))
+    db.commit()
+    db.close()
+    outside = price < (o['offer_floor'] or 0) or price > (o['offer_ceiling'] or 10**9)
+    return jsonify({'ok': True, 'price': price, 'outside_band': outside,
+                    'band': [o['offer_floor'], o['offer_ceiling']]})
+
+
 # ── /api/bid/<id>/estimate ─ operator value estimate (training signal) ──
 # Independent of the AI assessment — Gemini does NOT read this value.
 # Consumed by reconcile_ai_accuracy.py (every 30 min) + train_per_make.py

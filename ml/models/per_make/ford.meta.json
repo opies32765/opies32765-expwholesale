@@ -1,9 +1,9 @@
 {
   "make_name": "FORD",
-  "trained_at": "2026-08-13T08:30:12.326996Z",
-  "n_total": 2247,
+  "trained_at": "2026-08-14T08:30:09.958709Z",
+  "n_total": 2248,
   "n_train": 1972,
-  "n_test": 275,
+  "n_test": 276,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -227,49 +227,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 6212.0,
-    "mape_pct": 13.01,
-    "r2": 0.8715,
-    "within_5pct": 31.6,
-    "within_10pct": 57.8
+    "mae_dollars": 6254.0,
+    "mape_pct": 13.11,
+    "r2": 0.8709,
+    "within_5pct": 31.5,
+    "within_10pct": 57.2
   },
   "baseline_metrics": {
-    "mae_dollars": 6395.0,
-    "mape_pct": 17.18,
+    "mae_dollars": 6378.0,
+    "mape_pct": 17.13,
     "ratio": 1.0945
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.2675398290157318
-    },
-    {
-      "name": "base_appraised_value",
-      "importance": 0.13792943954467773
+      "importance": 0.26705506443977356
     },
     {
       "name": "year",
-      "importance": 0.13576248288154602
+      "importance": 0.1383901983499527
+    },
+    {
+      "name": "base_appraised_value",
+      "importance": 0.13621027767658234
     },
     {
       "name": "market_asking_price",
-      "importance": 0.10178016871213913
+      "importance": 0.10096811503171921
     },
     {
       "name": "original_msrp",
-      "importance": 0.0271975789219141
+      "importance": 0.02756870724260807
     },
     {
       "name": "model_name_Mustang GT Coupe",
-      "importance": 0.02665117010474205
+      "importance": 0.02631898783147335
     },
     {
       "name": "body_type_Coupe",
-      "importance": 0.02031111903488636
+      "importance": 0.020057959482073784
     },
     {
       "name": "model_name_Mustang",
-      "importance": 0.019570259377360344
+      "importance": 0.019326334819197655
     }
   ]
 }

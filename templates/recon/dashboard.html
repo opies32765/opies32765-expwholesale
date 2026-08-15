@@ -331,9 +331,10 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
     <div class="wizh">Routing to Home Base first</div>
     <div class="wizb">
       <p id="bwMsg" class="wizmsg"></p>
+      <label class="wizchk"><input type="checkbox" id="bwPhotos"> This vehicle needs photos taken on arrival</label>
+      <label class="wizchk"><input type="checkbox" id="bwDenes"> 🔧 This car needs recon — text Denes what&rsquo;s needed <small>(recon notes below become required)</small></label>
       <label class="wizlbl">Why is it coming to Home Base first — does it need recon? What's needed?</label>
       <textarea id="bwNote" class="wiztext" placeholder="e.g. needs recon: bumper + full detail before it heads to the dealer"></textarea>
-      <label class="wizchk"><input type="checkbox" id="bwPhotos"> This vehicle needs photos taken on arrival</label>
 
       <div class="wizship">
         <div class="wizshiph">How is it getting here?</div>
@@ -485,7 +486,8 @@ document.addEventListener('click',function(e){
 function quickMove(id, code, el){
   var sold=(el.getAttribute('data-sold')||'').trim();
   if(code==='ready'){ openReadyWiz(id, el); }
-  else if((code==='dealer_to_home'||code==='indiv_to_home') && sold){ openBoardWiz(id, code, el, sold); }
+  // HOME_WIZ_ALWAYS_2026_08_14: wizard on EVERY move to a Home lane, sold or not
+  else if(code==='dealer_to_home'||code==='indiv_to_home'){ openBoardWiz(id, code, el, sold); }
   else { doMove(id, code, el); }
 }
 var _rw=null;
@@ -537,9 +539,12 @@ async function doMove(id, code, el){
 var _bw=null;
 function openBoardWiz(id, code, el, sold){
   _bw={id:id, code:code, el:el};
-  document.getElementById('bwMsg').innerHTML=((el.getAttribute('data-veh')||'This vehicle').trim()||'This vehicle')+
-    ' is sold to <b>'+sold.replace(/</g,'&lt;')+'</b>, but you’re routing it to <b>Home Base</b> first. Confirm and capture why:';
+  var veh=((el.getAttribute('data-veh')||'This vehicle').trim()||'This vehicle');
+  document.getElementById('bwMsg').innerHTML = sold
+    ? veh+' is sold to <b>'+sold.replace(/</g,'&lt;')+'</b>, but you’re routing it to <b>Home Base</b> first. Confirm and capture why:'
+    : veh+' is being routed to <b>Home Base</b>. Capture why it’s coming here:';
   document.getElementById('bwNote').value=''; document.getElementById('bwPhotos').checked=false;
+  document.getElementById('bwDenes').checked=false;
   Array.prototype.forEach.call(document.getElementsByName('bwVia'),
     function(r){ r.checked=false; });
   bwViaChanged();
@@ -577,6 +582,8 @@ async function confirmBoardWiz(){
   var note=(document.getElementById('bwNote').value||'').trim();
   var pics=document.getElementById('bwPhotos').checked;
   var via=bwVia();
+  var denes=document.getElementById('bwDenes').checked;
+  if(denes && !note){ alert('Recon notes are required when texting Denes — describe what recon is needed in the box above.'); return; }
   if(!via){ alert('Pick how it is getting here — choose "Not yet" if it is not decided.'); return; }
   var btn=document.getElementById('bwConfirmBtn');
   if(btn){ btn.disabled=true; }             // no double-fire on a double-click
@@ -585,8 +592,13 @@ async function confirmBoardWiz(){
     var rm=await fetch('/api/recon/'+id+'/move', J({to_step:code}));
     var jm=await rm.json();
     if(!jm.ok){ alert(jm.error||'move failed'); if(btn){btn.disabled=false;} return; }
-    if(note){ await fetch('/api/recon/'+id+'/note', J({body:'Routed to Home Base first → '+sold+'. '+note, category:'recon'})); }
+    if(note){ await fetch('/api/recon/'+id+'/note', J({body:(sold?'Routed to Home Base first → '+sold+'. ':'Routed to Home Base. ')+note, category:'recon'})); }
     if(pics){ await fetch('/api/recon/'+id+'/photos-flag', J({needs_photos:true})); }
+    if(denes){
+      var dr=await fetch('/api/recon/'+id+'/notify-denes', J({note:note}));
+      var djj=await dr.json();
+      if(!djj.ok){ alert('Car moved, but Denes was NOT texted: '+(djj.error||'failed')); }
+    }
     // transport LAST: never message anyone for a move that did not take
     if(via!=='none'){
       var rt=await fetch('/api/recon/'+id+'/home-transport', J({via:via, note:note}));

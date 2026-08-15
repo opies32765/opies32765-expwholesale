@@ -67,6 +67,12 @@ COBRA_SMS_TO = os.environ.get('RECON_COBRA_SMS', '+19546092424')       # Jordan
 COBRA_LABEL = 'Cobra'
 TRANSPORT_TEST_PHONE = os.environ.get('RECON_TRANSPORT_TEST_PHONE',
                                       '+14074309675')
+# RECON_DENES_SMS_2026_08_14 — "needs recon" texts to Denes (main recon guy).
+# Independent live flag from the transport channel: transport is already live,
+# this one stays STAGED (operator's cell, [TEST] prefix) until the operator
+# flips RECON_DENES_LIVE=1 in a systemd drop-in.
+DENES_SMS_LIVE = os.environ.get('RECON_DENES_LIVE', '0') == '1'
+DENES_SMS_TO = os.environ.get('RECON_DENES_SMS', '+19543971833')
 TRANSPORT_TEST_EMAIL = os.environ.get('RECON_TRANSPORT_TEST_EMAIL',
                                       'opies32765@gmail.com')
 # LSL web record deep-link. %s = inventory id (recon_units.lsl_inventory_ref).
@@ -2231,6 +2237,50 @@ def api_home_transport_sms(u, note, staged):
     if note:
         parts.append('Note: %s' % note)
     return '\n'.join(parts)
+
+
+@bp.route('/api/recon/<int:unit_id>/notify-denes', methods=['POST'])
+def api_notify_denes(unit_id):
+    """RECON_DENES_SMS_2026_08_14 — fired from the Home Base wizard when
+    'this car needs recon' is checked. Recon notes are REQUIRED (enforced
+    here, not just in the UI). While staged the text goes to the operator."""
+    data = request.get_json(silent=True) or request.form
+    note = (data.get('note') or '').strip()[:500]
+    if not note:
+        return jsonify({'error': 'recon notes are required to text Denes'}), 400
+    staged = not DENES_SMS_LIVE
+    db = _db()
+    cur = db.cursor()
+    try:
+        cur.execute("SELECT * FROM recon_units WHERE id=%s", (unit_id,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'unit not found'}), 404
+        u = dict(row)
+        ymm = ' '.join(str(x) for x in (u.get('year'), u.get('make'),
+                                        u.get('model')) if x) or 'A vehicle'
+        vin = (u.get('vin') or '').strip()
+        body = '%s%s%s is on the way home, needs recon: %s' % (
+            '[TEST] ' if staged else '', ymm,
+            (' (VIN %s)' % vin) if vin else '', note)
+        to = TRANSPORT_TEST_PHONE if staged else DENES_SMS_TO
+        n = _send_sms([to], body)
+        if not n:
+            return jsonify({'error': 'text failed to send'}), 502
+        nb = ('🔧 Denes texted — needs recon%s:\n%s'
+              % (' [TEST — sent to the operator]' if staged else '', body))
+        cur.execute("INSERT INTO recon_notes (unit_id, step_id, author, body, category) "
+                    "VALUES (%s,%s,%s,%s,'recon')",
+                    (unit_id, u.get('current_step_id'), _actor(), nb))
+        _audit(cur, unit_id, 'recon', None, 'denes_sms', _actor(),
+               {'to': to, 'staged': staged, 'body': body})
+        db.commit()
+        return jsonify({'ok': True, 'sent': True, 'staged': staged, 'to': to})
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
 
 
 @bp.route('/api/recon/<int:unit_id>/home-transport', methods=['POST'])
