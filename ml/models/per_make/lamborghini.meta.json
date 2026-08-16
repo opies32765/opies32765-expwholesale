@@ -1,9 +1,9 @@
 {
   "make_name": "LAMBORGHINI",
-  "trained_at": "2026-08-14T08:30:23.722063Z",
-  "n_total": 139,
+  "trained_at": "2026-08-15T08:30:40.595419Z",
+  "n_total": 140,
   "n_train": 118,
-  "n_test": 21,
+  "n_test": 22,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -211,15 +211,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 27135.0,
+    "mae_dollars": 27401.0,
     "mape_pct": 9.71,
-    "r2": 0.7703,
-    "within_5pct": 33.3,
-    "within_10pct": 81.0
+    "r2": 0.7742,
+    "within_5pct": 31.8,
+    "within_10pct": 81.8
   },
   "baseline_metrics": {
-    "mae_dollars": 71108.0,
-    "mape_pct": 31.3,
+    "mae_dollars": 71764.0,
+    "mape_pct": 31.01,
     "ratio": 1.3222
   },
   "top_features": [
