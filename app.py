@@ -14389,6 +14389,19 @@ def api_vauto_pending():
                                                   'released_admin',
                                                   'released_admin_reprocess',
                                                   'released_invalid_vin',
+                                                  -- AUTOGIVE_INFRA_RELEASES_EXCLUDED_2026_08_17:
+                                                  -- released_watchdog / released_reaper are OUR OWN
+                                                  -- infra releasing a claim, NOT evidence the VIN is
+                                                  -- unlookupable. During the 08-16 20:34-21:10 upstream
+                                                  -- vAuto browser-leg outage the 60s watchdog burned all
+                                                  -- 5 strikes in ~20min on bids 5879-5886, stamping
+                                                  -- __not_found__ permanently -- and because worker_jobs
+                                                  -- history never expires, the give-up RE-stamped it on
+                                                  -- the next poll, so operator reprocess could never win.
+                                                  -- Genuine failures (failed/error/unclosed in_progress)
+                                                  -- still count, so bid-1193 infinite churn stays fixed.
+                                                  'released_watchdog',
+                                                  'released_reaper',
                                                   'ok', 'ok_api_mode')
                GROUP BY bid_id
                HAVING COUNT(*) >= 5
