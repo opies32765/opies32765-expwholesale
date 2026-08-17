@@ -2545,6 +2545,91 @@ def _bid_receipt(bid_ids):
             'Team Members will contact you.')
 
 
+# AUTOBUY_ALERT_2026_08_17 (operator: "joe wants a text when autobuy submits").
+# Autobuy = LSL supplier 5005 -- 3,648 cars / $128.4M bought from them, dormant
+# since 2025-11-27, signed back up 2026-08-17. Joe owns the account.
+#
+# Fires INLINE on submission (see the call at the tail of api_dealerprice_bid).
+# /etc/cron.d/autobuy_alert runs the same logic every minute as a safety net --
+# it also covers Autobuy cars that arrive by SMS intake rather than the DP link,
+# which this hook does not see. The shared autobuy_alerts_sent ledger makes the
+# two idempotent: whoever gets there first claims the row, the other no-ops.
+#
+# LINK_NOT_LAST_2026_08_17: the URL must NOT be the last line. A trailing URL
+# makes the phone render a link-preview card as a SECOND bubble. Operator
+# verified this on a real handset -- keep plain text after the link.
+AUTOBUY_SUPPLIER_ID = 5005
+AUTOBUY_ALERT_TO = '3522099696'   # Joe Humphries' working cell
+
+
+def _autobuy_alert_joe(bid_id):
+    """Text Joe when Autobuy submits. Best-effort; never raises to the caller."""
+    _db = get_db()
+    try:
+        _c = _db.cursor()
+        _c.execute("""
+            CREATE TABLE IF NOT EXISTS autobuy_alerts_sent (
+                bid_id   INTEGER PRIMARY KEY,
+                phone    TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                sent_ok  BOOLEAN NOT NULL DEFAULT FALSE,
+                last_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )""")
+        _c.execute("""
+            SELECT b.id, b.year, b.make, b.model, b.trim, b.mileage, b.vin,
+                   m.contact_name, m.contact_phone
+              FROM bids b
+              LEFT JOIN dealerprice_members m
+                ON right(regexp_replace(coalesce(m.contact_phone,''),'[^0-9]','','g'),10)
+                 = right(regexp_replace(coalesce(b.phone,''),'[^0-9]','','g'),10)
+               AND coalesce(m.contact_phone,'') <> ''
+             WHERE b.id = %s
+               AND (b.source_supplier_id = %s
+                    OR b.source_supplier_name ILIKE %s)""",
+                   (bid_id, AUTOBUY_SUPPLIER_ID, '%autobuy%'))
+        r = _c.fetchone()
+        if not r:
+            return                      # not an Autobuy car -- nothing to do
+
+        # Claim first: if the cron already sent this one, do nothing.
+        _c.execute("""INSERT INTO autobuy_alerts_sent (bid_id, phone, attempts)
+                      VALUES (%s,%s,0) ON CONFLICT (bid_id) DO NOTHING""",
+                   (bid_id, AUTOBUY_ALERT_TO))
+        if _c.rowcount == 0:
+            _db.commit()
+            return
+        _db.commit()
+
+        _bits = [str(r['year'] or '').strip(), (r['make'] or '').strip().title(),
+                 (r['model'] or '').strip(), (r['trim'] or '').strip()]
+        _car = ' '.join(b for b in _bits if b) or (r['vin'] or '')
+        if r['mileage']:
+            _car += ' - %s mi' % format(int(r['mileage']), ',')
+
+        _d = ''.join(ch for ch in (r['contact_phone'] or '') if ch.isdigit())[-10:]
+        _ph = ('%s-%s-%s' % (_d[:3], _d[3:6], _d[6:])) if len(_d) == 10 else ''
+        _who = (r['contact_name'] or '').strip().split(' ')[0].title()
+        _contact = ' '.join(x for x in (_who, _ph) if x)
+
+        _base = os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net')
+        _body = 'Autobuy just submitted Bid #%s\n%s/bid/%s\n%s' % (
+            bid_id, _base, bid_id, _car)
+        if _contact.strip():
+            _body += '\n' + _contact
+
+        _ok = bool(send_sms(AUTOBUY_ALERT_TO, _body))
+        _c.execute("""UPDATE autobuy_alerts_sent
+                         SET attempts = attempts + 1, sent_ok = %s, last_at = now()
+                       WHERE bid_id = %s""", (_ok, bid_id))
+        _db.commit()
+        print('[autobuy-alert] bid=%s sent=%s' % (bid_id, _ok), flush=True)
+    finally:
+        try:
+            _db.close()
+        except Exception:
+            pass
+
+
 def send_sms(to, body):
     """Send SMS via Twilio. Returns True on success, False on failure. Never raises.
 
@@ -13181,6 +13266,14 @@ def api_dealerprice_bid():
                   % bid_id, flush=True)
     except Exception as _rc_e:
         print('[dealerprice] submit receipt failed bid=%s: %s' % (bid_id, _rc_e), flush=True)
+
+    # AUTOBUY_ALERT_2026_08_17 (operator): Joe gets a text the instant Autobuy
+    # submits. No-op for every other dealer. Best-effort -- a failed text must
+    # never fail the submission.
+    try:
+        _autobuy_alert_joe(bid_id)
+    except Exception as _ab_e:
+        print('[autobuy-alert] failed bid=%s: %s' % (bid_id, _ab_e), flush=True)
 
     return jsonify({'ok': True, 'status': 'new', 'bid_id': bid_id, 'vin': vin})
 
