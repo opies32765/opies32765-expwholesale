@@ -22745,6 +22745,35 @@ def api_bid_quick_drop():
         full_notes_parts.append(notes)
     full_notes = ' — '.join(full_notes_parts)
 
+    # QUICKDROP_REQUIRE_VIN_MILES_2026_08_17 (operator): reject a drop that has
+    # no VIN or no miles instead of creating a bid that can never be priced.
+    # PHASE1_MILES_GATE_2026_05_15 makes the vAuto queue skip `mileage IS NULL`
+    # forever, with no verification flag on it -- bids 2573 / 5413 / 5930 sat
+    # silently unpriced for weeks that way. Checked HERE, after extraction, so
+    # the Carfax/AutoCheck screenshot path still works when the VIN and miles
+    # come from the image rather than the form.
+    _qd_missing = []
+    if not (vin and len(vin) == 17 and VIN_RE.match(vin)):
+        _qd_missing.append('a valid 17-character VIN')
+    # Normalise before judging: extraction may hand back 45000, "45,000" or
+    # "45000 mi". A bare int() on those raises and would FALSELY reject a
+    # perfectly good drop, breaking the whole quick-drop path.
+    _qd_miles_ok = False
+    if mileage is not None:
+        try:
+            _qd_digits = re.sub(r'[^0-9]', '', str(mileage))
+            _qd_miles_ok = bool(_qd_digits) and int(_qd_digits) > 0
+        except (TypeError, ValueError):
+            _qd_miles_ok = False
+    if not _qd_miles_ok:
+        _qd_missing.append('mileage')
+    if _qd_missing:
+        print('[quick-drop] REJECTED missing %s (vin=%r mileage=%r)'
+              % (', '.join(_qd_missing), vin, mileage), flush=True)
+        return jsonify({'error': 'Need %s. Without both, the bid can never be '
+                                 'priced — it would sit unenriched.'
+                                 % ' and '.join(_qd_missing)}), 400
+
     # Create bid
     db = get_db()
     cur = db.cursor()

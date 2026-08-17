@@ -200,7 +200,7 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
         <input type="text" id="repName" placeholder="Who's submitting this bid?">
       </div>
       <div class="field">
-        <label>Mileage (optional)</label>
+        <label>Mileage (required)</label>
         <input type="text" id="mileage" placeholder="e.g. 45,000" inputmode="numeric">
       </div>
       <div class="field">
@@ -367,6 +367,23 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
     const vin = document.getElementById('manualVin').value.trim().toUpperCase();
     const vinValid = VIN_REGEX.test(vin);
 
+    // QUICKDROP_REQUIRE_VIN_MILES_2026_08_17: the bid needs BOTH a VIN and
+    // miles, but they may come from the screenshots -- the extractor (9B) reads
+    // them off the Carfax. So: with screenshots, let it through and let the
+    // server decide once extraction has actually produced values. With NO
+    // screenshots there is nothing to read, so both must be typed here.
+    // Either way the server is the real gate: a bid with no miles fails
+    // PHASE1_MILES_GATE, is never claimed by a worker, and sits invisible and
+    // unpriced forever.
+    const milesRaw = document.getElementById('mileage').value.replace(/[^0-9]/g, '');
+    const milesValid = milesRaw.length > 0 && parseInt(milesRaw, 10) > 0;
+
+    if(!files.length && vinValid && !milesValid){
+      submitBtn.disabled = true;
+      btnText.textContent = 'Enter mileage to submit';
+      return;
+    }
+
     if(files.length && vinValid){
       submitBtn.disabled = false;
       btnText.textContent = 'Submit ' + files.length + ' screenshot' + (files.length > 1 ? 's' : '') + ' + VIN';
@@ -384,6 +401,8 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
 
   // Re-evaluate button state when VIN is typed
   document.getElementById('manualVin').addEventListener('input', updateButton);
+  // ...and when mileage is typed (QUICKDROP_REQUIRE_VIN_MILES_2026_08_17)
+  document.getElementById('mileage').addEventListener('input', updateButton);
 
   // --- Submit ---
   submitBtn.addEventListener('click', function(){
