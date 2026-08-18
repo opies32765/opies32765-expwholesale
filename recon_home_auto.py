@@ -172,6 +172,44 @@ def resolve_distance(bought_from):
     return _hav(POMPANO, pt), label, conf
 
 
+def resolve_source_type(u):
+    """Dealer vs Individual decides which lane the car is staged into
+    (dealer_to_home vs indiv_to_home), so getting it wrong mis-stages the car.
+
+    recon_units.buying_from_type is normally set by ew_recon_lsl_sync (627
+    Dealer / 36 Individual / 2 empty at wire-in), but when it is empty we go
+    back to LSL for `inventory.purchased_from_type` rather than silently
+    defaulting to Dealer. Mirrors the sync's own mapping exactly:
+        Individual iff purchased_from_type == 'individual', else Dealer.
+
+    Returns (type, source) where source is 'unit' | 'lsl' | 'assumed'.
+    'assumed' means we genuinely could not tell -- the caller flags it for a
+    human instead of pretending it knew.
+    """
+    bft = (u.get('buying_from_type') or '').strip()
+    if bft:
+        return ('Individual' if bft.lower() == 'individual' else 'Dealer'), 'unit'
+    try:
+        c = sqlite3.connect('file:%s?mode=ro' % R.LSL_DB, uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        row = None
+        if u.get('stock_no'):
+            row = c.execute('SELECT purchased_from_type FROM inventory '
+                            'WHERE stock_no=? ORDER BY created_at DESC LIMIT 1',
+                            (u['stock_no'],)).fetchone()
+        if not row and u.get('vin'):
+            row = c.execute('SELECT purchased_from_type FROM inventory '
+                            'WHERE vin_no=? ORDER BY created_at DESC LIMIT 1',
+                            (u['vin'],)).fetchone()
+        c.close()
+        if row and (row['purchased_from_type'] or '').strip():
+            pft = row['purchased_from_type'].strip()
+            return ('Individual' if pft.lower() == 'individual' else 'Dealer'), 'lsl'
+    except Exception as exc:
+        print('[recon-auto] source-type LSL lookup failed: %s' % exc, flush=True)
+    return 'Dealer', 'assumed'
+
+
 def _move_to(cur, u, to_code, actor):
     """Mirror of api_move's bookkeeping so the board history stays truthful:
     close the open step event, swap the active step, write a new event + audit.
@@ -219,8 +257,14 @@ def process_unit(cur, u, recon_amount, staged, actor='auto:recon-home'):
     by_id = {s['id']: s for s in steps}
     cur_code = (by_id.get(u.get('current_step_id')) or {}).get('code', 'all')
 
-    bft = (u.get('buying_from_type') or '').strip().lower()
-    to_code = 'indiv_to_home' if bft == 'individual' else 'dealer_to_home'
+    src_type, src_from = resolve_source_type(u)
+    u['buying_from_type'] = src_type
+    out['source_type'] = src_type
+    out['source_type_from'] = src_from
+    to_code = 'indiv_to_home' if src_type == 'Individual' else 'dealer_to_home'
+    if src_from == 'assumed':
+        print('[recon-auto] unit=%s source type UNKNOWN, assuming Dealer'
+              % u['id'], flush=True)
 
     if cur_code in STAGING and cur_code != to_code:
         tgt = _move_to(cur, u, to_code, actor)
@@ -232,6 +276,13 @@ def process_unit(cur, u, recon_amount, staged, actor='auto:recon-home'):
     ymm = ' '.join(str(x) for x in (u.get('year'), u.get('make'), u.get('model')) if x)
     money = '${:,.0f}'.format(float(recon_amount or 0))
     note_txt = 'recon %s entered on the LSL deal' % money
+
+    _note(cur, u['id'], u.get('current_step_id'), actor,
+          '🏠 Auto: %s → staged as **%s** (source: %s). %s'
+          % (out['moved'], src_type,
+             {'unit': 'LSL sync field', 'lsl': 'read live from the LSL deal',
+              'assumed': '⚠ COULD NOT DETERMINE — assumed Dealer, please verify'}[src_from],
+             note_txt))
 
     # --- 1. Denes (wording mirrors api_notify_denes) ---
     dbody = '%s%s%s is on the way home, needs recon: %s' % (
