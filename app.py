@@ -1020,6 +1020,62 @@ THUMB_SIZES = {
 
 VIN_RE = re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b')
 
+# -- REP_QR_TAG_2026_08_19 ---------------------------------------------------
+# Business-card QRs encode  sms:+1754...?body=<invisible characters>  so that a
+# dealer scanning a rep's card attributes the bid to that rep, without the
+# dealer ever seeing -- or being able to delete -- any visible text.
+#
+# Each rep owns ONE zero-width character, repeated, and we match on PRESENCE.
+# Copies DO get lost in transit (2026-08-19 test: 3 chars sent, 2 arrived), so
+# any scheme keyed on an exact sequence or an exact count would misfire. With
+# presence-matching, losing copies still reads as the same rep and can never
+# read as a different one: a corrupted tag costs an attribution, never causes
+# a WRONG attribution.
+#
+# U+200D is DELIBERATELY LEFT UNASSIGNED -- it is the joiner inside emoji
+# (family / flag / heart sequences), so any dealer sending an emoji would be
+# credited to whichever rep owned it.
+REP_QR_TAGS = {
+    '\u200c': 'patty_hoyos',   # ZWNJ
+    '\u2060': 'rob_binnix',    # WORD JOINER
+    '\u2063': 'dan_camino',    # INVISIBLE SEPARATOR
+}
+
+# Everything stripped before parsing. Deliberately WIDER than our own tags:
+# a dealer pasting a VIN off a listing site can carry a zero-width space, which
+# kills the bare-digits path in extract_miles_from_text() exactly the way our
+# own tag did on bids 6020-6022 (miles NULL -> no enrichment -> no notify).
+# Stripping here fixes that pre-existing hole too.
+_INVISIBLE_RE = re.compile('[\u200b-\u200f\u2060-\u2064\ufeff]')
+
+
+def _rep_tag_from_body(raw):
+    """Return (rep_name_or_None, cleaned_body).
+
+    MUST run before ANY parser touches the body. The cleaned body has every
+    invisible character removed, so VIN/miles extraction sees exactly what it
+    would have seen had the QR carried nothing at all.
+
+    Fails OPEN: on any error the original body is returned untagged. Rep
+    attribution is an ANNOTATION and must never decide whether a bid intakes
+    -- same rule as the AI assessment never blocking enrichment.
+    """
+    try:
+        raw = raw or ''
+        rep = None
+        for _ch, _rep in REP_QR_TAGS.items():
+            if _ch in raw:
+                rep = _rep
+                break
+        return rep, _INVISIBLE_RE.sub('', raw).strip()
+    except Exception as _e:
+        print('[rep-qr] tag parse error: %s' % _e, flush=True)
+        try:
+            return None, (raw or '').strip()
+        except Exception:
+            return None, ''
+
+
 
 def vin_check_digit_valid(vin):
     """Validate VIN check digit (9th position) per ISO 3779 algorithm.
@@ -5656,7 +5712,10 @@ class _VsSkip(Exception):
 @app.route('/webhook/twilio', methods=['POST'])
 def twilio_webhook():
     from_phone = request.form.get('From', '')
-    body = request.form.get('Body', '').strip()
+    # REP_QR_TAG_2026_08_19: pull the business-card rep marker and strip ALL
+    # invisible characters BEFORE anything parses the body. sms_intake_log's
+    # raw_form still stores the original payload, so the tag stays auditable.
+    _rep_from_qr, body = _rep_tag_from_body(request.form.get('Body', ''))
     num_media = int(request.form.get('NumMedia', 0))
     _media_urls = [request.form.get(f'MediaUrl{i}') for i in range(num_media)]
     _media_urls = [u for u in _media_urls if u]
@@ -6856,15 +6915,18 @@ def twilio_webhook():
         INSERT INTO bids (contact_id, phone, vin, mileage, raw_message, status,
                           driver_token, driver_phone,
                           bidder_name, partner_dealer_id,
-                          awaiting_name, name_asked_at, photo_hold_at)
+                          awaiting_name, name_asked_at, photo_hold_at,
+                          field_rep_name)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s,
                 CASE WHEN %s THEN NOW() ELSE NULL END,
-                CASE WHEN %s THEN NOW() ELSE NULL END) RETURNING id
+                CASE WHEN %s THEN NOW() ELSE NULL END,
+                %s) RETURNING id
     """, (contact_id, from_phone, vin, miles, body, initial_status,
           driver_token, from_phone,
           bidder['name'], bidder['partner_dealer_id'],
-          is_unknown, is_unknown, _lone_pic_hold))
+          is_unknown, is_unknown, _lone_pic_hold,
+          _rep_from_qr))
     bid_id = cur.fetchone()['id']
 
     # Direct API kick removed 2026-05-08: was firing here with stale
@@ -10340,6 +10402,7 @@ def api_bids():
                b.raw_message, b.status, b.created_at, b.bid_amount, b.ai_price, b.asking_price,
                b.has_unread, b.partner_dealer_id, b.partner_request_id, b.salesperson,
                b.bidder_name, b.awaiting_name, b.vin_invalid_reason,
+               b.field_rep_name,  -- REP_QR_TAG_2026_08_19: business-card QR rep
                b.needs_verification_at, b.needs_verification_cleared_at,
                b.needs_verification_reason,  -- BADGE_NEEDS_VERIFY_API_2026_05_15
                b.damage_signal,  -- DAMAGE_BADGE_API_2026_05_15
@@ -10408,6 +10471,9 @@ def api_bids():
             'status': r['status'],
             'created_at': r['created_at'].isoformat() if r['created_at'] else None,
             'contact_name': r['contact_name'],
+            # REP_QR_TAG_2026_08_19: without this the 15s poll rebuilds the row
+            # with no rep badge and it flickers away (cf BADGE_NEEDS_VERIFY_*).
+            'field_rep_name': r.get('field_rep_name'),
             'contact_company': r['contact_company'],
             'contact_role': r.get('contact_role'),
             'asking_price': float(r['asking_price']) if r['asking_price'] else None,

@@ -728,11 +728,18 @@ function renderRow(b, pc, fp, activeWorker) {
   const _vdDup = !!(_vd && _norm(b.contact_name)
                     && (_norm(b.contact_name) === _norm(_vd.name)
                         || _norm(b.contact_name) === _norm(_vd.contact)));
-  const vettedCell = _vd
+  let vettedCell = _vd
     ? `<div><span title="Vetted DealerPrice dealer${_vd.name?' - '+_vd.name:''}${_vd.contact?' ('+_vd.contact+')':''}${_vd.rep?' - rep '+_vd.rep:''}" style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(34,197,94,.14);border:1px solid rgba(34,197,94,.35);border-radius:3px;font-size:9px;font-weight:700;color:#4ade80;letter-spacing:.4px;text-transform:uppercase">DealerPrice vetted</span></div>`
       + (_vd.name ? `<div class="contact-company" style="color:#4ade80;font-size:11px">${_vd.name}</div>` : '')
       + (_vd.contact ? `<div class="contact-name" style="color:#86efac;font-size:12px">${_vd.contact}</div>` : '')
     : '';
+  // REP_QR_TAG_2026_08_19: dealer scanned a rep's business-card QR. Must be
+  // rendered HERE and not only in the Jinja template — this poll replaces
+  // tbody.innerHTML wholesale every 15s.
+  const repBadge = b.field_rep_name
+    ? `<div><span title="Attributed from a business-card QR scan" style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(52,211,153,.14);border:1px solid rgba(52,211,153,.4);border-radius:3px;font-size:9px;font-weight:700;color:#34d399;letter-spacing:.4px;text-transform:uppercase">REP ${String(b.field_rep_name).replace(/_/g, ' ')}</span></div>`
+    : '';
+  vettedCell = repBadge + vettedCell;
   const contactCell = b.is_field
     ? `<div class="contact-name">${b.contact_name||'Field Rep'}</div><div><span class="badge-field">${b.contact_role||'Field Rep'}</span></div>`
     : isThalist

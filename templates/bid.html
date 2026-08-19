@@ -2137,7 +2137,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
             {%- else -%}
               {{ bid.contact_name or bid.phone or '' }}
             {%- endif -%}
-          </span></span>
+          </span>{% if bid.field_rep_name %}<span title="Attributed from a business-card QR scan" style="margin-left:8px;font-size:11px;font-weight:700;color:#34d399;background:#064e3b;border:1px solid #065f46;border-radius:4px;padding:2px 7px;letter-spacing:.03em">REP {{ bid.field_rep_name.replace('_',' ').title() }}</span>{% endif %}</span>
           <span id="contact-chevron" style="font-size:11px;color:#475569;transition:transform .2s;display:inline-block;transform:rotate(0deg)">&#9660;</span>
         </div>
         <div id="contact-body" style="display:none">

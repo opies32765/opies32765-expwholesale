@@ -1,9 +1,9 @@
 {
   "make_name": "CHEVROLET",
-  "trained_at": "2026-08-18T08:30:13.669962Z",
-  "n_total": 2387,
+  "trained_at": "2026-08-19T08:30:10.466259Z",
+  "n_total": 2388,
   "n_train": 2123,
-  "n_test": 264,
+  "n_test": 265,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -227,49 +227,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3306.0,
-    "mape_pct": 6.65,
-    "r2": 0.8647,
-    "within_5pct": 51.5,
-    "within_10pct": 79.5
+    "mae_dollars": 3327.0,
+    "mape_pct": 6.64,
+    "r2": 0.8666,
+    "within_5pct": 50.9,
+    "within_10pct": 79.6
   },
   "baseline_metrics": {
-    "mae_dollars": 3712.0,
-    "mape_pct": 8.39,
+    "mae_dollars": 3749.0,
+    "mape_pct": 8.41,
     "ratio": 1.048
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.38569897413253784
+      "importance": 0.38192498683929443
     },
     {
       "name": "market_asking_price",
-      "importance": 0.2799014151096344
+      "importance": 0.2752871811389923
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.24356649816036224
+      "importance": 0.25291261076927185
     },
     {
       "name": "supplier_name_Nissan Of Orange Park",
-      "importance": 0.003841953817754984
+      "importance": 0.003650536062195897
     },
     {
       "name": "supplier_name_Classic Cars Of Palm Beach Llc",
-      "importance": 0.0033445784356445074
+      "importance": 0.003201201092451811
     },
     {
       "name": "sold_year",
-      "importance": 0.0031818263232707977
+      "importance": 0.003112231846898794
     },
     {
       "name": "model_name_Tahoe Premier Sport Utility Vehicle",
-      "importance": 0.0029736042488366365
+      "importance": 0.0028745841700583696
     },
     {
       "name": "supplier_name_Ultimo Northbrook",
-      "importance": 0.002902332693338394
+      "importance": 0.002858154708519578
     }
   ]
 }
