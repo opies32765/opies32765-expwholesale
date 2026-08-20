@@ -739,7 +739,16 @@ function renderRow(b, pc, fp, activeWorker) {
   const repBadge = b.field_rep_name
     ? `<div><span title="Attributed from a business-card QR scan" style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(52,211,153,.14);border:1px solid rgba(52,211,153,.4);border-radius:3px;font-size:9px;font-weight:700;color:#34d399;letter-spacing:.4px;text-transform:uppercase">REP ${String(b.field_rep_name).replace(/_/g, ' ')}</span></div>`
     : '';
-  vettedCell = repBadge + vettedCell;
+  // NO_BOOK_DATA_2026_08_19: VIN not lookupable anywhere -> say so, rather
+  // than leaving the row looking like it is still enriching.
+  const _nbLabel = (b.vauto_no_books && b.accu_no_vin) ? 'VIN NOT FOUND'
+                 : b.vauto_no_books ? 'NO VAUTO BOOKS'
+                 : b.accu_no_vin ? 'ACCUTRADE NO VIN'
+                 : null;
+  const noBookBadge = _nbLabel
+    ? `<div><span title="This VIN could not be looked up - vAuto returned no books and/or AccuTrade has no data for it. No AI price will be generated." style="display:inline-block;margin-top:3px;padding:1px 7px;background:rgba(248,113,113,.16);border:1px solid rgba(248,113,113,.5);border-radius:3px;font-size:9px;font-weight:800;color:#fca5a5;letter-spacing:.4px;text-transform:uppercase">&#9888; ${_nbLabel}</span></div>`
+    : '';
+  vettedCell = repBadge + noBookBadge + vettedCell;
   const contactCell = b.is_field
     ? `<div class="contact-name">${b.contact_name||'Field Rep'}</div><div><span class="badge-field">${b.contact_role||'Field Rep'}</span></div>`
     : isThalist

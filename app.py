@@ -4031,6 +4031,50 @@ def time_ago(dt):
 
 # ── Routes ───────────────────────────────────────────────────────────────────
 
+def _no_book_data_bulk(bids):
+    """NO_BOOK_DATA_2026_08_19: {bid_id: label} for bids whose VIN cannot be
+    looked up anywhere. ONE bulk query keyed on the ids already on the page,
+    mirroring _dp_vetted_bulk. Fails soft: no badge, never no page."""
+    try:
+        ids = [b['id'] for b in (bids or []) if b.get('id')]
+        if not ids:
+            return {}
+        db = get_db()
+        cur = db.cursor()
+        cur.execute("""
+            SELECT b.id,
+                   COALESCE(vl.appraisal_url = '__not_found__'
+                            AND vl.raw_json IS NULL, FALSE) AS no_books,
+                   EXISTS (SELECT 1 FROM accutrade_lookups al
+                            WHERE al.bid_id = b.id
+                              AND COALESCE(al.not_available, FALSE) = TRUE
+                              -- ACCU_TERMINAL_WIDENED_2026_08_19: ANY terminal
+                              -- AccuTrade failure means AccuTrade cannot price this
+                              -- car (bid 6067: 'worker error: appraisal_not_created').
+                              -- Only the known-retryable mileage transient is excluded,
+                              -- mirroring _maybe_fire_assessment's split.
+                              AND COALESCE(al.unavailable_reason, '')
+                                  NOT ILIKE '%%mileage_did_not_commit%%') AS accu_no_vin
+              FROM bids b
+              LEFT JOIN vauto_lookups vl ON vl.bid_id = b.id
+             WHERE b.id = ANY(%s)
+        """, (ids,))
+        out = {}
+        for r in cur.fetchall():
+            if r['no_books'] and r['accu_no_vin']:
+                out[r['id']] = 'VIN NOT FOUND'
+            elif r['no_books']:
+                out[r['id']] = 'NO VAUTO BOOKS'
+            elif r['accu_no_vin']:
+                out[r['id']] = 'ACCUTRADE NO VIN'
+        db.close()
+        return out
+    except Exception as _e:
+        print('[no-book-data] bulk lookup failed (badge skipped): %s' % _e,
+              flush=True)
+        return {}
+
+
 @app.route('/')
 def dashboard():
     # PERF_DASH_CACHE_2026_06_24: serve a recent rendered copy (10s) keyed by the
@@ -4332,9 +4376,12 @@ def dashboard():
     # phone - a per-row query would be ~50 round trips on a full dashboard, and
     # this page is already cached for 10s. Fails soft: no badge, never no page.
     dp_vetted_phones = _dp_vetted_bulk(bids)
+    # NO_BOOK_DATA_2026_08_19
+    no_book_data = _no_book_data_bulk(bids)
 
     _dhtml = render_template('index.html', bids=bids, stats=stats,
                            dp_vetted_phones=dp_vetted_phones,
+                           no_book_data=no_book_data,
                            status_filter=status_filter, rep_filter=rep_filter,
                            reps=reps, photo_counts=photo_counts,
                            first_photos=first_photos,
@@ -10403,6 +10450,18 @@ def api_bids():
                b.has_unread, b.partner_dealer_id, b.partner_request_id, b.salesperson,
                b.bidder_name, b.awaiting_name, b.vin_invalid_reason,
                b.field_rep_name,  -- REP_QR_TAG_2026_08_19: business-card QR rep
+               -- NO_BOOK_DATA_2026_08_19: dead-end signals. Scalar subqueries,
+               -- not joins, so row counts cannot change.
+               (SELECT COALESCE(vl2.appraisal_url = '__not_found__'
+                                AND vl2.raw_json IS NULL, FALSE)
+                  FROM vauto_lookups vl2
+                 WHERE vl2.bid_id = b.id LIMIT 1) AS vauto_no_books,
+               EXISTS (SELECT 1 FROM accutrade_lookups al2
+                        WHERE al2.bid_id = b.id
+                          AND COALESCE(al2.not_available, FALSE) = TRUE
+                          -- ACCU_TERMINAL_WIDENED_2026_08_19 (see helper)
+                          AND COALESCE(al2.unavailable_reason, '')
+                              NOT ILIKE '%%mileage_did_not_commit%%') AS accu_no_vin,
                b.needs_verification_at, b.needs_verification_cleared_at,
                b.needs_verification_reason,  -- BADGE_NEEDS_VERIFY_API_2026_05_15
                b.damage_signal,  -- DAMAGE_BADGE_API_2026_05_15
@@ -10474,6 +10533,10 @@ def api_bids():
             # REP_QR_TAG_2026_08_19: without this the 15s poll rebuilds the row
             # with no rep badge and it flickers away (cf BADGE_NEEDS_VERIFY_*).
             'field_rep_name': r.get('field_rep_name'),
+            # NO_BOOK_DATA_2026_08_19 — must ride the poll payload or the
+            # badge flickers away on the next tbody rebuild.
+            'vauto_no_books': bool(r.get('vauto_no_books')),
+            'accu_no_vin': bool(r.get('accu_no_vin')),
             'contact_company': r['contact_company'],
             'contact_role': r.get('contact_role'),
             'asking_price': float(r['asking_price']) if r['asking_price'] else None,
