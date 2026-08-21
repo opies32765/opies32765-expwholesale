@@ -6351,6 +6351,40 @@ def twilio_webhook():
                               AND status NOT IN ('cancelled','archived','dead','duplicate')
                             ORDER BY id DESC LIMIT 1""", (from_phone,))
             _win_row = cur.fetchone()
+            # SAME_VIN_RESEND_2026_08_20 (bids 6118/6119 and 6078/6080): a
+            # sender who re-sends the SAME VIN just OUTSIDE the 60s window
+            # used to spawn a DUPLICATE bid. The legacy verify-stitch that
+            # would have caught it is itself gated on a verify-pending bid
+            # less than 1 MINUTE old (VS_WINDOW_GUARD_2026_05_27), so a
+            # resend at ~70s fell between the two windows -- the duplicate
+            # then priced and texted the dealer its own card while the
+            # ORIGINAL sat flagged and unpriced. Same phone + same VIN
+            # inside 30 min is the SAME CAR (operator: one bid per car):
+            # fold it onto the FIRST bid (id ASC) so everything -- photos,
+            # miles, messages -- lands on the original, not on a later dup.
+            if not _win_row:
+                try:
+                    _win_vin = extract_vin_from_text(body) if body else None
+                except Exception:
+                    _win_vin = None
+                if _win_vin:
+                    cur.execute("""SELECT id FROM bids
+                                    WHERE phone = %s
+                                      AND upper(vin) = upper(%s)
+                                      AND created_at > NOW() - INTERVAL '30 minutes'
+                                      -- terminal states excluded on purpose: once a
+                                      -- bid has been SENT or PASSED the operator has
+                                      -- already acted on that car, so a later resend
+                                      -- must still be able to open a fresh bid.
+                                      AND status NOT IN ('cancelled','archived','dead',
+                                                         'duplicate','passed','bid_sent')
+                                    ORDER BY id ASC LIMIT 1""",
+                                (from_phone, _win_vin))
+                    _win_row = cur.fetchone()
+                    if _win_row:
+                        print('[window-merge] same-VIN resend %s -> bid #%s '
+                              '(outside 60s window, one bid per car)'
+                              % (_win_vin, _win_row['id']), flush=True)
         except Exception as _win_e:
             print('[window-merge] lookup err phone=%s: %s' % (from_phone, _win_e), flush=True)
             try:
@@ -6416,6 +6450,63 @@ def twilio_webhook():
                     _w_applied.append('photo')
                 except Exception as _wpe:
                     print('[window-merge] photo err bid=%s: %s' % (_wb, _wpe), flush=True)
+            # WINDOW_MERGE_CLEARS_VERIFY_2026_08_20 (bids 6118, 6078, 5512):
+            # this front door RETURNS EARLY, so the two paths that normally
+            # lift a needs_verification hold when the missing field lands --
+            # CLEAR_VERIFY_STATE_BASED_2026_05_16 on the photo-OCR side and
+            # VERIFY_STITCH_SILENT_2026_05_27 on the slow-text side -- never
+            # get a chance. The result was perverse: a sender who replied
+            # FAST (<60s) left the bid flagged missing_miles, and an open
+            # flag is excluded from the worker claim gate
+            # (PHASE1_MILES_GATE_2026_05_15), so the bid was frozen out of
+            # EVERY queue -- 6118 sat 16 minutes until an operator clicked
+            # reprocess, 6078 sat over a day. A sender who replied SLOW
+            # (>60s) self-healed. State-based, exactly like the photo path:
+            # clear only if the bid actually HAS the field it was flagged
+            # for, regardless of whether this merge is what supplied it.
+            if _w_applied:
+                try:
+                    cur.execute("""SELECT vin, mileage, needs_verification_at,
+                                          needs_verification_cleared_at,
+                                          needs_verification_reason
+                                     FROM bids WHERE id = %s""", (_wb,))
+                    _wv = cur.fetchone() or {}
+                    _wreason = (_wv.get('needs_verification_reason') or '').lower()
+                    _w_open = (_wv.get('needs_verification_at') is not None
+                               and _wv.get('needs_verification_cleared_at') is None)
+                    _w_miles_ok = (bool(_wv.get('mileage')) and any(
+                        k in _wreason for k in
+                        ('missing_miles', 'miles_discrepancy', 'miles_mismatch')))
+                    _w_vin_ok = (bool(_wv.get('vin')) and any(
+                        k in _wreason for k in ('missing_vin', 'vin_not_found')))
+                    if _w_open and (_w_miles_ok or _w_vin_ok):
+                        cur.execute(
+                            "UPDATE bids SET needs_verification_cleared_at = NOW(), "
+                            "needs_verification_cleared_by = 'auto:window_merge' "
+                            "WHERE id = %s AND needs_verification_at IS NOT NULL "
+                            "AND needs_verification_cleared_at IS NULL", (_wb,))
+                        # Same force-reprocess the photo-OCR clear fires: drop
+                        # lookups taken against incomplete data, but PRESERVE a
+                        # good iPacket capture -- iPacket must never be
+                        # re-pulled (account-ban risk),
+                        # IPACKET_PRESERVE_ALLPATHS_2026_05_30.
+                        cur.execute(
+                            "DELETE FROM ipacket_lookups WHERE bid_id=%s "
+                            "AND (not_available=true OR (total_msrp IS NULL "
+                            "AND base_price IS NULL AND (raw_json->'options') IS NULL))",
+                            (_wb,))
+                        cur.execute("DELETE FROM accutrade_lookups WHERE bid_id=%s", (_wb,))
+                        cur.execute("DELETE FROM vauto_lookups WHERE bid_id=%s", (_wb,))
+                        cur.execute("UPDATE bids SET vauto_claimed_by=NULL, "
+                                    "vauto_claimed_at=NULL, ai_assessed_at=NULL, "
+                                    "ai_price=NULL, ai_assessment=NULL, "
+                                    "miles_audit_at=NULL WHERE id=%s", (_wb,))
+                        print('[window-merge] bid=%s cleared verification (%s) '
+                              '+ force-reprocess fired'
+                              % (_wb, _wreason or 'unspecified'), flush=True)
+                except Exception as _wve:
+                    print('[window-merge] verify-clear err bid=%s: %s'
+                          % (_wb, _wve), flush=True)
             if body:
                 cur.execute("INSERT INTO bid_messages (bid_id, direction, message, from_phone) "
                             "VALUES (%s,'inbound',%s,%s)", (_wb, body, from_phone))
