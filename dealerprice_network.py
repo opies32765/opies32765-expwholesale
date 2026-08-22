@@ -140,6 +140,16 @@ def _possessive(name):
     return n + ("'" if n.endswith('s') else "'s")
 
 
+# NO_DATA_REQUEST_2026_06_12, hoisted to module scope 2026-08-22.
+# _dp_alert_send DISCARDS THE WHOLE MESSAGE when this matches, so the apply
+# alert has to be able to pre-check its own composed body against the SAME
+# pattern. A second copy of the regex would drift, and the drift would be
+# invisible - the failure mode is a text that simply never arrives.
+_NO_DATA_REQUEST_RE = re.compile(
+    r'(send|text|reply|provide|verify|confirm)[^.!?]{0,40}'
+    r'(vin|mileage|miles|odometer)', re.I)
+
+
 def _dp_alert_send(to_e164, body):
     """Send the partner alert as an MMS with the EW car logo, falling back to a
     plain SMS if Twilio rejects the media (bad URL, carrier, size...). The alert
@@ -149,10 +159,7 @@ def _dp_alert_send(to_e164, body):
     re-applies NO_DATA_REQUEST_2026_06_12 here - going around send_sms would
     otherwise silently go around that operator rule too.
     """
-    import re as _re
-    if body and _re.search(
-            r'(send|text|reply|provide|verify|confirm)[^.!?]{0,40}'
-            r'(vin|mileage|miles|odometer)', body, _re.I):
+    if body and _NO_DATA_REQUEST_RE.search(body):
         print('[dp-alert] suppressed by NO_DATA_REQUEST: %r' % body[:80], flush=True)
         return False
     sid = os.environ.get('TWILIO_ACCOUNT_SID')
@@ -271,14 +278,46 @@ def _dp_apply_receipt(app_id, dealership, contact_name, email, phone, tcpa=False
             print('[dp-network] apply receipt email: %s' % e, flush=True)
 
 
-def _dp_apply_alert_sms(app_id, dealership, contact, hist, is_existing):
-    """Text the partners that a new dealer applied. Best-effort; never raises
-    into the apply path (an alert must not fail a dealer's application).
+# -- DP_APPLY_ALERT_ADWORDS_2026_08_22 -------------------------------------
+# TWO application texts, same four recipients. A partner has to be able to tell
+# from the LOCK-SCREEN PREVIEW that a lead was PAID FOR, and a preview reliably
+# shows only the first line - so the Google Ads variant leads with the flag
+# rather than burying it under the ledger line.
+_KW_URLISH_RE = re.compile(
+    r'://|www\.|/|\.(com|net|org|co|io|biz|info|xyz|top|shop)\b', re.I)
 
-    NOTE: this goes to EW's OWN partners, not to a submitter, so the ledger
-    figures are fine here — ENRICHMENT_SMS_DENY_BY_DEFAULT_2026_07_28 governs
-    what we text to DEALERS, which is a different audience entirely.
+
+def _dp_apply_alert_kw(kw):
+    """Untrusted keyword -> something safe to put in a partner's text, or None.
+
+    utm_term arrives from the BROWSER. The channel gate upstream keys on a
+    gclid, but nothing stops a stranger POSTing a made-up one, so treat this
+    string as attacker-controlled. .strip() alone leaves INTERNAL newlines, and
+    in an SMS a newline is line injection - a crafted keyword could forge an
+    extra line underneath our own link. Collapse all whitespace, keep it short.
     """
+    if not isinstance(kw, str):
+        return None
+    k = ' '.join(kw.split())[:60].strip()
+    if not k:
+        return None
+    # Flattening newlines stops LINE injection but not LINK injection: iOS
+    # auto-links anything URL-shaped, so a crafted keyword could put a tappable
+    # phishing link in front of all four partners. A genuine Google search term
+    # is not a URL, so drop the keyword entirely rather than try to defang it.
+    # The cost of a false positive (a conquest keyword like 'carvana com') is
+    # one missing line in a text; the raw value is still on the application.
+    if _KW_URLISH_RE.search(k):
+        print('[dp-network] apply-alert kw %r looks like a URL - omitted' % k,
+              flush=True)
+        return None
+    return k
+
+
+def _dp_apply_alert_body(app_id, dealership, contact, hist, is_existing,
+                         ad_channel=None, ad_keyword=None):
+    """Compose the partner text. PURE - no Twilio, no DB - so both variants can
+    be printed and eyeballed without paging three owners to proof-read copy."""
     h = hist or {}
     if h.get('tx_count'):
         who = ('Known EW dealer: %d bought / %d sold, $%s gross with us.'
@@ -293,19 +332,57 @@ def _dp_apply_alert_sms(app_id, dealership, contact, hist, is_existing):
         who = 'Says they are an existing dealer, but no transactions on our ledger.'
     else:
         who = 'New applicant - no history with us.'
-    # No application number in the copy: it is internal plumbing, means nothing to
-    # a partner, and the link already carries it.
+    # No application number in the copy: it is internal plumbing, means nothing
+    # to a partner, and the link already carries it.
     #
     # The link sits in the MIDDLE on purpose. iOS renders a separate link-preview
     # bubble when a URL is the last thing in a message, which made every alert
     # arrive as two bubbles. Putting the ledger line after the link fixes that
     # without padding the copy with filler. Do not move the URL to the end.
-    body = ('New dealer application - DealerPrice\n%s%s\n%s/a/%d\n%s'
-            % (dealership or '(no name)',
-               (' - %s' % contact) if contact else '',
-               os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net'),
-               app_id,
-               who))
+    who_line = '%s%s' % (dealership or '(no name)',
+                         (' - %s' % contact) if contact else '')
+    link = '%s/a/%d' % (
+        os.environ.get('PUBLIC_BASE_URL', 'https://experience-wholesale.net'),
+        app_id)
+
+    if ad_channel != 'google_ads':
+        # Unchanged, word for word. channel 'other' (an organic utm tag, a
+        # referral) stays on this one too: the ask was two texts, not three.
+        return 'New dealer application - DealerPrice\n%s\n%s\n%s' % (
+            who_line, link, who)
+
+    kw = _dp_apply_alert_kw(ad_keyword)
+
+    def _compose(with_kw):
+        ad = ('Paid Google Ads click - keyword: %s' % with_kw) if with_kw \
+            else 'Paid Google Ads click.'
+        return ('GOOGLE ADS LEAD - new dealer application\n%s\n%s\n%s\n%s'
+                % (who_line, link, ad, who))
+
+    body = _compose(kw)
+    # A keyword is trade vocabulary we do not choose, and this campaign's search
+    # terms are thick with "text", "send" and "vin". If the quoted keyword trips
+    # NO_DATA_REQUEST, _dp_alert_send discards the ENTIRE alert and the partners
+    # never hear about the lead at all. Losing the keyword is cheap; losing the
+    # alert is not.
+    if kw and _NO_DATA_REQUEST_RE.search(body):
+        print('[dp-network] apply-alert kw %r trips NO_DATA_REQUEST - dropping '
+              'the keyword to save the alert' % kw, flush=True)
+        body = _compose(None)
+    return body
+
+
+def _dp_apply_alert_sms(app_id, dealership, contact, hist, is_existing,
+                        ad_channel=None, ad_keyword=None):
+    """Text the partners that a new dealer applied. Best-effort; never raises
+    into the apply path (an alert must not fail a dealer's application).
+
+    NOTE: this goes to EW's OWN partners, not to a submitter, so the ledger
+    figures are fine here — ENRICHMENT_SMS_DENY_BY_DEFAULT_2026_07_28 governs
+    what we text to DEALERS, which is a different audience entirely.
+    """
+    body = _dp_apply_alert_body(app_id, dealership, contact, hist,
+                                is_existing, ad_channel, ad_keyword)
     live = os.path.exists(DP_APPLY_ALERT_GATE)
     for ph in _dp_apply_alert_phones():
         digits = _digits(ph)
@@ -1436,6 +1513,84 @@ def _dp_intent(v):
     return v if v in INTENT_LABELS else None
 
 
+# ---------------------------------------------------------------------------
+# AD_ATTRIBUTION_2026_08_22 — where an application came from.
+#
+# Google's auto-tagging puts ?gclid= on the landing URL and the account-level
+# final-URL suffix adds utm_*, including utm_term = the keyword that matched.
+# dealerprice.net records the FIRST such touch in first-party storage and posts
+# it back here with the application.
+# ---------------------------------------------------------------------------
+_ATTR_FIELDS = ('gclid', 'utm_source', 'utm_medium', 'utm_campaign',
+                'utm_content', 'utm_term', 'utm_matchtype',
+                'landing_page', 'referrer')
+
+
+def _dp_attribution(d):
+    """Return (channel, values) for the ad click that produced this application.
+
+    The CHANNEL is derived here and never taken from the browser. Anyone can
+    POST utm_source=google to the bridge, so trusting the payload would let a
+    stranger stamp "came from our ads" on their own application and quietly
+    corrupt the only number that justifies the ad spend. A gclid is issued by
+    Google and is the real signal; the utm_source/medium pair is the fallback
+    for the occasional click that arrives without one.
+    """
+    a = d.get('attribution')
+    if not isinstance(a, dict):
+        return (None, {})
+    out = {}
+    for f in _ATTR_FIELDS:
+        v = a.get(f)
+        if isinstance(v, str) and v.strip():
+            out[f] = v.strip()[:300]
+    ts = a.get('first_touch_at')
+    if isinstance(ts, str) and ts.strip():
+        out['first_touch_at'] = ts.strip()[:40]
+    if not out:
+        return (None, {})
+    src_ = (out.get('utm_source') or '').lower()
+    med_ = (out.get('utm_medium') or '').lower()
+    if out.get('gclid') or (src_ == 'google' and med_ in ('cpc', 'ppc', 'paid')):
+        return ('google_ads', out)
+    return ('other', out)
+
+
+def _dp_store_attribution(cur, db, app_id, d):
+    """Write the ad attribution for an application. Never raises.
+
+    Deliberately its own statement AFTER the application is committed: an
+    application is the thing that matters, and a malformed timestamp from a
+    browser must never be able to lose one.
+    """
+    try:
+        channel, attr = _dp_attribution(d)
+        if not channel:
+            return None
+        cur.execute(
+            "UPDATE dealer_applications SET source_channel=%s, gclid=%s,"
+            " utm_source=%s, utm_medium=%s, utm_campaign=%s, utm_content=%s,"
+            " utm_term=%s, utm_matchtype=%s, landing_page=%s, ad_referrer=%s,"
+            " first_touch_at=%s WHERE id=%s",
+            (channel, attr.get('gclid'), attr.get('utm_source'),
+             attr.get('utm_medium'), attr.get('utm_campaign'),
+             attr.get('utm_content'), attr.get('utm_term'),
+             attr.get('utm_matchtype'), attr.get('landing_page'),
+             attr.get('referrer'), attr.get('first_touch_at'), app_id))
+        db.commit()
+        print('[dp-network] attribution app=%s channel=%s kw=%r' %
+              (app_id, channel, attr.get('utm_term')), flush=True)
+        return channel
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print('[dp-network] attribution write FAILED app=%s: %s' % (app_id, e),
+              flush=True)
+        return None
+
+
 # Gate, same pattern as the other DealerPrice rollouts. While ABSENT the approve
 # step only LOGS what it would have registered - it never touches the scanner
 # fleet. REMINDER: `touch /opt/expwholesale/DP_AUTOSCAN_LIVE` after testing.
@@ -1908,11 +2063,19 @@ def api_dp_apply():
         cur.execute("UPDATE dealer_applications SET license_doc_path=%s, taxid_doc_path=%s, classification=%s, lsl_history=%s WHERE id=%s",
                     (lic, tax, classification, Json(lsl_hist or None), app_id))
         db.commit()
+        ad_channel = _dp_store_attribution(cur, db, app_id, d)
     except Exception as e:
         db.rollback(); db.close()
         print('[dp-network] apply insert: %s' % e, flush=True)
         return jsonify({'ok': False, 'error': 'Could not submit your application — please try again.'}), 500
     db.close()
+
+    # DP_APPLY_ALERT_ADWORDS_2026_08_22 - flag a lead we PAID for.
+    # ad_channel is what _dp_store_attribution actually WROTE (None when the
+    # write failed), never what the browser claimed. The alert must not say
+    # 'Google Ads' about a row the dashboard will show as organic.
+    ad_kw = (_dp_apply_alert_kw(_dp_attribution(d)[1].get('utm_term'))
+             if ad_channel == 'google_ads' else None)
 
     # Tell the applicant we have it (text + email). Wrapped: a receipt problem
     # must never turn a successful submission into an error for the dealer.
@@ -1923,6 +2086,13 @@ def api_dp_apply():
         print('[dp-network] apply receipt: %s' % _e_r, flush=True)
 
     tag = 'EXISTING ✓' if is_existing else 'NEW'
+    if ad_channel == 'google_ads':
+        # Rides in the existing (%s) header slot rather than a new line, so
+        # the flag is visible in Telegram's own notification preview too.
+        tag += ' · 💰 GOOGLE ADS'
+        if ad_kw:
+            tag += ' kw: %s' % (ad_kw.replace('&', '&amp;')
+                                .replace('<', '&lt;').replace('>', '&gt;'))
     mtag = (' · roster:%s' % name_match['name']) if name_match.get('matched') else ''
     if lsl_hist.get('tx_count'):
         ltag = '\n📊 LSL: EW bought <b>%d</b> / sold <b>%d</b> · EW gross <b>$%s</b>' % (
@@ -1935,7 +2105,8 @@ def api_dp_apply():
     # DP_APPLY_ALERT_2026_07_28 — text the partners too. Wrapped so a failed
     # alert can never turn a dealer's successful application into an error.
     try:
-        _dp_apply_alert_sms(app_id, dealership, cname, lsl_hist, is_existing)
+        _dp_apply_alert_sms(app_id, dealership, cname, lsl_hist,
+                            is_existing, ad_channel, ad_kw)
     except Exception as e:
         print('[dp-network] apply-alert fanout: %s' % e, flush=True)
     return jsonify({'ok': True, 'application_id': app_id, 'status': 'pending', 'existing': is_existing})
@@ -1987,7 +2158,9 @@ def network_applications():
     cur.execute("""SELECT id, created_at, status, is_existing, dealership_name,
                           dealer_types, units_per_month, avg_investment_band,
                           credit_line, license_number, contact_name, contact_email,
-                          contact_phone, name_match, member_id, classification, lsl_history
+                          contact_phone, name_match, member_id, classification, lsl_history,
+                          -- AD_ATTRIBUTION_2026_08_22 (queue): which ad produced this
+                          source_channel, utm_term, utm_campaign, gclid
                      FROM dealer_applications
                     ORDER BY (status='pending') DESC, created_at DESC LIMIT 300""")
     rows = cur.fetchall()
@@ -3269,12 +3442,37 @@ def dp_visit_beacon():
         applied = bool(d.get('applied'))
         ua = (request.headers.get('User-Agent') or '')[:400]
         ip = _dpv_client_ip()
+        # AD_ATTRIBUTION_2026_08_22 (visits)
+        # The beacon sends the raw query string; we parse it here rather than in
+        # the nginx-injected snippet, because that snippet lives inside a quoted
+        # sub_filter directive and every extra character in it is a chance to
+        # break the whole site's HTML rewriting.
+        q = (_s(d.get('q')) or '')[:300]
+        gclid = utm_source = utm_medium = utm_campaign = utm_term = None
+        if q:
+            try:
+                from urllib.parse import parse_qs
+                _p = parse_qs(q.lstrip('?'), keep_blank_values=False)
+                def _one(k):
+                    v = _p.get(k) or []
+                    return (v[0][:300] or None) if v else None
+                gclid = _one('gclid') or _one('wbraid') or _one('gbraid')
+                utm_source = _one('utm_source')
+                utm_medium = _one('utm_medium')
+                utm_campaign = _one('utm_campaign')
+                utm_term = _one('utm_term')
+            except Exception:
+                pass  # a malformed query string must never lose the pageview
         db = _db(); cur = db.cursor()
         try:
             cur.execute("""INSERT INTO dp_site_visits
-                             (visitor_id, ip, path, referer, ua, applied)
-                           VALUES (%s,%s,%s,%s,%s,%s)""",
-                        (vid or None, ip or None, path, ref or None, ua, applied))
+                             (visitor_id, ip, path, referer, ua, applied,
+                              query, gclid, utm_source, utm_medium,
+                              utm_campaign, utm_term)
+                           VALUES (%s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s)""",
+                        (vid or None, ip or None, path, ref or None, ua, applied,
+                         q or None, gclid, utm_source, utm_medium,
+                         utm_campaign, utm_term))
             db.commit()
         finally:
             db.close()
@@ -3353,7 +3551,11 @@ def network_visitors():
                    count(DISTINCT COALESCE(visitor_id, ip))
                      FILTER (WHERE applied)                                    AS applied,
                    count(DISTINCT ip) FILTER (WHERE COALESCE(is_hosting,false))AS bots,
-                   count(*) FILTER (WHERE country IS NULL)                     AS ungeo
+                   count(*) FILTER (WHERE country IS NULL)                     AS ungeo,
+                   -- AD_ATTRIBUTION_2026_08_22 (visitors): people who arrived on a paid click
+                   count(DISTINCT COALESCE(visitor_id, ip))
+                     FILTER (WHERE gclid IS NOT NULL
+                             AND NOT COALESCE(is_hosting,false))       AS ad_clicks
               FROM dp_site_visits
              WHERE visited_at > now() - (%s || ' days')::interval""", (days,))
         stats = dict(cur.fetchone() or {})
@@ -3388,7 +3590,10 @@ def network_visitors():
                    bool_or(v.applied) AS applied,
                    count(*) AS views, min(v.visited_at) AS first_seen,
                    max(v.visited_at) AS last_seen,
-                   max(v.referer) AS referer
+                   max(v.referer) AS referer,
+                   -- AD_ATTRIBUTION_2026_08_22 (visitors)
+                   max(v.gclid) AS gclid, max(v.utm_term) AS utm_term,
+                   max(v.utm_campaign) AS utm_campaign
               FROM dp_site_visits v
              WHERE v.visited_at > now() - (%s || ' days')::interval
              GROUP BY 1 ORDER BY max(v.visited_at) DESC LIMIT 300""", (days,))
