@@ -10227,6 +10227,18 @@ def _maybe_reassess_on_late_data(bid_id, source):
                             AND COALESCE(not_available,false)=false
                             AND (guaranteed_offer IS NOT NULL OR trade_in IS NOT NULL
                                  OR trade_market IS NOT NULL) LIMIT 1""", (bid_id,))
+        elif source.startswith('direct_api') or source == 'vauto_url_backfill':
+            # LATE_RBOOK_REASSESS_2026_08_21: the vAuto comps legs can land long
+            # after the assessment locked -- on 2026-08-21 the worker's permalink
+            # capture broke, so rBook + Manheim only arrived once the server-side
+            # backfill resolved the appraisal. Those bids were priced on
+            # "0 mmr_tx, 0 rbook" and, without this branch, kept that number
+            # forever. Real data = an actual competitive set or transactions,
+            # not merely a row.
+            cur.execute("""SELECT 1 FROM vauto_lookups WHERE bid_id=%s
+                            AND (jsonb_typeof(rbook_competitive_set) IS NOT NULL
+                                 OR jsonb_typeof(manheim_transactions) IS NOT NULL)
+                            LIMIT 1""", (bid_id,))
         else:
             cur.execute("""SELECT 1 FROM ipacket_lookups WHERE bid_id=%s
                             AND COALESCE(not_available,false)=false

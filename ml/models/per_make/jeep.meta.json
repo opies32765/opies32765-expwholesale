@@ -1,9 +1,9 @@
 {
   "make_name": "JEEP",
-  "trained_at": "2026-08-20T08:30:15.489605Z",
-  "n_total": 1246,
+  "trained_at": "2026-08-21T08:30:11.774137Z",
+  "n_total": 1247,
   "n_train": 1169,
-  "n_test": 77,
+  "n_test": 78,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,15 +215,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2253.0,
-    "mape_pct": 9.45,
+    "mae_dollars": 2259.0,
+    "mape_pct": 9.59,
     "r2": 0.9621,
-    "within_5pct": 42.9,
-    "within_10pct": 74.0
+    "within_5pct": 42.3,
+    "within_10pct": 73.1
   },
   "baseline_metrics": {
-    "mae_dollars": 2649.0,
-    "mape_pct": 11.54,
+    "mae_dollars": 2640.0,
+    "mape_pct": 11.57,
     "ratio": 1.0595
   },
   "top_features": [

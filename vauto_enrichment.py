@@ -471,7 +471,14 @@ def kick_direct_enrichment(bid_id: int, db_conn_factory) -> None:
             # if rbook+manheim are now both done.
             try:
                 from app import _maybe_fire_assessment
-                _maybe_fire_assessment(bid_id, source='direct_api_rbook')
+                fired = _maybe_fire_assessment(bid_id, source='direct_api_rbook')
+                # LATE_RBOOK_REASSESS_2026_08_21: the gate declines when the bid
+                # was already assessed. That is precisely the case where the AI
+                # priced it WITHOUT these comps -- so claim the one bounded
+                # re-assessment instead of leaving a blind number standing.
+                if not fired:
+                    from app import _maybe_reassess_on_late_data
+                    _maybe_reassess_on_late_data(bid_id, 'direct_api_rbook')
             except Exception as gate_err:
                 log.debug('bid %d gate poke err: %s', bid_id, gate_err)
         except Exception as e:
