@@ -1,0 +1,573 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Send Us Your List — Experience Wholesale</title>
+<meta name="robots" content="noindex, nofollow">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',system-ui,sans-serif;background:#1f2e40;color:#e2e8f0;min-height:100vh;-webkit-text-size-adjust:100%}
+
+/* Header — EW theme, deliberately with NO navigation. This page is an
+   island: there is nothing here to click through to. */
+.header{background:#243447;border-bottom:1px solid #344f68;padding:0 24px;height:66px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:100}
+.logo-mark{width:38px;height:38px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;color:#fff;flex-shrink:0}
+.logo-text{font-size:17px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px;line-height:1.15}
+.logo-sub{font-size:11px;color:#7a9bb5;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+
+.wrap{max-width:1080px;margin:0 auto;padding:36px 20px 80px}
+
+/* Steps rail */
+.steps{display:flex;align-items:center;gap:8px;margin-bottom:32px;flex-wrap:wrap}
+.step{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:600;color:#5a7a96}
+.step .num{width:26px;height:26px;border-radius:50%;border:1.5px solid #344f68;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0}
+.step.active{color:#e2e8f0}
+.step.active .num{border-color:#3b82f6;background:#3b82f6;color:#fff}
+.step.done{color:#4ade80}
+.step.done .num{border-color:#22c55e;background:#22c55e;color:#0b1a12}
+.step-sep{flex:1;height:1.5px;background:#2c405a;min-width:16px;max-width:60px}
+
+.card{background:#243447;border:1px solid #344f68;border-radius:14px;padding:28px}
+h1{font-size:27px;font-weight:800;letter-spacing:-.5px;margin-bottom:8px}
+h2{font-size:19px;font-weight:700;margin-bottom:6px}
+.lede{font-size:15px;color:#a8c0d6;line-height:1.6}
+.muted{color:#7a9bb5}
+.small{font-size:13px}
+
+.dealer-chip{display:inline-flex;align-items:center;gap:8px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.35);color:#93c5fd;border-radius:999px;padding:6px 14px;font-size:13px;font-weight:600;margin-bottom:18px}
+
+/* The plan — three plain-English cards */
+.plan{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:26px 0 6px}
+.plan-item{background:#1f2e40;border:1px solid #2c405a;border-radius:11px;padding:16px 17px}
+.plan-item .n{font-size:12px;font-weight:800;color:#3b82f6;letter-spacing:1px;margin-bottom:7px}
+.plan-item .t{font-size:14px;font-weight:700;margin-bottom:5px}
+.plan-item .d{font-size:13px;color:#8ba7c0;line-height:1.5}
+@media(max-width:760px){.plan{grid-template-columns:1fr}}
+
+.btn{background:#3b82f6;color:#fff;border:0;padding:13px 26px;border-radius:9px;font-size:15px;font-weight:700;font-family:inherit;cursor:pointer;transition:background .15s}
+.btn:hover:not(:disabled){background:#2563eb}
+.btn:disabled{background:#3d5570;color:#8ba7c0;cursor:not-allowed}
+.btn.ghost{background:transparent;border:1px solid #344f68;color:#a8c0d6}
+.btn.ghost:hover{background:#2a3f54;color:#e2e8f0}
+.btn.big{width:100%;padding:16px;font-size:16px}
+.btn-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:24px}
+
+/* Drop zone */
+.drop{border:2px dashed #344f68;border-radius:16px;padding:52px 28px;text-align:center;cursor:pointer;transition:all .2s;background:#1f2e40;min-height:210px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.drop:hover{border-color:#4d7a9e;background:#22344a}
+.drop.over{border-color:#3b82f6;background:rgba(59,130,246,.09)}
+.drop .icon{font-size:44px;opacity:.55;margin-bottom:14px}
+.drop .t{font-size:17px;font-weight:700;color:#c7d9e8}
+.drop .s{font-size:13.5px;color:#7a9bb5;margin-top:9px;line-height:1.6;max-width:520px}
+.hidden-input{display:none}
+
+.formats{display:flex;flex-wrap:wrap;gap:7px;justify-content:center;margin-top:16px}
+.fmt{font-size:11.5px;font-weight:600;color:#8ba7c0;background:#1a2a3a;border:1px solid #2c405a;border-radius:5px;padding:3px 9px}
+
+.filelist{margin-top:18px;display:flex;flex-direction:column;gap:8px}
+.fileitem{display:flex;align-items:center;gap:11px;background:#1f2e40;border:1px solid #2c405a;border-radius:9px;padding:10px 13px;font-size:13.5px}
+.fileitem .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fileitem .sz{color:#7a9bb5;font-size:12px;flex-shrink:0}
+.fileitem .x{background:none;border:0;color:#64748b;cursor:pointer;font-size:18px;line-height:1;padding:0 3px}
+.fileitem .x:hover{color:#ef4444}
+
+.or{display:flex;align-items:center;gap:14px;margin:22px 0 14px;color:#5a7a96;font-size:12px;font-weight:700;letter-spacing:1px}
+.or:before,.or:after{content:'';flex:1;height:1px;background:#2c405a}
+textarea{width:100%;background:#1a2a3a;border:1px solid #2c405a;border-radius:9px;color:#e2e8f0;font-family:inherit;font-size:14px;padding:12px 14px;min-height:90px;resize:vertical}
+textarea:focus{outline:none;border-color:#3b82f6}
+
+/* Review table */
+.tbl-wrap{overflow-x:auto;border:1px solid #2c405a;border-radius:11px;margin-top:20px}
+table{width:100%;border-collapse:collapse;font-size:13.5px;min-width:720px}
+th{text-align:left;background:#1f2e40;color:#7a9bb5;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;padding:11px 12px;border-bottom:1px solid #2c405a;white-space:nowrap}
+td{padding:9px 12px;border-bottom:1px solid #26374d;vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+tr.off td{opacity:.35}
+tr.dupe{background:rgba(245,158,11,.07)}
+
+/* VIN and MILES are the two columns that matter. They get real inputs,
+   full size, always editable. Everything else is small grey text. */
+.vin-in{width:190px;font-family:'SF Mono',Consolas,monospace;font-size:13.5px;letter-spacing:.4px;text-transform:uppercase;background:#1a2a3a;border:1px solid #2c405a;border-radius:7px;color:#e2e8f0;padding:8px 10px}
+.vin-in:focus{outline:none;border-color:#3b82f6}
+.vin-in.bad{border-color:#ef4444;background:rgba(239,68,68,.09);color:#fca5a5}
+.mi-in{width:104px;font-size:14px;font-weight:600;text-align:right;background:#1a2a3a;border:1px solid #2c405a;border-radius:7px;color:#e2e8f0;padding:8px 10px}
+.mi-in:focus{outline:none;border-color:#3b82f6}
+.mi-in.empty{border-color:#f59e0b;background:rgba(245,158,11,.08)}
+.veh{font-weight:600;color:#dbe7f2}
+.veh .extra{display:block;font-size:11.5px;color:#5f7c96;font-weight:400;margin-top:2px}
+.flag{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:4px;white-space:nowrap}
+.flag.bad{background:rgba(239,68,68,.16);color:#fca5a5}
+.flag.warn{background:rgba(245,158,11,.16);color:#fcd34d}
+.flag.ok{background:rgba(34,197,94,.14);color:#86efac}
+.chk{width:17px;height:17px;accent-color:#3b82f6;cursor:pointer}
+
+/* Phone: the table becomes one card per vehicle. A side-scrolling table
+   pushed MILES off-screen, and MILES is half of what we are asking the
+   dealer to check — it cannot live behind a horizontal scroll. */
+@media(max-width:720px){
+  .tbl-wrap{border:0;overflow-x:visible;margin-top:16px}
+  table{min-width:0;display:block}
+  thead{display:none}
+  tbody{display:block}
+  tr{display:flex;flex-direction:column;position:relative;background:#1f2e40;
+     border:1px solid #2c405a;border-radius:12px;padding:15px 16px;margin-bottom:12px}
+  tr.dupe{border-color:rgba(245,158,11,.45)}
+  td{display:block;border:0;padding:0}
+  td.c-chk{position:absolute;top:15px;right:15px;order:0}
+  td.c-veh{order:1;padding-right:36px;margin-bottom:13px;font-size:14.5px}
+  td.c-vin{order:2;margin-bottom:12px}
+  td.c-mi{order:3;margin-bottom:12px}
+  td.c-flag{order:4}
+  td.c-vin:before,td.c-mi:before{display:block;font-size:10.5px;font-weight:700;
+     color:#7a9bb5;text-transform:uppercase;letter-spacing:.7px;margin-bottom:6px}
+  td.c-vin:before{content:'VIN'}
+  td.c-mi:before{content:'Odometer — miles'}
+  .vin-in{width:100%;font-size:15px;padding:11px 12px}
+  .mi-in{width:100%;text-align:left;font-size:15px;padding:11px 12px}
+  .chk{width:22px;height:22px}
+}
+
+.notice{border-radius:9px;padding:12px 15px;font-size:13.5px;line-height:1.55;margin-top:16px}
+.notice.warn{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:#fcd34d}
+.notice.err{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#fca5a5}
+.notice.info{background:rgba(59,130,246,.09);border:1px solid rgba(59,130,246,.28);color:#93c5fd}
+
+.summary{display:flex;gap:22px;flex-wrap:wrap;margin-top:18px;font-size:13.5px;color:#8ba7c0}
+.summary b{color:#e2e8f0;font-size:17px;font-weight:700;display:block}
+
+.spinner{width:17px;height:17px;border:2.5px solid rgba(255,255,255,.28);border-top-color:#fff;border-radius:50%;display:inline-block;animation:spin .7s linear infinite;vertical-align:-3px;margin-right:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.done-mark{width:74px;height:74px;border-radius:50%;background:rgba(34,197,94,.14);border:2px solid #22c55e;display:flex;align-items:center;justify-content:center;font-size:36px;margin:0 auto 22px}
+.center{text-align:center}
+.foot{text-align:center;color:#4d6a85;font-size:12.5px;margin-top:34px;line-height:1.7}
+.pane{display:none}
+.pane.on{display:block}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo-mark">EW</div>
+  <div>
+    <div class="logo-text">Experience Wholesale</div>
+    <div class="logo-sub">Vehicle Acquisition</div>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <div class="steps">
+    <div class="step active" id="s1"><span class="num">1</span> Your list</div>
+    <div class="step-sep"></div>
+    <div class="step" id="s2"><span class="num">2</span> Check VIN &amp; miles</div>
+    <div class="step-sep"></div>
+    <div class="step" id="s3"><span class="num">3</span> Sent</div>
+  </div>
+
+  <!-- ── STEP 1 ───────────────────────────────────────────────────── -->
+  <div class="pane on" id="pane1">
+    <div class="card">
+      <div class="dealer-chip">🏷️ {{ link.dealer_name }}{% if link.contact_name %} · {{ link.contact_name }}{% endif %}</div>
+      <h1>Send us the cars you want bid</h1>
+      <p class="lede">This link is set up for you, so there are no forms to fill out —
+        we already know who it's from. Drop in whatever list you've got and we'll
+        read the VINs and miles off it.</p>
+
+      <div class="plan">
+        <div class="plan-item">
+          <div class="n">STEP 1</div>
+          <div class="t">Send your list</div>
+          <div class="d">Any format. A spreadsheet, a PDF off your DMS, a screenshot,
+            or a photo of a printed sheet.</div>
+        </div>
+        <div class="plan-item">
+          <div class="n">STEP 2</div>
+          <div class="t">Check what we read</div>
+          <div class="d">We show you every VIN and odometer we pulled out. Fix
+            anything that looks off — it takes a few seconds.</div>
+        </div>
+        <div class="plan-item">
+          <div class="n">STEP 3</div>
+          <div class="t">We go to work</div>
+          <div class="d">Each car gets valued right away. An Experience Wholesale
+            associate will contact you back.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:18px">
+      <h2>Your list</h2>
+      <p class="lede small" style="margin-bottom:18px">You can add more than one file
+        — a couple of screenshots and a spreadsheet is fine. We'll merge them.</p>
+
+      <div class="drop" id="drop">
+        <div class="icon">📄</div>
+        <div class="t">Drop your list here, or tap to pick a file</div>
+        <div class="s">Whatever you've got. If it's on paper, just take a picture of it.</div>
+        <div class="formats">
+          <span class="fmt">Excel</span><span class="fmt">CSV</span>
+          <span class="fmt">PDF</span><span class="fmt">Screenshot</span>
+          <span class="fmt">Photo</span><span class="fmt">iPhone HEIC</span>
+        </div>
+      </div>
+      <input type="file" id="filepick" class="hidden-input" multiple
+             accept=".xlsx,.xlsm,.xls,.csv,.tsv,.txt,.pdf,.png,.jpg,.jpeg,.webp,.gif,.bmp,.heic,.heif,image/*,application/pdf">
+      <input type="file" id="campick" class="hidden-input" accept="image/*" capture="environment">
+
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn ghost" type="button" id="btn-camera">📷 Take a photo</button>
+      </div>
+
+      <div class="filelist" id="filelist"></div>
+
+      <div class="or">OR PASTE IT</div>
+      <textarea id="paste" placeholder="Paste the list straight out of an email or a spreadsheet…"></textarea>
+
+      <div id="err1"></div>
+
+      <div class="btn-row">
+        <button class="btn big" id="btn-read" disabled>Read my list</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── STEP 2 ───────────────────────────────────────────────────── -->
+  <div class="pane" id="pane2">
+    <div class="card">
+      <h1>Here's what we read</h1>
+      <p class="lede">The two things we need right are the <b style="color:#e2e8f0">VIN</b>
+        and the <b style="color:#e2e8f0">miles</b>. Everything else we can look up.
+        Give these a quick once-over and correct anything that's wrong.</p>
+
+      <div id="notices2"></div>
+
+      <div class="summary" id="summary"></div>
+
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:38px"><input type="checkbox" class="chk" id="chk-all" checked></th>
+              <th style="width:200px">VIN</th>
+              <th style="width:118px">Miles</th>
+              <th>Vehicle</th>
+              <th style="width:120px"></th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+
+      <div id="err2"></div>
+
+      <div class="btn-row">
+        <button class="btn" id="btn-send">Send these to Experience Wholesale</button>
+        <button class="btn ghost" id="btn-back">← Start over</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── STEP 3 ───────────────────────────────────────────────────── -->
+  <div class="pane" id="pane3">
+    <div class="card center">
+      <div class="done-mark">✓</div>
+      <h1 id="done-title">Got it — thank you</h1>
+      <p class="lede" id="done-body" style="max-width:520px;margin:0 auto"></p>
+      <div class="btn-row" style="justify-content:center">
+        <button class="btn ghost" id="btn-another">Send another list</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    Experience Wholesale · this link was created for
+    {{ link.dealer_name }}{% if link.contact_name %} ({{ link.contact_name }}){% endif %}<br>
+    Questions? Call your EW rep.
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var TOKEN = {{ token|tojson }};
+  var files = [];
+  var rows  = [];
+
+  var $ = function(id){ return document.getElementById(id); };
+
+  // ── Step navigation ────────────────────────────────────────────────
+  function show(n){
+    [1,2,3].forEach(function(i){
+      $('pane'+i).classList.toggle('on', i===n);
+      var s = $('s'+i);
+      s.classList.toggle('active', i===n);
+      s.classList.toggle('done', i<n);
+    });
+    window.scrollTo({top:0, behavior:'smooth'});
+  }
+
+  function notice(where, cls, html){
+    $(where).innerHTML = html ? '<div class="notice '+cls+'">'+html+'</div>' : '';
+  }
+
+  function esc(s){
+    return String(s==null?'':s).replace(/[&<>"']/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+
+  // ── File collection ────────────────────────────────────────────────
+  var drop = $('drop');
+  ['dragenter','dragover'].forEach(function(ev){
+    drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.add('over'); });
+  });
+  ['dragleave','drop'].forEach(function(ev){
+    drop.addEventListener(ev, function(e){ e.preventDefault(); drop.classList.remove('over'); });
+  });
+  drop.addEventListener('drop', function(e){ addFiles(e.dataTransfer.files); });
+  drop.addEventListener('click', function(){ $('filepick').click(); });
+  $('filepick').addEventListener('change', function(e){ addFiles(e.target.files); e.target.value=''; });
+  $('btn-camera').addEventListener('click', function(){ $('campick').click(); });
+  $('campick').addEventListener('change', function(e){ addFiles(e.target.files); e.target.value=''; });
+  $('paste').addEventListener('input', refreshReadBtn);
+
+  function addFiles(list){
+    for (var i=0; i<list.length; i++){
+      if (files.length >= 10){
+        notice('err1','warn','That’s the most we can take at once (10 files). Send the rest as a second list.');
+        break;
+      }
+      files.push(list[i]);
+    }
+    renderFiles();
+  }
+
+  function renderFiles(){
+    var el = $('filelist');
+    el.innerHTML = '';
+    files.forEach(function(f, i){
+      var kb = f.size/1024;
+      var sz = kb > 1024 ? (kb/1024).toFixed(1)+' MB' : Math.round(kb)+' KB';
+      var d = document.createElement('div');
+      d.className = 'fileitem';
+      d.innerHTML = '<span>📎</span><span class="nm">'+esc(f.name)+'</span>'+
+                    '<span class="sz">'+sz+'</span>'+
+                    '<button class="x" type="button" title="Remove">&times;</button>';
+      d.querySelector('.x').addEventListener('click', function(){
+        files.splice(i,1); renderFiles();
+      });
+      el.appendChild(d);
+    });
+    refreshReadBtn();
+  }
+
+  function refreshReadBtn(){
+    $('btn-read').disabled = (files.length===0 && !$('paste').value.trim());
+  }
+
+  // ── Parse ──────────────────────────────────────────────────────────
+  $('btn-read').addEventListener('click', function(){
+    var btn = this;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Reading your list…';
+    notice('err1','','');
+
+    var fd = new FormData();
+    files.forEach(function(f){ fd.append('files', f); });
+    var pt = $('paste').value.trim();
+    if (pt) fd.append('paste_text', pt);
+
+    fetch('/api/dealer-intake/'+TOKEN+'/parse', {method:'POST', body:fd})
+      .then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; }); })
+      .then(function(res){
+        btn.disabled = false;
+        btn.textContent = 'Read my list';
+        if (!res.ok){
+          var extra = (res.j.problems||[]).map(function(p){ return '<br>• '+esc(p); }).join('');
+          notice('err1','err', esc(res.j.error || 'We could not read that.') + extra);
+          return;
+        }
+        rows = res.j.rows || [];
+        renderRows(res.j.problems || []);
+        show(2);
+      })
+      .catch(function(){
+        btn.disabled = false;
+        btn.textContent = 'Read my list';
+        notice('err1','err','Connection problem — please try again.');
+      });
+  });
+
+  // ── Review table ───────────────────────────────────────────────────
+  var VIN_RE = /^[A-HJ-NPR-Z0-9]{17}$/;
+
+  function renderRows(problems){
+    var tb = $('tbody');
+    tb.innerHTML = '';
+    rows.forEach(function(r, i){
+      r.skip = !!r.skip;
+      var tr = document.createElement('tr');
+      tr.dataset.i = i;
+      if (r.already_have) tr.classList.add('dupe');
+
+      var veh = [r.year, r.make, r.model, r.trim].filter(Boolean).join(' ')
+                || r.raw_vehicle || '—';
+      var extra = [];
+      if (r.color) extra.push(r.color);
+      if (r.stock) extra.push('Stock ' + r.stock);
+      if (r.asking_price) extra.push('$' + Number(r.asking_price).toLocaleString());
+
+      // The c-* classes are what the phone layout reorders into a card.
+      tr.innerHTML =
+        '<td class="c-chk"><input type="checkbox" class="chk keep" '+(r.skip?'':'checked')+'></td>'+
+        '<td class="c-vin"><input class="vin-in" maxlength="17" value="'+esc(r.vin||'')+'" spellcheck="false"></td>'+
+        '<td class="c-mi"><input class="mi-in" inputmode="numeric" placeholder="miles" value="'+
+             (r.mileage!=null && r.mileage!=='' ? Number(r.mileage).toLocaleString() : '')+'"></td>'+
+        '<td class="veh c-veh">'+esc(veh)+
+          (extra.length ? '<span class="extra">'+esc(extra.join(' · '))+'</span>' : '')+'</td>'+
+        '<td class="flagcell c-flag"></td>';
+
+      var vinIn = tr.querySelector('.vin-in');
+      var miIn  = tr.querySelector('.mi-in');
+      var keep  = tr.querySelector('.keep');
+
+      vinIn.addEventListener('input', function(){
+        this.value = this.value.toUpperCase().replace(/[^A-HJ-NPR-Z0-9]/g,'');
+        rows[i].vin = this.value;
+        paint(tr, i);
+      });
+      miIn.addEventListener('input', function(){
+        var digits = this.value.replace(/[^0-9]/g,'');
+        rows[i].mileage = digits ? parseInt(digits,10) : null;
+        this.value = digits ? Number(digits).toLocaleString() : '';
+        paint(tr, i);
+      });
+      keep.addEventListener('change', function(){
+        rows[i].skip = !this.checked;
+        paint(tr, i);
+        updateSummary();
+      });
+
+      tb.appendChild(tr);
+      paint(tr, i);
+    });
+
+    $('chk-all').addEventListener('change', function(){
+      var on = this.checked;
+      Array.prototype.forEach.call(tb.querySelectorAll('.keep'), function(c, i){
+        c.checked = on; rows[i].skip = !on;
+        paint(tb.rows[i], i);
+      });
+      updateSummary();
+    });
+
+    var msgs = problems.slice();
+    notice('notices2', 'warn', msgs.length
+      ? msgs.map(function(p){ return esc(p); }).join('<br>') : '');
+    updateSummary();
+  }
+
+  function paint(tr, i){
+    var r = rows[i];
+    var vinIn = tr.querySelector('.vin-in');
+    var miIn  = tr.querySelector('.mi-in');
+    var ok = VIN_RE.test(r.vin||'');
+    vinIn.classList.toggle('bad', !ok);
+    miIn.classList.toggle('empty', !(r.mileage > 0));
+    tr.classList.toggle('off', !!r.skip);
+
+    var f = [];
+    if (!ok)            f.push('<span class="flag bad">VIN incomplete</span>');
+    else if (!(r.mileage > 0)) f.push('<span class="flag warn">miles?</span>');
+    if (r.already_have) f.push('<span class="flag warn">already sent</span>');
+    if (!f.length)      f.push('<span class="flag ok">ready</span>');
+    tr.querySelector('.flagcell').innerHTML = f.join(' ');
+  }
+
+  function updateSummary(){
+    var ready = 0, badvin = 0, nomiles = 0, dupes = 0;
+    rows.forEach(function(r){
+      if (r.skip) return;
+      if (!VIN_RE.test(r.vin||'')) { badvin++; return; }
+      if (!(r.mileage > 0)) nomiles++;
+      if (r.already_have) dupes++;
+      ready++;
+    });
+    var s = '<div><b>'+ready+'</b>ready to send</div>';
+    if (badvin)  s += '<div style="color:#fca5a5"><b style="color:#fca5a5">'+badvin+'</b>need a VIN</div>';
+    if (nomiles) s += '<div style="color:#fcd34d"><b style="color:#fcd34d">'+nomiles+'</b>missing miles</div>';
+    if (dupes)   s += '<div style="color:#fcd34d"><b style="color:#fcd34d">'+dupes+'</b>already sent before</div>';
+    $('summary').innerHTML = s;
+    $('btn-send').disabled = (ready === 0);
+    $('btn-send').textContent = ready
+      ? 'Send ' + ready + ' vehicle' + (ready===1?'':'s') + ' to Experience Wholesale'
+      : 'Nothing ready to send';
+  }
+
+  // ── Submit ─────────────────────────────────────────────────────────
+  $('btn-send').addEventListener('click', function(){
+    var btn = this;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Sending…';
+    notice('err2','','');
+
+    fetch('/api/dealer-intake/'+TOKEN+'/submit', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        rows: rows,
+        files: files.map(function(f){ return f.name; })
+      })
+    })
+    .then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; }); })
+    .then(function(res){
+      if (!res.ok){
+        btn.disabled = false;
+        updateSummary();
+        notice('err2','err', esc(res.j.error || 'That did not go through.'));
+        return;
+      }
+      var n   = res.j.created || 0;
+      var bad = res.j.invalid || 0;
+      // Say the count back in the HEADLINE, so the dealer can see at a glance
+      // that what they sent is what we got.
+      $('done-title').textContent = n + ' vehicle' + (n===1?'':'s') + ' received';
+      var body =
+        'Thanks — we got <b style="color:#e2e8f0">'+n+' vehicle'+(n===1?'':'s')+
+        '</b> from '+esc(res.j.dealer_name)+'. We’re pulling numbers on '+
+        (n===1?'it':'them')+' now — an Experience Wholesale associate will '+
+        'contact you back shortly.';
+      // And say plainly if anything was LEFT OUT. A dealer who sent 14 and
+      // had 12 go through needs to hear that here, not a week later when two
+      // cars never came back with a number.
+      if (bad){
+        body += '<br><br><span style="color:#fcd34d">'+bad+' more '+
+                (bad===1?'was':'were')+' left out — we couldn’t read a complete '+
+                'VIN for '+(bad===1?'it':'them')+'. Send those over separately '+
+                'and we’ll get them bid too.</span>';
+      }
+      $('done-body').innerHTML = body;
+      files = []; rows = [];
+      renderFiles();
+      $('paste').value = '';
+      show(3);
+    })
+    .catch(function(){
+      btn.disabled = false;
+      updateSummary();
+      notice('err2','err','Connection problem — your list did not go through. Please try again.');
+    });
+  });
+
+  $('btn-back').addEventListener('click', function(){ show(1); });
+  $('btn-another').addEventListener('click', function(){
+    notice('err1','',''); notice('err2','','');
+    show(1);
+  });
+})();
+</script>
+</body>
+</html>

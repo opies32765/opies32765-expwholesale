@@ -85,6 +85,22 @@ _HEADER_MAP = {
     'mileage': 'mileage',
     'miles': 'mileage',
     'km': 'mileage',
+    # ODO_ALIASES_2026_08_23: short forms seen on real dealer sheets. A
+    # header we fail to recognise silently DISCARDS that column -- the Palm
+    # Bay sheet said "ODO" and all ten odometers were dropped.
+    'odo': 'mileage',
+    'odo.': 'mileage',
+    'odom': 'mileage',
+    'odom.': 'mileage',
+    'odometer reading': 'mileage',
+    'mi': 'mileage',
+    'mi.': 'mileage',
+    'miles (k)': 'mileage',
+    'mileage (mi)': 'mileage',
+    'current miles': 'mileage',
+    'actual miles': 'mileage',
+    'kms': 'mileage',
+    'kilometers': 'mileage',
     'vrank description': 'notes',
     'notes': 'notes',
     'comments': 'notes',
@@ -111,6 +127,31 @@ _YEAR_RE = re.compile(r'^\s*(19\d{2}|20\d{2})\b\s*(.+)$')
 _YEAR2_RE = re.compile(r'^\s*(\d{2})\s+([A-Za-z].*)$')
 _YEAR_ANY_RE = re.compile(r'\b(19\d{2}|20\d{2})\b')
 _VIN_RE = re.compile(r'^[A-HJ-NPR-Z0-9]{17}$')
+
+
+# REAL_CHECKDIGIT_2026_08_23 — ISO 3779 check digit. Mirrors
+# app.py:vin_check_digit_valid(); duplicated because this module must not
+# import app.py. Used to RANK parse strategies, never to reject a VIN.
+_VIN_TRANS = {'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'F': 6, 'G': 7, 'H': 8,
+              'J': 1, 'K': 2, 'L': 3, 'M': 4, 'N': 5, 'P': 7, 'R': 9,
+              'S': 2, 'T': 3, 'U': 4, 'V': 5, 'W': 6, 'X': 7, 'Y': 8, 'Z': 9,
+              '0': 0, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6,
+              '7': 7, '8': 8, '9': 9}
+_VIN_WEIGHTS = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2]
+
+
+def vin_check_digit_ok(vin: str) -> bool:
+    """True when the 9th character checks out against the other sixteen."""
+    vin = (vin or '').upper()
+    if len(vin) != 17:
+        return False
+    try:
+        total = sum(_VIN_TRANS[c] * w
+                    for c, w in zip(vin, _VIN_WEIGHTS))
+    except KeyError:
+        return False
+    expected = total % 11
+    return vin[8] == ('X' if expected == 10 else str(expected))
 
 
 def _clean(value) -> str:
@@ -392,7 +433,9 @@ def _finalize_record(rec: dict) -> dict:
 
     out = {
         'vin': vin if _VIN_RE.match(vin) else '',
-        'vin_check_digit_valid': bool(vin and _VIN_RE.match(vin)),
+        # REAL_CHECKDIGIT_2026_08_23: was bool(_VIN_RE.match(vin)),
+        # which only checked the SHAPE and made the key's name a lie.
+        'vin_check_digit_valid': vin_check_digit_ok(vin),
         'raw_vehicle': raw_vehicle,
         'year':  year,
         'make':  make,
@@ -714,6 +757,36 @@ def parse_xlsx(file_bytes: bytes) -> list[dict]:
     return out
 
 
+# DELIMITED_VS_WHOLELINE_2026_08_23 — see parse_csv.
+_DELIMS = set(',\t;|"\'')
+
+
+def _looks_delimited(text: str) -> bool:
+    """Is this text really a delimited file, or one vehicle per line?
+
+    Decided by what fences the VIN: a comma/tab/semicolon/pipe/quote means a
+    real cell boundary, whitespace means free text. Sampling several lines
+    keeps one odd row from flipping the whole file.
+    """
+    votes = []
+    for line in (text or '').splitlines():
+        vin = _find_vin_in(line)
+        if not vin:
+            continue
+        i = line.upper().find(vin)
+        if i < 0:
+            continue
+        before = line[i - 1] if i > 0 else ''
+        j = i + len(vin)
+        after = line[j] if j < len(line) else ''
+        votes.append(before in _DELIMS or after in _DELIMS)
+        if len(votes) >= 5:
+            break
+    if not votes:
+        return True          # no VIN lines: let the csv reader try
+    return sum(votes) * 2 >= len(votes)
+
+
 def parse_csv(file_bytes: bytes) -> list[dict]:
     """Parse a .csv (or .tsv) upload. Returns a list of candidate-row dicts."""
     text = file_bytes.decode('utf-8-sig', errors='replace')
@@ -723,15 +796,19 @@ def parse_csv(file_bytes: bytes) -> list[dict]:
         dialect = csv.Sniffer().sniff(sample, delimiters=',\t;|')
     except csv.Error:
         dialect = csv.excel
+    # DELIMITED_VS_WHOLELINE_2026_08_23: a space-separated .txt list must NOT
+    # go through the csv reader -- the comma in "41,200" gets taken for a
+    # delimiter and the odometer ends up as 200.
+    if not _looks_delimited(text):
+        return _rows_to_records(_text_lines_to_rows(text))
     reader = csv.reader(io.StringIO(text), dialect)
     rows = [tuple(r) for r in reader]
     if not rows:
         return []
-    hdr = _scan_for_header(rows)
-    if hdr is not None:
-        idx, headers = hdr
-        return _parse_with_header(rows, idx, headers)
-    return _parse_no_header(rows)
+    # TXT_WHOLELINE_2026_08_23: go through the shared record builder rather
+    # than straight to the header scan, so single-cell whole-record rows are
+    # parsed VIN-first instead of by the column heuristic.
+    return _rows_to_records(rows)
 
 
 def parse_upload(filename: str, file_bytes: bytes,
@@ -969,3 +1046,496 @@ def parse_image(file_bytes, mime, vision_fn):
             continue
         out.append(row)
     return out
+
+
+# -- PDF_HEIC_INTAKE_2026_08_23 ---------------------------------------------
+# Dealer-facing intake accepts "whatever you've got": a PDF export from the
+# DMS, a HEIC straight off an iPhone, a screenshot, a spreadsheet. All of it
+# funnels into the SAME row shape parse_upload() produces, so there is exactly
+# one set of VIN/mileage rules to maintain.
+#
+# PDF strategy, in order:
+#   1. pdfplumber extract_tables() — a real text-layer table. Best accuracy:
+#      column boundaries are known, so miles can never be read as price.
+#   2. pdfplumber extract_text() split on 2+ spaces — text layer, no ruled
+#      table (most DMS "print to PDF" reports land here).
+#   3. pdftoppm -> PNG per page -> parse_image(). Only for SCANNED pdfs with
+#      no text layer at all. Costs one vision call per page, so it is the
+#      last resort, never the first try.
+
+_PDF_RASTER_DPI = 150
+_PDF_MAX_RASTER_PAGES = 12   # a vision call per page — cap the burn
+
+
+def _heic_to_jpeg(file_bytes: bytes) -> tuple[bytes, str]:
+    """Convert HEIC/HEIF bytes to JPEG so the vision path can read them.
+    Returns (bytes, mime). Falls through unchanged if conversion fails —
+    some models accept HEIC directly, and an unconverted try beats none."""
+    try:
+        import pillow_heif
+        from PIL import Image
+        pillow_heif.register_heif_opener()
+        img = Image.open(io.BytesIO(file_bytes))
+        if img.mode not in ('RGB', 'L'):
+            img = img.convert('RGB')
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=88)
+        return buf.getvalue(), 'image/jpeg'
+    except Exception:
+        return file_bytes, 'image/heic'
+
+
+def _text_lines_to_rows(text: str) -> list[tuple]:
+    """Turn a page of extracted PDF text into row tuples. Columns in a
+    text-layer PDF are separated by RUNS of spaces (a single space is a word
+    break inside a cell), so split on 2+ spaces and keep the cells in order —
+    that preserves the column positions _infer_column_roles() relies on."""
+    rows: list[tuple] = []
+    for line in (text or '').splitlines():
+        line = line.rstrip()
+        if not line.strip():
+            continue
+        cells = [c.strip() for c in re.split(r'\s{2,}', line.strip())]
+        if len(cells) == 1:
+            # No column runs on this line. It may still be one whole record
+            # ("2021 HONDA PILOT EX-L 5FNYF6H55MB012345 48,221"), which the
+            # single-column heuristic path handles fine.
+            rows.append((cells[0],))
+        else:
+            rows.append(tuple(cells))
+    return rows
+
+
+# WHOLE_LINE_RECORD_2026_08_23 — see module note at parse_pdf.
+_MONEY_TOKEN_RE = re.compile(r'\$\s*\d')
+
+
+def _record_from_line(line: str) -> dict | None:
+    """Parse one vehicle written as a single free-text line.
+
+    The VIN is the anchor: it is the only token whose SHAPE is unambiguous
+    (17 chars, no I/O/Q). Everything before it is the vehicle description
+    (which carries the model year); the odometer is the first bare number
+    AFTER it. That ordering is why the year can never be read as mileage
+    here — a year sits before the VIN, an odometer after it.
+
+    Returns None when the line has no VIN; the caller falls back to the
+    column heuristic.
+    """
+    s = _clean(line)
+    vin = _find_vin_in(s)
+    if not vin:
+        return None
+    up = s.upper()
+    idx = up.find(vin)
+    before = s[:idx].strip(' ,|\t-')
+    after = s[idx + len(vin):]
+
+    def _first_number(text: str) -> str:
+        """First integer that is not a price. Skips $-prefixed amounts and
+        anything with a cents decimal."""
+        for m in re.finditer(r'(\$?)\s*(\d[\d,]*)(\.\d+)?', text or ''):
+            if m.group(1) or m.group(3):
+                continue                      # $24,995 or 24995.00 -> price
+            tail = text[m.end():m.end() + 12].lower()
+            if tail.strip().startswith(('k mi', 'k miles')):
+                continue
+            return m.group(2)
+        return ''
+
+    miles = _parse_mileage(_first_number(after))
+    if miles is None:
+        # ODO_STRICT_2026_08_23: nothing usable after the VIN. We may look
+        # BEFORE it, but that half of the line is where model designations
+        # live -- F-150, 1500, Q50, 300, X5 -- and "F-150" happily yields
+        # 150 miles. So a number before the VIN only counts as an odometer
+        # if it is WRITTEN like one: a thousands comma, or an explicit
+        # k/mi/miles suffix. A model number never carries either.
+        head = _YEAR_RE.sub(r'\2', before) if _YEAR_RE.match(before) else before
+        m = re.search(
+            r'(?<![-A-Za-z0-9])'
+            r'(\d{1,3}(?:,\d{3})+|\d{2,7}\s*(?:k\b|mi\b|miles\b))',
+            head, flags=re.I)
+        miles = _parse_mileage(m.group(1)) if m else None
+
+    return _finalize_record({
+        'raw_vehicle': before,
+        'vin': vin,
+        'mileage': miles,
+    })
+
+
+def _is_whole_line_grid(rows: list[tuple]) -> bool:
+    """True when every non-blank row is one cell AND at least one holds a
+    VIN — i.e. records were never split into columns at all."""
+    cells = [r for r in rows if not _is_blank_row(r)]
+    if not cells or any(len(r) > 1 for r in cells):
+        return False
+    return any(_find_vin_in(r[0]) for r in cells)
+
+
+def _scrub_mileage(rows: list[dict]) -> list[dict]:
+    """Drop a mileage that is exactly this row's model year. See Fix 2."""
+    for r in rows:
+        try:
+            yr = int(r.get('year') or 0)
+            mi = int(r.get('mileage') or 0)
+        except (TypeError, ValueError):
+            continue
+        if yr and mi and yr == mi:
+            r['mileage'] = None
+            r['mileage_dropped'] = 'looked like the model year'
+    return rows
+
+
+def _rows_to_records(rows: list[tuple]) -> list[dict]:
+    """Header-scan then parse, else fall back to content inference. Same
+    two-step every other parser in this module uses."""
+    if not rows:
+        return []
+    if _is_whole_line_grid(rows):
+        out = []
+        for r in rows:
+            if _is_blank_row(r):
+                continue
+            rec = _record_from_line(r[0])
+            if rec:
+                out.append(rec)
+        if out:
+            return out
+    hdr = _scan_for_header(rows)
+    if hdr is not None:
+        idx, headers = hdr
+        recs = _parse_with_header(rows, idx, headers)
+        if recs:
+            return recs
+    return _parse_no_header(rows)
+
+
+# Column-detection strategies, best structure first. "ruled" wins when the
+# PDF has real table borders; "text-aligned" clusters words by x-position and
+# is what most DMS "print to PDF" reports need.
+_PDF_TEXT_TABLE = {'vertical_strategy': 'text', 'horizontal_strategy': 'text'}
+
+
+# VIN_ANCHORED_GRID_2026_08_23 — see the note on _pdf_vin_grid below.
+_LINE_TOL = 2.0      # pts: words within this vertical distance are one line
+_COL_TOL = 3.0       # pts: word starts within this distance are one column
+
+
+def _pdf_lines(page):
+    """Group a page's words into visual lines. Returns [(top, [word,...])]
+    with words left-to-right."""
+    try:
+        words = page.extract_words(use_text_flow=False,
+                                   keep_blank_chars=False) or []
+    except Exception:
+        return []
+    lines = []
+    for w in sorted(words, key=lambda w: (round(w['top'], 1), w['x0'])):
+        if lines and abs(w['top'] - lines[-1][0]) <= _LINE_TOL:
+            lines[-1][1].append(w)
+        else:
+            lines.append((w['top'], [w]))
+    for _t, ws in lines:
+        ws.sort(key=lambda w: w['x0'])
+    return lines
+
+
+def _column_starts(data_lines) -> list[float]:
+    """Cluster the x0 of every word on the VIN-bearing lines into column
+    start positions. A real column start recurs on most data rows; a word
+    that happens to begin mid-cell (the second word of "GRAND CHEROKEE")
+    does not, and is dropped by the frequency floor."""
+    xs = sorted(w['x0'] for _t, ws in data_lines for w in ws)
+    if not xs:
+        return []
+    clusters = [[xs[0]]]
+    for x in xs[1:]:
+        if x - clusters[-1][-1] <= _COL_TOL:
+            clusters[-1].append(x)
+        else:
+            clusters.append([x])
+    floor = max(2, int(len(data_lines) * 0.6))
+    starts = [sum(c) / len(c) for c in clusters if len(c) >= floor]
+    return sorted(starts)
+
+
+def _assign_to_columns(words, starts) -> tuple:
+    """Place each word in the last column whose start is at or before it.
+    Words sharing a column are joined with a space, so a two-word MODEL cell
+    stays one cell."""
+    cells = [[] for _ in starts]
+    for w in words:
+        idx = 0
+        for i, s in enumerate(starts):
+            if w['x0'] >= s - _COL_TOL:
+                idx = i
+            else:
+                break
+        cells[idx].append(w['text'])
+    return tuple(' '.join(c).strip() for c in cells)
+
+
+def _pdf_vin_grid(page):
+    """Build a rectangular grid for a fixed-width report, using the rows that
+    contain VINs to define the columns. Returns [] when the page has no
+    VIN-bearing line (a cover page, a terms page), so the caller falls
+    through to the other strategies."""
+    lines = _pdf_lines(page)
+    if not lines:
+        return []
+    data = [(t, ws) for t, ws in lines
+            if _find_vin_in(' '.join(w['text'] for w in ws))]
+    if not data:
+        return []
+    starts = _column_starts(data)
+    if len(starts) < 2:
+        return []
+
+    grid = []
+    # The header is the nearest line ABOVE the first data row that names a
+    # column we understand. Without it the content heuristic still runs, but
+    # with it MILES/ASK/FLOOR are unambiguous.
+    first_top = data[0][0]
+    header_ws = None
+    for t, ws in lines:
+        if t >= first_top:
+            break
+        txt = ' '.join(w['text'] for w in ws).lower()
+        if 'vin' in txt.split() or 'vin#' in txt or (
+                'miles' in txt and ('make' in txt or 'model' in txt
+                                    or 'year' in txt or 'yr' in txt)):
+            header_ws = ws
+    # VIN_GRID_NEEDS_HEADER_2026_08_23: no header means no mapping to make,
+    # and a word-per-column grid handed to the content heuristic is WORSE
+    # than the whole-line parser -- it reads the model year as the odometer.
+    if not header_ws:
+        return []
+    header_cells = _assign_to_columns(header_ws, starts)
+    if 'vin' not in _normalize_headers(list(header_cells)):
+        return []
+    grid.append(header_cells)
+    for _t, ws in data:
+        grid.append(_assign_to_columns(ws, starts))
+    return grid
+
+
+def _pdf_page_grids(page):
+    """Yield (label, rows) candidate grids for one page, best-first.
+
+    NOTE: page.extract_text() is deliberately LAST and is only ever a
+    whole-record-per-line fallback. It collapses inter-column space runs to a
+    single space, so it cannot be used to recover columns — see
+    PDF_TEXT_STRATEGY_2026_08_23.
+    """
+    vin_grid = _pdf_vin_grid(page)
+    if vin_grid:
+        yield 'vin-anchored', vin_grid
+    for label, settings in (('ruled', None), ('text-aligned', _PDF_TEXT_TABLE)):
+        try:
+            tables = (page.extract_tables(settings) if settings
+                      else page.extract_tables())
+        except Exception:
+            continue
+        grid = []
+        for tbl in tables or []:
+            for r in tbl or []:
+                if r:
+                    grid.append(tuple(_clean(c) for c in r))
+        if grid:
+            yield label, grid
+    try:
+        txt = page.extract_text() or ''
+    except Exception:
+        txt = ''
+    if txt.strip():
+        yield 'text-lines', _text_lines_to_rows(txt)
+
+
+def _vin_count(records: list[dict]) -> int:
+    return sum(1 for r in records
+               if _VIN_RE.match((r.get('vin') or '').upper()))
+
+
+def _vin_valid_count(records: list[dict]) -> int:
+    """CHECKDIGIT_GATE_2026_08_23: VINs whose 9th character actually checks
+    out against the other sixteen. A VIN split across two table cells is
+    still 17 legal characters and still matches _VIN_RE -- only the check
+    digit tells the difference."""
+    return sum(1 for r in records if r.get('vin_check_digit_valid'))
+
+
+def parse_pdf(file_bytes: bytes, vision_fn=None) -> list[dict]:
+    """Parse a PDF vehicle list into parse_upload()-shaped rows.
+
+    Per page, try each column strategy in order and keep the FIRST one that
+    actually yields a valid VIN. Gating on "found a real VIN" rather than
+    "returned something" is what stops a mis-clustered grid from winning and
+    filing the asking price as the odometer.
+
+    vision_fn(prompt, image_bytes, mime) -> str | None
+        Optional. Only used when the PDF has NO text layer (a scan, or a
+        photo saved as a PDF). Without it, a scanned PDF returns [].
+    """
+    out: list[dict] = []
+    text_layer_found = False
+    try:
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                # Score EVERY strategy for this page and keep the best, rather
+                # than taking the first that produced something VIN-shaped.
+                # Score is (check-digit-valid VINs, VIN-shaped, any rows).
+                best: list[dict] = []
+                best_score = (-1, -1, -1)
+                for _label, grid in _pdf_page_grids(page):
+                    text_layer_found = True
+                    recs = _rows_to_records(grid)
+                    n_ok = _vin_valid_count(recs)
+                    n_vin = _vin_count(recs)
+                    score = (n_ok, n_vin, len(recs))
+                    if score > best_score:
+                        best, best_score = recs, score
+                    if n_ok and n_ok == n_vin:
+                        break   # every VIN checks out; nothing can beat this
+                out.extend(best)
+    except Exception:
+        pass
+
+    if out or (text_layer_found and not vision_fn):
+        return _scrub_mileage(_dedupe_rows(out))
+
+    # Scanned PDF — rasterize and read each page with the vision model.
+    if vision_fn is None:
+        return []
+    for png in _pdf_to_pngs(file_bytes):
+        try:
+            out.extend(parse_image(png, 'image/png', vision_fn))
+        except Exception:
+            continue
+    return _scrub_mileage(_dedupe_rows(out))
+
+
+def _pdf_to_pngs(file_bytes: bytes) -> list[bytes]:
+    """Rasterize a PDF to one PNG per page via poppler's pdftoppm.
+    Returns [] if poppler is unavailable — the caller degrades to no rows
+    rather than raising."""
+    import os
+    import subprocess
+    import tempfile
+    pages: list[bytes] = []
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, 'in.pdf')
+        with open(src, 'wb') as fh:
+            fh.write(file_bytes)
+        try:
+            subprocess.run(
+                ['pdftoppm', '-png', '-r', str(_PDF_RASTER_DPI),
+                 '-l', str(_PDF_MAX_RASTER_PAGES), src,
+                 os.path.join(td, 'pg')],
+                check=True, timeout=120,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            return []
+        for name in sorted(os.listdir(td)):
+            if name.startswith('pg') and name.endswith('.png'):
+                try:
+                    with open(os.path.join(td, name), 'rb') as fh:
+                        pages.append(fh.read())
+                except Exception:
+                    continue
+    return pages[:_PDF_MAX_RASTER_PAGES]
+
+
+def _dedupe_rows(rows: list[dict]) -> list[dict]:
+    """Collapse rows that describe the same vehicle. A multi-page PDF repeats
+    its header/footer, and a dealer who sends 3 screenshots of one scrolling
+    table will overlap them. Keyed on VIN when present; rows with no VIN are
+    kept as-is (we cannot prove they are the same car).
+
+    When two rows share a VIN, MERGE rather than drop: page 1 may carry the
+    mileage and page 2 the price."""
+    seen: dict[str, dict] = {}
+    out: list[dict] = []
+    for r in rows:
+        vin = (r.get('vin') or '').strip().upper()
+        if not vin:
+            out.append(r)
+            continue
+        if vin not in seen:
+            seen[vin] = r
+            out.append(r)
+            continue
+        keep = seen[vin]
+        for k, v in r.items():
+            if v not in (None, '', 0) and keep.get(k) in (None, '', 0):
+                keep[k] = v
+    return out
+
+
+# Extensions we will even attempt. Anything else is rejected before it
+# reaches a parser — a public endpoint should never hand arbitrary bytes to
+# openpyxl or a subprocess.
+SHEET_EXTS = ('xlsx', 'xlsm', 'xls', 'csv', 'tsv', 'txt')
+IMAGE_EXTS = ('png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'heic', 'heif')
+PDF_EXTS = ('pdf',)
+ALLOWED_EXTS = SHEET_EXTS + IMAGE_EXTS + PDF_EXTS
+
+
+def parse_any(filename: str, file_bytes: bytes, mime: str = '',
+              vision_fn=None) -> list[dict]:
+    """One door for every supported format. Dispatches on extension first,
+    then on content-type, then falls back to sniffing the magic bytes —
+    dealers rename files and phone browsers send bad content-types.
+
+    vision_fn(prompt, image_bytes, mime) -> str | None  (image + scanned PDF)
+    Returns parse_upload()-shaped rows. Raises nothing on a bad file; an
+    unreadable upload comes back as [].
+    """
+    name = (filename or '').lower()
+    ext = name.rsplit('.', 1)[-1] if '.' in name else ''
+    ctype = (mime or '').lower()
+    head = (file_bytes or b'')[:8]
+
+    is_pdf = ext in PDF_EXTS or ctype == 'application/pdf' or head[:4] == b'%PDF'
+    is_img = (ext in IMAGE_EXTS or ctype.startswith('image/')
+              or head[:3] == b'\xff\xd8\xff'          # jpeg
+              or head[:8] == b'\x89PNG\r\n\x1a\n'     # png
+              or (len(file_bytes or b'') > 12
+                  and file_bytes[4:12] in (b'ftypheic', b'ftypheix',
+                                           b'ftyphevc', b'ftypmif1')))
+
+    if is_pdf:
+        return parse_pdf(file_bytes, vision_fn)
+
+    if is_img:
+        if vision_fn is None:
+            return []
+        img, imime = file_bytes, (ctype if ctype.startswith('image/') else '')
+        # HEIC_MAGIC_FIX_2026_08_23: slice file_bytes, not head (head is only
+        # 8 bytes, so head[4:12] could never match an 8-byte brand literal).
+        if ext in ('heic', 'heif') or file_bytes[4:12] in (
+                b'ftypheic', b'ftypheix', b'ftypmif1', b'ftyphevc'):
+            img, imime = _heic_to_jpeg(file_bytes)
+        if not imime:
+            imime = 'image/png' if head[:8] == b'\x89PNG\r\n\x1a\n' else 'image/jpeg'
+        return _scrub_mileage(_dedupe_rows(parse_image(img, imime, vision_fn)))
+
+    # Spreadsheet / delimited text. parse_upload() already tries xlsx then
+    # csv on the raw bytes when the extension lies, so a mislabeled sheet
+    # still parses.
+    rows = parse_upload(filename, file_bytes)
+    if not rows and ext == 'xls':
+        # Excel 97 (BIFF). openpyxl cannot read it; xlrd can.
+        try:
+            import xlrd
+            book = xlrd.open_workbook(file_contents=file_bytes)
+            grid: list[tuple] = []
+            for sh in book.sheets():
+                for rx in range(sh.nrows):
+                    grid.append(tuple(sh.row_values(rx)))
+            rows = _rows_to_records(grid)
+        except Exception:
+            rows = []
+    return _scrub_mileage(_dedupe_rows(rows))

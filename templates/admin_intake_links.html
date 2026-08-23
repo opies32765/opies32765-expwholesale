@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dealer Upload Links — Experience Wholesale</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',system-ui,sans-serif;background:#1f2e40;color:#e2e8f0}
+.header{background:#243447;border-bottom:1px solid #344f68;padding:0 24px;height:66px;display:flex;align-items:center;justify-content:space-between}
+.hl{display:flex;align-items:center;gap:12px}
+.logo-mark{width:38px;height:38px;background:linear-gradient(135deg,#3b82f6,#1d4ed8);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:800;color:#fff}
+.logo-text{font-size:17px;font-weight:700;color:#f1f5f9;letter-spacing:-.3px;line-height:1.15}
+.logo-sub{font-size:11px;color:#7a9bb5;font-weight:500;text-transform:uppercase;letter-spacing:1px}
+.nav a{font-size:13px;color:#64748b;text-decoration:none;font-weight:500;padding:5px 12px;border:1px solid #1e293b;border-radius:6px;margin-left:8px}
+.nav a:hover{color:#e2e8f0;border-color:#334155}
+
+.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 70px}
+h1{font-size:23px;font-weight:800;letter-spacing:-.4px;margin-bottom:5px}
+.lede{font-size:13.5px;color:#7a9bb5;margin-bottom:24px;line-height:1.55}
+.card{background:#243447;border:1px solid #344f68;border-radius:12px;padding:20px 22px;margin-bottom:20px}
+h2{font-size:15px;font-weight:700;margin-bottom:16px}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:13px}
+label{display:block;font-size:11px;font-weight:700;color:#7a9bb5;text-transform:uppercase;letter-spacing:.6px;margin-bottom:5px}
+input[type=text]{width:100%;padding:9px 12px;background:#1a2a3a;border:1px solid #2c405a;border-radius:7px;color:#e2e8f0;font-size:14px;font-family:inherit}
+input[type=text]:focus{outline:none;border-color:#3b82f6}
+.req{color:#60a5fa}
+
+.btn{background:#3b82f6;color:#fff;border:0;padding:10px 20px;border-radius:8px;font-size:14px;font-weight:700;font-family:inherit;cursor:pointer}
+.btn:hover:not(:disabled){background:#2563eb}
+.btn:disabled{background:#3d5570;color:#8ba7c0;cursor:not-allowed}
+.btn.sm{padding:5px 11px;font-size:12px;font-weight:600;border-radius:6px}
+.btn.ghost{background:transparent;border:1px solid #344f68;color:#a8c0d6}
+.btn.ghost:hover{background:#2a3f54;color:#e2e8f0}
+.btn.danger{background:transparent;border:1px solid rgba(239,68,68,.4);color:#fca5a5}
+.btn.danger:hover{background:rgba(239,68,68,.13)}
+
+.typeahead{position:relative}
+.ta-list{position:absolute;z-index:40;left:0;right:0;top:100%;margin-top:3px;background:#1a2a3a;border:1px solid #344f68;border-radius:8px;max-height:230px;overflow-y:auto;display:none}
+.ta-list.on{display:block}
+.ta-item{padding:9px 12px;font-size:13.5px;cursor:pointer;border-bottom:1px solid #24374d}
+.ta-item:last-child{border-bottom:0}
+.ta-item:hover{background:#243447}
+.ta-item .c{color:#7a9bb5;font-size:12px}
+
+.newlink{margin-top:16px;background:rgba(34,197,94,.09);border:1px solid rgba(34,197,94,.32);border-radius:9px;padding:14px 16px;display:none}
+.newlink.on{display:block}
+.newlink .u{font-family:'SF Mono',Consolas,monospace;font-size:14px;color:#86efac;word-break:break-all;margin:7px 0 11px}
+
+.toolbar{display:flex;gap:12px;align-items:center;margin-bottom:14px}
+#search{flex:1;max-width:340px}
+
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{text-align:left;background:#1f2e40;color:#7a9bb5;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;padding:10px 12px;border-bottom:1px solid #2c405a;white-space:nowrap}
+td{padding:10px 12px;border-bottom:1px solid #26374d;vertical-align:middle}
+tr.revoked td{opacity:.42}
+.tbl-wrap{overflow-x:auto;border:1px solid #2c405a;border-radius:11px}
+.mono{font-family:'SF Mono',Consolas,monospace;font-size:12.5px;color:#93c5fd}
+.dim{color:#7a9bb5;font-size:12px}
+.acts{display:flex;gap:7px;white-space:nowrap}
+.empty{padding:34px;text-align:center;color:#5a7a96;font-size:14px}
+.err{color:#fca5a5;font-size:13.5px;margin-top:10px}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#22c55e;color:#0b1a12;font-weight:700;font-size:13.5px;padding:10px 20px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
+.toast.on{opacity:1}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="hl">
+    <div class="logo-mark">EW</div>
+    <div>
+      <div class="logo-text">EW Buy Center</div>
+      <div class="logo-sub">Vehicle Acquisition</div>
+    </div>
+  </div>
+  <div class="nav">
+    <a href="/">← Dashboard</a>
+    <a href="/admin/bulk_upload">Bulk Upload</a>
+  </div>
+</div>
+
+<div class="wrap">
+  <h1>Dealer Upload Links</h1>
+  <p class="lede">Make a link for one dealer and text or email it to them. They open it,
+    drop in their list, and the cars come straight in as bids — they never see anything
+    else on the site and they never have to type who they are. Revoke a link any time.</p>
+
+  <div class="card">
+    <h2>New link</h2>
+    <div class="grid">
+      <div class="typeahead">
+        <label>Dealership <span class="req">*</span></label>
+        <input type="text" id="f-dealer" autocomplete="off" placeholder="Start typing…">
+        <div class="ta-list" id="ta"></div>
+      </div>
+      <div><label>Contact name</label><input type="text" id="f-contact" placeholder="Bob"></div>
+      <div><label>Contact mobile</label><input type="text" id="f-phone" placeholder="954-555-1234"></div>
+      <div><label>Contact email</label><input type="text" id="f-email" placeholder="bob@dealer.com"></div>
+      <div><label>Note (internal)</label><input type="text" id="f-note" placeholder="Sends a list every Monday"></div>
+    </div>
+    <div style="margin-top:16px"><button class="btn" id="btn-create">Create link</button></div>
+    <div class="err" id="create-err"></div>
+    <div class="newlink" id="newlink">
+      <div style="font-size:12px;font-weight:700;color:#86efac;text-transform:uppercase;letter-spacing:.6px">Link ready — send this to the dealer</div>
+      <div class="u" id="newlink-url"></div>
+      <button class="btn sm" id="btn-copy-new">Copy link</button>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <input type="text" id="search" placeholder="Search dealer or contact…">
+    <span class="dim" id="count"></span>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Dealer</th><th>Contact</th><th>Link</th>
+          <th style="text-align:right">Lists</th><th style="text-align:right">Cars</th>
+          <th>Last used</th><th>Created</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="empty" id="empty" style="display:none">No links yet.</div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  "use strict";
+  var $ = function(i){ return document.getElementById(i); };
+  var ROOT = location.origin;
+  var links = [];
+  var dealerId = null;
+
+  function esc(s){
+    return String(s==null?'':s).replace(/[&<>"']/g,function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});
+  }
+  function toast(msg){
+    var t = $('toast'); t.textContent = msg; t.classList.add('on');
+    setTimeout(function(){ t.classList.remove('on'); }, 1600);
+  }
+  function copy(text){
+    navigator.clipboard.writeText(text).then(function(){ toast('Link copied'); },
+      function(){ window.prompt('Copy this link:', text); });
+  }
+  function when(iso){
+    if(!iso) return '<span class="dim">—</span>';
+    var d = new Date(iso);
+    return '<span class="dim">'+d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+'</span>';
+  }
+
+  // ── Dealer typeahead over the existing dealers table ────────────────
+  var taTimer = null;
+  $('f-dealer').addEventListener('input', function(){
+    dealerId = null;                       // free-typed name until one is picked
+    var q = this.value.trim();
+    clearTimeout(taTimer);
+    if (q.length < 2){ $('ta').classList.remove('on'); return; }
+    taTimer = setTimeout(function(){
+      fetch('/api/admin/intake-links/dealer-search?q='+encodeURIComponent(q))
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          var list = j.dealers || [];
+          if (!list.length){ $('ta').classList.remove('on'); return; }
+          $('ta').innerHTML = list.map(function(d){
+            var loc = [d.city, d.state].filter(Boolean).join(', ');
+            return '<div class="ta-item" data-id="'+d.id+'" data-name="'+esc(d.name)+'">'+
+                   esc(d.name)+(loc?' <span class="c">'+esc(loc)+'</span>':'')+'</div>';
+          }).join('');
+          $('ta').classList.add('on');
+          Array.prototype.forEach.call($('ta').children, function(el){
+            el.addEventListener('click', function(){
+              $('f-dealer').value = this.dataset.name;
+              dealerId = parseInt(this.dataset.id, 10);
+              $('ta').classList.remove('on');
+            });
+          });
+        }).catch(function(){});
+    }, 220);
+  });
+  document.addEventListener('click', function(e){
+    if (!e.target.closest('.typeahead')) $('ta').classList.remove('on');
+  });
+
+  // ── Create ─────────────────────────────────────────────────────────
+  $('btn-create').addEventListener('click', function(){
+    var name = $('f-dealer').value.trim();
+    $('create-err').textContent = '';
+    if (!name){ $('create-err').textContent = 'Dealership name is required.'; return; }
+    var btn = this; btn.disabled = true; btn.textContent = 'Creating…';
+    fetch('/api/admin/intake-links', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        dealer_name: name, dealer_id: dealerId,
+        contact_name: $('f-contact').value.trim(),
+        contact_phone: $('f-phone').value.trim(),
+        contact_email: $('f-email').value.trim(),
+        note: $('f-note').value.trim()
+      })
+    })
+    .then(function(r){ return r.json().then(function(j){ return {ok:r.ok,j:j}; }); })
+    .then(function(res){
+      btn.disabled = false; btn.textContent = 'Create link';
+      if (!res.ok){ $('create-err').textContent = res.j.error || 'Could not create link.'; return; }
+      var url = ROOT + '/dealer-intake/' + res.j.token;
+      $('newlink-url').textContent = url;
+      $('newlink').classList.add('on');
+      $('btn-copy-new').onclick = function(){ copy(url); };
+      ['f-contact','f-phone','f-email','f-note'].forEach(function(i){ $(i).value=''; });
+      $('f-dealer').value=''; dealerId=null;
+      load();
+    })
+    .catch(function(){
+      btn.disabled = false; btn.textContent = 'Create link';
+      $('create-err').textContent = 'Connection problem.';
+    });
+  });
+
+  // ── List ───────────────────────────────────────────────────────────
+  function load(){
+    fetch('/api/admin/intake-links')
+      .then(function(r){ return r.json(); })
+      .then(function(j){ links = j.links || []; render(); })
+      .catch(function(){});
+  }
+
+  function render(){
+    var q = $('search').value.trim().toLowerCase();
+    var list = links.filter(function(l){
+      if (!q) return true;
+      return (l.dealer_name||'').toLowerCase().indexOf(q) >= 0
+          || (l.contact_name||'').toLowerCase().indexOf(q) >= 0;
+    });
+    $('count').textContent = list.length + ' link' + (list.length===1?'':'s');
+    $('empty').style.display = list.length ? 'none' : 'block';
+    $('tbody').innerHTML = list.map(function(l){
+      var url = ROOT + '/dealer-intake/' + l.token;
+      var contact = [l.contact_name, l.contact_phone].filter(Boolean).join(' · ');
+      return '<tr class="'+(l.revoked?'revoked':'')+'">'+
+        '<td><b>'+esc(l.dealer_name)+'</b>'+
+          (l.note?'<div class="dim">'+esc(l.note)+'</div>':'')+'</td>'+
+        '<td>'+(contact?esc(contact):'<span class="dim">—</span>')+'</td>'+
+        '<td class="mono">/dealer-intake/'+esc(l.token)+
+          (l.revoked?' <span class="dim">(revoked)</span>':'')+'</td>'+
+        '<td style="text-align:right">'+(l.submission_count||0)+'</td>'+
+        '<td style="text-align:right">'+(l.vehicle_count||0)+'</td>'+
+        '<td>'+when(l.last_used_at)+'</td>'+
+        '<td>'+when(l.created_at)+'</td>'+
+        '<td><div class="acts">'+
+          // Delete is offered only on an already-revoked link, so a live link
+          // a dealer is using can't disappear on a mis-click.
+          (l.revoked
+            ? '<button class="btn sm ghost" data-act="restore" data-id="'+l.id+'">Restore</button>'+
+              '<button class="btn sm danger" data-act="delete" data-id="'+l.id+'" data-name="'+esc(l.dealer_name)+'">Delete</button>'
+            : '<button class="btn sm ghost" data-act="copy" data-url="'+esc(url)+'">Copy</button>'+
+              '<button class="btn sm danger" data-act="revoke" data-id="'+l.id+'">Revoke</button>')+
+        '</div></td></tr>';
+    }).join('');
+
+    Array.prototype.forEach.call($('tbody').querySelectorAll('button'), function(b){
+      b.addEventListener('click', function(){
+        var act = this.dataset.act;
+        if (act === 'copy'){ copy(this.dataset.url); return; }
+        if (act === 'delete'){
+          // Second press confirms. Avoids a browser modal and still makes
+          // the delete deliberate.
+          if (this.dataset.armed !== '1'){
+            this.dataset.armed = '1';
+            this.textContent = 'Sure?';
+            var b = this;
+            setTimeout(function(){
+              if (b.dataset.armed === '1'){ b.dataset.armed = '0'; b.textContent = 'Delete'; }
+            }, 4000);
+            return;
+          }
+          fetch('/api/admin/intake-links/'+this.dataset.id, {method:'DELETE'})
+            .then(function(r){ return r.json(); })
+            .then(function(j){
+              toast(j.error ? j.error : 'Link deleted'); load();
+            }).catch(function(){});
+          return;
+        }
+        var revoke = (act === 'revoke');
+        fetch('/api/admin/intake-links/'+this.dataset.id+'/revoke', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({revoke: revoke})
+        }).then(function(){ toast(revoke?'Link revoked':'Link restored'); load(); })
+          .catch(function(){});
+      });
+    });
+  }
+
+  $('search').addEventListener('input', render);
+  load();
+})();
+</script>
+</body>
+</html>

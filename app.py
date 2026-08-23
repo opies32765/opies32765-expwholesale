@@ -212,6 +212,11 @@ _PUBLIC_PREFIXES = (
     '/api/quick-extract',
     '/api/recon/inbound-email',  # BOL inbound (CF Email Worker; X-Recon-Inbound secret)
     '/api/voice/', '/api/app/', '/v/', '/mobile/ewbot', '/model/ewbot', '/ewbot', '/m/ewbot', '/bot',  # VOICE_AGENT_2026_05_20 EW bot — partner-token auth inside handlers
+    '/dealer-intake/',      # DEALER_INTAKE_2026_08_23 — per-dealer
+    '/api/dealer-intake/',  # upload link. Token validated in the
+                            # handler; unknown/revoked token 404s.
+                            # NOTE: distinct from '/api/intake/'
+                            # above (the LONE_PIC_HOLD sweep).
     '/wholesaler-',  # public self-serve signup at /wholesaler-<reviewer>/signup; admin routes still gated by _require_admin().
 )
 
@@ -12430,33 +12435,25 @@ def _stagger_kick_market_check(bid_ids_vins, delay_seconds):
                      name='bulk-upload-stagger').start()
 
 
-@app.route('/api/admin/bulk_upload/commit', methods=['POST'])
-def api_admin_bulk_upload_commit():
-    """Commit a confirmed set of bid candidates. Body:
-        {rows: [{vin, raw_vehicle, year, make, model, trim, mileage,
-                 asking_price, color, body, notes, stock, ...}, ...],
-         delay_seconds: 5,
-         source_name: "Bob @ ABC Motors"}
+def _bulk_commit_core(rows, source_name, delay_seconds=5, client_ip='',
+                      uploaded_by='admin', creation_source='bulk_upload',
+                      notes_label='Bulk Upload', contact_extra=''):
+    """BULK_COMMIT_CORE_2026_08_23 — the ONE insert path for a list of cars.
 
-    Inserts all bids immediately (single transaction), creates a
-    bulk_uploads row, then spawns one stagger thread that fires
-    trigger_market_check per bid with the requested delay.
+    Lifted verbatim out of api_admin_bulk_upload_commit so the operator's
+    /admin/bulk_upload page and a dealer's own upload link
+    (/dealer-intake/<token>) produce byte-identical bids and identical
+    staggered enrichment. This is a move, not a rewrite: no enrichment leg,
+    column limit or stagger behaviour changed.
+
+    contact_phone is ALWAYS the synthetic 'bulk:<slug>' key, never a real
+    mobile — a bid carrying a dealer's real number is an outbound-SMS
+    surface, and enrichment is deny-by-default to submitters. The real
+    contact details ride along in `contact_extra`, which lands in notes.
+
+    Returns {'bulk_upload_id', 'created': [(bid_id, vin), ...], 'skipped'}.
+    Raises on DB failure; the caller owns validation and the HTTP shape.
     """
-    data = request.get_json(silent=True) or {}
-    rows = data.get('rows') or []
-    delay_seconds = data.get('delay_seconds')
-    try:
-        delay_seconds = int(delay_seconds) if delay_seconds is not None else 5
-    except (TypeError, ValueError):
-        delay_seconds = 5
-    delay_seconds = max(0, min(60, delay_seconds))
-    source_name = (data.get('source_name') or '').strip()[:200]
-
-    if not source_name:
-        return jsonify({'error': 'source_name required (type the dealer or contact who sent the list)'}), 400
-    if not isinstance(rows, list) or not rows:
-        return jsonify({'error': 'rows array required'}), 400
-
     # Filter to rows we'll actually insert (valid 17-char VIN, no skip flag).
     keep = []
     for r in rows:
@@ -12465,7 +12462,7 @@ def api_admin_bulk_upload_commit():
             continue
         keep.append({**r, 'vin': vin})
     if not keep:
-        return jsonify({'error': 'no rows with valid VINs'}), 400
+        raise ValueError('no rows with valid VINs')
 
     # Resolve a contact for the batch. We slug the source name into a
     # phone-key like 'bulk:bob_abc_motors' so we can find the same contact
@@ -12475,13 +12472,19 @@ def api_admin_bulk_upload_commit():
         slug = _re.sub(r'[^a-z0-9]+', '_',
                        source_name.lower()).strip('_')[:60] or 'unnamed'
         contact_phone = f'bulk:{slug}'
-        contact_name = source_name
+        # CONTACT_KEY_FIT_2026_08_23: contacts.phone and bids.phone are
+        # varchar(20). An over-long key raises StringDataRightTruncation and
+        # rolls back the ENTIRE list, so fold it down to exactly 20 chars.
+        # Keys that already fit are untouched — existing contacts must keep
+        # resolving to the same row.
+        if len(contact_phone) > 20:
+            import hashlib as _hl
+            _h = _hl.md5(slug.encode('utf-8')).hexdigest()[:6]
+            contact_phone = f'bulk:{slug[:8]}_{_h}'
+        contact_name = source_name[:100]   # contacts.name is varchar(100)
     else:
         contact_phone = 'bulk:unnamed'
         contact_name = 'Bulk Upload'
-
-    client_ip = (request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
-                 or request.remote_addr or '')
 
     db = get_db()
     cur = db.cursor()
@@ -12501,7 +12504,7 @@ def api_admin_bulk_upload_commit():
                 (uploaded_by, contact_id, source_name, row_count, delay_seconds)
             VALUES (%s, %s, %s, %s, %s)
             RETURNING id
-        """, (session.get('username') or 'admin', contact_id, source_name,
+        """, (uploaded_by, contact_id, source_name,
               len(rows), delay_seconds))
         bulk_upload_id = cur.fetchone()['id']
 
@@ -12526,7 +12529,9 @@ def api_admin_bulk_upload_commit():
             # Notes field: combine the dealer's note, any stock #, and a
             # bulk-upload header so it's obvious in bid view where this
             # came from.
-            note_parts = [f'[Bulk Upload: {source_name or "unnamed"}]']
+            note_parts = [f'[{notes_label}: {source_name or "unnamed"}]']
+            if contact_extra:
+                note_parts.append(contact_extra)
             if stock:
                 note_parts.append(f'Stock #{stock}')
             if body:
@@ -12537,7 +12542,7 @@ def api_admin_bulk_upload_commit():
 
             # Raw message — mimic the quick_drop format so AI prompts and
             # bid_detail render correctly.
-            rm_parts = ['[BULK UPLOAD]']
+            rm_parts = [f'[{notes_label.upper()}]']
             rm_parts.append(f'VIN: {r["vin"]}')
             if raw_veh:
                 rm_parts.append(raw_veh)
@@ -12557,7 +12562,7 @@ def api_admin_bulk_upload_commit():
                      vauto_priority, enrich_release_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s,
-                        'new', %s, 'bulk_upload', %s,
+                        'new', %s, %s, %s,
                         FALSE, NOW() + (%s * INTERVAL '1 second'))
                 RETURNING id
             """, (
@@ -12567,7 +12572,7 @@ def api_admin_bulk_upload_commit():
                 int(mileage) if mileage else None,
                 color or None, raw_message,
                 int(asking) if asking else None, full_notes,
-                client_ip, bulk_upload_id,
+                client_ip, creation_source, bulk_upload_id,
                 _i * delay_seconds,
             ))
             new_bid_id = cur.fetchone()['id']
@@ -12581,10 +12586,10 @@ def api_admin_bulk_upload_commit():
             WHERE id = %s
         """, (len(created), len(rows) - len(created), bulk_upload_id))
         db.commit()
-    except Exception as e:
+    except Exception:
         db.rollback()
         db.close()
-        return jsonify({'error': f'commit failed: {type(e).__name__}: {e}'}), 500
+        raise
     finally:
         try: db.close()
         except Exception: pass
@@ -12593,13 +12598,71 @@ def api_admin_bulk_upload_commit():
     # bids — no thread-per-bid storm.
     _stagger_kick_market_check(created, delay_seconds)
 
+    return {
+        'bulk_upload_id': bulk_upload_id,
+        'created': created,
+        'skipped': len(rows) - len(created),
+    }
+
+
+@app.route('/api/admin/bulk_upload/commit', methods=['POST'])
+def api_admin_bulk_upload_commit():
+    """Commit a confirmed set of bid candidates. Body:
+        {rows: [{vin, raw_vehicle, year, make, model, trim, mileage,
+                 asking_price, color, body, notes, stock, ...}, ...],
+         delay_seconds: 5,
+         source_name: "Bob @ ABC Motors"}
+
+    Thin wrapper over _bulk_commit_core() since BULK_COMMIT_CORE_2026_08_23.
+    """
+    data = request.get_json(silent=True) or {}
+    rows = data.get('rows') or []
+    delay_seconds = data.get('delay_seconds')
+    try:
+        delay_seconds = int(delay_seconds) if delay_seconds is not None else 5
+    except (TypeError, ValueError):
+        delay_seconds = 5
+    delay_seconds = max(0, min(60, delay_seconds))
+    source_name = (data.get('source_name') or '').strip()[:200]
+
+    if not source_name:
+        return jsonify({'error': 'source_name required (type the dealer or contact who sent the list)'}), 400
+    if not isinstance(rows, list) or not rows:
+        return jsonify({'error': 'rows array required'}), 400
+
+    client_ip = (request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
+                 or request.remote_addr or '')
+
+    try:
+        res = _bulk_commit_core(
+            rows, source_name,
+            delay_seconds=delay_seconds,
+            client_ip=client_ip,
+            uploaded_by=session.get('username') or 'admin',
+        )
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'commit failed: {type(e).__name__}: {e}'}), 500
+
     return jsonify({
         'ok': True,
-        'bulk_upload_id': bulk_upload_id,
-        'created': [{'bid_id': bid_id, 'vin': vin} for bid_id, vin in created],
-        'skipped': len(rows) - len(created),
+        'bulk_upload_id': res['bulk_upload_id'],
+        'created': [{'bid_id': bid_id, 'vin': vin}
+                    for bid_id, vin in res['created']],
+        'skipped': res['skipped'],
         'delay_seconds': delay_seconds,
     })
+
+
+# DEALER_INTAKE_2026_08_23 — the dealer-facing upload link
+# (/dealer-intake/<token>, /admin/intake-links) lives in
+# dealer_intake.py and is REGISTERED IN wsgi.py, not here:
+# this point in the file is above THALIST_ALERT_PHONE, and
+# wsgi.py registration also survives app.py being overwritten.
+# It commits through _bulk_commit_core() above.
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────
