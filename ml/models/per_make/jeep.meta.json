@@ -1,9 +1,9 @@
 {
   "make_name": "JEEP",
-  "trained_at": "2026-08-21T08:30:11.774137Z",
-  "n_total": 1247,
+  "trained_at": "2026-08-22T08:30:13.776470Z",
+  "n_total": 1252,
   "n_train": 1169,
-  "n_test": 78,
+  "n_test": 83,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,49 +215,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2259.0,
-    "mape_pct": 9.59,
-    "r2": 0.9621,
-    "within_5pct": 42.3,
-    "within_10pct": 73.1
+    "mae_dollars": 2357.0,
+    "mape_pct": 10.96,
+    "r2": 0.9619,
+    "within_5pct": 41.0,
+    "within_10pct": 67.5
   },
   "baseline_metrics": {
-    "mae_dollars": 2640.0,
-    "mape_pct": 11.57,
+    "mae_dollars": 2748.0,
+    "mape_pct": 13.58,
     "ratio": 1.0595
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.33559417724609375
+      "importance": 0.3420376181602478
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.2562785744667053
+      "importance": 0.2476428598165512
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.22944988310337067
+      "importance": 0.22820992767810822
     },
     {
       "name": "model_name_Wrangler Sport Sport Utility Vehicle",
-      "importance": 0.025899752974510193
-    },
-    {
-      "name": "odometer",
-      "importance": 0.009181024506688118
+      "importance": 0.026697592809796333
     },
     {
       "name": "supplier_name_Marino Performance Motors",
-      "importance": 0.008608073927462101
+      "importance": 0.008783502504229546
+    },
+    {
+      "name": "odometer",
+      "importance": 0.008560667745769024
     },
     {
       "name": "mileage_adjustment_value",
-      "importance": 0.0055903238244354725
+      "importance": 0.005556621588766575
     },
     {
-      "name": "original_msrp",
-      "importance": 0.005572388879954815
+      "name": "supplier_name_Manheim Orlando",
+      "importance": 0.005510774441063404
     }
   ]
 }

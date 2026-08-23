@@ -37,6 +37,7 @@
   .num{text-align:right;font-variant-numeric:tabular-nums}
   .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
   .pill{display:inline-block;font-size:10.5px;font-weight:800;padding:2px 7px;border-radius:999px;letter-spacing:.3px}
+  .p-ads{background:#fde68a;color:#7c2d12}
   .p-app{background:#dcfce7;color:var(--good)}
   .p-bot{background:#fee2e2;color:var(--bad)}
   .muted{color:var(--mut)}
@@ -89,6 +90,10 @@
       <div class="s">one browser = one visitor</div></div>
     <div class="tile"><div class="n">{{ stats.views or 0 }}</div><div class="l">Page views</div>
       <div class="s">humans only</div></div>
+    {# AD_ATTRIBUTION_2026_08_22 (visitors) — paid arrivals, counted on arrival rather than on
+       application, so the ad spend is visible before anyone converts. #}
+    <div class="tile"><div class="n" style="color:#b45309">{{ stats.ad_clicks or 0 }}</div><div class="l">From Google Ads</div>
+    </div>
     <div class="tile"><div class="n" style="color:var(--good)">{{ stats.applied or 0 }}</div><div class="l">Applied</div>
       <div class="s">reached the apply form</div></div>
     <div class="tile"><div class="n" style="color:var(--bad)">{{ stats.bots or 0 }}</div><div class="l">Datacenter IPs</div>
@@ -147,7 +152,7 @@
         <td class="num">{{ v.views }}</td>
         <td class="muted">{{ v.first_seen.strftime('%d %b %H:%M') if v.first_seen else '' }}</td>
         <td class="muted">{{ v.last_seen.strftime('%d %b %H:%M') if v.last_seen else '' }}</td>
-        <td class="muted" style="max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ v.referer or 'direct' }}</td>
+        <td class="muted" style="max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{% if v.gclid %}<span class="pill p-ads" title="Paid click{% if v.utm_campaign %} · campaign {{ v.utm_campaign }}{% endif %} · gclid {{ v.gclid[:16] }}…">📣 Google Ads{% if v.utm_term %} · {{ v.utm_term }}{% endif %}</span>{% else %}{{ v.referer or 'direct' }}{% endif %}</td>
         <td>{% if v.applied %}<span class="pill p-app">APPLIED</span>{% endif %}
             {% if v.hosting %}<span class="pill p-bot">DATACENTER</span>{% endif %}</td>
       </tr>

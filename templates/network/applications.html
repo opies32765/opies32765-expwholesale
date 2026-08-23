@@ -36,6 +36,7 @@
   .b-prev{background:#ede9fe;color:#5b21b6}
   .b-lsl{background:#0b1220;color:#e2e8f0}
   .b-roster{background:#eef2f7;color:#475569}
+  .b-ads{background:#fde68a;color:#7c2d12}
   .contact .cname{font-weight:600}
   .st{font-weight:700;text-transform:capitalize}
   .st-pending{color:#b45309}.st-approved{color:#15803d}.st-rejected{color:#b91c1c}.st-needs_info{color:#6d28d9}
@@ -78,6 +79,10 @@
           <td class="dealer">
             <div class="dname">{{ a.dealership_name or '—' }}</div>
             <div class="dtags">
+              {# AD_ATTRIBUTION_2026_08_22 (queue) — paid-search source. The tooltip carries the
+                 exact keyword, which is the only thing that tells us which
+                 search actually produces dealers. #}
+              {% if a.source_channel == 'google_ads' %}<span class="badge b-ads" title="Came from a Google Ads click{% if a.utm_term %} · keyword: {{ a.utm_term }}{% endif %}{% if a.utm_campaign %} · campaign {{ a.utm_campaign }}{% endif %}{% if a.gclid %} · gclid {{ a.gclid[:16] }}…{% endif %}">📣 Google Ads{% if a.utm_term %} · {{ a.utm_term }}{% endif %}</span>{% elif a.source_channel %}<span class="badge b-roster" title="Arrived with tracking parameters that were not a verified Google Ads click">tagged link</span>{% endif %}
               {% if a.classification == 'new_applicant' %}<span class="badge b-new">New applicant</span>
               {% elif a.classification == 'previous_partner' %}<span class="badge b-prev">{{ class_labels.get(a.classification, 'Previous partner') }}</span>
               {% elif a.classification %}<span class="badge b-partner">{{ class_labels.get(a.classification, 'Current partner') }}</span>{% endif %}

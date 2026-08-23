@@ -1,9 +1,9 @@
 {
   "make_name": "FERRARI",
-  "trained_at": "2026-08-21T08:30:18.070811Z",
-  "n_total": 334,
+  "trained_at": "2026-08-22T08:30:22.375055Z",
+  "n_total": 335,
   "n_train": 264,
-  "n_test": 70,
+  "n_test": 71,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -26,13 +26,13 @@
     "model_name_458 Spider Convertible",
     "model_name_488",
     "model_name_488 COUPE Coupe",
+    "model_name_488 Convertible",
     "model_name_488 Coupe",
     "model_name_488 GTB Coupe",
     "model_name_488 GTB Coupe Coupe",
     "model_name_488 Spider",
     "model_name_488 Spider Convertible",
     "model_name_599 GTB F1",
-    "model_name_812 GTS",
     "model_name_812 Superfast",
     "model_name_California",
     "model_name_California Convertible",
@@ -136,18 +136,18 @@
       "F430_DELETED",
       "488 GTB Coupe",
       "812 Superfast",
-      "488 Spider",
       "296 GTB",
       "488 Coupe",
       "488 GTB Coupe Coupe",
       "F8 Tributo",
+      "488 Spider",
       "296 GTS",
       "599 GTB F1",
+      "488 Convertible",
       "458 Coupe",
       "488 COUPE Coupe",
       "Testarossa Coupe",
-      "360 Modena Berlinetta Coupe",
-      "812 GTS"
+      "360 Modena Berlinetta Coupe"
     ],
     "body_type": [
       "Convertible",
@@ -217,49 +217,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 62855.0,
-    "mape_pct": 16.2,
-    "r2": 0.5354,
-    "within_5pct": 32.9,
-    "within_10pct": 57.1
+    "mae_dollars": 63414.0,
+    "mape_pct": 16.27,
+    "r2": 0.5321,
+    "within_5pct": 33.8,
+    "within_10pct": 56.3
   },
   "baseline_metrics": {
-    "mae_dollars": 63447.0,
-    "mape_pct": 18.11,
-    "ratio": 1.0371
+    "mae_dollars": 64263.0,
+    "mape_pct": 18.32,
+    "ratio": 1.0373
   },
   "top_features": [
     {
       "name": "base_appraised_value",
-      "importance": 0.32368698716163635
+      "importance": 0.343794584274292
     },
     {
       "name": "market_asking_price",
-      "importance": 0.2634139955043793
+      "importance": 0.2636217176914215
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.21564674377441406
+      "importance": 0.2134748250246048
     },
     {
       "name": "model_name_488 Coupe",
-      "importance": 0.05222070589661598
+      "importance": 0.04476892575621605
     },
     {
       "name": "model_name_458 Spider Convertible",
-      "importance": 0.023890921846032143
-    },
-    {
-      "name": "model_name_California_DELETED",
-      "importance": 0.013174910098314285
-    },
-    {
-      "name": "model_name_Testarossa Coupe",
-      "importance": 0.01121574454009533
+      "importance": 0.021938733756542206
     },
     {
       "name": "body_type_Sedan",
-      "importance": 0.010207408107817173
+      "importance": 0.0127385463565588
+    },
+    {
+      "name": "model_name_California_DELETED",
+      "importance": 0.012490314431488514
+    },
+    {
+      "name": "supplier_name_Ferrari San Francisco",
+      "importance": 0.0076150838285684586
     }
   ]
 }
