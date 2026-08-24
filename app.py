@@ -1419,7 +1419,7 @@ def _gemini():
     return _gemini_client if _gemini_client else None
 
 
-def _resize_image_for_gemini(image_bytes, max_dim=1536, quality=85):
+def _resize_image_for_gemini(image_bytes, max_dim=1536, quality=85, min_dim=0):
     """Resize image to keep Gemini token count manageable. Vehicle photos
     from dealer sites often arrive at 4000x3000+ which can push a single-image
     request over Gemini's 1M-token cap (1095944 observed 2026-05-14 on
@@ -1434,6 +1434,21 @@ def _resize_image_for_gemini(image_bytes, max_dim=1536, quality=85):
         import io as _io
         img = Image.open(_io.BytesIO(image_bytes))
         w, h = img.size
+        # VIN_UPSCALE_2026_08_23: thumbnail() only ever SHRINKS and the early return
+        # below hands small crops through untouched, so a 1024x250 accutrade/autocheck
+        # VIN crop reached the brain at native size with ~3px of character height per
+        # visual patch. Measured on the live brain, 60 held-out VIN images:
+        # 63.3% -> 86.7% at 2x (14 fixed, 0 broken); 3x adds nothing. The gain is
+        # concentrated at 800-1500px (+30pt). Only OCR call sites pass min_dim, so
+        # ordinary vehicle photos are unaffected and cost no extra tokens.
+        if min_dim and max(w, h) < min_dim:
+            _s = float(min_dim) / float(max(w, h))
+            if img.mode not in ('RGB', 'L'):
+                img = img.convert('RGB')
+            img = img.resize((max(1, int(w * _s)), max(1, int(h * _s))), Image.LANCZOS)
+            _b = _io.BytesIO()
+            img.save(_b, format='JPEG', quality=max(quality, 92), optimize=True)
+            return _b.getvalue(), 'image/jpeg'
         if max(w, h) <= max_dim and len(image_bytes) < 2_000_000:
             return image_bytes, 'image/jpeg'  # already small enough
         if img.mode not in ('RGB', 'L'):
@@ -1476,7 +1491,7 @@ import local_brain_shim  # EW_SHIM_2026_06_11: route ALL genai generate_content 
 
 def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-flash',
                 max_tokens=1024, temperature=0.4, disable_thinking=False,
-                img_max_dim=1536, img_quality=85):  # NINEB_VIN_HIRES_2026_06_18
+                img_max_dim=1536, img_quality=85, img_min_dim=0):  # NINEB_VIN_HIRES_2026_06_18 / VIN_UPSCALE_2026_08_23
     # GEMINI_FLASH_MILES_OCR_2026_05_17 (param): pass disable_thinking=True for
     # terse-output OCR tasks (single number, 17-char VIN). With thinking enabled
     # the model can burn most of max_tokens on internal reasoning, leaving
@@ -1507,7 +1522,7 @@ def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-f
     if image_bytes:
         # Downsize oversized images before encoding — Gemini's per-request
         # token budget is finite; high-res dealer photos can blow it.
-        image_bytes, mime = _resize_image_for_gemini(image_bytes, max_dim=img_max_dim, quality=img_quality)  # NINEB_VIN_HIRES_2026_06_18
+        image_bytes, mime = _resize_image_for_gemini(image_bytes, max_dim=img_max_dim, quality=img_quality, min_dim=img_min_dim)  # NINEB_VIN_HIRES_2026_06_18 / VIN_UPSCALE_2026_08_23
         contents = [
             types.Part.from_bytes(data=image_bytes, mime_type=mime),
             prompt,
@@ -2163,7 +2178,7 @@ def vin_nearmiss_from_file(file_bytes, media_type='image/jpeg'):
         )
         out = gemini_call(prompt, image_bytes=file_bytes, mime=media_type,
                           model='gemini-2.5-pro', max_tokens=200,
-                          img_max_dim=3000, img_quality=92, temperature=0.0)
+                          img_max_dim=3000, img_quality=92, img_min_dim=2000, temperature=0.0)
         if not out:
             return None
         m = re.search(r'[A-HJ-NPR-Z0-9]{12,25}', out.strip().upper())
@@ -2224,7 +2239,7 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
     for attempt in range(2):
         result = gemini_call(hw_prompt, image_bytes=file_bytes, mime=media_type,
                              model='gemini-2.5-pro', max_tokens=2000,
-                             img_max_dim=3000, img_quality=92,  # NINEB_VIN_HIRES_2026_06_18: 1536 downscale shrank fine sticker VINs to ~6-8px = unreadable; the 9B accepts up to 16MP
+                             img_max_dim=3000, img_quality=92, img_min_dim=2000,  # NINEB_VIN_HIRES_2026_06_18: 1536 downscale shrank fine sticker VINs to ~6-8px = unreadable; the 9B accepts up to 16MP
                              temperature=(0.0 if attempt == 0 else 0.4))  # HARDEN_OCR_TEMP_2026_06_11
         if not result:
             continue
@@ -2258,7 +2273,7 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
     # Cross-check 2: Gemini Flash. Accept ONLY if check digit valid.
     flash_result = gemini_call(VIN_PROMPT, image_bytes=file_bytes, mime=media_type,
                                model='gemini-2.5-flash', max_tokens=100, temperature=0.0,
-                               img_max_dim=3000, img_quality=92)  # NINEB_VIN_HIRES_2026_06_18
+                               img_max_dim=3000, img_quality=92, img_min_dim=2000)  # NINEB_VIN_HIRES_2026_06_18
     if flash_result:
         flash_vin = flash_result.strip().upper()
         m = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', flash_vin)
@@ -5390,12 +5405,16 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                 print('[sms-ocr] near-miss store err bid=%s: %s' % (bid_id, _nme),
                       flush=True)
 
+        # ODO_PER_PHOTO_2026_08_23
+        _photo_miles, _photo_miles_src = None, None
         # Gemini fallback for miles
         if miles is None:
             try:
                 cand = extract_mileage_from_file(img_bytes, mime)
                 if cand and str(cand).isdigit() and 100 <= int(cand) <= 999999:
                     miles = int(cand)
+                    # ODO_PER_PHOTO_2026_08_23: remember WHICH photo produced this and HOW.
+                    _photo_miles, _photo_miles_src = int(cand), 'odometer_ocr'
                     print(f'[sms-ocr] miles via Gemini bid={bid_id}: {miles}', flush=True)
             except Exception as _e:
                 print(f'[sms-ocr] miles err bid={bid_id} photo={photo_id}: {_e}', flush=True)
@@ -5409,6 +5428,10 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                 _sm = extract_stated_mileage_from_image(img_bytes, mime)
                 if _sm:
                     miles = int(_sm)
+                    # ODO_PER_PHOTO_2026_08_23: a STATED mileage in a screenshot is NOT an
+                    # odometer photo. Tagged distinctly so it can never leak into the
+                    # odometer training set.
+                    _photo_miles, _photo_miles_src = int(_sm), 'stated_text'
                     print(f'[sms-ocr] stated-miles via text-read bid={bid_id}: {miles}', flush=True)
             except Exception as _e:
                 print(f'[sms-ocr] stated-miles err bid={bid_id} photo={photo_id}: {_e}', flush=True)
@@ -5432,6 +5455,11 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                 if local:
                     bg_cur.execute("UPDATE bid_photos SET local_path=%s WHERE id=%s",
                                    (local, photo_id))
+                if _photo_miles:
+                    # ODO_PER_PHOTO_2026_08_23
+                    bg_cur.execute("UPDATE bid_photos SET miles_extracted=%s, "
+                                   "miles_source=%s WHERE id=%s",
+                                   (_photo_miles, _photo_miles_src, photo_id))
                 if vin:
                     bg_cur.execute("UPDATE bid_photos SET vin_extracted=%s WHERE id=%s",
                                    (vin, photo_id))
