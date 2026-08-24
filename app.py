@@ -1050,6 +1050,7 @@ REP_QR_TAGS = {
     '\u200c': 'patty_hoyos',   # ZWNJ
     '\u2060': 'rob_binnix',    # WORD JOINER
     '\u2063': 'dan_camino',    # INVISIBLE SEPARATOR
+    '\u2064': 'oscar_pastrana',  # INVISIBLE PLUS
 }
 
 # Everything stripped before parsing. Deliberately WIDER than our own tags:
