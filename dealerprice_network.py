@@ -2805,6 +2805,26 @@ DP_TRACK_BASE = os.environ.get('DP_TRACK_BASE', 'https://experience-wholesale.ne
 # before the POST-only fix — unsubscribes, from a dealer who never saw the
 # message. UA matching cannot catch it: Defender sends a normal Chrome UA. The
 # tell is the IP, which belongs to a datacentre.
+# HOSTING_FALSE_POSITIVE_2026_08_24 - ip-api.com returns hosting=true for some
+# residential ISPs. Caught when a BILLED Google Ads click from Orlando (ISP
+# "Blue Stream", utm_term "wholesale bid") was counted as a datacenter bot and
+# disappeared from "From Google Ads" on /network/visitors.
+#
+# An ALLOWLIST of known-bad flags, not a denylist of cloud operators: a denylist
+# fails OPEN (any cloud org missing from it becomes "human"), this fails CLOSED.
+# Not keyed on gclid either - Google's own ad-QA crawler arrives with a gclid.
+_DPV_HOSTING_FALSE_POSITIVES = {
+    'blue stream',          # Blue Stream Fiber, FL residential - billed click 2026-08-24
+}
+
+
+def _dpv_hosting(raw_hosting, isp):
+    """ip-api's hosting flag, minus the ISPs we have proof it gets wrong."""
+    if not raw_hosting:
+        return False
+    return (isp or '').strip().lower() not in _DPV_HOSTING_FALSE_POSITIVES
+
+
 def _dpt_machine_ip(cur, ip):
     """True / False / None(unknown-yet) for 'this IP is a machine'.
 
@@ -2857,7 +2877,9 @@ def _dpt_classify_ips(max_lookups=90):
                                          is_hosting=EXCLUDED.is_hosting,
                                          is_proxy=EXCLUDED.is_proxy,
                                          isp=EXCLUDED.isp""",
-                                    (r.get('query'), bool(r.get('hosting')),
+                                    (r.get('query'),
+                                     _dpv_hosting(r.get('hosting'),
+                                                  r.get('isp') or r.get('org')),
                                      bool(r.get('proxy')),
                                      (r.get('isp') or r.get('org') or '')[:120]))
                 db.commit()
@@ -3516,7 +3538,8 @@ def _dpv_geofill(max_lookups=60):
                                       is_hosting=%s, is_proxy=%s
                                 WHERE ip=%s AND country IS NULL""",
                             (r.get('country'), r.get('regionName'), r.get('city'),
-                             r.get('isp'), bool(r.get('hosting')),
+                             r.get('isp'),
+                             _dpv_hosting(r.get('hosting'), r.get('isp')),
                              bool(r.get('proxy')), r.get('query')))
                 n += cur.rowcount
             db.commit()
@@ -3526,6 +3549,146 @@ def _dpv_geofill(max_lookups=60):
     except Exception as e:
         print('[dp-visit] geofill %s: %s' % (type(e).__name__, str(e)[:120]), flush=True)
         return 0
+
+
+# ── AD_SPEND_2026_08_24 ─────────────────────────────────────────────────────
+# Live Google Ads cost on the visitors page.
+#
+# WHY NOT THE GOOGLE ADS API: it exists, but a developer token requires a
+# Manager (MCC) account and a written application Google reviews by hand. For
+# one daily cost figure that is days of latency and a permanent credential to
+# babysit. A **Google Ads Script** runs INSIDE the account - no developer token,
+# no OAuth dance - on an hourly schedule, and pushes here. Same number, minutes
+# to set up, and revoking it is deleting the script.
+#
+# The script POSTs {"rows":[{"date":"YYYY-MM-DD","cost":..,"clicks":..,
+# "impressions":..,"conversions":..}]} to /api/dp/adspend?k=DP_WEBHOOK_KEY.
+# Idempotent upsert on day, so re-sending today's row all day is the point:
+# cost only ever moves forward and a missed run self-heals on the next one.
+def _dp_adspend_window(cur, days):
+    """Spend for the last N days + how stale the newest push is. Never raises -
+    a reporting number must not be able to take the visitors page down."""
+    try:
+        cur.execute("""
+            SELECT COALESCE(sum(cost),0)                    AS cost,
+                   COALESCE(sum(clicks),0)                  AS clicks,
+                   COALESCE(sum(impressions),0)             AS impressions,
+                   max(updated_at)                          AS updated_at,
+                   COALESCE(sum(cost) FILTER (
+                       WHERE day = (now() AT TIME ZONE 'America/New_York')::date
+                   ),0)                                     AS cost_today
+              FROM dp_ad_spend
+             WHERE day > ((now() AT TIME ZONE 'America/New_York')::date
+                          - (%s || ' days')::interval)""", (days,))
+        row = dict(cur.fetchone() or {})
+    except Exception as e:
+        print('[dp-adspend] read failed: %s' % e, flush=True)
+        row = {}
+    # ADSPEND_ALWAYS_KEYED: every key present, always. A MISSING key in Jinja is
+    # Undefined, and `Undefined is not none` is TRUE - so an absent key sails
+    # through an `is not none` guard and explodes on the next comparison. That
+    # is exactly how ?days=1 broke: no spend row for today yet, no 'age_min'.
+    out = {'cost': row.get('cost') or 0,
+           'clicks': row.get('clicks') or 0,
+           'impressions': row.get('impressions') or 0,
+           'cost_today': row.get('cost_today') or 0,
+           'has_data': bool(row.get('updated_at')),
+           'age_min': None}
+    up = row.get('updated_at')
+    if up:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            out['age_min'] = int((_dt.now(_tz.utc) - up).total_seconds() // 60)
+        except Exception:
+            out['age_min'] = None
+    return out
+
+
+DP_ADSPEND_KEY_FILE = '/opt/expwholesale/DP_ADSPEND_KEY'
+
+
+def _dp_adspend_key_ok(supplied):
+    """Constant-time check of the dedicated ad-spend key.
+
+    Read from a FILE, not the environment: the key is pasted into a Google Ads
+    Script living on Google's servers, so it must be rotatable in seconds
+    without a gunicorn restart (this app runs with --preload, so a restart is
+    the only way to pick up a new env var - see the deploy note in memory).
+    Falls back to DP_WEBHOOK_KEY only if the file is missing, so the endpoint
+    keeps working if the file is ever lost.
+    """
+    import hmac
+    want = ''
+    try:
+        with open(DP_ADSPEND_KEY_FILE, encoding='utf-8') as fh:
+            want = fh.read().strip()
+    except Exception:
+        want = os.environ.get('DP_WEBHOOK_KEY', '')
+    if not want:
+        return False
+    return hmac.compare_digest(str(supplied), want)
+
+
+@bp.route('/api/dp/adspend', methods=['POST'])
+def api_dp_adspend():
+    """Receive a daily-cost push from the Google Ads Script.
+
+    Auth is the same shared key the other DP webhooks use. Returns 403 without
+    it - this writes to a table the dashboard trusts, so it is not open.
+    """
+    if not _dp_adspend_key_ok(request.args.get('k') or ''):
+        return jsonify({'ok': False, 'error': 'bad key'}), 403
+    d = request.get_json(silent=True) or {}
+    rows = d.get('rows')
+    if not isinstance(rows, list) or not rows:
+        return jsonify({'ok': False, 'error': 'no rows'}), 400
+    if len(rows) > 400:
+        return jsonify({'ok': False, 'error': 'too many rows'}), 400
+
+    def _num(v, cap=1e7):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        # A malformed push must not be able to print a fantasy number on the
+        # dashboard, so clamp rather than trust the sender.
+        if f != f or f < 0 or f > cap:
+            return 0.0
+        return f
+
+    written = 0
+    db = _db(); cur = db.cursor()
+    try:
+        for r in rows[:400]:
+            if not isinstance(r, dict):
+                continue
+            day = (r.get('date') or '').strip()[:10]
+            if len(day) != 10 or day[4] != '-' or day[7] != '-':
+                continue
+            cur.execute("""
+                INSERT INTO dp_ad_spend (day, cost, clicks, impressions,
+                                         conversions, updated_at)
+                     VALUES (%s, %s, %s, %s, %s, now())
+                ON CONFLICT (day) DO UPDATE
+                        SET cost = EXCLUDED.cost,
+                            clicks = EXCLUDED.clicks,
+                            impressions = EXCLUDED.impressions,
+                            conversions = EXCLUDED.conversions,
+                            updated_at = now()""",
+                        (day, round(_num(r.get('cost')), 2),
+                         int(_num(r.get('clicks'), 1e6)),
+                         int(_num(r.get('impressions'), 1e8)),
+                         round(_num(r.get('conversions'), 1e6), 2)))
+            written += 1
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print('[dp-adspend] write failed: %s' % e, flush=True)
+        return jsonify({'ok': False, 'error': 'write failed'}), 500
+    finally:
+        db.close()
+    print('[dp-adspend] %d day-row(s) upserted' % written, flush=True)
+    return jsonify({'ok': True, 'rows': written})
 
 
 @bp.route('/network/visitors')
@@ -3598,10 +3761,13 @@ def network_visitors():
              WHERE v.visited_at > now() - (%s || ' days')::interval
              GROUP BY 1 ORDER BY max(v.visited_at) DESC LIMIT 300""", (days,))
         visitors = cur.fetchall()
+        # AD_SPEND_2026_08_24 — cost for the same window as the range bar
+        spend = _dp_adspend_window(cur, days)
     finally:
         db.close()
     return render_template('network/visitors.html', stats=stats, by_day=by_day,
-                           by_geo=by_geo, visitors=visitors, days=days)
+                           by_geo=by_geo, visitors=visitors, days=days,
+                           spend=spend)
 
 
 # ── EMAIL_EDIT_2026_07_30 — correct a contact address before the send ────────

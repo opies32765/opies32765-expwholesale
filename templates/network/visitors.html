@@ -94,6 +94,46 @@
        application, so the ad spend is visible before anyone converts. #}
     <div class="tile"><div class="n" style="color:#b45309">{{ stats.ad_clicks or 0 }}</div><div class="l">From Google Ads</div>
     </div>
+    {# AD_SPEND_2026_08_24 — REAL cost, not an estimate. A Google Ads Script
+       inside the ad account pushes the daily figure to /api/dp/adspend every
+       hour (no Google Ads API developer token needed). The freshness line is
+       not decoration: without it a stale number is indistinguishable from a
+       live one, and this is the number people will quote. #}
+    <div class="tile">
+      <div class="n" style="color:#b45309">
+        {%- if spend and spend.get('has_data') -%}
+          ${{ '%.2f'|format(spend.get('cost')) }}
+        {%- else -%}<span class="muted">&mdash;</span>{%- endif -%}
+      </div>
+      <div class="l">Ad spend</div>
+      <div class="s">
+        {%- if spend and spend.get('age_min') is not none -%}
+          {%- if spend.get('age_min') > 180 -%}
+            <span style="color:var(--bad);font-weight:700">stale &middot;
+              {{ spend.get('age_min') // 60 }}h old</span>
+          {%- elif spend.get('age_min') < 2 -%}just updated
+          {%- else -%}updated {{ spend.get('age_min') }} min ago{%- endif -%}
+        {%- else -%}awaiting first push{%- endif -%}
+      </div>
+    </div>
+    {# ADSPEND_CPC_SAME_SOURCE - both numbers come from dp_ad_spend, so this
+       equals the Avg. CPC in the Google Ads UI and can be checked against it.
+       The old tile divided Google's CALENDAR-day cost by our ROLLING-window
+       visitor count; at days=1 that read $0.44 against a true $3.05. Never
+       build a ratio from two sources that do not share a window. #}
+    <div class="tile">
+      <div class="n">
+        {%- if spend and spend.get('clicks') -%}
+          ${{ '%.2f'|format(spend.get('cost') / spend.get('clicks')) }}
+        {%- else -%}<span class="muted">&mdash;</span>{%- endif -%}
+      </div>
+      <div class="l">Avg. cost per click</div>
+      <div class="s">
+        {%- if spend and spend.get('clicks') -%}
+          {{ spend.get('clicks') }} billed &middot; {{ stats.ad_clicks or 0 }} landed on site
+        {%- else -%}billed by Google{%- endif -%}
+      </div>
+    </div>
     <div class="tile"><div class="n" style="color:var(--good)">{{ stats.applied or 0 }}</div><div class="l">Applied</div>
       <div class="s">reached the apply form</div></div>
     <div class="tile"><div class="n" style="color:var(--bad)">{{ stats.bots or 0 }}</div><div class="l">Datacenter IPs</div>

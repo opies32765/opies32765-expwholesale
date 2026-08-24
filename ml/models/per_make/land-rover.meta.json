@@ -1,6 +1,6 @@
 {
   "make_name": "LAND ROVER",
-  "trained_at": "2026-08-23T08:30:12.921353Z",
+  "trained_at": "2026-08-24T08:30:14.103564Z",
   "n_total": 1232,
   "n_train": 1091,
   "n_test": 141,
@@ -213,8 +213,8 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 4052.0,
-    "mape_pct": 8.21,
+    "mae_dollars": 4056.0,
+    "mape_pct": 8.22,
     "r2": 0.9709,
     "within_5pct": 49.6,
     "within_10pct": 76.6

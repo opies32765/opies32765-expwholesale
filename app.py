@@ -190,6 +190,12 @@ _PUBLIC_PREFIXES = (
     '/api/dp/visit',  # DP_SITE_VISITS_2026_08_05: visitor beacon fired by
                       # anonymous browsers on dealerprice.net. Exact path,
                       # not a prefix. Write-only, returns 204, no body.
+    '/api/dp/adspend',  # AD_SPEND_2026_08_24: hourly Google Ads cost push from
+                        # a Google Ads Script. Login-exempt because the script
+                        # runs on GOOGLE's servers and cannot carry a session
+                        # cookie. It is not open: the handler rejects anything
+                        # without DP_WEBHOOK_KEY, and it only ever writes to
+                        # dp_ad_spend.
     '/api/carworth/',    # carworth.net consumer assistant -> EW (shared-secret auth)
     '/api/comp_msrp/',   # VM 121 comp_msrp worker (claim, submit, jwt, status)
     "/api/internal/",  # internal worker -> SMS bridge (X-Auth gated inside handler)
