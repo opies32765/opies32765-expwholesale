@@ -1495,6 +1495,14 @@ def sonnet_vision_call(prompt, image_bytes, mime='image/jpeg', max_tokens=64,
 
 import local_brain_shim  # EW_SHIM_2026_06_11: route ALL genai generate_content -> 9B brain, Gemini fallback
 
+# VIN_SHEET_UPSCALE_2026_08_24: tiny bulk-list photos (a phone pic of a printed
+# inventory sheet) arrive small -- patty.jpg was 640px for 25 rows, ~3px per VIN
+# character, and the 9B read 1/24 VINs check-digit-valid. Upscaling the whole
+# sheet to 2560px before OCR took the SAME 9B to 21/25 (measured on the live
+# brain). Only bulk-OCR call sites pass this floor via img_min_dim, so ordinary
+# vehicle photos are untouched.
+BULK_OCR_MIN_DIM = 2560
+
 
 def gemini_call(prompt, image_bytes=None, mime='image/jpeg', model='gemini-2.5-flash',
                 max_tokens=1024, temperature=0.4, disable_thinking=False,
@@ -12407,7 +12415,7 @@ def api_admin_bulk_upload_parse():
                     lambda prompt, img, mime: gemini_call(
                         prompt, image_bytes=img, mime=mime,
                         model='gemini-2.5-pro', max_tokens=4096,
-                        temperature=0))
+                        temperature=0, img_min_dim=BULK_OCR_MIN_DIM))  # VIN_SHEET_UPSCALE_2026_08_24
             else:
                 from bulk_upload import parse_upload
                 rows = parse_upload(fname, fbytes)

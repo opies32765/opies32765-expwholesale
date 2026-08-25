@@ -86,14 +86,15 @@ try:
                      gemini_call as _di_gemini,
                      send_sms as _di_sms,
                      _bulk_commit_core as _di_commit_core,
-                     THALIST_ALERT_PHONE as _di_alert_phone)
+                     THALIST_ALERT_PHONE as _di_alert_phone,
+                     BULK_OCR_MIN_DIM as _di_bulk_ocr_min_dim)
 
     def _di_vision(prompt, img, mime):
         # gemini_call is local-9B-first via local_brain_shim; real Gemini is
         # only the fallback. Same call the operator's bulk upload makes.
         return _di_gemini(prompt, image_bytes=img, mime=mime,
                           model='gemini-2.5-pro', max_tokens=4096,
-                          temperature=0)
+                          temperature=0, img_min_dim=_di_bulk_ocr_min_dim)  # VIN_SHEET_UPSCALE_2026_08_24
 
     def _di_commit(rows, source_name, delay_seconds, client_ip, uploaded_by,
                    contact_phone, contact_name, creation_source):

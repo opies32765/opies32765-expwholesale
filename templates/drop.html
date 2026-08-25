@@ -132,6 +132,9 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
 }
 .no-vin-warn.show{display:block}
 
+/* QUICKDROP_VIN_VALIDATE_2026_08_24: red field when a typed VIN fails its check digit */
+.vin-bad{border:1px solid #ef4444 !important;background:rgba(239,68,68,.10) !important}
+
 /* Mobile nav fix */
 @media(max-width:768px){
   .header{padding:0 12px;height:58px;gap:8px}
@@ -192,6 +195,7 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
     <div class="field">
       <label>VIN (required if no screenshots)</label>
       <input type="text" id="manualVin" placeholder="Type or paste 17-character VIN" maxlength="17" style="font-family:monospace;letter-spacing:1px;text-transform:uppercase">
+      <div class="no-vin-warn" id="vinCdWarn"></div>
       <div class="hint">If you drop screenshots, AI reads VIN automatically — this field is the override / VIN-only path.</div>
     </div>
     <div class="field-row">
@@ -362,10 +366,35 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
   }
 
   const VIN_REGEX = /^[A-HJ-NPR-Z0-9]{17}$/;
+  // QUICKDROP_VIN_VALIDATE_2026_08_24: mirror the server check digit (bulk_upload.vin_check_digit_ok)
+  const _VIN_TRANS = {A:1,B:2,C:3,D:4,E:5,F:6,G:7,H:8,J:1,K:2,L:3,M:4,N:5,P:7,R:9,S:2,T:3,U:4,V:5,W:6,X:7,Y:8,Z:9,'0':0,'1':1,'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9};
+  const _VIN_W = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2];
+  function vinCheckDigitOk(vin){
+    vin = (vin||'').toUpperCase();
+    if (!VIN_REGEX.test(vin)) return false;
+    let total = 0;
+    for (let k=0;k<17;k++){ const t=_VIN_TRANS[vin[k]]; if (t===undefined) return false; total += t*_VIN_W[k]; }
+    const exp = total % 11;
+    return vin[8] === (exp===10 ? 'X' : String(exp));
+  }
+  let vinWarnAck = false;
 
   function updateButton(){
     const vin = document.getElementById('manualVin').value.trim().toUpperCase();
     const vinValid = VIN_REGEX.test(vin);
+    const vinCdOk = vinValid && vinCheckDigitOk(vin);  // QUICKDROP_VIN_VALIDATE_2026_08_24
+    const _vinEl = document.getElementById('manualVin');
+    const _warnEl = document.getElementById('vinCdWarn');
+    if (vinValid && !vinCdOk) {
+      _vinEl.classList.add('vin-bad');
+      if (!vinWarnAck) {
+        _warnEl.textContent = '⚠ This VIN fails its check digit — almost certainly a typo. Double-check it before dropping.';
+        _warnEl.classList.add('show');
+      }
+    } else {
+      _vinEl.classList.remove('vin-bad');
+      _warnEl.classList.remove('show');
+    }
 
     // QUICKDROP_REQUIRE_VIN_MILES_2026_08_17: the bid needs BOTH a VIN and
     // miles, but they may come from the screenshots -- the extractor (9B) reads
@@ -392,7 +421,7 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
       btnText.textContent = 'Submit ' + files.length + ' screenshot' + (files.length > 1 ? 's' : '');
     } else if(vinValid){
       submitBtn.disabled = false;
-      btnText.textContent = 'Create bid from VIN';
+      btnText.textContent = vinCdOk ? 'Create bid from VIN' : 'Create bid — check VIN';
     } else {
       submitBtn.disabled = true;
       btnText.textContent = 'Drop screenshots or enter a VIN';
@@ -400,13 +429,24 @@ body{font-family:'Inter',sans-serif;background:#1f2e40;color:#e2e8f0;min-height:
   }
 
   // Re-evaluate button state when VIN is typed
-  document.getElementById('manualVin').addEventListener('input', updateButton);
+  document.getElementById('manualVin').addEventListener('input', function(){ vinWarnAck = false; updateButton(); });
   // ...and when mileage is typed (QUICKDROP_REQUIRE_VIN_MILES_2026_08_17)
   document.getElementById('mileage').addEventListener('input', updateButton);
 
   // --- Submit ---
   submitBtn.addEventListener('click', function(){
     if(submitBtn.disabled) return;
+    // QUICKDROP_VIN_VALIDATE_2026_08_24: first click on a check-digit-bad VIN warns; second confirms.
+    const _cvin = document.getElementById('manualVin').value.trim().toUpperCase();
+    if (VIN_REGEX.test(_cvin) && !vinCheckDigitOk(_cvin) && !vinWarnAck) {
+      vinWarnAck = true;
+      const _w = document.getElementById('vinCdWarn');
+      _w.textContent = '⚠ This VIN fails its check digit — likely a typo. Click again to drop it as-is.';
+      _w.classList.add('show');
+      document.getElementById('manualVin').classList.add('vin-bad');
+      btnText.textContent = 'Drop anyway →';
+      return;
+    }
     submitBtn.disabled = true;
 
     // Hide form, show processing

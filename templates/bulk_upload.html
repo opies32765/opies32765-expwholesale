@@ -223,7 +223,7 @@ function renderPreview() {
     tr.innerHTML = `
       <td><input type="checkbox" data-i="${i}" ${cls === 'invalid' || cls === 'dupe' ? '' : 'checked'} class="row-keep" /></td>
       <td><span class="badge ${badgeCls}">${badge}</span></td>
-      <td class="vin-cell">${r.vin || '<em style=color:#999>(blank)</em>'}</td>
+      <td class="vin-cell"><input type="text" class="vin-edit" data-i="${i}" value="${r.vin || ''}" oninput="onVinEdit(this)" spellcheck="false" maxlength="17" placeholder="(blank)" style="font-family:inherit;font-size:12px;width:158px;text-transform:uppercase;border:1px solid #d1d5db;border-radius:4px;padding:2px 4px;" /></td>
       <td>${escapeHtml(r.raw_vehicle || ((r.year||'')+' '+(r.make||'')+' '+(r.model||'')+' '+(r.trim||'')))}</td>
       <td><input type="number" data-i="${i}" data-field="mileage" value="${r.mileage || ''}" /></td>
       <td><input type="number" data-i="${i}" data-field="asking_price" value="${r.asking_price || ''}" placeholder="${r.dealer_cost ? '(cost: '+r.dealer_cost.toLocaleString()+')' : ''}" /></td>
@@ -239,6 +239,60 @@ function renderPreview() {
 function escapeHtml(s) {
   if (s == null) return '';
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// VIN_EDIT_2026_08_24: let the operator fix a mis-OCR'd VIN inline in the preview.
+// The VIN cell is now an <input>; on edit we re-run the SAME check-digit test as
+// the server (bulk_upload.vin_check_digit_ok) and flip the row badge/keep state
+// live, writing the value back into parsed[i] so commit carries the correction.
+const _VIN_TRANS = {A:1,B:2,C:3,D:4,E:5,F:6,G:7,H:8,J:1,K:2,L:3,M:4,N:5,P:7,R:9,S:2,T:3,U:4,V:5,W:6,X:7,Y:8,Z:9,'0':0,'1':1,'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9};
+const _VIN_W = [8,7,6,5,4,3,2,10,0,9,8,7,6,5,4,3,2];
+function vinCheckOk(vin) {
+  vin = (vin || '').toUpperCase();
+  if (!/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)) return false;
+  let total = 0;
+  for (let i = 0; i < 17; i++) {
+    const t = _VIN_TRANS[vin[i]];
+    if (t === undefined) return false;
+    total += t * _VIN_W[i];
+  }
+  const expected = total % 11;
+  return vin[8] === (expected === 10 ? 'X' : String(expected));
+}
+function recomputeCounts() {
+  let c = { new: 0, dupe: 0, invalid: 0 };
+  parsed.forEach(r => {
+    if (!r.vin_check_digit_valid) c.invalid++;
+    else if (r.duplicate_of) c.dupe++;
+    else c.new++;
+  });
+  document.getElementById('preview-counts').textContent =
+    `${c.new} new · ${c.dupe} dupes · ${c.invalid} invalid VIN`;
+}
+function onVinEdit(inp) {
+  const i = +inp.dataset.i;
+  const v = inp.value.trim().toUpperCase();
+  if (inp.value !== v) inp.value = v;
+  parsed[i].vin = v;
+  const ok = vinCheckOk(v);
+  parsed[i].vin_check_digit_valid = ok;
+  const tr = inp.closest('tr');
+  const badgeEl = tr.querySelector('.badge');
+  const keepCb = tr.querySelector('.row-keep');
+  tr.classList.remove('invalid', 'dupe');
+  if (!ok) {
+    tr.classList.add('invalid');
+    badgeEl.className = 'badge badge-invalid'; badgeEl.textContent = 'INVALID VIN';
+    if (keepCb) keepCb.checked = false;
+  } else if (parsed[i].duplicate_of) {
+    tr.classList.add('dupe');
+    badgeEl.className = 'badge badge-dupe'; badgeEl.textContent = 'DUPE → bid #' + parsed[i].duplicate_of;
+    if (keepCb) keepCb.checked = false;
+  } else {
+    badgeEl.className = 'badge badge-new'; badgeEl.textContent = 'NEW';
+    if (keepCb) keepCb.checked = true;
+  }
+  recomputeCounts();
 }
 
 document.getElementById('btn-toggle-skip').onclick = () => {
