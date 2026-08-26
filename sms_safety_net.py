@@ -80,7 +80,9 @@ def process(row):
         if not existing_miles:
             try:
                 miles_raw = app.extract_mileage_from_file(r.content, mime)
-                if miles_raw and str(miles_raw).isdigit() and 100 <= int(miles_raw) <= 999999:
+                # PHOTO_MILES_NO_FLOOR_2026_08_25
+                if miles_raw and str(miles_raw).isdigit() \
+                        and app.MILES_MIN_FROM_PHOTO <= int(miles_raw) <= 999999:
                     miles = int(miles_raw)
                     print(f'[{_ts()}]   miles extracted: {miles}', flush=True)
             except Exception as e:

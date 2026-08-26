@@ -1,9 +1,9 @@
 {
   "make_name": "LAND ROVER",
-  "trained_at": "2026-08-24T08:30:14.103564Z",
-  "n_total": 1232,
+  "trained_at": "2026-08-25T08:30:12.724840Z",
+  "n_total": 1233,
   "n_train": 1091,
-  "n_test": 141,
+  "n_test": 142,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -213,15 +213,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 4056.0,
-    "mape_pct": 8.22,
-    "r2": 0.9709,
-    "within_5pct": 49.6,
-    "within_10pct": 76.6
+    "mae_dollars": 4103.0,
+    "mape_pct": 8.26,
+    "r2": 0.9703,
+    "within_5pct": 49.3,
+    "within_10pct": 76.1
   },
   "baseline_metrics": {
-    "mae_dollars": 6121.0,
-    "mape_pct": 12.51,
+    "mae_dollars": 6109.0,
+    "mape_pct": 12.46,
     "ratio": 1.0258
   },
   "top_features": [

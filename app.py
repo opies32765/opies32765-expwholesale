@@ -2364,6 +2364,33 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
     return None
 
 
+# --- PHOTO_MILES_NO_FLOOR_2026_08_25 ----------------------------------------
+# Bid 6323 (2026 Corvette ZR1X, "10 mi" printed plainly in the screenshot)
+# landed flagged unreadable_reason='miles' and had to be keyed in by hand. The
+# vision model read it CORRECTLY -- probing that exact photo returns '10'.
+# Every wrapper on the photo-miles path then threw it away, because each one
+# clamped to 100 <= n <= 999999.
+#
+# That floor was a phantom-miles guard from May/June, and it does not work.
+# Measured over 200 real intake photos with the floor removed:
+#     sub-100 reads produced ....... 1   (bid 6323 -- and it was CORRECT)
+#     sub-100 reads that were WRONG. 0   <- everything the floor bought us
+#     wrong reads overall .......... 5   <- ALL of them >=100, so the floor
+#                                           let every single one through.
+# It caught nothing and blocked the one right answer. Real sub-100 cars are
+# routine here: bid 4108 (2026 Escalade, 4 mi), 3456 (Temerario, 46 mi),
+# plus every leftover new unit -- all previously hand-entered.
+#
+# So: if the photo says 10, the miles are 10. Floor is 1, not 100. The upper
+# bound stays. 0 is still rejected -- it is indistinguishable from "no reading"
+# and would be falsy at the ~17 `if miles:` checks downstream.
+#
+# NOTE: this is the PHOTO path only. The SMS *body text* parsers keep their
+# 100 floor -- a bare "10" in a typed message really is ambiguous ("2 dr",
+# "3 owners"), which is a different risk from a number read off an image.
+MILES_MIN_FROM_PHOTO = 1
+
+
 def extract_stated_mileage_from_image(file_bytes, media_type='image/jpeg'):
     """STATED_MILEAGE_OCR_2026_06_11: read an EXPLICITLY-STATED mileage written
     as TEXT in an image (a texted screenshot/note like '21k', '21,000 mi',
@@ -2407,7 +2434,7 @@ def extract_stated_mileage_from_image(file_bytes, media_type='image/jpeg'):
     if m.group(2):
         val *= 1000
     val = int(round(val))
-    return val if 100 <= val <= 999999 else None
+    return val if MILES_MIN_FROM_PHOTO <= val <= 999999 else None
 
 
 def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
@@ -2424,7 +2451,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
     # v4 routing: same rule as VIN — only the test user routes to home v4.
     if should_use_v4():
         v4_miles = v4_extract(file_bytes, task='odometer')
-        if v4_miles and v4_miles.isdigit() and 100 <= int(v4_miles) <= 999999:
+        if v4_miles and v4_miles.isdigit() and MILES_MIN_FROM_PHOTO <= int(v4_miles) <= 999999:
             print(f'[OCR] miles via v4 (test user): {v4_miles}', flush=True)
             return v4_miles
         print('[OCR] v4 odo missed/skipped, going to Gemini Flash', flush=True)
@@ -2447,7 +2474,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
             digits = re.sub(r'[^\d]', '', up)
             if digits:
                 n = int(digits)
-                if 100 <= n <= 999999:
+                if MILES_MIN_FROM_PHOTO <= n <= 999999:
                     print(f'[OCR] miles via Gemini Flash (no-think): {n}',
                           flush=True)
                     return n
@@ -2460,9 +2487,11 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
     _listing_prompt = (
         "This image is a vehicle LISTING screenshot \u2014 Manheim auction, "
         "Carbly, vAuto, or dealer inventory. Find the ODOMETER / MILEAGE. "
-        "In these layouts, the mileage is a 4-6 digit integer in its own "
+        "In these layouts, the mileage is an integer in its own "
         "column, typically RIGHT of the VIN/year/make/model and LEFT of "
-        "the auction lane code. Examples: '9090', '25000', '152340'.\n"
+        "the auction lane code. Examples: '9090', '25000', '152340'. A "
+        "brand-new vehicle may legitimately read under 100 (e.g. '10', "
+        "'7') -- report it exactly as shown.\n"
         "\n"
         "NOT the MMR price (usually has $ or appears as '$26,700').\n"
         "NOT the Adj MMR Range.\n"
@@ -2483,7 +2512,7 @@ def extract_mileage_from_file(file_bytes, media_type='image/jpeg'):
             digits = re.sub(r'[^\d]', '', up)
             if digits:
                 n = int(digits)
-                if 100 <= n <= 999999:
+                if MILES_MIN_FROM_PHOTO <= n <= 999999:
                     print(f'[OCR] miles via listing-format prompt: {n}',
                           flush=True)
                     return n
@@ -3452,7 +3481,8 @@ def _extract_vehicles_from_image(image_bytes, mime='image/jpeg'):
             miles = int(str(miles).replace(',', '').strip()) if miles not in (None, '') else None
         except Exception:
             miles = None
-        if miles is not None and not (100 <= miles <= 999999):
+        # PHOTO_MILES_NO_FLOOR_2026_08_25
+        if miles is not None and not (MILES_MIN_FROM_PHOTO <= miles <= 999999):
             miles = None
         out.append({'vin': vin, 'miles': miles})
     return out[:BATCH_MAX]
@@ -3686,7 +3716,7 @@ def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
                                            max_tokens=20, temperature=0)
                     _odo_digits = re.sub(r'[^0-9]', '', _odo_raw or '')
                     _odo_n = int(_odo_digits) if _odo_digits else 0
-                    if 100 <= _odo_n <= 400000:
+                    if MILES_MIN_FROM_PHOTO <= _odo_n <= 400000:
                         miles = _odo_n
                         print(f'[caption-match] odo read from photo: {miles}', flush=True)
                 except Exception as _oe:
@@ -3741,7 +3771,7 @@ def _handle_image_vin_scan(db, cur, from_phone, num_media, form, intake_log_id):
                                            max_tokens=20, temperature=0)
                     _odo_digits = re.sub(r'[^0-9]', '', _odo_raw or '')
                     _odo_n = int(_odo_digits) if _odo_digits else 0
-                    if 100 <= _odo_n <= 400000:
+                    if MILES_MIN_FROM_PHOTO <= _odo_n <= 400000:
                         miles = _odo_n
                 except Exception as _oe:
                     print(f'[img-batch] paired odo read err: {_oe}', flush=True)
@@ -5387,7 +5417,7 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
                     vin = v4_vin
                     print(f'[v4-sms] VIN={vin} bid={bid_id} photo={photo_id}', flush=True)
                 v4_m = v4_extract(img_bytes, task='odometer')
-                if v4_m and v4_m.isdigit() and 100 <= int(v4_m) <= 999999:
+                if v4_m and v4_m.isdigit() and MILES_MIN_FROM_PHOTO <= int(v4_m) <= 999999:
                     miles = int(v4_m)
                     print(f'[v4-sms] miles={miles} bid={bid_id} photo={photo_id}', flush=True)
             except Exception as _v4e:
@@ -5426,7 +5456,7 @@ def _bg_download_sms_photo(photo_id, bid_id, media_url, media_type, from_phone=N
         if miles is None:
             try:
                 cand = extract_mileage_from_file(img_bytes, mime)
-                if cand and str(cand).isdigit() and 100 <= int(cand) <= 999999:
+                if cand and str(cand).isdigit() and MILES_MIN_FROM_PHOTO <= int(cand) <= 999999:
                     miles = int(cand)
                     # ODO_PER_PHOTO_2026_08_23: remember WHICH photo produced this and HOW.
                     _photo_miles, _photo_miles_src = int(cand), 'odometer_ocr'
