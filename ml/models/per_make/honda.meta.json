@@ -1,9 +1,9 @@
 {
   "make_name": "HONDA",
-  "trained_at": "2026-08-26T08:30:17.555867Z",
-  "n_total": 699,
+  "trained_at": "2026-08-27T08:30:17.191440Z",
+  "n_total": 700,
   "n_train": 614,
-  "n_test": 85,
+  "n_test": 86,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -225,15 +225,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1642.0,
-    "mape_pct": 7.74,
-    "r2": 0.9261,
-    "within_5pct": 41.2,
-    "within_10pct": 77.6
+    "mae_dollars": 1631.0,
+    "mape_pct": 7.69,
+    "r2": 0.9262,
+    "within_5pct": 41.9,
+    "within_10pct": 77.9
   },
   "baseline_metrics": {
-    "mae_dollars": 1798.0,
-    "mape_pct": 7.6,
+    "mae_dollars": 1788.0,
+    "mape_pct": 7.56,
     "ratio": 1.052
   },
   "top_features": [

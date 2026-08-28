@@ -101,6 +101,11 @@
   .dot.open{background:var(--accent);box-shadow:0 0 0 3px rgba(226,59,59,.18)}
   .tl .nm{font-weight:600;min-width:150px}
   .tl .tm{color:var(--mut);font-size:12px;flex:1}
+  /* RECON_WHO_2026_08_27 — who moved it; automated paths read quieter */
+  .tl .tl-by{color:var(--mut);font-size:12px;white-space:nowrap}
+  .tl .tl-by b{color:#c0392b;font-weight:700}
+  .tl .tl-by.sys{opacity:.7;font-style:italic}
+  .tl .tl-by.sys b{color:var(--mut);font-weight:600;font-style:normal}
   .tag{font-size:10px;padding:1px 7px;border-radius:20px;background:#eef0f2;color:#374151}
   .tag.open{background:rgba(226,59,59,.14);color:#c0392b}
   .empty{color:#9ca3af;font-size:12px}
@@ -314,6 +319,7 @@
         <li>
           <span class="dot {% if e.open %}open{% endif %}"></span>
           <span class="nm">{{ e.step_name }}</span>
+          {% if e.moved_by %}<span class="tl-by{% if e.moved_by in ('operator','lsl_sync','sheet_ingest') or e.moved_by.startswith('auto:') %} sys{% endif %}">by <b>{{ e.moved_by }}</b></span>{% endif %}
           <span class="tm">{{ e.entered_at.strftime('%b %-d %H:%M') if e.entered_at else '' }}{% if e.hours is not none %} · {{ e.hours }}h{% endif %}</span>
           {% if e.open %}<span class="tag open">open</span>{% endif %}
         </li>
@@ -589,5 +595,6 @@ document.addEventListener('paste', function(e){
   }
 });
 </script>
+<script src="/static/recon_who.js?v=20260827a"></script>
 </body>
 </html>

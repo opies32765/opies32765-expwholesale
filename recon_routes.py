@@ -251,7 +251,41 @@ def _shipping_disp(u):
     return {'arranged': True, 'who': who, 'when': when, 'tip': tip}
 
 
+# ── RECON_WHO_2026_08_27 — who moved the car, without per-person logins ─────
+# recon_step_events.moved_by / recon_audit.actor have been written since day one,
+# but the single shared EW credential never sets session['username'], so this
+# fell through to 'operator' for all 2,408 human moves. Everyone still uses that
+# one login; static/recon_who.js asks each DEVICE once for a name and POSTs it to
+# /api/recon/who, which sets a year-long `ew_who` cookie that _actor() reads.
+#
+# Honor-system attribution for COORDINATION, not security — anyone can pick any
+# name. recon_actors upgrades into real accounts later if permissions are wanted.
+#
+# NOT enforced server-side on purpose: Anna (voice), lsl_sync, sheet_ingest and
+# auto:recon-home each write their own actor through other paths, and a "no
+# cookie, no move" rule here would break all four. The browser modal is the gate.
+WHO_COOKIE = 'ew_who'
+WHO_MAX_AGE = 60 * 60 * 24 * 365          # 1 year
+_WHO_OK_PUNCT = set(" .'-")
+
+
+def _who_clean(raw):
+    """A plain human name only: letters/digits/space/.'- and <= 40 chars."""
+    s = (raw or '').strip()[:40]
+    if not s or not all(c.isalnum() or c in _WHO_OK_PUNCT for c in s):
+        return ''
+    return s
+
+
 def _actor():
+    """Who is doing this. The device's picked name wins; the old 'operator'
+    fallback stays so nothing breaks before a name has been set."""
+    try:
+        who = _who_clean(request.cookies.get(WHO_COOKIE))
+        if who:
+            return who
+    except Exception:
+        pass
     try:
         return (session.get('username') or session.get('user')
                 or session.get('owner') or 'operator')
@@ -752,9 +786,19 @@ def board():
         steps = _steps(cur)
         cur.execute("""SELECT u.*, sd.code AS step_code, sd.name AS step_name,
                               sd.sort_order AS step_sort, sd.is_gate,
-                              sd.sla_hours, sd.sla_hours_exotic
+                              sd.sla_hours, sd.sla_hours_exotic, mv.moved_by
                          FROM recon_units u
                          LEFT JOIN recon_step_defs sd ON sd.id = u.current_step_id
+                         -- RECON_WHO_2026_08_27: who put this car in the step it
+                         -- is in now, so the board answers "who moved this?"
+                         -- without opening the car. ix_rse_open makes it ~5us/row.
+                         LEFT JOIN LATERAL (
+                               SELECT e.moved_by
+                                 FROM recon_step_events e
+                                WHERE e.unit_id = u.id AND e.exited_at IS NULL
+                                ORDER BY e.entered_at DESC
+                                LIMIT 1
+                         ) mv ON true
                         WHERE u.store_id=%s
                           AND u.status IN ('in_transit_stage0','in_recon','on_hold')
                         ORDER BY sd.sort_order NULLS FIRST, u.current_step_entered_at""",
@@ -1755,7 +1799,11 @@ def api_move(unit_id):
         try:
             ymm = ('%s %s %s' % (u.get('year') or '', u.get('make') or '',
                                  u.get('model') or '')).strip()
-            _recon_push('Recon update', '%s → %s' % (ymm or u.get('vin'), target['name']),
+            # RECON_WHO_2026_08_27: lead with the mover's name when we have a
+            # real one. 'operator' means nobody has picked yet -> old wording.
+            _by = '' if actor in ('operator', '') else (actor + ': ')
+            _recon_push('Recon update',
+                        '%s%s → %s' % (_by, ymm or u.get('vin'), target['name']),
                         {'reconKey': u.get('recon_token') or u.get('vin')})
         except Exception:
             pass
@@ -3000,3 +3048,70 @@ def api_unflag_damage(unit_id):
         db.rollback(); return jsonify({'error': str(e)}), 500
     finally:
         db.close()
+
+
+# ============================================================================
+# RECON_WHO_2026_08_27 — name picker endpoints (see _actor above)
+# ============================================================================
+def _actor_names(cur):
+    cur.execute("SELECT name FROM recon_actors WHERE active "
+                "ORDER BY sort_order, name")
+    return [r['name'] for r in cur.fetchall()]
+
+
+@bp.route('/api/recon/who', methods=['GET'])
+def api_who_get():
+    """Who is this device, and who can it choose from."""
+    try:
+        db = _db()
+        cur = db.cursor()
+        try:
+            names = _actor_names(cur)
+        finally:
+            db.close()
+    except Exception as e:
+        print('[recon-who] name list unavailable: %s' % e, flush=True)
+        names = []
+    return jsonify({'current': _who_clean(request.cookies.get(WHO_COOKIE)) or None,
+                    'names': names})
+
+
+@bp.route('/api/recon/who', methods=['POST'])
+def api_who_set():
+    """Remember this name on this device for a year."""
+    data = request.get_json(silent=True) or request.form
+    name = _who_clean(data.get('name'))
+    if not name:
+        return jsonify({'error': "that name has characters we can't use"}), 400
+    db = _db()
+    cur = db.cursor()
+    try:
+        # resolve case-insensitively so a free-typed "joe" joins Joe rather than
+        # becoming a second person in every report from here on
+        cur.execute("SELECT name FROM recon_actors WHERE lower(name)=lower(%s)",
+                    (name,))
+        row = cur.fetchone()
+        if row:
+            name = row['name']
+            # last_picked_at/pick_count are the only record that a PERSON set up
+            # a device — moved_by alone can't tell you Danny tagged his phone on
+            # Monday when he doesn't touch a car until Thursday.
+            cur.execute("UPDATE recon_actors SET active=true, last_picked_at=now(), "
+                        "pick_count=pick_count+1 WHERE lower(name)=lower(%s)", (name,))
+        else:
+            name = name[0].upper() + name[1:]
+            cur.execute("INSERT INTO recon_actors (name, sort_order, last_picked_at, "
+                        "pick_count) VALUES (%s, 500, now(), 1) "
+                        "ON CONFLICT DO NOTHING", (name,))
+        db.commit()
+        names = _actor_names(cur)
+    except Exception as e:
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.close()
+    session['username'] = name
+    resp = make_response(jsonify({'ok': True, 'current': name, 'names': names}))
+    resp.set_cookie(WHO_COOKIE, name, max_age=WHO_MAX_AGE, path='/',
+                    httponly=True, samesite='Lax', secure=bool(request.is_secure))
+    return resp

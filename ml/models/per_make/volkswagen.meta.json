@@ -1,9 +1,9 @@
 {
   "make_name": "VOLKSWAGEN",
-  "trained_at": "2026-08-26T08:30:19.408609Z",
-  "n_total": 353,
+  "trained_at": "2026-08-27T08:30:19.385233Z",
+  "n_total": 354,
   "n_train": 323,
-  "n_test": 30,
+  "n_test": 31,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 1175.0,
-    "mape_pct": 8.42,
-    "r2": 0.9005,
-    "within_5pct": 56.7,
-    "within_10pct": 76.7
+    "mae_dollars": 1367.0,
+    "mape_pct": 8.12,
+    "r2": 0.9283,
+    "within_5pct": 48.4,
+    "within_10pct": 71.0
   },
   "baseline_metrics": {
-    "mae_dollars": 1818.0,
-    "mape_pct": 10.51,
+    "mae_dollars": 2123.0,
+    "mape_pct": 10.93,
     "ratio": 1.0176
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.4396413564682007
+      "importance": 0.4615449607372284
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.12845270335674286
+      "importance": 0.12253407388925552
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.11899711191654205
+      "importance": 0.12195142358541489
     },
     {
       "name": "body_type_Convertible",
-      "importance": 0.03948620334267616
+      "importance": 0.05387080833315849
     },
     {
       "name": "original_msrp",
-      "importance": 0.02575661614537239
-    },
-    {
-      "name": "year",
-      "importance": 0.017061447724699974
+      "importance": 0.018730008974671364
     },
     {
       "name": "odometer",
-      "importance": 0.01446531806141138
+      "importance": 0.011557145975530148
     },
     {
-      "name": "supplier_name_Brickell Luxury Motors ",
-      "importance": 0.013543061912059784
+      "name": "model_name_Tiguan S Sport Utility Vehicle",
+      "importance": 0.010293685831129551
+    },
+    {
+      "name": "year",
+      "importance": 0.009935910813510418
     }
   ]
 }

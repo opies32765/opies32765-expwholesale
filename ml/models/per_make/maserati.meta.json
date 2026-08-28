@@ -1,6 +1,6 @@
 {
   "make_name": "MASERATI",
-  "trained_at": "2026-08-26T08:30:18.535984Z",
+  "trained_at": "2026-08-27T08:30:18.119809Z",
   "n_total": 499,
   "n_train": 469,
   "n_test": 30,
@@ -215,15 +215,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 4144.0,
-    "mape_pct": 10.41,
+    "mae_dollars": 4138.0,
+    "mape_pct": 10.39,
     "r2": 0.9747,
     "within_5pct": 43.3,
     "within_10pct": 63.3
   },
   "baseline_metrics": {
-    "mae_dollars": 6115.0,
-    "mape_pct": 13.67,
+    "mae_dollars": 6109.0,
+    "mape_pct": 13.64,
     "ratio": 0.9868
   },
   "top_features": [

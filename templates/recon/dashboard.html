@@ -65,6 +65,14 @@
   .daybox.warn{background:#fff3cd;color:#92660a}
   .daybox.breach{background:#fde2e2;color:#b91c1c}
   td.num{text-align:center;color:#374151;font-weight:600}
+  /* RECON_WHO_2026_08_27 — who put this car in the step it's in now.
+     People read as a solid badge; the automated writers (lsl_sync, sheet_ingest,
+     auto:*, Anna) stay plain grey so a sync is never mistaken for a person. */
+  td.movedby{white-space:nowrap}
+  .whoby{display:inline-block;padding:2px 8px;border-radius:11px;font-size:11.5px;
+         font-weight:700;background:#fdecec;color:#c0392b}
+  .whoby.sys{background:#f3f4f6;color:#9ca3af;font-weight:500;font-style:italic}
+  .whoby.none{background:none;color:#cbd5e1;font-weight:400;padding-left:0}
   td.notes{color:#4b5563;font-size:12px;max-width:360px;white-space:pre-wrap}
   .empty{text-align:center;color:#9ca3af;padding:30px}
   /* VIN under the stock #, status dots, search */
@@ -164,6 +172,10 @@
     td.status-cell{display:inline-block;width:auto;margin:7px 16px 0 0;text-align:left}
     td.status-cell::before{content:"Status ";color:#9ca3af;font-size:11px;vertical-align:middle}
     td.status-cell .dot{vertical-align:middle}
+    /* RECON_WHO_2026_08_27 — sits beside Status on the mobile card, not on its
+       own full-width line (table td goes display:block here). */
+    td.movedby{display:inline-block;width:auto;margin:7px 16px 0 0;text-align:left}
+    td.movedby::before{content:attr(data-label) " ";color:#9ca3af;font-size:11px;font-weight:400}
     body.show-austin td.austincol{display:inline-block;width:auto;margin:7px 16px 0 0;text-align:left}
     td.austincol::before{content:attr(data-label) " ";color:#9ca3af;font-size:11px;font-weight:400}
     .chip{font-size:11px;padding:4px 9px}
@@ -243,6 +255,7 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
     <table>
       <thead><tr>
         <th>Step</th><th>Stock #</th><th>Vehicle</th><th>Status</th>
+        <th>Moved&nbsp;By</th>
         <th class="austincol">Shipping&nbsp;Arranged</th>
         <th>Days In&nbsp;Step</th><th>Days Since Recon&nbsp;Began</th><th>Notes</th>
       </tr></thead>
@@ -253,13 +266,14 @@ try{var _s=document.getElementById('ew-app-simplify');if(_s&&_s.parentNode)_s.pa
           <td class="stock">{{ u.stock_no or '—' }}<span class="vin">{{ u.vin }}</span></td>
           <td class="veh"><b>{{ u.make or '' }} {{ u.model or '' }}</b>{% if u.needs_photos %} <span title="Needs photos on arrival">📷</span>{% endif %}{% if u.damage_flagged %} <span title="Unaccounted damage{% if u.damage_note %}: {{ u.damage_note }}{% endif %}" style="cursor:help">🚩</span>{% endif %}<!--DAMAGE_BADGE_2026_07_07--><div class="sub">{{ u.year or '' }} {{ u.exterior_color or '' }}<span class="fromto">{% if u.bought_from %} · from {{ u.bought_from }}{% endif %}{% if u.sold_to %} · → {{ u.sold_to }}{% endif %}</span></div></td>
           <td class="status-cell" data-label="Status:"><span class="dot" style="background:{{ u.dot }}" title="{{ u.step_name }}"></span><select class="qstat" data-sold="{{ u.sold_to or '' }}" data-cur="{{ u.step_code }}" data-veh="{{ u.year or '' }} {{ u.make or '' }} {{ u.model or '' }}" onclick="event.stopPropagation()" onchange="quickMove({{ u.id }}, this.value, this)">{% for s in steps %}<option value="{{ s.code }}"{% if s.code==u.step_code %} selected{% endif %}>{{ s.name }}</option>{% endfor %}</select></td>
+          <td class="movedby" data-label="Moved by:">{% if u.moved_by %}<span class="whoby{% if u.moved_by in ('operator','lsl_sync','sheet_ingest') or u.moved_by.startswith('auto:') or u.moved_by.startswith('Anna') %} sys{% endif %}">{{ u.moved_by }}</span>{% else %}<span class="whoby none">—</span>{% endif %}</td>
           <td class="austincol" data-label="Shipping:">{% if u.ship.arranged %}<span class="achk" title="{{ u.ship.tip }}">✓</span><span class="shipwho">{{ u.ship.who }}</span>{% else %}<span class="ax" title="Shipping not arranged yet">✕</span>{% endif %}</td>
           <td class="num" data-label="In step:"><span class="daybox {{ u.sla_state }}">{{ u.d_step if u.d_step is not none else 0 }}</span></td>
           <td class="num" data-label="Recon began:">{{ u.d_recon if u.d_recon is not none else '—' }}</td>
           <td class="notes">{{ u.notes or '' }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="8" class="empty">No vehicles{% if sel %} in this step{% endif %} yet. Click <b>+ Add Vehicle</b> to put one in recon.</td></tr>
+        <tr><td colspan="9" class="empty">No vehicles{% if sel %} in this step{% endif %} yet. Click <b>+ Add Vehicle</b> to put one in recon.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -638,5 +652,6 @@ setInterval(poll, 5000); poll();
 })();
 </script>
 
+<script src="/static/recon_who.js?v=20260827a"></script>
 </body>
 </html>
