@@ -1,9 +1,9 @@
 {
   "make_name": "CHEVROLET",
-  "trained_at": "2026-08-27T08:30:10.136741Z",
-  "n_total": 2393,
+  "trained_at": "2026-08-28T08:30:09.010921Z",
+  "n_total": 2394,
   "n_train": 2123,
-  "n_test": 270,
+  "n_test": 271,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -227,49 +227,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3312.0,
-    "mape_pct": 6.64,
-    "r2": 0.8679,
-    "within_5pct": 50.7,
-    "within_10pct": 80.0
+    "mae_dollars": 3299.0,
+    "mape_pct": 6.65,
+    "r2": 0.868,
+    "within_5pct": 52.4,
+    "within_10pct": 79.7
   },
   "baseline_metrics": {
-    "mae_dollars": 3728.0,
-    "mape_pct": 8.37,
+    "mae_dollars": 3741.0,
+    "mape_pct": 8.43,
     "ratio": 1.048
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.38126522302627563
+      "importance": 0.37324216961860657
     },
     {
       "name": "market_asking_price",
-      "importance": 0.27650099992752075
+      "importance": 0.2716080844402313
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.2521101236343384
+      "importance": 0.2655869722366333
     },
     {
-      "name": "supplier_name_Nissan Of Orange Park",
-      "importance": 0.0036389529705047607
+      "name": "model_name_Camaro 2SS Coupe",
+      "importance": 0.0031471350230276585
     },
     {
       "name": "supplier_name_Classic Cars Of Palm Beach Llc",
-      "importance": 0.0031301085837185383
+      "importance": 0.003143152454867959
     },
     {
       "name": "sold_year",
-      "importance": 0.0031151652801781893
+      "importance": 0.0030880942940711975
     },
     {
       "name": "model_name_Tahoe Premier Sport Utility Vehicle",
-      "importance": 0.0028654630295932293
+      "importance": 0.0030688466504216194
     },
     {
-      "name": "supplier_name_Ultimo Northbrook",
-      "importance": 0.0028490859549492598
+      "name": "supplier_name_Nissan Of Orange Park",
+      "importance": 0.002774610184133053
     }
   ]
 }

@@ -2624,6 +2624,18 @@ def _bol_extract(file_bytes, content_type):
     elif 'image' in ct:
         imgs.append((file_bytes, ct if '/' in ct else 'image/jpeg'))
     vins, stocks, label = set(), set(), ''
+    # BOL_GROUNDED_VIN_2026_08_28 - the text layer is the document's own words, so read it
+    # in CODE rather than asking the model to read it back to us. Anything found here (or
+    # echoed back by the model and found verbatim in here) is GROUNDED: it provably came
+    # off the document, so it can be shown even when it matches no recon unit.
+    grounded, gstocks = set(), set()
+    _dtu = (doctext or '').upper()
+    _dtu_ns = _bre.sub(r'\s+', '', _dtu)
+    for _m in _bre.findall(r'[A-HJ-NPR-Z0-9]{17}', _dtu):
+        if _vin_ok(_m):
+            vins.add(_m); grounded.add(_m)
+    for _m in _bre.findall(r'\bLL\d{3,6}\b', _dtu):
+        stocks.add(_m); gstocks.add(_m)
     _p = prompt
     if (doctext or '').strip():
         _p = (prompt + '  ===== DOCUMENT TEXT (authoritative). The exact text embedded in '
@@ -2658,13 +2670,15 @@ def _bol_extract(file_bytes, content_type):
             # Only look INSIDE the (possibly unterminated) "vins":[ ... ] array.
             _seg = _bre.search(r'"vins"\s*:\s*\[(.*?)(?:\]|$)', out, _bre.S)
             if _seg:
-                cand = _bre.findall(r'[A-HJ-NPR-Z0-9]{17}', _seg.group(1).upper())
+                cand = _bre.findall(r'\b[A-HJ-NPR-Z0-9]{17}\b', _seg.group(1).upper())
                 if cand:
                     print('[bol] salvaged %d VIN(s) from unterminated JSON' % len(cand), flush=True)
         for v in cand:
             v = str(v).strip().upper().replace(' ', '')
             if _vin_ok(v):
                 vins.add(v)
+                if v in _dtu or v in _dtu_ns:
+                    grounded.add(v)          # BOL_GROUNDED_VIN_2026_08_28
             elif _VINRE.match(v):
                 # well-formed but fails the NA check digit (some imports do).
                 # Do NOT fabricate a correction — surface it instead.
@@ -2675,7 +2689,8 @@ def _bol_extract(file_bytes, content_type):
                 stocks.add(s)
         if not label and (d or {}).get('label'):
             label = str(d['label']).strip()
-    return {'vins': sorted(vins), 'stocks': sorted(stocks), 'label': label}
+    return {'vins': sorted(vins), 'stocks': sorted(stocks), 'label': label,
+            'grounded': sorted(grounded), 'gstocks': sorted(gstocks)}
 
 
 def _bol_match_unit(cur, vins, stocks):
@@ -2796,13 +2811,19 @@ def api_inbound_email():
             saved.append({'filename': fn, 'path': sp, 'content_type': ct})
         except Exception:
             pass
-    # VIN/stock from body (regex) + each attachment (9B)
+    # VIN/stock from subject + body (regex) + each attachment (9B)
+    # BOL_GROUNDED_VIN_2026_08_28 - the SUBJECT was never scanned. Carriers and our own
+    # people forward BOLs titled with the bare VIN ("SJAAM2ZV4NC016602 bol"), and that one
+    # sat unmatched for a week beside its own recon unit. Subject and body are the sender's
+    # own words, so hits there are grounded by definition.
     vins, stocks, label = set(), set(), ''
-    for m in _bre.findall(r'[A-HJ-NPR-Z0-9]{17}', (body_text or '').upper()):
+    grounded, gstocks = set(), set()
+    _hdrtext = ((subject or '') + ' ' + (body_text or '')).upper()
+    for m in _bre.findall(r'[A-HJ-NPR-Z0-9]{17}', _hdrtext):
         if _vin_ok(m):
-            vins.add(m)
-    for m in _bre.findall(r'\bLL\d{3,6}\b', (body_text or '').upper()):
-        stocks.add(m)
+            vins.add(m); grounded.add(m)
+    for m in _bre.findall(r'\bLL\d{3,6}\b', _hdrtext):
+        stocks.add(m); gstocks.add(m)
     # BOL_PDF_FIRST_2026_08_07 — carrier emails often attach BOTH a screenshot
     # (image.png, no text layer -> the 9B degenerates and invents a vehicle) and the
     # real PDF. Label/VIN were taken first-wins, so the raster's fabrication beat the
@@ -2812,6 +2833,8 @@ def api_inbound_email():
         ex = _bol_extract(data, ct)
         vins.update(ex['vins'])
         stocks.update(ex['stocks'])
+        grounded.update(ex.get('grounded') or [])       # BOL_GROUNDED_VIN_2026_08_28
+        gstocks.update(ex.get('gstocks') or [])
         if not label and ex['label']:
             label = ex['label']
     # RECON_BOL_CONTEXT_2026_06_29 — link-only BOLs (Super Dispatch etc.) carry no
@@ -2848,8 +2871,21 @@ def api_inbound_email():
                      # 2FRDKGVX9ZDAR62PU...). If it grounds to no unit, do not show it:
                      # a fabricated VIN in the inbox sends someone chasing a car that
                      # does not exist. Matched rows take the VIN from the unit itself.
-                     (unit['vin'] if unit else None),
-                     ((sorted(stocks)[0] if stocks else None) if unit else None),
+                     # BOL_GROUNDED_VIN_2026_08_28 narrows BOL_NO_UNGROUNDED_2026_08_07.
+                     # That guard blanked EVERY unmatched VIN to hide the 9B's fabrications
+                     # (1C4RJXSJ1RW101234 off a raster screenshot - still reproducible).
+                     # But it blanked real VINs lifted verbatim off a PDF text layer or a
+                     # subject line too, so a correctly-read BOL displayed "VIN: -" and
+                     # looked un-ingested (load 13599205, a 2015 Ferrari F12 whose VIN we
+                     # read perfectly). A fabrication cannot be corroborated by a text layer
+                     # it never appeared in, so show grounded values only.
+                     (unit['vin'] if unit else (sorted(grounded)[0] if grounded else None)),
+                     # a MATCHED row's stock comes from the unit itself, never from the
+                     # model: BOL 111 matched a Bentley Bentayga off its subject-line VIN
+                     # while the raster screenshot had invented "2024 RAM 1500" / stock
+                     # 101234, and that invented stock got filed on the Bentley.
+                     ((unit.get('stock_no') if unit else None)
+                      or (sorted(gstocks)[0] if gstocks else None)),
                      label[:200], (body_text or '')[:4000], len(saved),
                      _bos.path.join(bdir, 'raw.eml'), _bjson.dumps(saved)))
         bol_id = cur.fetchone()['id']

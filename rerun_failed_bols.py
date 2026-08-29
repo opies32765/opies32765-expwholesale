@@ -26,10 +26,15 @@ print('queued failures: %d   mode=%s\n' % (len(rows), 'APPLY' if APPLY else 'DRY
 
 fixed = still = 0
 for r in rows:
+    # BOL_GROUNDED_VIN_2026_08_28 — mirror the route: scan the SUBJECT too, and track
+    # which VINs/stocks are GROUNDED (found verbatim in the sender's own text or in the
+    # document's text layer) so an unmatched row can still display what we actually read.
     vins, stocks, label = set(), set(), ''
-    for m in re.findall(r'[A-HJ-NPR-Z0-9]{17}', (r['body_text'] or '').upper()):
-        if R._vin_ok(m): vins.add(m)
-    for m in re.findall(r'\bLL\d{3,6}\b', (r['body_text'] or '').upper()): stocks.add(m)
+    grounded, gstocks = set(), set()
+    _hdr = ((r['subject'] or '') + ' ' + (r['body_text'] or '')).upper()
+    for m in re.findall(r'[A-HJ-NPR-Z0-9]{17}', _hdr):
+        if R._vin_ok(m): vins.add(m); grounded.add(m)
+    for m in re.findall(r'\bLL\d{3,6}\b', _hdr): stocks.add(m); gstocks.add(m)
     saved = sorted(r['attachments'] or [],
                    key=lambda a: 0 if 'pdf' in (a.get('content_type') or '').lower() else 1)
     for s in saved:
@@ -41,6 +46,7 @@ for r in rows:
         except Exception as e:
             print('  id=%-3s EXTRACT ERR %s' % (r['id'], e)); continue
         vins.update(ex['vins']); stocks.update(ex['stocks'])
+        grounded.update(ex.get('grounded') or []); gstocks.update(ex.get('gstocks') or [])
         if not label and ex['label']: label = ex['label']
     unit = R._bol_match_unit(cur, sorted(vins), sorted(stocks))
     ymm = False
@@ -52,7 +58,8 @@ for r in rows:
             print('  (YMM ambiguous: %d candidates for %r)' % (_nc, label))
     status = 'matched' if unit else ('needs_match' if (vins or stocks) else 'no_vin')
     tag = 'MATCHED%s -> unit %s %s' % (' by YMM' if ymm else '', unit['id'], unit.get('stock_no') or '') if unit \
-          else ('vins=%s stocks=%s' % (sorted(vins), sorted(stocks)) if (vins or stocks) else 'still nothing')
+          else ('vins=%s grounded=%s stocks=%s' % (sorted(vins), sorted(grounded), sorted(stocks))
+                if (vins or stocks) else 'still nothing')
     print('  id=%-3s %-12s -> %-12s %s' % (r['id'], r['status'], status, tag))
     if unit: fixed += 1
     else: still += 1
@@ -62,10 +69,13 @@ for r in rows:
                         extracted_label=COALESCE(NULLIF(%s,''), extracted_label)
                        WHERE id=%s""",
                     (status, (unit['id'] if unit else None),
-                     # only persist a VIN we could GROUND to a real unit — the 9B
-                     # fabricates check-digit-valid VINs (2FRDKGVX9ZDAR62PU etc.)
-                     (sorted(vins)[0] if (vins and unit) else None),
-                     (sorted(stocks)[0] if (stocks and unit) else None), label[:200], r['id']))
+                     # BOL_GROUNDED_VIN_2026_08_28 — persist the unit's VIN when matched,
+                     # otherwise a DOCUMENT-GROUNDED one. The 9B fabricates check-digit-valid
+                     # VINs (2FRDKGVX9ZDAR62PU etc.), but a fabrication never appears in the
+                     # text layer, so grounding is what separates the two — not the match.
+                     ((unit['vin'] if unit else None) or (sorted(grounded)[0] if grounded else None)),
+                     ((unit.get('stock_no') if unit else None)
+                      or (sorted(gstocks)[0] if gstocks else None)), label[:200], r['id']))
         if unit:
             cur.execute("SELECT 1 FROM recon_photos WHERE url LIKE %s LIMIT 1",
                         ('/api/recon/bol/%d/doc/%%' % r['id'],))
