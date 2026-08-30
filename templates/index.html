@@ -686,7 +686,13 @@ function renderRow(b, pc, fp, activeWorker) {
   // RED 'INVALID VIN' badge when vin_invalid_reason is set (ISO 3779 check
   // digit / illegal char / wrong length). Worker eligibility query excludes
   // these so they stop spinning the worker pool. The dashboard shows WHY.
-  const invBadge = b.vin_invalid_reason
+  // BADGE_SETTLE_2026_08_30: suppress the badge until the bid has settled (2 min). A fresh bid can
+  // carry a bad first OCR read for seconds before a later layer lands a valid VIN.
+  // Fails OPEN when created_at is absent -- never hide a genuinely bad VIN.
+  const _vinSettled = b.created_at
+    ? ((Date.now() - new Date(b.created_at).getTime()) > 120000)
+    : true;
+  const invBadge = (b.vin_invalid_reason && _vinSettled)
     ? `<span title="VIN failed structural check: ${b.vin_invalid_reason}. Worker pool will not pick this up." style="display:inline-block;margin-left:6px;font-size:9px;font-weight:800;color:#fca5a5;background:rgba(220,38,38,.18);border:1px solid rgba(220,38,38,.55);border-radius:3px;padding:1px 6px;vertical-align:middle;letter-spacing:.4px;text-transform:uppercase">⚠ INVALID VIN</span>`
     : '';
   // BADGE_NEEDS_VERIFY_JS_2026_05_15: yellow ⚠ VERIFY badge when bid has

@@ -1089,6 +1089,55 @@ def _rep_tag_from_body(raw):
 
 
 
+# BADGE_SETTLE_2026_08_30: the dashboard must not flash "INVALID VIN" while OCR/enrichment are still
+# running. A bid can legitimately carry a bad first read for a few seconds before a later
+# layer lands a valid VIN (bid 6536). Only surface the badge once the bid has settled.
+# Fails OPEN (shows the badge) if created_at is missing -- never hide a real bad VIN.
+def vin_badge_ready(bid, settle_seconds=120):
+    try:
+        if not bid:
+            return False
+        _r = bid.get("vin_invalid_reason") if hasattr(bid, "get") else None
+        if not _r:
+            return False
+        _ts = bid.get("created_at") if hasattr(bid, "get") else None
+        if not _ts:
+            return True
+        from datetime import datetime, timezone
+        if getattr(_ts, "tzinfo", None) is None:
+            _ts = _ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - _ts).total_seconds() > settle_seconds
+    except Exception:
+        return True
+
+
+def vin_missing_ready(bid, settle_seconds=120):
+    """BADGE_SETTLE_NOVIN_2026_08_30: only shout NOT ENRICHABLE once OCR has had time to land a VIN.
+
+    A photo-first bid legitimately has no VIN for ~30-60s while extract_vin_from_file runs
+    (bid 6537: 39s). Showing a red 'not enrichable' badge during that window is noise.
+    Fails OPEN when created_at is missing -- never hide a genuinely VIN-less bid.
+    """
+    try:
+        if not bid:
+            return False
+        if (bid.get("vin") if hasattr(bid, "get") else None):
+            return False
+        _ts = bid.get("created_at") if hasattr(bid, "get") else None
+        if not _ts:
+            return True
+        from datetime import datetime, timezone
+        if getattr(_ts, "tzinfo", None) is None:
+            _ts = _ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - _ts).total_seconds() > settle_seconds
+    except Exception:
+        return True
+
+
+app.jinja_env.globals['vin_badge_ready'] = vin_badge_ready
+app.jinja_env.globals['vin_missing_ready'] = vin_missing_ready
+
+
 def vin_check_digit_valid(vin):
     """Validate VIN check digit (9th position) per ISO 3779 algorithm.
     Returns True if the VIN math works out. Use this to catch misread VINs."""
@@ -2359,8 +2408,17 @@ def extract_vin_from_file(file_bytes, media_type='image/jpeg'):
         # Retry didn't help. Persist best-guess with the same caveat as before;
         # the canonicalize re-trigger downstream will stamp vin_invalid_reason
         # so workers don't spin on it.
-        print(f'[OCR] All layers + retry failed check digit; returning Pro best-guess (vin_invalid_reason will land): {candidates[0]}', flush=True)
-        return candidates[0]
+        # NO_GUESS_VIN_2026_08_30 (operator: "i dont want the system to guess").
+        # Previously returned candidates[0] -- a check-digit-INVALID VIN -- and leaned on
+        # vin_invalid_reason being stamped downstream. That put wrong VINs on live bids
+        # (bid 6533 got 1G1YC2D41R5502910 off a window sticker containing no VIN at all)
+        # and corrupted bid_photos.vin_extracted, which is the gold-VIN training label.
+        # Both brains fabricate 17-char VINs from blank image regions, so a candidate that
+        # fails the check digit is evidence of nothing. Measured: 24 such bids ever,
+        # 0 purchased. No VIN beats a wrong VIN.
+        print(f'[OCR] All layers + retry failed check digit; DROPPING guess '
+              f'(NO_GUESS_VIN_2026_08_30): {candidates[0]}', flush=True)
+        return None
     return None
 
 
@@ -9910,7 +9968,10 @@ def _run_assessment(bid_id):
             # on every assessment (root cause of the 2026-06-15 lock storm).
 
             if buy_price:
-                cur.execute("UPDATE bids SET ai_assessment=%s, ai_assessed_at=NOW(), ai_price=%s WHERE id=%s",
+                # ASSESS_ATTEMPT_CAP_RESET_2026_08_30: a successful assessment clears the failure
+                # counter, so the cap bounds CONSECUTIVE failures rather than lifetime
+                # attempts and can never block a bid that is working.
+                cur.execute("UPDATE bids SET ai_assessment=%s, ai_assessed_at=NOW(), ai_price=%s, ai_assess_attempts=0 WHERE id=%s",
                             (assessment, buy_price, bid_id))
             else:
                 cur.execute("UPDATE bids SET ai_assessment=%s, ai_assessed_at=NOW() WHERE id=%s",
@@ -10157,10 +10218,21 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
         cur = db.cursor()
         cur.execute("SELECT ai_assessed_at, ai_assessment, "
                     "needs_verification_at, needs_verification_cleared_at, "
-                    "needs_verification_reason "
+                    "needs_verification_reason, "
+                    "COALESCE(ai_assess_attempts,0) AS ai_assess_attempts "
                     "FROM bids WHERE id=%s", (bid_id,))
         row = cur.fetchone()
         if not row:
+            db.close()
+            return False
+        # ASSESS_ATTEMPT_CAP_2026_08_30: give up after 5 failed assessment attempts. Without this a bid that can
+        # never produce a price is re-fired forever (bid 5102: 10,018 rounds, no price).
+        # ONLY the assessment is capped -- every enrichment leg still runs.
+        _att = int(row.get("ai_assess_attempts") or 0)
+        if _att >= 5:
+            print(f"[assess-cap] bid={bid_id} src={source} at {_att} attempts "
+                  f"(cap 5) - not re-firing. Zero ai_assess_attempts to retry.",
+                  flush=True)
             db.close()
             return False
         # If already claimed or assessed, bail
@@ -10243,7 +10315,12 @@ def _maybe_fire_assessment(bid_id, require_all=True, source='unknown'):
         # gate is satisfied (not the vauto-only fallback-timer path).
         _full_ready = bool(has_vauto and has_accu and rb_done and mh_done and has_ipkt)
         cur.execute("""
+            -- ASSESS_ATTEMPT_CAP_INCR_2026_08_30: count every genuine attempt here, at
+            -- the atomic claim, so exactly one increment happens per attempt even when
+            -- several gunicorn workers race. _maybe_fire_assessment refuses to fire once
+            -- this passes the cap, which is what stops a price-less bid re-firing forever.
             UPDATE bids SET ai_assessed_at=NOW(),
+                ai_assess_attempts = COALESCE(ai_assess_attempts,0) + 1,
                 all_enriched_at = CASE WHEN %s THEN COALESCE(all_enriched_at, NOW())
                                        ELSE all_enriched_at END
             WHERE id=%s AND ai_assessed_at IS NULL
