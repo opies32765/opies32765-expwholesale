@@ -1,9 +1,9 @@
 {
   "make_name": "LEXUS",
-  "trained_at": "2026-08-28T08:30:11.556878Z",
-  "n_total": 1205,
+  "trained_at": "2026-08-29T08:30:14.791892Z",
+  "n_total": 1206,
   "n_train": 1092,
-  "n_test": 113,
+  "n_test": 114,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3886.0,
-    "mape_pct": 7.45,
-    "r2": 0.9513,
-    "within_5pct": 38.1,
-    "within_10pct": 73.5
+    "mae_dollars": 3858.0,
+    "mape_pct": 7.42,
+    "r2": 0.952,
+    "within_5pct": 38.6,
+    "within_10pct": 73.7
   },
   "baseline_metrics": {
-    "mae_dollars": 4254.0,
+    "mae_dollars": 4234.0,
     "mape_pct": 9.53,
     "ratio": 1.1085
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.4927884638309479
+      "importance": 0.4878880977630615
     },
     {
       "name": "market_asking_price",
-      "importance": 0.2423246055841446
+      "importance": 0.2488006353378296
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.052671175450086594
+      "importance": 0.04705474525690079
     },
     {
       "name": "original_msrp",
-      "importance": 0.03099784255027771
+      "importance": 0.029340224340558052
     },
     {
       "name": "supplier_name_Thomasville Toyota",
-      "importance": 0.012455642223358154
+      "importance": 0.012907706201076508
     },
     {
       "name": "model_name_RX 350",
-      "importance": 0.00961755309253931
+      "importance": 0.009783084504306316
     },
     {
       "name": "odometer",
-      "importance": 0.008204872719943523
+      "importance": 0.007923389784991741
     },
     {
       "name": "year",
-      "importance": 0.008032796904444695
+      "importance": 0.007497530430555344
     }
   ]
 }
