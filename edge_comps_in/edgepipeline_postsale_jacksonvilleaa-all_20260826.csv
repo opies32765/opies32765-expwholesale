@@ -1,0 +1,5 @@
+Picture Count,Run Number,Stock #,Year,Make,Model,Style,Color,Odometer,CR,Grade,Sale Date,Lane,Price
+15,DH-0001,705229,2025,Chevrolet,Trax,2RS,GRAY,41247,No,"",2026-08-26,DH,17500.0
+15,V-0002,705263,2019,Ford,Explorer,Base,BLACK,113013,No,"",2026-08-26,V,4900.0
+14,DH-0002,705342,1995,Ford,F150,"Reg Cab 116.8"" WB",GREEN,180587,No,"",2026-08-26,DH,3000.0
+0,V-0001,705372,2023,Tesla,Model Y,Standard Range,GRAY,22047,No,"",2026-08-26,V,34000.0

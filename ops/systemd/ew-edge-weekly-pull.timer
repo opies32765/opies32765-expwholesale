@@ -1,0 +1,17 @@
+[Unit]
+# Saturday morning: most Florida sales run Mon-Fri, so Saturday catches the
+# whole week before EDGE's ~6-week retention window rolls anything off.
+# Server TZ is America/New_York, so OnCalendar is local time.
+Description=Weekly Saturday EDGE Pipeline comps pull for EW auction_comps
+
+[Timer]
+OnCalendar=Sat *-*-* 07:30:00
+# If C1 was down on Saturday, run as soon as it is back — a missed week is
+# permanently lost data, not just a late report.
+Persistent=true
+RandomizedDelaySec=15min
+AccuracySec=1min
+Unit=ew-edge-weekly-pull.service
+
+[Install]
+WantedBy=timers.target

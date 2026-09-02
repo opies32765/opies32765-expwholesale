@@ -4203,8 +4203,12 @@ def dashboard():
     # PERF_DASH_CACHE_2026_06_24: serve a recent rendered copy (10s) keyed by the
     # status/rep filters so "Back to bids" / repeat loads are near-instant.
     # Safe to share: no CSRF + no per-user content on this page.
+    # BID_SEARCH_SERVERSIDE_2026_09_02: a search is never served from - nor written
+    # to - the 10s render cache. Keying the cache by q would just fill it with one
+    # entry per debounced keystroke and evict the entries that actually get reused.
+    search_q = (request.args.get('q') or '').strip()[:120]
     _dck = 'dashhtml:' + request.args.get('status', 'all') + ':' + request.args.get('rep', 'all')
-    _dcached = _dash_cache_get(_dck, 10)
+    _dcached = None if search_q else _dash_cache_get(_dck, 10)
     if _dcached is not None:
         return _dcached
     db = get_db()
@@ -4289,6 +4293,49 @@ def dashboard():
 
     # TL_AI_COMPARE_2026_07_02: comparison bids never surface on the dashboard
     conditions.append("COALESCE(b.creation_source,'') != 'tl_ai_compare'")
+
+    # BID_SEARCH_SERVERSIDE_2026_09_02: the dashboard search box used to be pure
+    # client-side DOM filtering over whatever the LIMIT had already handed the
+    # browser. With 6,000+ bids in the table that meant the tabs advertised the
+    # whole history while the box could only ever match the newest 100 rows.
+    # The query now runs in Postgres.
+    #
+    # Tokenised: every whitespace-separated token must match SOMEWHERE on the row
+    # (AND across tokens, OR across fields), so "2020 m2" and "smith tahoe" work
+    # without depending on column order. Parameterised only - no user text is
+    # ever interpolated into the SQL string. Composes with status/rep because it
+    # appends to the same `conditions`/`params` pair they use.
+    _search_cols = (
+        "b.vin",
+        "c.name",
+        "c.company",
+        "CONCAT_WS(' ', b.year::text, b.make, b.model, b.trim, yc.model, yc.trim)",
+    )
+    for _tok in (search_q.split()[:6] if search_q else []):
+        _ors, _tp = [], []
+        for _col in _search_cols:
+            _ors.append(_col + " ILIKE %s")
+            _tp.append('%' + _tok + '%')
+        _digits = ''.join(_ch for _ch in _tok if _ch.isdigit())
+        # Phone is matched digits-to-digits so (954) 555-1234, 954-555-1234 and
+        # 9545551234 all hit the same typed fragment. Gated to tokens that are
+        # ONLY digits/separators and carry 3+ of them: measured on the live table,
+        # a token like "m2" yields the digit "2", and '%2%' matched 181 of 6,064
+        # phones - i.e. the phone leg alone turned a vehicle search into noise.
+        if len(_digits) >= 3 and not any(_ch.isalpha() for _ch in _tok):
+            _ors.append("regexp_replace(COALESCE(b.phone,''), '[^0-9]', '', 'g') LIKE %s")
+            _tp.append('%' + _digits + '%')
+        if _tok.isdigit() and len(_tok) <= 9:
+            _ors.append("b.id = %s")   # bid number is an exact match, never a substring
+            _tp.append(int(_tok))
+        conditions.append('(' + ' OR '.join(_ors) + ')')
+        params.extend(_tp)
+
+    # BID_SEARCH_SERVERSIDE_2026_09_02: a search must not be truncated by the
+    # listing cap, but everything downstream of this query is per-row work
+    # (opportunity math, buy-profile matching, the vetted/no-book bulks), so the
+    # search cap stays bounded rather than unlimited.
+    _bid_limit = 300 if search_q else 100
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     q = """
         SELECT b.*, c.name as contact_name, c.company as contact_company,
@@ -4308,9 +4355,9 @@ def dashboard():
         LEFT JOIN dealerclub_lots dl ON dl.bid_id = b.id
         LEFT JOIN ymmt_catalog yc ON yc.id = b.ymmt_id
         {where}
-        ORDER BY b.created_at DESC LIMIT 100
+        ORDER BY b.created_at DESC LIMIT {limit}
     """
-    cur.execute(q.format(where=where), params)
+    cur.execute(q.format(where=where, limit=_bid_limit), params)
     bids = list(cur.fetchall())
 
     # Compute opportunity for each DealerClub-sourced bid so the template
@@ -4506,6 +4553,7 @@ def dashboard():
                            dp_vetted_phones=dp_vetted_phones,
                            no_book_data=no_book_data,
                            status_filter=status_filter, rep_filter=rep_filter,
+                           search_q=search_q,  # BID_SEARCH_SERVERSIDE_2026_09_02
                            reps=reps, photo_counts=photo_counts,
                            first_photos=first_photos,
                            vauto_done=vauto_done,
@@ -4516,7 +4564,9 @@ def dashboard():
                            time_ago=time_ago,
                            network_claims=network_claims,
                            network_claims_by_bid=network_claims_by_bid)
-    _dash_cache_set(_dck, _dhtml)
+    # BID_SEARCH_SERVERSIDE_2026_09_02: never cache a search render
+    if not search_q:
+        _dash_cache_set(_dck, _dhtml)
     return _dhtml
 
 
@@ -5326,7 +5376,17 @@ def bid_detail(bid_id):
 
     # DP_VETTED_ON_BIDS_2026_07_29 - who is this dealer, for Joe/Todd/Gregg.
     dp_vetted = _dp_vetted_dealer(bid)
+    # AUCTION_COMPS_CARD_2026_08_29: Edge Pipeline like-car comps. This must NEVER gate or
+    # delay the listing -- for_bid() swallows every exception and returns an
+    # empty dict, same rule as LISTING_NEVER_WAITS_ON_ASSESSMENT_2026_06_18.
+    try:
+        from comps_lookup import for_bid as _ac_for_bid
+        auction_comps = _ac_for_bid(bid)
+    except Exception as _ace:
+        print('[auction-comps] bid=%s err=%s' % (bid_id, _ace), flush=True)
+        auction_comps = {'sold': [], 'avail': [], 'ns_rate': None, 'ok': False}
     _rendered = render_template('bid.html', bid=bid, photos=photos, show_sources=show_sources,
+                                auction_comps=auction_comps,
                                 dp_vetted=dp_vetted,
                                 messages=messages, valuations=valuations,
                                 vauto_data=vauto_data,

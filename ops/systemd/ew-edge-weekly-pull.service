@@ -1,0 +1,30 @@
+[Unit]
+# EDGE_WEEKLY_PULL_2026_09_02 — weekly refresh of auction_comps from EDGE
+# Pipeline. APPEND-ONLY: the script's own DB connection is read-only; the
+# only writer is load_comps.py's idempotent upsert.
+#
+# NOT installed/enabled by default. To install (operator):
+#   cp /opt/expwholesale/ops/systemd/ew-edge-weekly-pull.{service,timer} /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now ew-edge-weekly-pull.timer
+# Requires the cookie jar first — see the README block in edge_weekly_pull.py.
+#
+# Deliberately NO ConditionPathExists= on the cookie jar: a missing jar must
+# fail LOUDLY (exit 2), not be silently skipped. A skipped week is lost data.
+Description=EW weekly EDGE Pipeline comps pull (append-only)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/expwholesale
+# No EnvironmentFile on purpose: the script needs only DATABASE_URL, which
+# load_comps.py already reads out of /etc/default/expwholesale-mcp itself.
+# Loading that file here would hand the job Twilio/MCP tokens it never uses.
+ExecStart=/usr/bin/python3 /opt/expwholesale/edge_weekly_pull.py
+# No StandardOutput=append: the script writes its own
+# /opt/expwholesale/logs/edge_weekly_pull.log; redirecting stdout there too
+# would duplicate every line. stdout/stderr go to the journal
+# (journalctl -u ew-edge-weekly-pull.service).
+# Paced at 4-6s/request; a first run that backfills ~6 weeks can take ~20 min.
+TimeoutStartSec=3h
+Nice=10

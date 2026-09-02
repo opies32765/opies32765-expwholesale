@@ -481,17 +481,19 @@ setInterval(() => {
 </div>
 
 <div class="mobile-search-row">
-  <input type="search" class="mobile-search-input" id="mobile-search" placeholder="Search bid #, VIN, contact, phone…" autocomplete="off" autocapitalize="none" spellcheck="false">
+  <input type="search" class="mobile-search-input" id="mobile-search" placeholder="Search bid #, VIN, contact, phone…" value="{{ search_q if search_q is defined else '' }}" autocomplete="off" autocapitalize="none" spellcheck="false">
 </div>
+{# BID_SEARCH_SERVERSIDE_2026_09_02: carry an active search across the status tabs #}
+{% set _qs = ('&q=' ~ (search_q|urlencode)) if (search_q is defined and search_q) else '' %}
 <div class="filters">
   <span class="filter-label">Status</span>
-  <a href="/?status=all&rep={{ rep_filter }}" class="filter-btn {% if status_filter=='all' %}active{% endif %}">All <span class="filter-count" data-status="total">{{ stats.total }}</span></a>
-  <a href="/?status=today&rep={{ rep_filter }}" class="filter-btn {% if status_filter=='today' %}active{% endif %}" style="{% if status_filter=='today' %}background:rgba(255,255,255,.1);border-color:#94a3b8;color:#f1f5f9{% endif %}">Today <span class="filter-count" data-status="today">{{ stats.today }}</span></a>
-  <a href="/?status=new&rep={{ rep_filter }}" class="filter-btn {% if status_filter=='new' %}active{% endif %}">New <span class="filter-count" data-status="new">{{ stats.new }}</span></a>
-  <a href="/?status=reviewing&rep={{ rep_filter }}" class="filter-btn {% if status_filter=='reviewing' %}active{% endif %}">Reviewing <span class="filter-count" data-status="reviewing">{{ stats.reviewing }}</span></a>
-  <a href="/?status=bid_sent&rep={{ rep_filter }}" class="filter-btn {% if status_filter=='bid_sent' %}active{% endif %}">Bid Sent <span class="filter-count" data-status="bid_sent">{{ stats.bid_sent }}</span></a>
-  <a href="/?status=bought&rep={{ rep_filter }}" class="filter-btn {% if status_filter=='bought' %}active{% endif %}" style="{% if status_filter=='bought' %}background:rgba(34,197,94,.15);border-color:#22c55e;color:#34d399{% else %}border-color:rgba(34,197,94,.3);color:#34d399{% endif %}">Bought <span class="filter-count" data-status="bought" style="{% if status_filter=='bought' %}background:rgba(34,197,94,.15);color:#34d399{% endif %}">{{ stats.bought }}</span></a>
-  <a href="/?status=passed&rep={{ rep_filter }}" class="filter-btn filter-btn-passed {% if status_filter=='passed' %}active{% endif %}">Passed <span class="filter-count" data-status="passed">{{ stats.passed }}</span></a>
+  <a href="/?status=all&rep={{ rep_filter }}{{ _qs }}" class="filter-btn {% if status_filter=='all' %}active{% endif %}">All <span class="filter-count" data-status="total">{{ stats.total }}</span></a>
+  <a href="/?status=today&rep={{ rep_filter }}{{ _qs }}" class="filter-btn {% if status_filter=='today' %}active{% endif %}" style="{% if status_filter=='today' %}background:rgba(255,255,255,.1);border-color:#94a3b8;color:#f1f5f9{% endif %}">Today <span class="filter-count" data-status="today">{{ stats.today }}</span></a>
+  <a href="/?status=new&rep={{ rep_filter }}{{ _qs }}" class="filter-btn {% if status_filter=='new' %}active{% endif %}">New <span class="filter-count" data-status="new">{{ stats.new }}</span></a>
+  <a href="/?status=reviewing&rep={{ rep_filter }}{{ _qs }}" class="filter-btn {% if status_filter=='reviewing' %}active{% endif %}">Reviewing <span class="filter-count" data-status="reviewing">{{ stats.reviewing }}</span></a>
+  <a href="/?status=bid_sent&rep={{ rep_filter }}{{ _qs }}" class="filter-btn {% if status_filter=='bid_sent' %}active{% endif %}">Bid Sent <span class="filter-count" data-status="bid_sent">{{ stats.bid_sent }}</span></a>
+  <a href="/?status=bought&rep={{ rep_filter }}{{ _qs }}" class="filter-btn {% if status_filter=='bought' %}active{% endif %}" style="{% if status_filter=='bought' %}background:rgba(34,197,94,.15);border-color:#22c55e;color:#34d399{% else %}border-color:rgba(34,197,94,.3);color:#34d399{% endif %}">Bought <span class="filter-count" data-status="bought" style="{% if status_filter=='bought' %}background:rgba(34,197,94,.15);color:#34d399{% endif %}">{{ stats.bought }}</span></a>
+  <a href="/?status=passed&rep={{ rep_filter }}{{ _qs }}" class="filter-btn filter-btn-passed {% if status_filter=='passed' %}active{% endif %}">Passed <span class="filter-count" data-status="passed">{{ stats.passed }}</span></a>
 
   {% if reps %}
   <div class="filter-divider"></div>
@@ -506,6 +508,7 @@ setInterval(() => {
 
   <div class="filter-divider"></div>
   <input type="search" id="bid-search" placeholder="Search… bid #, VIN, name, vehicle"
+         value="{{ search_q if search_q is defined else '' }}"
          oninput="applyBidSearch(this.value)"
          style="background:#243447;border:1px solid #344f68;border-radius:8px;color:#e2e8f0;font-size:14px;font-family:'Inter',sans-serif;padding:9px 14px;outline:none;min-width:260px"
          onfocus="this.style.borderColor='#3b82f6'"
@@ -636,12 +639,45 @@ function stripFieldMeta(msg) {
 // Client-side row filter — pure DOM, no server call. Matches the user's
 // query against bid #, VIN, contact name, vehicle desc, and any visible cell.
 let _bidSearchQuery = '';
+/* BID_SEARCH_SERVERSIDE_2026_09_02
+   _serverQ is what the SERVER already filtered this page load on ('' = the plain
+   newest-N listing). Two consequences:
+     1. While the box still holds exactly that text, the rows on screen ARE the
+        result set, so the client-side textContent filter stands down. A row can
+        match in Postgres on a field that is never printed in the row (phone,
+        trim, company) and DOM filtering would wrongly hide it.
+     2. Typing anything else re-queries the server, debounced - never one
+        request per keystroke. Clearing the box drops q and restores the
+        original newest-100 behaviour untouched. */
+const _serverQ = {{ ((search_q if search_q is defined else '') or '')|tojson }};
+let _bidSearchTimer = null;
+function ewServerSearch(v) {
+  const s = (v || '').trim();
+  if (s.toLowerCase() === (_serverQ || '').toLowerCase()) return;
+  if (s && s.length < 2) return;            // 1 char: client-side only, too broad
+  const url = new URL(window.location.href);
+  if (s) { url.searchParams.set('q', s); } else { url.searchParams.delete('q'); }
+  window.location.href = url.toString();
+}
+function ewQueueServerSearch(v) {
+  if (_bidSearchTimer) clearTimeout(_bidSearchTimer);
+  _bidSearchTimer = setTimeout(function(){ ewServerSearch(v); }, 700);
+}
+/* Put the caret back after the round-trip so the operator can keep typing. */
+document.addEventListener('DOMContentLoaded', function(){
+  if (!_serverQ) return;
+  const el = document.getElementById('bid-search');
+  if (!el) return;
+  try { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } catch(e) {}
+});
 function applyBidSearch(q) {
   _bidSearchQuery = (q || '').trim().toLowerCase();
   filterVisibleRows();
+  ewQueueServerSearch(q);
 }
 function filterVisibleRows() {
-  const q = _bidSearchQuery;
+  // BID_SEARCH_SERVERSIDE_2026_09_02: no DOM filtering on the server's own query
+  const q = (_bidSearchQuery === (_serverQ || '').toLowerCase()) ? '' : _bidSearchQuery;
   const rows = document.querySelectorAll('tbody tr');
   let visibleCount = 0;
   rows.forEach(row => {
@@ -851,6 +887,12 @@ async function poll() {
   // Skip in background tabs — no point repainting what nobody can see, and
   // it frees a gunicorn worker for whoever IS looking at a bid page.
   if (document.hidden) return;
+  // BID_SEARCH_SERVERSIDE_2026_09_02: a server-side search render is a RESULT SET,
+  // not the live feed. /api/bids only ever returns the newest N, so polling would
+  // repaint the search away - and highestId, seeded from the rendered rows, would
+  // be an old bid id, making the next poll treat thousands of bids as brand new
+  // (chime + new-bid alert + row flash). Stats are server-rendered on load.
+  if (_serverQ) return;
   try {
     const r = await fetch(`/api/bids?since_id=${highestId}&status=${currentFilter}&rep=${currentRep}`);
     const d = await r.json();
@@ -968,6 +1010,8 @@ setInterval(poll, 15000);  // 2026-05-27: 120s→15s (reverted, operator wants l
   input.addEventListener('input', function(){
     if (t) clearTimeout(t);
     t = setTimeout(applyFilter, 150);
+    // BID_SEARCH_SERVERSIDE_2026_09_02: the phone box searches the DB too
+    ewQueueServerSearch(input.value);
   });
 })();
 
