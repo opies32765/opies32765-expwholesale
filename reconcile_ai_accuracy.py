@@ -217,7 +217,13 @@ def main():
         # Parse LSL purchased_at if available
         purchased_at = None
         if deal:
-            for k in ('sold_at', 'created_at', 'modified_at'):
+            # PURCHASED_AT_USES_CREATED_AT_2026_09_02 — was sold_at-first, but the
+            # deal's sold_at is an ACCOUNTING date and can be backdated: on
+            # 2026-09-01 all 8 deals written that day were dated 2026-08-31, which
+            # emptied /admin/ai-accuracy for that day. created_at is when the deal
+            # was actually written, matches this module's docstring, and cannot be
+            # moved by a month-end close.
+            for k in ('created_at', 'sold_at', 'modified_at'):
                 v = deal.get(k)
                 if v:
                     try:

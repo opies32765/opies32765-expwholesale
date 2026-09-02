@@ -5946,6 +5946,43 @@ def twilio_webhook():
         return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 200, {'Content-Type': 'text/xml'})
 
+    # ── REP_WANTLIST_SMS_2026_09_02: the BILL keyword routes to the want-list ──
+    # A leading "BILL ..." is a request to WATCH FOR a car the rep wants to BUY --
+    # the exact opposite of every other text this webhook sees. Keyword-gated for
+    # the same reason the transport branch above is: it must be impossible for
+    # want-list text to shadow VIN/miles bid intake. Anchored to a LEADING token
+    # so "send the bill to accounting" never triggers it.
+    #
+    # Placed BEFORE the ONE_BID_PER_WINDOW front door on purpose: a BILL text
+    # arriving seconds after a real bid must never fold onto that bid.
+    #
+    # Bill's want-list logic stays in ew-rep-voice (:5211, loopback). app.py only
+    # forwards. If that service is down we apologise and point at the phone -- we
+    # NEVER fall through to bid intake, which would open a bid on a car the rep is
+    # trying to buy. Nothing here reads or sends valuation/enrichment data.
+    if from_phone and re.match(r'^\s*bill\b', (body or ''), re.I):
+        _bill_reply = None
+        try:
+            _bill_resp = requests.post('http://127.0.0.1:5211/rep-voice/sms',
+                                       json={'from': from_phone, 'body': body},
+                                       timeout=25)
+            _bill_reply = ((_bill_resp.json() or {}).get('reply') or '').strip() or None
+        except Exception as _be:
+            print('[bill-sms] forward failed phone=%s: %s' % (from_phone, _be), flush=True)
+        if not _bill_reply:
+            _bill_reply = ("Bill's stepped away from his desk - give him a call at "
+                           "754-247-1123 and he'll get it on the list.")
+        try:
+            if not send_sms(from_phone, _bill_reply):
+                # bot_mute / STOP / NO_DATA_REQUEST: the want is still registered,
+                # the rep just never hears back. Log it so it is not invisible.
+                print('[bill-sms] reply SUPPRESSED (mute/STOP) phone=%s' % from_phone,
+                      flush=True)
+        except Exception as _bse:
+            print('[bill-sms] send %s' % _bse, flush=True)
+        return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                200, {'Content-Type': 'text/xml'})
+
     # ── ROLLING_PORTAL_2026_06_02: multi-car batch intake (gated) ──────────
     # A single text with >=2 VINs from a portal-gated sender creates one bid
     # per (VIN, miles) pair instead of one bid. Gated to the rolling_portal

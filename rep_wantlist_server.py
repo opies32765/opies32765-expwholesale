@@ -1074,6 +1074,161 @@ async def rep_stream(ws: WebSocket):
             pass
 
 
+# ─── REP_WANTLIST_SMS_2026_09_02 — the BILL keyword over text ──────────
+# app.py's /webhook/twilio matches ^\s*bill\b and forwards {from, body} here
+# instead of opening a bid. Bill's want-list logic stays in THIS service; app.py
+# only forwards. Nothing here touches bids, valuations or enrichment — a reply
+# carries the rep's OWN request back to them and nothing else.
+#
+# Confirmations are worded by PYTHON from the DB result, never by the model:
+# the model decides INTENT, the data grounds the words. The model only writes
+# the drill question when it can't name a make + model.
+
+_SMS_SUFFIX = (
+    "\n═══ THIS IS A TEXT MESSAGE, NOT A CALL ═══\n"
+    "Same job, same JSON. One line, no greeting, no sign-off. You get ONE reply — "
+    "there is no back-and-forth, so if you can name a make and model, ADD IT NOW "
+    "rather than asking. Only ask a question when you genuinely cannot name both.\n")
+
+
+def _sms_ctx(digits: str) -> str:
+    """THIS TEXT block — same shape as _refresh_ctx builds for a call."""
+    wants = []
+    try:
+        wants = db_open_wants(digits)
+    except Exception as e:
+        log.warning(f"[sms] open-wants lookup failed: {e}")
+    ctx = [f"caller_phone_digits: {digits}"]
+    if wants:
+        ctx.append("OPEN REQUESTS for this caller (id | want | since):")
+        for w in wants:
+            yr = ""
+            if w.get("year_min") and w.get("year_max"):
+                yr = (f"{w['year_min']}-{w['year_max']} "
+                      if w["year_min"] != w["year_max"] else f"{w['year_min']} ")
+            elif w.get("year_min"):
+                yr = f"{w['year_min']}+ "
+            desc = w.get("label") or f"{yr}{(w['make'] or '').title()} {w['model'] or ''}".strip()
+            ctx.append(f"  #{w['id']} | {desc} | {w['created']}")
+    else:
+        ctx.append("OPEN REQUESTS: none")
+    return "═══ THIS TEXT ═══\n" + "\n".join(ctx) + "\n\n"
+
+
+def _want_desc(w: dict) -> str:
+    yr = ""
+    ymin, ymax = w.get("year_min"), w.get("year_max")
+    if ymin and ymax and ymin != ymax:
+        yr = f"{ymin}-{ymax} "
+    elif ymin:
+        yr = f"{ymin}+ "
+    return (w.get("label") or f"{yr}{(w.get('make') or '').title()} {w.get('model') or ''}").strip()
+
+
+def _sms_wants_line(digits: str) -> str:
+    """Open list WITH ids, so 'BILL DROP 41' is always available to them."""
+    wants = db_open_wants(digits)
+    if not wants:
+        return ("Nothing on your list right now. Text BILL then the year, make "
+                "and model to start watching one.")
+    return "Watching: " + "; ".join("#%s %s" % (w["id"], _want_desc(w)) for w in wants)
+
+
+async def bill_sms_reply(digits: str, body: str) -> str:
+    """One inbound text -> one reply string. Never raises."""
+    text = (body or "").strip()
+    # strip the leading keyword; app.py matched it, we own the rest
+    rest = re.sub(r"^\s*bill\b[\s,:;-]*", "", text, flags=re.I).strip()
+
+    # ---- deterministic fast paths (small models obey code, not prompts) ----
+    if not rest:
+        return ("It's Bill. Text BILL then the year, make and model and I'll watch "
+                "for it — e.g. BILL 2022+ Escalade under 90. BILL LIST to see yours.")
+    if re.match(r"^(list|what|status)\b", rest, re.I) and len(rest.split()) <= 3:
+        return _sms_wants_line(digits)
+    m = re.match(r"^(?:drop|stop|cancel|done|remove)\s*#?\s*(\d{1,7})\s*$", rest, re.I)
+    if m:
+        r = db_cancel_want(digits, int(m.group(1)))
+        if not r.get("ok"):
+            return "No open request with that number. " + _sms_wants_line(digits)
+        return "Dropped #%s. %s" % (m.group(1), _sms_wants_line(digits))
+
+    # ---- everything else: the brain decides intent, Python words the facts ----
+    system = _sms_ctx(digits) + SYSTEM_PROMPT + _SMS_SUFFIX
+    out = await brain_chat(system, [{"role": "user", "content": rest}], "[sms]")
+    action = out.get("action")
+    actions = action if isinstance(action, list) else ([action] if isinstance(action, dict) else [])
+
+    added, cancelled = [], 0
+    for act in actions[:4]:
+        if not isinstance(act, dict):
+            continue
+        name = str(act.get("name") or "")
+        args = act.get("args") or {}
+        log.info("[sms] ACTION %s(%s)" % (name, json.dumps(args, default=str)[:150]))
+        try:
+            if name == "add_want":
+                pm = args.get("price_max")
+                try:
+                    pm = int(pm) if pm else None
+                except (TypeError, ValueError):
+                    pm = None
+                r = db_add_want(digits, str(args.get("make") or ""),
+                                str(args.get("model") or ""), args.get("year_min"),
+                                args.get("year_max"), args.get("trim_contains"),
+                                pm, args.get("label"))
+                if r.get("ok"):
+                    added.append(r.get("alert_id"))
+                    db_dedupe_wants(digits)
+            elif name == "cancel_want":
+                raw = args.get("alert_id")
+                ids = [int(x) for x in (raw if isinstance(raw, list) else [raw]) if x]
+                cancelled += sum(1 for i in ids if db_cancel_want(digits, i).get("ok"))
+            elif name == "list_wants":
+                return _sms_wants_line(digits)
+        except Exception as e:
+            log.exception("[sms] action %s failed: %s" % (name, e))
+            return "Hit a snag logging that — call me at 754-247-1123 and I'll set it up."
+
+    if added:
+        cur = {w["id"]: w for w in db_open_wants(digits)}
+        # dedupe may have folded the new row into an existing one
+        desc = next((_want_desc(cur[i]) for i in added if i in cur), None)
+        if not desc:
+            return _sms_wants_line(digits)
+        tail = " Also dropped %d." % cancelled if cancelled else ""
+        return ("Watching for %s — I'll text you the second one hits our board.%s "
+                "Reply BILL DROP %s to stop." % (desc, tail, added[0]))
+    if cancelled:
+        return "Dropped %d. %s" % (cancelled, _sms_wants_line(digits))
+
+    say = (out.get("say") or "").strip()
+    if say:
+        return say[:300]
+    return ("Didn't catch a car in that — text BILL then the year, make and model, "
+            "like BILL 2022+ Escalade under 90.")
+
+
+@app.post("/rep-voice/sms")
+async def rep_sms(request: Request):
+    """Called ONLY by app.py's /webhook/twilio BILL branch (loopback)."""
+    try:
+        data = await request.json()
+    except Exception:
+        return {"ok": False, "reply": ""}
+    digits = _digits(str(data.get("from") or ""))[-10:]
+    body = str(data.get("body") or "")
+    if len(digits) != 10:
+        return {"ok": False, "reply": ""}
+    try:
+        reply = await bill_sms_reply(digits, body)
+    except Exception as e:
+        log.exception("[sms] reply failed: %s" % e)
+        return {"ok": False, "reply": ""}
+    log.info("[sms] %s -> %r" % (digits, reply[:160]))
+    return {"ok": True, "reply": reply}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=PORT)

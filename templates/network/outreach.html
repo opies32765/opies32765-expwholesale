@@ -39,7 +39,8 @@
   td.dealer{white-space:normal;max-width:290px}
   .dname{font-weight:700}
   .more{font-size:11px;color:#6b7280;margin-top:3px}
-  .badge{display:inline-block;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700}
+  .b-applied{background:#dcfce7;color:#166534;border:1px solid #bbf7d0}
+    .badge{display:inline-block;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700}
   .b-pending{background:#f1f5f9;color:#475569}
   .b-sent{background:#e0f2fe;color:#075985}
   .b-deliv{background:#dbeafe;color:#1e40af}
@@ -114,7 +115,24 @@
             <span id="k-removed">{{ stats.removed }}</span> removed by review</span>
         </div>
       </div>
-      <span class="live"><span class="dot"></span> live · refreshes every 20s</span>
+      <div style="text-align:right">
+        {# DP_CAMPAIGN_SCOPED_2026_09_02 — one campaign at a time. "All" is a
+           total across sends, not a description of any one email. #}
+        {% if campaigns and campaigns|length > 1 %}
+        <div style="margin:0 0 7px 0;font-size:12.5px">
+          <span style="color:#64748b;font-weight:600;margin-right:6px">Campaign</span>
+          {% for c in campaigns %}
+          <a href="?campaign={{ c.campaign }}" style="display:inline-block;margin-left:5px;padding:3px 10px;border-radius:999px;text-decoration:none;font-weight:600;
+             {% if campaign == c.campaign %}background:#b91c2c;color:#fff{% else %}background:#eef1f5;color:#334155{% endif %}"
+             title="{{ c.attempted }} attempted · {{ c.delivered }} delivered{% if c.first_send %} · from {{ c.first_send.strftime('%b %-d') }}{% endif %}">{{ c.campaign }}</a>
+          {% endfor %}
+          <a href="?campaign=all" style="display:inline-block;margin-left:5px;padding:3px 10px;border-radius:999px;text-decoration:none;font-weight:600;
+             {% if not campaign %}background:#1e3a8a;color:#fff{% else %}background:#eef1f5;color:#334155{% endif %}"
+             title="Every campaign added together — a total, not one send">All campaigns</a>
+        </div>
+        {% endif %}
+        <span class="live"><span class="dot"></span> live · refreshes every 20s</span>
+      </div>
     </div>
 
     <div class="tiles">
@@ -208,6 +226,19 @@
             {% if r.unsubscribed_at %}<span class="badge b-unsub">unsubscribed</span>
             {% elif r.email_status == 'delayed' %}<span class="badge b-delay" title="The receiving server asked us to try again later. Resend is still retrying — this is not a failed address.">delayed</span>
             {% elif r.bounced_at %}<span class="badge b-bounce" title="{% if r.bounce_type == 'hard' %}Permanent failure — this address is suppressed and will never be mailed again.{% else %}Temporary failure on the receiving end. Still on the list; eligible for one retry.{% endif %}">bounced{% if r.bounce_type != 'hard' %} &middot; retry{% endif %}</span>
+            {# DP_ROW_TRUTH_2026_09_02 — "not sent" used to cover every row with no
+               email in this campaign: queued dealers, applicants, unsubscribers
+               and hard bounces all looked identical and all looked like they
+               were about to be mailed. Say which it is. #}
+            {% elif r.camp_state == 'queued' %}<span class="badge b-pending" title="Eligible for this campaign — will be picked by the next batch.">queued</span>
+            {% elif r.camp_state == 'applied' %}<span class="badge b-applied" title="This dealer has applied. Excluded from this campaign — we do not re-pitch a customer.">applied &middot; excluded</span>
+            {% elif r.camp_state == 'unsubscribed' %}<span class="badge b-unsub" title="Unsubscribed from the launch. Excluded.">unsubscribed</span>
+            {% elif r.camp_state == 'complaint' %}<span class="badge b-bounce" title="Marked the launch email as spam. Excluded, permanently.">complaint</span>
+            {% elif r.camp_state == 'suppressed' %}<span class="badge b-bounce" title="On the suppression list — hard bounce or manual removal. The database trigger refuses to mail this address.">suppressed</span>
+            {% elif r.camp_state == 'removed' %}<span class="badge b-bounce" title="Taken off the list by review.">removed</span>
+            {% elif r.camp_state == 'did not land' %}<span class="badge b-bounce" title="The launch email never reached this address, so there is nothing to follow up on.">didn&rsquo;t land</span>
+            {% elif r.camp_state == 'never mailed' %}<span class="badge b-pending" title="This address was not part of the launch send.">not in launch</span>
+            {% elif r.camp_state == 'no address' %}<span class="badge b-bounce">no address</span>
             {% elif not r.sent_at %}<span class="badge b-pending">not sent</span>
             {% elif r.clicks %}<span class="badge b-click">clicked</span>
             {% elif r.opens %}<span class="badge b-open">opened</span>

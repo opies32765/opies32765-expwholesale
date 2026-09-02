@@ -3166,8 +3166,47 @@ def dpt_resend_webhook():
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def _dpo_stats(cur):
-    """Everything the header tiles need, in one pass."""
+# DP_ROW_TRUTH_2026_09_02: the launch is the baseline every later campaign is
+# judged against — "did this address land in the send we are following up on".
+DP_BASE_CAMPAIGN = 'dp_launch_2026_08'
+
+
+def _dpo_campaigns(cur):
+    """Every campaign that has an attempt row, newest send first.
+
+    DP_CAMPAIGN_SCOPED_2026_09_02. The page shows ONE campaign at a time; this
+    is what fills the switcher and decides the default.
+    """
+    cur.execute("""
+        SELECT campaign,
+               count(*)                                        AS attempted,
+               count(*) FILTER (WHERE status='delivered')       AS delivered,
+               min(sent_at)                                     AS first_send,
+               max(sent_at)                                     AS last_send
+          FROM dp_outreach_email
+         GROUP BY campaign
+         ORDER BY max(sent_at) DESC NULLS LAST""")
+    return cur.fetchall() or []
+
+
+def _dpo_default_campaign(cur):
+    """The newest campaign that actually sent something, or None."""
+    rows = _dpo_campaigns(cur)
+    for r in rows:
+        if r['last_send']:
+            return r['campaign']
+    return rows[0]['campaign'] if rows else None
+
+
+def _dpo_stats(cur, campaign=None):
+    """Everything the header tiles need, in one pass.
+
+    DP_CAMPAIGN_SCOPED_2026_09_02: `campaign` scopes every count to one send.
+    None means "all campaigns", which is a genuine total and is labelled as
+    one on the page — it is NOT a description of any single email.
+    """
+    cwhere = ' WHERE campaign = %s' if campaign else ''
+    cargs = [campaign] if campaign else []
     cur.execute("""
         SELECT
           -- REMOVED_NOT_COUNTED_2026_07_30: these MUST exclude removed rows.
@@ -3194,13 +3233,34 @@ def _dpo_stats(cur):
           count(*) FILTER (WHERE clicks > 0)                                      AS clicked,
           count(*) FILTER (WHERE unsubscribed_at IS NOT NULL)                     AS unsubscribed,
           count(*) FILTER (WHERE applied_at IS NOT NULL)                          AS applied
-        FROM dp_outreach_email
-    """)
+        FROM dp_outreach_email""" + cwhere + """
+    """, cargs)
     s = dict(cur.fetchone() or {})
+    s['campaign'] = campaign or ""
     sent = s.get('sent') or 0
     # DP_PENDING_COUNT_2026-08-05: count the sendable targets directly. The old
     # `targets - sent` went negative once bounces started suppressing addresses
     # out of `targets` while their attempt rows remained.
+    #
+    # DP_PENDING_TRUTH_2026_09_02: for a campaign that FOLLOWS the launch,
+    # "not yet sent" has to mean "the sender would actually pick this", not
+    # "no row exists yet" — otherwise the tile counts dealers who applied and
+    # dealers the launch never reached, and disagrees with the table below it.
+    # Mirrors dp_campaign.pick_followup().
+    _followup_pending_clause = ''
+    _pending_args = [campaign or '', campaign or '']
+    if campaign and campaign != DP_BASE_CAMPAIGN:
+        _followup_pending_clause = """
+           AND NOT EXISTS (SELECT 1 FROM dealer_applications a
+                            WHERE lower(a.contact_email) = lower(t.email))
+           AND EXISTS (SELECT 1 FROM dp_outreach_email b
+                        WHERE lower(b.email) = lower(t.email)
+                          AND b.campaign = %s
+                          AND b.status = 'delivered'
+                          AND b.applied_at IS NULL
+                          AND b.unsubscribed_at IS NULL
+                          AND b.complained_at IS NULL)"""
+        _pending_args.append(DP_BASE_CAMPAIGN)
     cur.execute("""
         SELECT count(*) AS n
           FROM dp_outreach_targets t
@@ -3209,7 +3269,10 @@ def _dpo_stats(cur):
            AND NOT EXISTS (SELECT 1 FROM dp_outreach_suppression sp
                             WHERE sp.email = lower(t.email))
            AND NOT EXISTS (SELECT 1 FROM dp_outreach_email e
-                            WHERE lower(e.email) = lower(t.email))""")
+                            WHERE lower(e.email) = lower(t.email)
+                              AND (%s = '' OR e.campaign = %s))"""
+                + _followup_pending_clause,
+                _pending_args)
     s['pending'] = (cur.fetchone() or {}).get('n') or 0
     # Rates are quoted against DELIVERED, not sent — an open rate that silently
     # includes bounced mail flatters itself.
@@ -3279,7 +3342,18 @@ def network_outreach():
     except Exception as e:
         db.rollback()
         print('[dp-outreach] suppression re-apply: %s' % e, flush=True)
-    stats = _dpo_stats(cur)
+    # DP_CAMPAIGN_SCOPED_2026_09_02: ?campaign=<tag> picks one send,
+    # ?campaign=all totals them. Default is the newest campaign that sent.
+    campaigns = _dpo_campaigns(cur)
+    _known = {c['campaign'] for c in campaigns}
+    _req = (request.args.get('campaign') or '').strip()
+    if _req == 'all':
+        campaign = None
+    elif _req in _known:
+        campaign = _req
+    else:
+        campaign = _dpo_default_campaign(cur)
+    stats = _dpo_stats(cur, campaign)
     cur.execute("""SELECT subject, body, updated_at FROM dp_outreach_template WHERE id=1""")
     tpl = cur.fetchone()
     cur.execute("""
@@ -3292,20 +3366,53 @@ def network_outreach():
                e.id AS email_id, e.status AS email_status, e.sent_at,
                e.opens, e.proxy_opens, e.clicks, e.first_open_at, e.last_click_at,
                e.bounced_at, e.bounce_type, e.unsubscribed_at, e.applied_at,
-               e.application_id
+               e.application_id,
+               -- DP_ROW_TRUTH_2026_09_02: when this row has no email in the
+               -- SELECTED campaign, say why. Same predicates as
+               -- dp_campaign.pick_followup(), so the table and the sender can
+               -- never disagree about who is about to be mailed. Order matters:
+               -- the most decisive reason wins.
+               CASE
+                 WHEN e.id IS NOT NULL THEN NULL
+                 WHEN t.removed_at IS NOT NULL THEN 'removed'
+                 WHEN t.email IS NULL OR t.email = '' THEN 'no address'
+                 WHEN EXISTS (SELECT 1 FROM dp_outreach_suppression s
+                               WHERE s.email = lower(t.email)) THEN 'suppressed'
+                 WHEN EXISTS (SELECT 1 FROM dealer_applications a
+                               WHERE lower(a.contact_email) = lower(t.email))
+                      THEN 'applied'
+                 WHEN b.applied_at IS NOT NULL THEN 'applied'
+                 WHEN b.unsubscribed_at IS NOT NULL THEN 'unsubscribed'
+                 WHEN b.complained_at IS NOT NULL THEN 'complaint'
+                 WHEN b.id IS NULL THEN 'never mailed'
+                 WHEN b.status <> 'delivered' THEN 'did not land'
+                 ELSE 'queued'
+               END AS camp_state
           FROM dp_outreach_targets t
           LEFT JOIN LATERAL (
+                -- DP_CAMPAIGN_SCOPED_2026_09_02: without the campaign clause
+                -- this returns the newest attempt for the address across ALL
+                -- campaigns, so a follow-up row (opens=0) would overwrite the
+                -- launch engagement in every row of the table.
                 SELECT * FROM dp_outreach_email x
                  WHERE lower(x.email) = lower(t.email)
+                   AND (%s = '' OR x.campaign = %s)
                  ORDER BY x.id DESC LIMIT 1) e ON TRUE
+          -- the BASE send every later campaign is measured against
+          LEFT JOIN LATERAL (
+                SELECT * FROM dp_outreach_email y
+                 WHERE lower(y.email) = lower(t.email)
+                   AND y.campaign = %s
+                 ORDER BY y.id DESC LIMIT 1) b ON TRUE
          ORDER BY (e.clicks > 0) DESC NULLS LAST,
                   (e.opens  > 0) DESC NULLS LAST,
                   t.total_profit DESC NULLS LAST
-    """)
+    """, (campaign or '', campaign or '', DP_BASE_CAMPAIGN))
     rows = cur.fetchall()
     db.close()
     return render_template('network/outreach.html', rows=rows, stats=stats,
-                           tpl=tpl, reps=DP_SALES_REPS)
+                           tpl=tpl, reps=DP_SALES_REPS,
+                           campaigns=campaigns, campaign=campaign)
 
 
 @bp.route('/network/outreach/stats')
@@ -3321,7 +3428,12 @@ def network_outreach_stats():
         _dpt_classify_ips()   # keeps machine detection current
     except Exception:
         pass
-    s = _dpo_stats(cur)
+    # DP_CAMPAIGN_SCOPED_2026_09_02: the poller must scope exactly as the page
+    # did, or the tiles it overwrites every 20s would drift back to all-campaign
+    # totals while the table below stayed on one campaign.
+    _req = (request.args.get('campaign') or '').strip()
+    campaign = None if _req == 'all' else (_req or _dpo_default_campaign(cur))
+    s = _dpo_stats(cur, campaign)
     # DP_FEED_HONEST_2026-08-05: humans only, and a delay is not a bounce.
     cur.execute("""SELECT e.email,
                           CASE WHEN ev.kind='bounce' AND e.status='delayed'
@@ -3331,7 +3443,9 @@ def network_outreach_stats():
                      JOIN dp_outreach_email e ON e.id = ev.email_id
                     WHERE ev.kind IN ('open','click','bounce','complaint','unsubscribe')
                       AND NOT COALESCE(ev.is_machine, false)
-                 ORDER BY ev.ts DESC LIMIT 12""")
+                      AND (%s = '' OR e.campaign = %s)
+                 ORDER BY ev.ts DESC LIMIT 12""",
+                (campaign or '', campaign or ''))
     s['recent'] = [{'email': r['email'], 'kind': r['kind'],
                     'ts': r['ts'].strftime('%H:%M:%S') if r['ts'] else ''}
                    for r in cur.fetchall()]
@@ -3345,7 +3459,9 @@ def network_outreach_stats():
                e.proxy_opens, e.clicks, e.sent_at, e.bounced_at,
                e.unsubscribed_at, e.applied_at, e.application_id
           FROM dp_outreach_email e
-         ORDER BY lower(e.email), e.id DESC""")
+         WHERE (%s = '' OR e.campaign = %s)
+         ORDER BY lower(e.email), e.id DESC""",
+                (campaign or '', campaign or ''))
     s['rows'] = [{
         'email': r['email'],
         'status': r['status'],

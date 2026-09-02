@@ -1,9 +1,9 @@
 {
   "make_name": "CADILLAC",
-  "trained_at": "2026-09-01T08:30:18.269175Z",
-  "n_total": 862,
+  "trained_at": "2026-09-02T08:30:22.123591Z",
+  "n_total": 863,
   "n_train": 782,
-  "n_test": 80,
+  "n_test": 81,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -219,49 +219,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 5654.0,
-    "mape_pct": 8.5,
-    "r2": 0.9614,
-    "within_5pct": 46.2,
-    "within_10pct": 77.5
+    "mae_dollars": 5614.0,
+    "mape_pct": 8.43,
+    "r2": 0.9617,
+    "within_5pct": 48.1,
+    "within_10pct": 79.0
   },
   "baseline_metrics": {
-    "mae_dollars": 6227.0,
-    "mape_pct": 9.13,
+    "mae_dollars": 6152.0,
+    "mape_pct": 9.02,
     "ratio": 1.0289
   },
   "top_features": [
     {
       "name": "est_wholesale_price",
-      "importance": 0.41183674335479736
+      "importance": 0.41537725925445557
     },
     {
       "name": "market_asking_price",
-      "importance": 0.29947227239608765
+      "importance": 0.2972838878631592
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.12547892332077026
+      "importance": 0.12736451625823975
     },
     {
       "name": "original_msrp",
-      "importance": 0.03255872055888176
+      "importance": 0.0327385850250721
     },
     {
       "name": "year",
-      "importance": 0.010826635174453259
+      "importance": 0.009834535419940948
     },
     {
       "name": "supplier_name_Ferrari Maserati Of Fort Lauderdale",
-      "importance": 0.009300794452428818
+      "importance": 0.009006079286336899
     },
     {
       "name": "model_name_Escalade Luxury Sport Utility Vehicle",
-      "importance": 0.007997343316674232
+      "importance": 0.0075769489631056786
     },
     {
       "name": "odometer",
-      "importance": 0.007403550669550896
+      "importance": 0.007309596985578537
     }
   ]
 }
