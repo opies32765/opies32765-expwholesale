@@ -1030,6 +1030,7 @@ class RepCall:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("ew-rep-voice startup")
+    _ensure_sms_thread_table()
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -1085,10 +1086,103 @@ async def rep_stream(ws: WebSocket):
 # the drill question when it can't name a make + model.
 
 _SMS_SUFFIX = (
-    "\n═══ THIS IS A TEXT MESSAGE, NOT A CALL ═══\n"
-    "Same job, same JSON. One line, no greeting, no sign-off. You get ONE reply — "
-    "there is no back-and-forth, so if you can name a make and model, ADD IT NOW "
-    "rather than asking. Only ask a question when you genuinely cannot name both.\n")
+    "\n═══ THIS IS A TEXT CONVERSATION ═══\n"
+    "Same job, same JSON. One line, no greeting, no sign-off.\n"
+    "The messages above are the LAST FEW TEXTS between you and this rep — your own "
+    "replies included. Read them. If they answer a question YOU just asked "
+    "(\"the first one\", \"Ford\", \"2022 and up\", \"yeah\"), that answer belongs to "
+    "the car you were just discussing. Resolve it from the conversation; never treat "
+    "a fragment as a whole new request.\n"
+    "\n"
+    "ASK WHEN YOU ARE NOT SURE. Texting is cheap and a wrong watch is worse than one "
+    "more question — but ask about ONE thing at a time, and never re-ask something "
+    "already answered above. Ask when:\n"
+    "  • the model belongs to more than one make, or you can't place it "
+    "(\"296\" — Ferrari 296? \"Grand Sport\" — Corvette or Acadia?)\n"
+    "  • a bare number could be a year, a price or mileage (\"under 60\" — sixty "
+    "thousand dollars, or sixty thousand miles?)\n"
+    "  • a trim or package doesn't belong to that model as far as you know\n"
+    "  • a price or year looks wrong for the car (a 2025 Escalade under thirty)\n"
+    "  • you genuinely did not understand the text — say so plainly and ask again\n"
+    "NEVER guess to avoid asking, and never register a car you had to guess at.\n"
+    "\n"
+    "BUT DO NOT HOLD A CAR HOSTAGE TO A DETAIL. Once make + model are clear, emit "
+    "add_want AND put your one follow-up question in \"say\" — BOTH in the same "
+    "reply. The car goes on the list now, and you still get your answer:\n"
+    "  {\"say\": \"What years?\", \"action\": {\"name\": \"add_want\", \"args\": "
+    "{\"make\": \"cadillac\", \"model\": \"Escalade\", \"price_max\": 60000}}}\n"
+    "Asking INSTEAD of adding loses the car the moment they stop texting. Only ask "
+    "with no action when you cannot name make AND model.\n"
+    "\n"
+    "A DETAIL ABOUT A CAR ALREADY ON THE LIST IS A CORRECTION — ACT, DON'T CHAT.\n"
+    "\"2022 and up\", \"make it white\", \"under sixty instead\", \"low miles only\" — "
+    "these change a car in OPEN REQUESTS. You MUST emit cancel_want (that car's #id) "
+    "AND add_want (the same car with the new detail) in the SAME reply:\n"
+    "  {\"say\": \"\", \"action\": [{\"name\": \"cancel_want\", \"args\": {\"alert_id\": 37}}, "
+    "{\"name\": \"add_want\", \"args\": {\"make\": \"chevrolet\", \"model\": \"Tahoe\", "
+    "\"year_min\": 2022, \"price_max\": 70000, \"label\": \"white Tahoe\"}}]}\n"
+    "Replying \"Got it, 2022 and up.\" with action null is a LIE — nothing changed, "
+    "the alert still fires on any year, and the rep believes it doesn't. NEVER "
+    "acknowledge a change you did not emit an action for.\n")
+
+# ─── SMS thread memory ─────────────────────────────────────────────────
+# Storage and CONTEXT are separate decisions (operator, 2026-09-02):
+# every message is kept forever (35 texts/day x ~1.3 kB = ~16 MB/yr against 496 GB
+# free, and it replicates to C2 + the LXC like everything else), but only a small
+# recent window is fed to the model — 100 messages of history would DOUBLE the
+# 2,453-token prompt on every single text, paid in latency on the 27B.
+SMS_CTX_MSGS  = int(os.environ.get("REP_SMS_CTX_MSGS", "8"))    # ~4 exchanges
+SMS_CTX_HOURS = int(os.environ.get("REP_SMS_CTX_HOURS", "12"))
+
+_SMS_THREAD_DDL = """
+CREATE TABLE IF NOT EXISTS rep_sms_thread (
+    id            BIGSERIAL PRIMARY KEY,
+    phone_digits  VARCHAR(10)  NOT NULL,
+    role          VARCHAR(10)  NOT NULL,
+    body          TEXT         NOT NULL,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS rep_sms_thread_phone_idx
+    ON rep_sms_thread (phone_digits, id DESC);
+"""
+
+
+def _ensure_sms_thread_table():
+    try:
+        with _db() as c, c.cursor() as cur:
+            cur.execute(_SMS_THREAD_DDL)
+        log.info("rep_sms_thread ready")
+    except Exception as e:
+        log.exception("rep_sms_thread DDL failed: %s" % e)
+
+
+def db_thread_append(phone_digits: str, role: str, body: str) -> None:
+    """Never raises — losing a transcript row must not cost the rep a reply."""
+    if not body:
+        return
+    try:
+        with _db() as c, c.cursor() as cur:
+            cur.execute("INSERT INTO rep_sms_thread (phone_digits, role, body)"
+                        " VALUES (%s,%s,%s)", (phone_digits, role, body[:2000]))
+    except Exception as e:
+        log.warning("thread append failed (%s): %s" % (role, e))
+
+
+def db_thread_recent(phone_digits: str) -> list[dict]:
+    """The window the MODEL sees — not the whole transcript."""
+    try:
+        with _db() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT role, body FROM ("
+                "  SELECT id, role, body FROM rep_sms_thread"
+                "   WHERE phone_digits=%s"
+                "     AND created_at > NOW() - (%s || ' hours')::interval"
+                "   ORDER BY id DESC LIMIT %s) t ORDER BY id ASC",
+                (phone_digits, str(SMS_CTX_HOURS), SMS_CTX_MSGS))
+            return [{"role": r[0], "content": r[1]} for r in cur.fetchall()]
+    except Exception as e:
+        log.warning("thread read failed: %s" % e)
+        return []
 
 
 def _sms_ctx(digits: str) -> str:
@@ -1116,29 +1210,116 @@ def _sms_ctx(digits: str) -> str:
 
 
 def _want_desc(w: dict) -> str:
+    """Always LEAD with the year range.
+
+    The label alone used to win, and a label never contains the year — so after
+    a rep narrowed a Tahoe to 2022+, Bill answered "now watching for Tahoe under
+    70 grand" and the rep had no way to tell the year had actually landed. The
+    year is the single most consequential field on an alert; it goes first."""
     yr = ""
     ymin, ymax = w.get("year_min"), w.get("year_max")
     if ymin and ymax and ymin != ymax:
         yr = f"{ymin}-{ymax} "
+    elif ymin and ymax:
+        yr = f"{ymin} "
     elif ymin:
         yr = f"{ymin}+ "
-    return (w.get("label") or f"{yr}{(w.get('make') or '').title()} {w.get('model') or ''}").strip()
+    elif ymax:
+        yr = f"up to {ymax} "
+    body = (w.get("label") or f"{(w.get('make') or '').title()} {w.get('model') or ''}").strip()
+    if not (yr and body.lower().startswith(yr.strip().lower())):
+        body = (yr + body).strip()
+    # The label is written by the MODEL and it rewrites it on every correction --
+    # "Tahoe under 70" became "white Tahoe" and the price vanished from what the
+    # rep was told, while price_max=70000 sat in the column. Never let a stored
+    # column go unsaid because the label forgot it.
+    pm = w.get("price_max")
+    if pm:
+        try:
+            pm_i = int(pm)
+            k = str(pm_i // 1000)
+            if k not in body and str(pm_i) not in body:
+                body += " under %sk" % k
+        except (TypeError, ValueError):
+            pass
+    return body.strip()
+
+
+def _short_name(w: dict) -> str:
+    """How a rep would SAY this car out loud — 'the Corvette', 'the F-250'.
+    Used to show them the exact words that remove it."""
+    md = (w.get("model") or "").strip()
+    if md:
+        return "the " + (md if md[:1].isupper() else md.title())
+    mk = (w.get("make") or "").strip()
+    return ("the " + mk.title()) if mk else "that one"
 
 
 def _sms_wants_line(digits: str) -> str:
-    """Open list WITH ids, so 'BILL DROP 41' is always available to them."""
+    """Open list in plain English. NO #ids: a rep who never called Bill has no
+    idea what 'DROP 20' means, and plain wording ('Bill drop the Corvette')
+    already works through the brain. Numeric DROP still works as a fallback."""
     wants = db_open_wants(digits)
     if not wants:
         return ("Nothing on your list right now. Text BILL then the year, make "
                 "and model to start watching one.")
-    return "Watching: " + "; ".join("#%s %s" % (w["id"], _want_desc(w)) for w in wants)
+    body = "You're watching: " + "; ".join(_want_desc(w) for w in wants)
+    return body + ". To remove one, text: Bill drop %s" % _short_name(wants[0])
+
+
+_CLAIM_RE = re.compile(
+    "(off the list|on the list|removed|dropped|deleted|cancelled|canceled|"
+    "added|updated|all set|taken care of|no longer watching)", re.I)
+
+
+def _nudge_missing_year(digits: str, reply: str) -> str:
+    """Re-ask for a missing year on a LATER message, not just at add time.
+
+    The ask used to be one-shot: Bill asked "What years?" on the turn he added
+    the car, and if the rep answered something else — or nothing — the want sat
+    yearless forever and NOBODY asked again. A yearless alert fires on every
+    model year ever built, which is how a rep ends up ignoring Bill entirely.
+
+    So: if they still have a yearless want and this reply isn't already asking
+    something, ask about it. At most once every 6 hours, so it nudges instead
+    of nagging."""
+    try:
+        if not reply or "?" in reply:
+            return reply                      # never stack two questions
+        yearless = [w for w in db_open_wants(digits)
+                    if not w.get("year_min") and not w.get("year_max")]
+        if not yearless:
+            return reply
+        with _db() as c, c.cursor() as cur:
+            cur.execute("SELECT 1 FROM rep_sms_thread"
+                        " WHERE phone_digits=%s AND role='assistant'"
+                        "   AND body ILIKE %s"
+                        "   AND created_at > NOW() - INTERVAL '6 hours' LIMIT 1",
+                        (digits, "%what years%"))
+            if cur.fetchone():
+                return reply                  # already asked recently
+        return reply + " Also — still no years on %s. What years?" % _short_name(yearless[0])
+    except Exception as e:
+        log.warning("year nudge failed: %s" % e)
+        return reply
 
 
 async def bill_sms_reply(digits: str, body: str) -> str:
-    """One inbound text -> one reply string. Never raises."""
+    """One inbound text -> one reply string. Never raises.
+
+    Records BOTH sides of every exchange, including the deterministic fast
+    paths, so the stored transcript is what actually happened."""
     text = (body or "").strip()
     # strip the leading keyword; app.py matched it, we own the rest
     rest = re.sub(r"^\s*bill\b[\s,:;-]*", "", text, flags=re.I).strip()
+    db_thread_append(digits, "user", rest or text)
+    reply = await _bill_sms_core(digits, rest)
+    reply = _nudge_missing_year(digits, reply)
+    db_thread_append(digits, "assistant", reply)
+    return reply
+
+
+async def _bill_sms_core(digits: str, rest: str) -> str:
 
     # ---- deterministic fast paths (small models obey code, not prompts) ----
     if not rest:
@@ -1150,17 +1331,32 @@ async def bill_sms_reply(digits: str, body: str) -> str:
     if m:
         r = db_cancel_want(digits, int(m.group(1)))
         if not r.get("ok"):
-            return "No open request with that number. " + _sms_wants_line(digits)
-        return "Dropped #%s. %s" % (m.group(1), _sms_wants_line(digits))
+            return "Couldn't find that one. " + _sms_wants_line(digits)
+        return "Done. %s" % _sms_wants_line(digits)
 
     # ---- everything else: the brain decides intent, Python words the facts ----
+    # db_thread_recent already ENDS with this message (bill_sms_reply appended it
+    # before calling in), so it is the full history, not history + current.
     system = _sms_ctx(digits) + SYSTEM_PROMPT + _SMS_SUFFIX
-    out = await brain_chat(system, [{"role": "user", "content": rest}], "[sms]")
+    history = db_thread_recent(digits) or [{"role": "user", "content": rest}]
+    if history[-1].get("role") != "user":
+        history.append({"role": "user", "content": rest})
+    out = await brain_chat(system, history, "[sms]")
     action = out.get("action")
     actions = action if isinstance(action, list) else ([action] if isinstance(action, dict) else [])
 
     added, cancelled = [], 0
-    for act in actions[:4]:
+    # CANCEL BEFORE ADD, ALWAYS — order is load-bearing and must not depend on
+    # the model. db_add_want dedupes on make+model+year and RETURNS THE EXISTING
+    # ROW's id on a hit, so on a correction that doesn't change the year
+    # ("make it white", "under sixty instead") an add-first batch matches the
+    # still-active old row, keeps its old label, and the change is silently lost
+    # — Bill then says "Updated" about a row that never changed.
+    _order = {"cancel_want": 0, "add_want": 1}
+    acts = sorted([a for a in actions[:4] if isinstance(a, dict)],
+                  key=lambda a: _order.get(str(a.get("name") or ""), 2))
+    _correcting = ({str(a.get("name")) for a in acts} >= {"cancel_want", "add_want"})
+    for act in acts:
         if not isinstance(act, dict):
             continue
         name = str(act.get("name") or "")
@@ -1179,7 +1375,11 @@ async def bill_sms_reply(digits: str, body: str) -> str:
                                 pm, args.get("label"))
                 if r.get("ok"):
                     added.append(r.get("alert_id"))
-                    db_dedupe_wants(digits)
+                    # dedupe folds same-vehicle rows together and keeps the
+                    # OLDER row's label -- on a correction that would throw away
+                    # the very detail they just gave us.
+                    if not _correcting:
+                        db_dedupe_wants(digits)
             elif name == "cancel_want":
                 raw = args.get("alert_id")
                 ids = [int(x) for x in (raw if isinstance(raw, list) else [raw]) if x]
@@ -1196,14 +1396,46 @@ async def bill_sms_reply(digits: str, body: str) -> str:
         desc = next((_want_desc(cur[i]) for i in added if i in cur), None)
         if not desc:
             return _sms_wants_line(digits)
-        tail = " Also dropped %d." % cancelled if cancelled else ""
-        return ("Watching for %s — I'll text you the second one hits our board.%s "
-                "Reply BILL DROP %s to stop." % (desc, tail, added[0]))
+        w = cur.get(added[0]) or {}
+        # ADD FIRST, THEN ASK — in the SAME message. Python words the fact (it
+        # is registered) and the model's question rides along, so a rep who
+        # never replies still has the car on the list. Without this, Bill asks
+        # "what years?" INSTEAD of adding and the car is lost if they stop.
+        ask = ""
+        _say = (out.get("say") or "").strip()
+        if _say.endswith("?") and len(_say.split()) <= 14:
+            ask = " " + _say.split(". ")[-1].strip()
+        # A YEARLESS ALERT FIRES ON EVERY MODEL YEAR EVER BUILT. Asking for the
+        # year is too important to leave to the model remembering — if it added
+        # a car with no year range and didn't ask anything, ask deterministically.
+        if not ask and not (w.get("year_min") or w.get("year_max")):
+            ask = " What years?"
+        if cancelled:
+            # add + cancel in one turn IS the correction pattern (they narrowed a
+            # year or price). The rep doesn't care that a row was retired — from
+            # their side they just changed their mind. Don't narrate plumbing.
+            head = "Updated — now watching for %s." % desc
+        else:
+            head = "Watching for %s — I'll text you the second one hits our board." % desc
+        # A question goes LAST so the rep answers it; the removal hint would
+        # bury it, and they don't need "how to remove" in the same breath as
+        # "just added". They get that hint on every list and every alert.
+        if ask:
+            return head + ask
+        return head + " To stop, text: Bill drop %s" % _short_name(w)
     if cancelled:
-        return "Dropped %d. %s" % (cancelled, _sms_wants_line(digits))
+        return "Done. %s" % _sms_wants_line(digits)
 
     say = (out.get("say") or "").strip()
     if say:
+        # NEVER SPEAK A CLAIM WE DID NOT EXECUTE. We are here only because no
+        # action ran -- usually the model dropped out of JSON entirely, which
+        # takes the action channel with it and leaves _prose_fallback happily
+        # saying "Escalade is off the list." while the row is still active.
+        # The rep then believes a car is dropped/added when nothing changed.
+        if _CLAIM_RE.search(say):
+            log.warning("[sms] model CLAIMED a change with no action: %r" % say[:140])
+            return "That didn't take — " + _sms_wants_line(digits)
         return say[:300]
     return ("Didn't catch a car in that — text BILL then the year, make and model, "
             "like BILL 2022+ Escalade under 90.")

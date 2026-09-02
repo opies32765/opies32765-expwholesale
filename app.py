@@ -5980,8 +5980,93 @@ def twilio_webhook():
                       flush=True)
         except Exception as _bse:
             print('[bill-sms] send %s' % _bse, flush=True)
+        # Ops read outcome='pending' as "we got the text but it blew up".
+        # A want-list text is a completed outcome, not a stalled bid.
+        try:
+            _finalize_sms_intake(cur, intake_log_id, 'bill_want',
+                                 reason=(_bill_reply or '')[:200])
+            db.commit()
+        except Exception as _ble:
+            print('[bill-sms] intake finalize %s' % _ble, flush=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
         return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
                 200, {'Content-Type': 'text/xml'})
+
+    # ── BILL_REPLY_WINDOW_2026_09_02: an ANSWER to Bill is not a bid ──────────
+    # The keyword branch above only catches a text that STARTS with "bill". But
+    # Bill now asks follow-up questions ("Under seventy grand, or seventy thousand
+    # miles?"), and nobody re-types a keyword to answer a question. Without this,
+    # that answer lands in bid intake and opens a junk bid.
+    #
+    # Narrow ON PURPOSE -- all of these must hold:
+    #   * Bill's own last message to this number ended in "?" (he IS waiting)
+    #   * it was under 30 minutes ago
+    #   * no media, no VIN, not a #N hash-ref, and short (answers are short)
+    # A real submission carries a VIN or a photo, so it can never match here.
+    if (from_phone and body and not num_media and not _early_vin
+            and not body.strip().startswith('#')
+            and len(body.strip()) <= 100
+            # a VIN-ish token means it is a submission, not an answer --
+            # the real no-VIN bids look like 'WA1 LVBF79SD014628'
+            and not any(len(w) >= 9 and w.isalnum() and not w.isalpha()
+                        for w in body.split())
+            and not re.match(r'^\s*bill\b', body, re.I)):
+        _bill_waiting = False
+        try:
+            cur.execute("""SELECT 1 FROM rep_sms_thread
+                            WHERE phone_digits = %s
+                              AND role = 'assistant'
+                              AND created_at > NOW() - INTERVAL '15 minutes'
+                            LIMIT 1""",
+                        (gate_helpers.phone_digits(from_phone),))
+            # Bill said ANYTHING to them in the last 15 min = the conversation is
+            # live. v1 required his last line to end in "?", which closed the
+            # window on his own confirmations and dropped the next answer into
+            # bid intake.
+            _bill_waiting = cur.fetchone() is not None
+        except Exception as _bwe:
+            # Table missing / DB hiccup: fail CLOSED to today's behaviour (bid
+            # intake). Never let this lookup break the money path.
+            print('[bill-window] lookup err phone=%s: %s' % (from_phone, _bwe), flush=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            _bill_waiting = False
+        if _bill_waiting:
+            print('[bill-window] routing answer to Bill phone=%s body=%r'
+                  % (from_phone, body[:60]), flush=True)
+            _bw_reply = None
+            try:
+                _bw_resp = requests.post('http://127.0.0.1:5211/rep-voice/sms',
+                                         json={'from': from_phone, 'body': body},
+                                         timeout=25)
+                _bw_reply = ((_bw_resp.json() or {}).get('reply') or '').strip() or None
+            except Exception as _bwf:
+                print('[bill-window] forward failed phone=%s: %s' % (from_phone, _bwf), flush=True)
+            if _bw_reply:
+                try:
+                    if not send_sms(from_phone, _bw_reply):
+                        print('[bill-window] reply SUPPRESSED (mute/STOP) phone=%s'
+                              % from_phone, flush=True)
+                except Exception as _bws:
+                    print('[bill-window] send %s' % _bws, flush=True)
+                try:
+                    _finalize_sms_intake(cur, intake_log_id, 'bill_want',
+                                         reason=_bw_reply[:200])
+                    db.commit()
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                return ('<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+                        200, {'Content-Type': 'text/xml'})
+            # Bill unreachable: fall through to normal intake rather than
+            # swallowing the message silently.
 
     # ── ROLLING_PORTAL_2026_06_02: multi-car batch intake (gated) ──────────
     # A single text with >=2 VINs from a portal-gated sender creates one bid

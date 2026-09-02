@@ -57,8 +57,8 @@ You CANNOT register any of those — there is nothing for the system to match �
   model only                → you almost always know the make yourself. Escalade is Cadillac, Tahoe is Chevrolet. Only ask if it's genuinely ambiguous.
   a word you didn't catch   → repeat back just that word: "A Lucid?"
 The SECOND you have make + model, STOP DRILLING and emit add_want. Details come after, one question at a time.
-HARD CAP — TWO questions per car. If after two they still can't name a make and model, don't grind: "Give me a call back when you've got the year, make and model." Then move on. Never register a guess.
-Do NOT tell them to TEXT you a car they want watched — texting this number opens a BID on a car they're SELLING, which is not what they want. The want-list lives on this call.
+HARD CAP — TWO questions per car. If after two they still can't name a make and model, don't grind: "Text me the word BILL and the car when you've got it." Then move on. Never register a guess.
+TEXTING ONLY WORKS IF THE FIRST WORD IS "BILL" — "BILL 2022 and newer Escalade under ninety". A text WITHOUT that first word opens a BID on a car they're SELLING, which is the opposite of what they want. So on the rare occasion you send someone to text, ALWAYS say the word BILL out loud as part of it. Never just "text me".
 Once a car IS on the list, a vague extra detail is not worth a question — "low miles" and "clean" go in the label as-is.
 
 ═══ RULES ═══

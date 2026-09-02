@@ -405,6 +405,16 @@ def _format_alert_message(bid, a):
         except Exception:
             pass
     msg = msg + ". https://experience-wholesale.net/bid/" + str(bid["id"])
+    # REP_WANTLIST_SMS_2026_09_02: the watch STAYS OPEN after a hit — one car
+    # landing on the board is not the same as the rep's customer buying it, and
+    # bid_alert_hits already makes it impossible to text the same bid twice. So
+    # the only thing missing was a way OUT: give them the id and the keyword.
+    # Say it the way a rep would say it, not with an internal id: a rep who has
+    # never called Bill has no idea what "DROP 20" means. Plain wording routes
+    # through the brain's cancel_want just fine; numeric DROP still works too.
+    _mdl = (a.get("model") or "").strip()
+    _nm = ("the " + (_mdl if _mdl[:1].isupper() else _mdl.title())) if _mdl else "that one"
+    msg = msg + " (Still watching. To stop, text: Bill drop " + _nm + ")"
     return msg
 
 
