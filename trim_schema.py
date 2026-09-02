@@ -102,6 +102,24 @@ WHY THIS SHAPE — the five things the survey established (see __main__ --survey
     "4WD 4DR" strips to empty.  "W/TECHNOLOGY PAC" strips to empty.  Neither can
     ever match anything, which is the correct outcome.
 
+4b. A PACKAGE IS NOT DISCARDED -- IT RIDES IN THE KEY.  Body and drivetrain words
+    are noise, but a PACKAGE is money.  When the width cap cuts a car carrying
+    one, the residue looks exactly like the base trim: "LATITUDE W/S" is a
+    Compass Latitude w/Sun & Sound, "SEDAN SE W/CON" is a Jetta SE
+    w/Convenience & Sunroof, "LT W/" is a Silverado LT w/1LT or w/2LT with the
+    package name cut off entirely.  All are priced ABOVE the base trim, so
+    resolving them to it is the operator's failure one level down -- and an
+    independent re-grade caught exactly that.  So a packaged surface resolves to
+    "<trim> |W/ <package>", which can only ever match another surface carrying
+    the SAME package, never the bare trim.  If the row was ALSO cut, the package
+    name is itself a fragment and the row abstains outright.
+
+    Markers, all measured in the feed: "W/" (638 rows, the dominant form),
+    "WITH", the package nouns PKG/PKGE/PACKAGE/PAC/GROUP/GRP/EQUIP/OPT, a
+    trailing "+" ("LIMITED+", "SEL+"), and a trailing bare "W" (unknowable --
+    Jeep "UNLIMITED W" is Unlimited Willys OR Unlimited w/something).
+    "PACK" is deliberately NOT a marker: Dodge sells the SCAT PACK.
+
 5.  bids.ymmt_id IS NOT A TRIM KEY.  Of the 3,802 bids carrying a ymmt_id, only
     45.2% have a catalog trim that agrees with bids.trim.  The disagreements are
     nearest-neighbour guesses, and some are dangerous: "AMG C63" -> "AMG GLS 63",
@@ -197,7 +215,7 @@ from edge_canon import canon_make, canon_model, models_match  # noqa: E402
 # "BIG HORN/LONE STAR" is one trim with two badges; "2.5 S" is a displacement
 # plus a trim and must not silently become the token "25".
 
-_PKG_SLASH = re.compile(r"\bW\s*/", re.I)          # "w/Nav", "W/A-SPEC PAC"
+_PKG_SLASH = re.compile(r"\bW\s*/|\bWITH\b", re.I)   # "w/Nav", "W/A-SPEC PAC", "EX-L WITH RES"
 _PUNCT = re.compile(r"[^A-Z0-9 ]+")
 _WS = re.compile(r"\s+")
 
@@ -234,9 +252,13 @@ DRIVE_TOKENS = {
 TRANS_TOKENS = {"AUTO", "AUTOMATIC", "AT", "MANUAL", "MAN", "MT", "CVT", "6MT",
                 "5MT", "6AT", "8AT", "SPEED", "SPD"}
 
-PKG_TOKENS = {"PKG", "PKGE", "PACKAGE", "PAC", "PACK", "GROUP", "GRP", "EQUIP",
-              "EQUIPMENT", "PREF", "PREFERRED EQUIPMENT", "OPTION", "OPT"}
+PKG_TOKENS = {"PKG", "PKGE", "PACKAGE", "PAC", "GROUP", "GRP", "EQUIP",
+              "EQUIPMENT", "PREF", "OPTION", "OPT"}
 # NOTE: "PREFERRED" alone is a real trim (Kia, Buick) and is NOT here.
+# NOTE: "PACK" is deliberately NOT here.  Dodge sells the SCAT PACK -- a trim,
+# 14 rows in the feed -- and listing PACK would have stripped it to "SCAT" and
+# then flagged every Scat Pack as a packaged variant.  "PAC" (the cut form of
+# PACKAGE, as in "W/A-SPEC PAC") IS kept: no trim ladder contains it as a word.
 
 NOISE_TOKENS = BODY_TOKENS | DRIVE_TOKENS | TRANS_TOKENS
 
@@ -302,6 +324,12 @@ def decompose(s, protect=()):
     else:
         pkg_tail = ""
 
+    # A "+" welded to the end marks a variant above the bare trim ("LIMITED+",
+    # "SEL+", "SPORT+").  It only counts when it survives on a TRIM token:
+    # Mercedes "4MATIC+" loses its "+" along with the drivetrain token, so the
+    # AMG EQE/EQS 4MATIC+ trims are untouched.
+    plus_marked = txt.rstrip().endswith("+")
+
     # 2. '/' and '-' are token separators, not deletions.  "BIG HORN/LONE STAR"
     #    must become two badges, not "BIG HORNLONE STAR".
     txt = txt.replace("/", " ").replace("-", " ").replace(".", ".")
@@ -321,6 +349,15 @@ def decompose(s, protect=()):
             pkg_terms.append(t)
         else:
             keep.append(t)
+    if plus_marked and keep:
+        had_package = True
+        pkg_terms.append("+")
+    # A trailing bare "W" cannot be read: it is either a cut "w/<package>" or a
+    # cut trim word -- Jeep "UNLIMITED W" is Unlimited Willys OR Unlimited w/...
+    # Marking it packaged routes it to an abstain, the only honest answer.
+    if keep and keep[-1] == "W":
+        had_package = True
+        pkg_terms.append(keep.pop())
     return Surface(raw, keep, body, pkg_terms, had_package)
 
 
@@ -516,6 +553,11 @@ SEED_ALIASES = [
      "content. The window sticker literally reads 'Big Horn/Lone Star'."),
     ("RAM", "*", "LONE STAR", "BIG HORN",
      "Same as above, badge name alone."),
+    ("RAM", "*", "BIG HORN LONESTAR", "BIG HORN",
+     "One-word spelling of the same badge; EDGE emits both 'Lone Star' and "
+     "'Lonestar' for the same truck."),
+    ("RAM", "*", "LONESTAR", "BIG HORN",
+     "One-word spelling, badge name alone."),
 ]
 
 
@@ -531,6 +573,7 @@ class Resolution:
     NO_VOCAB = "abstain_no_vocabulary"          # we know nothing about this YMM
     UNKNOWN = "abstain_unknown_surface"         # not in vocab, not truncated
     AMBIGUOUS = "abstain_ambiguous_truncation"  # >1 completion
+    PACKAGED_CUT = "abstain_packaged_and_cut"   # package marker on a cut row
     UNRESOLVABLE = "abstain_truncated_no_match"  # truncated, 0 completions
 
     def __init__(self, status, canon=None, reason="", candidates=(),
@@ -679,6 +722,7 @@ class TrimVocab:
                 surface="")
 
         text = surf.text
+        pkg_text = " ".join(surf.pkg_terms)
 
         # ---- TRUNCATION: two independent triggers, either sufficient --------
         #
@@ -741,9 +785,31 @@ class TrimVocab:
                               truncated=truncated, surface=text)
 
         def _res(canon, reason, **kw):
-            return Resolution(Resolution.RESOLVED, canon=self.alias(mk, md, canon),
+            c = self.alias(mk, md, canon)
+            # A PACKAGED VARIANT IS NOT THE BARE TRIM.  When the width cap cuts a
+            # car that carries a package, the residue looks exactly like the base
+            # trim: "LATITUDE W/S" is a Compass Latitude w/Sun & Sound and
+            # "SEDAN SE W/CON" is a Jetta SE w/Convenience & Sunroof.  Both are
+            # priced ABOVE the base, so resolving them to the base is the
+            # operator's failure one level down.  The package therefore rides
+            # INSIDE the canonical key: a packaged surface can only ever match
+            # another surface carrying the same package, never the bare trim.
+            if surf.had_package:
+                c = "%s |W/ %s" % (c, pkg_text)
+            return Resolution(Resolution.RESOLVED, canon=c,
                               reason=reason, body_terms=surf.body_terms,
                               pkg_terms=surf.pkg_terms, surface=text, **kw)
+
+        # Packaged AND cut: the package name is itself a fragment ("W/S", "W/CON",
+        # "LT W/" with nothing after it at all), so it cannot be compared to
+        # anything.  Abstain rather than guess which package it was.
+        if truncated and surf.had_package:
+            return Resolution(
+                Resolution.PACKAGED_CUT,
+                reason="carries a package marker AND was cut (%s); the package "
+                       "name %r is itself a fragment" % (trunc_why, pkg_text),
+                body_terms=surf.body_terms, pkg_terms=surf.pkg_terms,
+                truncated=True, surface=text)
 
         if not truncated:
             # A complete string matches its vocabulary entry EXACTLY.  No prefix
@@ -942,8 +1008,14 @@ def _derive_observed(cur, v):
         capped_feed = w is not None
         if capped_feed and len(reconstruct(mdl, st)) >= w:
             continue                                   # T1-truncated -> never admit
-        ct = canon_trim_text(st, v.protect.get(canon_make(cmk or ""), ()))
+        sf = decompose(st, v.protect.get(canon_make(cmk or ""), ()))
+        ct = sf.text
         if not ct:
+            continue
+        if sf.had_package:
+            # A packaged sighting is NOT evidence for the bare trim.  Letting
+            # "LATITUDE W/S" vouch for "LATITUDE" would admit a trim on the
+            # strength of rows that are not that trim.
             continue
         counts[(cmk or "", cmd or "", ct)] += 1
         # PROOF OF COMPLETENESS.  Two independent ways to know a surface is whole:
@@ -1076,6 +1148,55 @@ def verify_proposals(vocab, proposals):
 
 
 # ===========================================================================
+# 6b. THE SUPPORTED GRADING ENTRY POINT
+# ===========================================================================
+
+# The feed whose width is used when grading a corpus row.  A corpus pair carries
+# make/model/strings but no auction_slug, and WITHOUT a slug the truncation rules
+# are dead: `truncated` can never become True, so every cut string is judged as
+# though it were complete.  That is why an unaugmented harness scores
+# truncation_exact at 36/41 MISSED -- it is not measuring this module's
+# truncation logic at all, it is measuring the module with that logic disabled.
+GRADING_FEED = "orlandolongwoodaafl"     # a real capped feed, width 20
+
+
+def grading_candidate(vocab=None, feed=GRADING_FEED):
+    """Return an fn(a, b, make=None, model=None) suitable for
+    trim_match_eval.grade().
+
+        import trim_schema as ts, trim_match_eval as ev
+        ev.grade(ts.grading_candidate(), "trim_schema")
+
+    Three things this gets right that a hand-rolled wrapper misses:
+
+    1.  IT ACCEPTS make=/model= KWARGS.  trim_match_eval._accepts_context()
+        inspects the signature; a plain fn(a, b) makes the grader DROP the
+        10 cross_make pairs (CONTEXT_ONLY), so the no-match denominator falls
+        from 141 to 131 and 245 graded becomes 235.  Both numbers are "right"
+        for their own setting -- they are just different settings, and a
+        comparison has to name which.
+
+    2.  IT SUPPLIES FEED CONTEXT.  `b` is the auction side, so it is resolved
+        with a capped auction_slug and feed_model=model.  Without this the width
+        rule cannot fire.
+
+    3.  IT DOES NOT KEY CONTEXT OFF (a, b).  The cross_make category deliberately
+        reuses the SAME two strings across different makes; a dict keyed on
+        (a, b) keeps only the last one and silently mislabels the rest.  The
+        grader hands make/model in directly -- take them from there.
+    """
+    v = vocab if vocab is not None else load()
+
+    def candidate(a, b, make=None, model=None, **_kw):
+        ra = v.resolve(make or "", model or "", a)
+        rb = v.resolve(make or "", model or "", b,
+                       auction_slug=feed, feed_model=model or "")
+        return trims_match(ra, rb)
+
+    return candidate
+
+
+# ===========================================================================
 # 7. SELF-TEST + SURVEY
 # ===========================================================================
 
@@ -1205,6 +1326,43 @@ def selftest(vocab, verbose=True):
               "T2 is inert on the UNCAPPED feed: %r (%s %s)" % (short, mk, md))
     check(not vocab.resolve("CADILLAC", "XT4", "PREMIUM LUXU").truncated,
           "even 'PREMIUM LUXU' is not treated as a cut when it arrives as a BID trim")
+
+    print("-- packaged variants are not the bare trim --")
+    check(canon_trim_text("LATITUDE W/S") == "LATITUDE",
+          "the trim part of 'LATITUDE W/S' is still LATITUDE")
+    r_base = vocab.resolve("JEEP", "COMPASS", "Latitude")
+    r_pkg = vocab.resolve("JEEP", "COMPASS", "LATITUDE W/S",
+                          auction_slug="orlandolongwoodaafl", feed_model="Compass")
+    check(not trims_match(r_base, r_pkg),
+          "JEEP COMPASS: 'Latitude' !~ 'LATITUDE W/S' (w/Sun & Sound is priced above base)")
+    r_pkg2 = vocab.resolve("VOLKSWAGEN", "JETTA", "SEDAN SE W/CON",
+                           auction_slug="orlandolongwoodaafl", feed_model="Jetta")
+    check(not trims_match(vocab.resolve("VOLKSWAGEN", "JETTA", "SE"), r_pkg2),
+          "VW JETTA: 'SE' !~ 'SEDAN SE W/CON' (w/Convenience is priced above base)")
+    # ... and with NO feed context either, which is how a grader will call it
+    check(not trims_match(vocab.resolve("JEEP", "COMPASS", "Latitude"),
+                          vocab.resolve("JEEP", "COMPASS", "LATITUDE W/S")),
+          "the same holds with no auction_slug -- the package rides in the key, "
+          "so the fix does not depend on the width rule firing")
+    check(not trims_match(vocab.resolve("CHEVROLET", "SILVERADO 1500", "LT"),
+                          vocab.resolve("CHEVROLET", "SILVERADO 1500", "LT W/1LT")),
+          "CHEVROLET: 'LT' !~ 'LT W/1LT'")
+    check(trims_match(vocab.resolve("CHEVROLET", "SILVERADO 1500", "LT w/1LT"),
+                      vocab.resolve("CHEVROLET", "SILVERADO 1500", "LT W/1LT")),
+          "but 'LT w/1LT' ~ 'LT W/1LT' -- same package, same key")
+    check(not trims_match(vocab.resolve("CHEVROLET", "SILVERADO 1500", "LT W/1LT"),
+                          vocab.resolve("CHEVROLET", "SILVERADO 1500", "LT W/2LT")),
+          "and 'LT W/1LT' !~ 'LT W/2LT' -- different packages")
+    check(vocab.resolve("JEEP", "WRANGLER", "UNLIMITED W",
+                        auction_slug="orlandolongwoodaafl",
+                        feed_model="Wrangler").status == Resolution.PACKAGED_CUT,
+          "'UNLIMITED W' abstains -- Willys or w/<package>, unknowable")
+    check(canon_trim_text("EX-L WITH RES") == "EX L",
+          "'WITH' is a package marker too")
+    rs = vocab.resolve("DODGE", "CHARGER", "SCAT PACK")
+    check(rs.ok and "SCAT" in (rs.canon or "") and "|W/" not in (rs.canon or ""),
+          "DODGE 'SCAT PACK' is a TRIM, not a packaged variant (PACK is not a "
+          "package word)")
 
     print("-- match decision --")
     b = {"year": 2022, "make": "Ram", "model": "1500", "trim": "Laramie"}

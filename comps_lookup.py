@@ -29,6 +29,27 @@ def _conn():
     return psycopg2.connect(DSN, connect_timeout=10)
 
 
+# TRIM_SCHEMA_LIVE_2026_09_02 — trim_schema replaces edge_canon.trims_match in
+# the card path. Graded on the independent 245-pair corpus: 0 false matches
+# (0/141), 0 of 333,274 row-weighted exposures, missed 42.3% (exact-only was
+# 91.2%). Vocabulary is loaded ONCE and cached; if it cannot load the card
+# abstains rather than falling back to a looser rule.
+_VOCAB = None
+_VOCAB_FAILED = False
+
+
+def _vocab():
+    global _VOCAB, _VOCAB_FAILED
+    if _VOCAB is None and not _VOCAB_FAILED:
+        try:
+            import trim_schema as _ts
+            _VOCAB = _ts.load()
+        except Exception as e:
+            _VOCAB_FAILED = True
+            print('[auction-comps] trim_schema load FAILED: %s' % e, flush=True)
+    return _VOCAB
+
+
 def closest_comps(year, make, model, miles, *, limit=5, outcome='sold',
                   year_band=YEAR_BAND, conn=None):
     """Nearest sold comps by odometer. Returns rows with the gaps precomputed.
@@ -175,10 +196,18 @@ def for_bid(bid, *, n_sold=4, n_avail=1, conn=None):
             bid_trim = bid.get('trim') or bid.get('canon_trim') or ''
             if not bid_trim:
                 return empty
+            v = _vocab()
+            if v is None:
+                return empty
+            import trim_schema as _ts
             wide = closest_comps(yr, mk, md, miles, limit=200,
                                  outcome='sold', year_band=0, conn=c)
-            wide = [r for r in wide if trims_match(bid_trim, r.get('style') or '')]
-            sold = wide[:n_sold]
+            keep = []
+            for r in wide:
+                matched, _b, _c2 = _ts.match_bid_to_comp(v, bid, r)
+                if matched:
+                    keep.append(r)
+            sold = keep[:n_sold]
             # OPERATOR DIRECTIVE 2026-09-02: the no-sale CAR is not displayed.
             # It can never carry a price -- EDGE does not publish the high bid on
             # a no-sale (verified on both the no-sale list page and the vehicle
