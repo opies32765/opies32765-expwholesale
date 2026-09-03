@@ -39,6 +39,8 @@ EW buys cars and resells them to retail dealers, who then retail them to consume
 
 {market_stack}
 
+{auction_comps_section}
+
 {thalist_asks_section}
 
 {book_values_section}
@@ -55,7 +57,8 @@ EW buys cars and resells them to retail dealers, who then retail them to consume
 
 1. Is the retail-to-MMR spread healthy (>$5k)? Strong retail demand → buyer dealer has cushion → we can pay closer to or above MMR.
 2. Is the spread thin (<$2k)? Soft retail → pay below MMR for safety.
-3. Does this car's condition (Carfax flags, mileage vs comps, options package) suggest premium or discount vs comps?
+3. What did IDENTICAL cars (same year, model and trim) actually bring at auction in the last 6 weeks? Those are completed transactions, not valuations \u2014 weight them accordingly against the book values, and say in your reasoning whether they moved your number.
+4. Does this car's condition (Carfax flags, mileage vs comps, options package) suggest premium or discount vs comps?
 4. What's our LSL avg gross for this YMM? That's our PVR target on this deal.
 5. Is velocity HOT? Buyer dealers will pay up to lock supply. SLOW/STALE? Pay down for cushion.
 6. **MILEAGE GAP CHECK**: If subject mileage is >2x the avg comp mileage shown in rBook, the rBook median is NOT a fair price anchor — it represents a near-new cohort, not yours. In that case:
@@ -570,7 +573,8 @@ def build_prompt(bid: dict, *, vauto: dict | None = None,
                  purchase_history: dict | None = None,
                  ml_prediction: dict | None = None,
                  thalist_asks: dict | None = None,
-                 voice_master: dict | None = None) -> str:  # VOICE_YMM_MASTER_2026_05_27
+                 voice_master: dict | None = None,
+                 auction_comps: dict | None = None) -> str:  # VOICE_YMM_MASTER_2026_05_27
     """Compose the v2 assessment prompt. All inputs optional; sections render
     with placeholders when data is missing."""
     # ASKING_PRICE_OUT_2026_05_26: never feed asking_price to the LLM. Set
@@ -584,6 +588,7 @@ def build_prompt(bid: dict, *, vauto: dict | None = None,
                                               carfax_text, autocheck_text),
         market_stack=_market_stack(market_intel, dealer_intel, buyer_intel,
                                    subject_miles=bid.get('mileage')),
+        auction_comps_section=_auction_comps_section(auction_comps),
         book_values_section=_book_values_section(vauto, accutrade),
         purchase_history_section=_purchase_history_section(purchase_history),
         ml_section=_ml_section(ml_prediction),
@@ -678,3 +683,37 @@ def parse_response(raw: str) -> dict | None:
         'reasoning':        str(reasoning).strip()[:1500],
         'flags':            flags,
     }
+
+
+def _auction_comps_section(auction_comps: dict | None) -> str:
+    """AUCTION_COMPS_PROMPT_2026_09_03: real hammer prices for the SAME year/model/trim.
+
+    Source: auction_comps on C1, built from EDGE Pipeline post-sale reports for
+    13 Florida auctions. Every figure is a COMPLETED SALE at a physical auction,
+    not a valuation. That is why this sits above BOOK VALUES in the prompt.
+    """
+    ac = auction_comps or {}
+    rows = ac.get('sold') or []
+    out = ['\u2550\u2550\u2550 RECENT AUCTION SALES \u2014 same year, model and trim (COMPLETED TRANSACTIONS) \u2550\u2550\u2550']
+    if not rows:
+        out.append('  (no same-trim auction sale found in the last 6 weeks)')
+        return '\n'.join(out)
+    for r in rows:
+        try:
+            bits = [f"  {r['year']} {r.get('make','')} {r.get('model','')}"
+                    f"{(' ' + r['style']) if r.get('style') else ''}".rstrip()]
+            bits.append(f"{int(r['odometer']):,} mi")
+            bits.append(f"grade {r['grade']}" if r.get('grade') is not None else 'no CR')
+            bits.append(f"{r.get('auction_label') or r.get('auction_slug')} {r['sale_date']}")
+            line = ' | '.join(bits) + f"  \u2192 SOLD ${int(r['price']):,}"
+            if r.get('d_miles') is not None:
+                line += f"  ({int(r['d_miles']):+,} mi vs subject)"
+            out.append(line)
+        except (KeyError, TypeError, ValueError):
+            continue
+    ns = ac.get('ns_rate')
+    if ns is not None:
+        out.append(f"  Market resistance: {ns * 100:.1f}% of this make/year "
+                   f"ran and did NOT sell.")
+    out.append('  These are hammer prices actually paid, not estimates.')
+    return '\n'.join(out)

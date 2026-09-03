@@ -9922,6 +9922,19 @@ def _run_assessment(bid_id):
     except Exception as _ta_e:
         print(f'[ASSESS] thalist_asks err: {_ta_e}', flush=True)
 
+    # AUCTION_COMPS_PROMPT_2026_09_03: real auction sales for the same year/model/trim.
+    # Wrapped so a failure can NEVER block an assessment -- comps are
+    # supporting evidence, not a required leg.
+    _auction_comps = None
+    try:
+        from comps_lookup import for_bid as _ac_for_bid
+        _auction_comps = _ac_for_bid(dict(bid))
+        if _auction_comps and _auction_comps.get('sold'):
+            print('[ASSESS] Bid %s auction comps: n=%d' %
+                  (bid_id, len(_auction_comps['sold'])), flush=True)
+    except Exception as _ac_e:
+        print('[ASSESS] auction_comps err: %s' % _ac_e, flush=True)
+
     if _v2_build_prompt:
         prompt = _v2_build_prompt(
             dict(bid),
@@ -9941,6 +9954,7 @@ def _run_assessment(bid_id):
             ml_prediction=_ml_pred_assess,
             thalist_asks=_thalist_asks,
             voice_master=_voice_master,
+            auction_comps=_auction_comps,
         )
     else:
         # Module unavailable — emit a minimal prompt so we still return something
