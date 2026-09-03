@@ -208,6 +208,15 @@ def for_bid(bid, *, n_sold=4, n_avail=1, conn=None):
                 if matched:
                     keep.append(r)
             sold = keep[:n_sold]
+            # OPERATOR DIRECTIVE 2026-09-03: "ranked by lowest miles period the
+            # end".  SELECTION is unchanged -- still the n_sold nearest his car's
+            # odometer, per his 08-30 "surface the closest vehicle in miles".
+            # Only the DISPLAY ORDER changes.  Ranking by distance-from-subject
+            # read as unsorted: on bid 6690 a 22,110 mi car sat 4th because it was
+            # 23,267 from a 45,377 mi subject -- and 45,377 appeared nowhere on the
+            # card, so the order could not be reasoned about.  Lowest odo first is
+            # self-evident without any reference number.
+            sold.sort(key=lambda r: r["odometer"])
             # OPERATOR DIRECTIVE 2026-09-02: the no-sale CAR is not displayed.
             # It can never carry a price -- EDGE does not publish the high bid on
             # a no-sale (verified on both the no-sale list page and the vehicle
@@ -252,6 +261,9 @@ AUCTION_LABEL = {
     'jacksonvilleaa':      'Jacksonville',
     'speedwayaa':          'Speedway',
     'daxtampafl2':         'DAX Tampa',
+    'anaaatlanta': 'AutoNation ATL',
+    'vipauctions': 'Dealers AA ATL',
+    'aaaatlanta': "America's AA ATL",
 }
 
 

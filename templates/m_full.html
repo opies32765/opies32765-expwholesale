@@ -73,6 +73,7 @@
   details.card.lsl     { --accent: #6ee7b7; }   /* emerald */
   details.card.dealer  { --accent: #fbbf24; }   /* amber */
   details.card.books   { --accent: #94a3b8; }   /* slate */
+  details.card.auction { --accent: #38bdf8; }   /* sky */
 
   /* Data rows */
   .row { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0;
@@ -165,6 +166,35 @@
 {# COMBINED_SMS_2026_05_20 ─ card order: vAuto / AccuTrade / Carfax / AutoCheck / iPacket / Manheim / rBook / LSL / Dealer #}
 {# vAuto #}
 {% if vauto and (vauto.appraisal_url or vauto.rbook or vauto.mmr or vauto.black_book or vauto.kbb or vauto.kbb_com or vauto.jd_power) %}
+{# AUCTION_COMPS_MINISITE_2026_09_03 — real completed auction sales, same year/model/trim.
+   Renders only on a genuine match; no match renders nothing at all. #}
+{% if auction_comps and auction_comps.ok and auction_comps.sold %}
+<details class="card auction" open>
+  <summary>
+    <span class="title">Recent Auction Sales</span>
+    <span class="summary-text">{{ auction_comps.sold|length }} like {% if auction_comps.sold|length == 1 %}car{% else %}cars{% endif %} sold</span>
+  </summary>
+  <div class="body">
+    <div style="font-size:11.5px;color:#94a3b8;margin-bottom:10px;line-height:1.5">
+      Same year, model and trim. These are hammer prices actually paid at auction
+      in the last six weeks &mdash; completed sales, not estimates.
+    </div>
+    {% for c in auction_comps.sold %}
+    <div class="row">
+      <span class="lbl">
+        {{ c.year }} {{ c.model }}{% if c.style %} {{ c.style }}{% endif %}<br>
+        <span style="font-size:11px;color:#64748b">
+          {{ '{:,}'.format(c.odometer|int) }} mi{% if c.grade %} &middot; grade {{ c.grade }}{% endif %}
+          &middot; {{ c.auction_label }} {{ c.sale_date }}
+        </span>
+      </span>
+      <span class="val">${{ '{:,}'.format(c.price|int) }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
+
 <details class="card vauto">
   <summary>
     <span class="title">vAuto</span>

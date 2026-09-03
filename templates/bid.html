@@ -1012,7 +1012,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
             </div>
             <div style="font:12px/1.7 ui-monospace,monospace;color:#94a3b8;margin-top:5px">
               <b style="color:#e2e8f0">{{ '{:,}'.format(a.odometer) }} mi</b>
-              {%- if a.d_miles is not none %} ({{ '{:+,}'.format(a.d_miles) }} vs yours){% endif %}
+              
               {%- if a.grade %} · grade <b style="color:#e2e8f0">{{ a.grade }}</b>{% endif %}
               {%- if a.color %} · {{ a.color }}{% endif %}<br>
               {{ a.auction_label }} · {{ a.sale_date }} · stock {{ a.stock_no }}
@@ -1046,7 +1046,7 @@ body{font-family:'Inter',sans-serif;background:#0b0f19;color:#e2e8f0;height:100v
                 ${{ '{:,}'.format(c.price) }}
               </div>
               <div style="font:11px ui-monospace,monospace;color:#64748b;margin-top:3px">
-                {% if c.d_year == 0 %}same yr{% else %}{{ '{:+d}'.format(c.d_year) }} yr{% endif %}{% if c.d_miles is not none %} · {{ '{:+,}'.format(c.d_miles) }} mi{% endif %}
+                {% if c.d_year == 0 %}same yr{% else %}{{ '{:+d}'.format(c.d_year) }} yr{% endif %}
               </div>
             </div>
           </div>

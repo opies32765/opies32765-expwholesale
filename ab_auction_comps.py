@@ -69,6 +69,7 @@ print(f'running A/B on {len(subjects)}\n', flush=True)
 
 moved = cited = 0
 deltas = []
+BANDS = []
 print(f"{'bid':>6} {'car':<34} {'paid':>9} {'no comps':>9} {'w/ comps':>9} {'move':>8}  cites?")
 for b, ac in subjects:
     try:
@@ -79,6 +80,12 @@ for b, ac in subjects:
         t_off, t_on = num(r_off.get('target_buy')), num(r_on.get('target_buy'))
         if t_off is None or t_on is None:
             continue
+        def band(r):
+            lo, hi = num(r.get('confidence_low')), num(r.get('confidence_high'))
+            return (hi - lo) if (lo and hi and hi > lo) else None
+        b_off, b_on = band(r_off), band(r_on)
+        if b_off and b_on and t_off and t_on:
+            BANDS.append((b_off, b_on, b_off / t_off, b_on / t_on))
         d = t_on - t_off
         deltas.append(d)
         moved += 1 if d else 0
@@ -99,4 +106,15 @@ if n:
     print(f"\n  n={n}   number moved on {moved}/{n}   reasoning cites comps on {cited}/{n}")
     print(f"  mean move {st.mean(deltas):+,.0f}   median {st.median(deltas):+,.0f}   "
           f"max |move| {max(abs(d) for d in deltas):,}")
+if BANDS:
+    import statistics as st
+    hdr = "  STATED CONFIDENCE BAND (high - low), n=%d" % len(BANDS)
+    print("")
+    print(hdr)
+    print("    absolute       : $%,.0f  ->  $%,.0f".replace("%,","%")
+          % (st.mean([b[0] for b in BANDS]), st.mean([b[1] for b in BANDS])))
+    print("    as %% of target : %.1f%%  ->  %.1f%%"
+          % (st.mean([b[2] for b in BANDS])*100, st.mean([b[3] for b in BANDS])*100))
+    tighter = sum(1 for b in BANDS if b[1] < b[0])
+    print("    narrower on %d/%d" % (tighter, len(BANDS)))
 conn.close()

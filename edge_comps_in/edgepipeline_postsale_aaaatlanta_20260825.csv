@@ -1,0 +1,5 @@
+Picture Count,Run Number,Stock #,Year,Make,Model,Style,Color,Odometer,CR,Grade,Sale Date,Lane,Price
+23,V-0003,1183665,2022,Alfa Romeo,Stelvio,Sprint,WHITE,66871,Yes,1.0,2026-08-25,V,2500.0
+41,V-0001,1183516,2018,Ford,Expedition Max,Limited,SILVER,114034,Yes,2.5,2026-08-25,V,8300.0
+27,DH-0001,1182310,2016,Kia,Forte,LX,BLACK,107327,Yes,3.2,2026-08-25,DH,2100.0
+4,DH-0002,1185717,2001,Mercedes-Benz,M Class,AMG,SILVER,1,No,"",2026-08-25,DH,900.0

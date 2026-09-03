@@ -114,6 +114,13 @@ SLUGS = [
     "aaayasa",
     "aaapensacola",
     "vemoaag",
+    # ATLANTA_HIGHLINE_2026_09_03 — added for high-line depth.  Measured on one
+    # sale each: AutoNation ATL 26.6%% high-line / 43 cars >=$30k on 316 units,
+    # Dealers AA ATL 34.6%% / 12 on 130.  AAA Atlanta returned ONE car on 09-02,
+    # which is an unrepresentative day, not a dead auction (38 sale dates).
+    "anaaatlanta",
+    "vipauctions",
+    "aaaatlanta",
 ]
 
 KINDS = ("postsale", "nosale")            # the two list pages per slug
@@ -692,12 +699,59 @@ def setup_logging(verbose: bool = False) -> None:
     log.handlers[:] = [fh, sh]
 
 
+ALERT_PHONE = "4074309675"  # EDGE_PULL_SMS_ALERT_2026_09_03 — same ops number as ew_backup_watch.py
+
+def _envfile(path="/etc/default/expwholesale-mcp"):
+    """EDGE_PULL_SMS_ALERT_2026_09_03: read creds from the FILE, never os.environ.
+
+    A cron/systemd job does not inherit the unit's Environment=, and Twilio then
+    fails silently — which is the exact failure mode this alert exists to catch.
+    """
+    out = {}
+    try:
+        for ln in open(path):
+            ln = ln.strip()
+            if ln and not ln.startswith("#") and "=" in ln:
+                k, v = ln.split("=", 1)
+                out[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return out
+
+
+def alert_sms(text):
+    """Best-effort SMS to the ops phone. Same number as ew_backup_watch.py."""
+    try:
+        env = _envfile()
+        sid = env.get("TWILIO_ACCOUNT_SID")
+        tok = env.get("TWILIO_AUTH_TOKEN")
+        frm = env.get("TWILIO_PHONE")
+        to = os.environ.get("EW_BW_PHONE") or env.get("EW_BW_PHONE") or ALERT_PHONE
+        if not (sid and tok and frm and to):
+            log.warning("sms alert: missing twilio creds or destination")
+            return False
+        if not to.startswith("+"):
+            to = "+1" + to
+        from twilio.rest import Client
+        Client(sid, tok).messages.create(to=to, from_=frm, body=text[:1500])
+        log.info("sms alert sent to %s", to[:-4] + "XXXX")
+        return True
+    except Exception as e:
+        log.warning("sms alert failed: %s", e)
+        return False
+
 def alert(text: str) -> None:
     """Best-effort Telegram ping, matching /usr/local/bin/vauto_cookie_alert.py.
 
     No-ops silently when the token/chat are not configured. Operator ops
     channel only — this never contains customer or enrichment data.
     """
+    # EDGE_PULL_SMS_ALERT_2026_09_03: SMS FIRST and unconditionally. Telegram
+    # below returns early when unconfigured, and a missed week is permanently
+    # unrecoverable (EDGE deletes at 6 weeks), so the channel that gets read
+    # must not sit behind another channel's config check.
+    alert_sms(text)
+
     env = dict(os.environ)
     if os.path.exists("/etc/ew_failover.env"):
         try:

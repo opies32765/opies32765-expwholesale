@@ -24584,8 +24584,18 @@ def driver_full_page(token):
         (bid.get('damage_signal') in ('disagreement','both_damaged','damaged'))
         or (_ds_title in _dmg_titles)
         or (_ds_flagset & _dmg_flags))
+    # AUCTION_COMPS_MINISITE_2026_09_03: real auction sales for the same year/model/trim.
+    # Wrapped -- a failure must never break the customer's page.
+    _ac_mini = None
+    try:
+        from comps_lookup import for_bid as _ac_for_bid
+        _ac_mini = _ac_for_bid(dict(bid))
+    except Exception as _ac_e:
+        print('[m_full] auction_comps err: %s' % _ac_e, flush=True)
+
     return render_template(
         'm_full.html',
+        auction_comps=_ac_mini,
         bid=bid, vauto=vauto, accutrade=accutrade, ipacket=ipacket,
         confidence_low=ass.get('confidence_low') if ass else None,
         confidence_high=ass.get('confidence_high') if ass else None,
