@@ -1,9 +1,9 @@
 {
   "make_name": "JEEP",
-  "trained_at": "2026-09-02T08:30:18.474166Z",
-  "n_total": 1254,
+  "trained_at": "2026-09-03T08:30:13.264750Z",
+  "n_total": 1255,
   "n_train": 1169,
-  "n_test": 85,
+  "n_test": 86,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -215,49 +215,49 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 2317.0,
+    "mae_dollars": 2296.0,
     "mape_pct": 10.76,
-    "r2": 0.9619,
-    "within_5pct": 42.4,
-    "within_10pct": 68.2
+    "r2": 0.9634,
+    "within_5pct": 44.2,
+    "within_10pct": 62.8
   },
   "baseline_metrics": {
-    "mae_dollars": 2704.0,
-    "mape_pct": 13.34,
+    "mae_dollars": 2754.0,
+    "mape_pct": 13.81,
     "ratio": 1.0595
   },
   "top_features": [
     {
       "name": "market_asking_price",
-      "importance": 0.3420376181602478
+      "importance": 0.3620918393135071
     },
     {
       "name": "est_wholesale_price",
-      "importance": 0.2476428598165512
+      "importance": 0.22503304481506348
     },
     {
       "name": "base_appraised_value",
-      "importance": 0.22820992767810822
+      "importance": 0.21022410690784454
     },
     {
       "name": "model_name_Wrangler Sport Sport Utility Vehicle",
-      "importance": 0.026697592809796333
+      "importance": 0.0346149243414402
     },
     {
       "name": "supplier_name_Marino Performance Motors",
-      "importance": 0.008783502504229546
+      "importance": 0.011825453490018845
     },
     {
       "name": "odometer",
-      "importance": 0.008560667745769024
+      "importance": 0.007210428826510906
     },
     {
-      "name": "mileage_adjustment_value",
-      "importance": 0.005556621588766575
+      "name": "model_name_Grand Wagoneer Series III Sport Utility Vehicle",
+      "importance": 0.005302335135638714
     },
     {
-      "name": "supplier_name_Manheim Orlando",
-      "importance": 0.005510774441063404
+      "name": "supplier_name_h Greg Nissan Delray",
+      "importance": 0.005097472574561834
     }
   ]
 }

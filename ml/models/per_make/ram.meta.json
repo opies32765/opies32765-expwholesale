@@ -1,9 +1,9 @@
 {
   "make_name": "RAM",
-  "trained_at": "2026-09-02T08:30:23.254784Z",
-  "n_total": 769,
+  "trained_at": "2026-09-03T08:30:15.835052Z",
+  "n_total": 770,
   "n_train": 688,
-  "n_test": 81,
+  "n_test": 82,
   "test_cutoff": "2026-01-01",
   "feature_columns": [
     "year",
@@ -217,15 +217,15 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 3225.0,
-    "mape_pct": 9.1,
-    "r2": 0.9572,
-    "within_5pct": 38.3,
-    "within_10pct": 66.7
+    "mae_dollars": 3290.0,
+    "mape_pct": 9.97,
+    "r2": 0.9565,
+    "within_5pct": 37.8,
+    "within_10pct": 65.9
   },
   "baseline_metrics": {
-    "mae_dollars": 3765.0,
-    "mape_pct": 10.96,
+    "mae_dollars": 3859.0,
+    "mape_pct": 12.15,
     "ratio": 1.013
   },
   "top_features": [
