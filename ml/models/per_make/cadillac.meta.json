@@ -1,6 +1,6 @@
 {
   "make_name": "CADILLAC",
-  "trained_at": "2026-09-03T08:30:15.530320Z",
+  "trained_at": "2026-09-04T08:30:15.425860Z",
   "n_total": 863,
   "n_train": 782,
   "n_test": 81,
@@ -219,7 +219,7 @@
     ]
   },
   "metrics": {
-    "mae_dollars": 5616.0,
+    "mae_dollars": 5617.0,
     "mape_pct": 8.43,
     "r2": 0.9617,
     "within_5pct": 48.1,
